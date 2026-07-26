@@ -14,6 +14,7 @@ import type {
 } from '@/claude/sdk'
 import type { RawJSONLines } from '@/claude/types'
 import type { ClaudePermissionMode } from '@hapi/protocol/types'
+import { isNonChatClaudeMessageType } from '@hapi/protocol/messages'
 
 /**
  * Context for converting SDK messages to log format
@@ -198,6 +199,14 @@ export class SDKToLogConverter {
     convert(sdkMessage: SDKMessage): RawJSONLines | null {
         if (sdkMessage.type === 'rate_limit_event') {
             return this.convertRateLimitEvent(sdkMessage)
+        }
+
+        // 心跳与控制帧（tool_progress / control_* / log）不是会话内容：下面的 default
+        // 分支会把未知类型原样透传，web 端拿到后只能渲染成一坨原始 JSON。丢在这里而不是
+        // 让它落进 transcript，同时（和 rate_limit_event 一样）不推进 uuid 链，保证被丢
+        // 掉的消息对父子关系完全不可见。
+        if (isNonChatClaudeMessageType(sdkMessage.type)) {
+            return null
         }
 
         const uuid = randomUUID()
