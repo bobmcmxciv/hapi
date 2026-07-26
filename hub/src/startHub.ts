@@ -19,7 +19,9 @@ import QRCode from 'qrcode'
 import type { Server as BunServer } from 'bun'
 import type { WebSocketData } from '@socket.io/bun-engine'
 import { getOrCreateOwnerId } from './config/ownerId'
+import { join } from 'node:path'
 import { createMultiUserGatewayStore } from '../../fork-features/multi-user/hubMount'
+import { migrateLegacyMultiUser } from '../../fork-features/multi-user/migrateLegacyGateway'
 import { resolveTerminalNamespace } from '../../fork-features/multi-user/socketAdapter'
 import { MultiUserNotificationAdapter } from '../../fork-features/multi-user/notificationAdapter'
 import { resolveGatewayCliNamespace } from '../../fork-features/multi-user/cliAdapter'
@@ -168,6 +170,33 @@ export async function startHub(options: StartHubOptions = {}): Promise<HubInstan
         console.log(`[Hub] Tunnel: enabled (${relayFlag.source}), API: ${relayApiDomain}`)
     } else {
         console.log(`[Hub] Tunnel: disabled (${relayFlag.source})`)
+    }
+
+    // fork-features/multi-user：把 pre-gateway 形态的多用户数据搬进 gateway 库，
+    // 并把领先的主库 user_version 落回 upstream 的目标版本。
+    //
+    // 顺序是硬约束，不能挪：
+    //   - 必须在 `new Store()` 之前 —— 主库 user_version 领先时 Store 直接抛错拒启动；
+    //   - 必须在 `createMultiUserGatewayStore()` 之前 —— 它在空库时会 bootstrap 一个
+    //     全新 admin，之后迁移会判 gateway 非空而跳过，生产账号就被永久挡在门外。
+    //
+    // 幂等：gateway 库已有账号即跳过，所以每次启动都跑是安全的。
+    const legacyMigration = migrateLegacyMultiUser(config.dbPath, join(config.dataDir, 'multi-user-gateway.sqlite'))
+    if (legacyMigration.status === 'migrated') {
+        console.log(`[Hub] Legacy multi-user migrated: ${legacyMigration.accounts} accounts, ${legacyMigration.tokens} tokens, ` +
+            `${legacyMigration.resources.sessions + legacyMigration.resources.machines} resources, ${legacyMigration.grants.migrated} grants`)
+        if (legacyMigration.core.userVersionBefore !== legacyMigration.core.userVersionAfter) {
+            console.log(`[Hub] Core schema version realigned: ${legacyMigration.core.userVersionBefore} -> ${legacyMigration.core.userVersionAfter}`)
+        }
+        // 孤儿授权指向已删除/无主资源，新 schema 的外键表达不了。逐条打出来让
+        // operator 判断是无害残留还是真实丢失，不静默吞掉。
+        for (const skipped of legacyMigration.grants.skipped) {
+            console.warn(`[Hub] Skipped orphan grant: ${skipped.resourceType}/${skipped.resourceId} -> account#${skipped.granteeAccountId} (${skipped.reason})`)
+        }
+    }
+    if (legacyMigration.core.missingColumns.length > 0) {
+        console.warn(`[Hub] Core DB is missing columns required by the target schema: ${legacyMigration.core.missingColumns.join(', ')}. ` +
+            'Version was left untouched — run the upstream step migrations instead of forcing user_version.')
     }
 
     const store = new Store(config.dbPath)
