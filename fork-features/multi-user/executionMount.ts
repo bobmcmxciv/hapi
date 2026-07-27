@@ -31,6 +31,27 @@ const resourceFromPath = (path: string): { type: ResourceType; id: string } | nu
 
 const capabilityFor = (method: string): Capability => method === 'GET' ? 'read' : 'operate'
 
+/**
+ * 非 admin 的可见集：自己拥有的 + 被显式授权的。
+ *
+ * admin 不走这里 —— 它看整个 namespace。这不是特权膨胀，是补回一致性：
+ * `ExecutionDispatcher` 已经把 admin 当成每个已绑定资源的 owner（单资源
+ * 访问一直是放行的），而 pre-gateway 的 hub 也只对非 admin 套过滤
+ * （`hub/src/web/routes/sessions.ts` 的 `role !== 'admin'` 分支）。
+ * 只在**列表**里对 admin 也过滤，会造成"直接开 URL 打得开、但列表里根本
+ * 找不到"的割裂 —— 收敛到 gateway 后 admin 的会话列表凭空少了 56 条。
+ */
+function accessibleRecords<T>(
+    store: MultiUserGatewayStore,
+    type: ResourceType,
+    accountId: number,
+    lookup: (resourceId: string) => T | null | undefined
+): T[] {
+    return store.listAccessibleResources(type, accountId)
+        .map(binding => lookup(binding.resourceId))
+        .filter((record): record is T => record != null)
+}
+
 export function createExecutionMiddleware(deps: {
     store: MultiUserGatewayStore
     jwtSecret: Uint8Array
@@ -129,13 +150,12 @@ export function mountExecutionRoutes(app: Hono<WebAppEnv>, deps: {
         const account = accountId === null ? null : deps.store.getAccount(accountId)
         const engine = deps.getSyncEngine()
         if (!account || !engine) return c.json({ error: 'Not connected' }, account ? 503 : 401)
-        for (const session of engine.getSessionsByNamespace(account.defaultNamespace)) {
+        const namespaceSessions = engine.getSessionsByNamespace(account.defaultNamespace)
+        for (const session of namespaceSessions) {
             if (!deps.store.getResource('session', session.id)) deps.store.bindResource({ resourceType: 'session', resourceId: session.id, ownerAccountId: account.id, coreNamespace: account.defaultNamespace })
         }
-        const sessions = deps.store.listAccessibleResources('session', account.id)
-            .map(binding => engine.getSession(binding.resourceId))
-            .filter(session => session != null)
-            .map(session => toSessionSummary(session!))
+        const sessions = (account.role === 'admin' ? namespaceSessions : accessibleRecords(deps.store, 'session', account.id, id => engine.getSession(id)))
+            .map(session => toSessionSummary(session))
         return c.json({ sessions })
     })
 
@@ -144,12 +164,13 @@ export function mountExecutionRoutes(app: Hono<WebAppEnv>, deps: {
         const account = accountId === null ? null : deps.store.getAccount(accountId)
         const engine = deps.getSyncEngine()
         if (!account || !engine) return c.json({ error: 'Not connected' }, account ? 503 : 401)
-        for (const machine of engine.getOnlineMachinesByNamespace(account.defaultNamespace)) {
+        const namespaceMachines = engine.getOnlineMachinesByNamespace(account.defaultNamespace)
+        for (const machine of namespaceMachines) {
             if (!deps.store.getResource('machine', machine.id)) deps.store.bindResource({ resourceType: 'machine', resourceId: machine.id, ownerAccountId: account.id, coreNamespace: account.defaultNamespace })
         }
-        const machines = deps.store.listAccessibleResources('machine', account.id)
-            .map(binding => engine.getMachine(binding.resourceId))
-            .filter(machine => machine !== null)
+        const machines = account.role === 'admin'
+            ? namespaceMachines
+            : accessibleRecords(deps.store, 'machine', account.id, id => engine.getMachine(id) ?? null)
         return c.json({ machines })
     })
 }
