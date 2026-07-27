@@ -166,12 +166,19 @@ ssh ecs 'sqlite3 /root/.hapi/hapi.db "PRAGMA table_info(sessions);"'
 | 坑 | 正确做法 |
 |---|---|
 | `build-executable.ts --with-web-assets` **只校验不重建** web 资产 | 必须先 `bun run build:web` + `cd hub && bun run generate:embedded-web-assets` 再编 |
+| ⚠️ `build-executable.ts` **不带** `--with-web-assets` 跑一次，会把 `hub/src/web/embeddedAssets.generated.ts` **静默覆写成 stub** | 这个仓库里永远带上该标志。误跑了就重跑 `generate:embedded-web-assets` 恢复（正常是 228 行 / 108 资产，stub 只有 10 行） |
+| ⚠️ 构建失败时 `dist-exe/` 里**留着上一次的旧二进制**，sha256 与已部署的一模一样 | 必须查 exit code，并**比对新旧 sha256 确认确实变了**，否则会把旧二进制当新的发出去 |
+| ⚠️ bun 交叉编译报 `Error initializing ELF file: error.OutOfMemory` | 看的不是物理内存而是 **Windows 提交量**：`(Get-CimInstance Win32_OperatingSystem).FreeVirtualMemory`。<2GB 就编不动，8GB 空闲 RAM 也没用。最小样例能编成功即可排除工具链问题 |
+| ⚠️ `bun run test:cli` 的 `runner.integration.test.ts` 会 spawn 真实 runner + CLI，**失败时不清理** | 每个孤儿进程约 450MB 提交，跑几次就吃光提交量。识别：`bun.exe` + `--cwd <worktree>\cli` + **零出站连接**；真实会话是 `hapi.exe` 且连着 hub:443。清理前必须用这两个特征区分 |
 | ECS 出网被锁死，GitHub / npmmirror 全 `http=000` | 唯一通道是 **scp 推送**（入站 22） |
-| 单条 scp 只有 ~24KB/s（143ms / 20% 丢包） | `split -b 12m` + `xargs -P 8 scp` 并行 ≈ 480KB/s，逐块 md5 校验 |
+| 单条 scp 只有 ~24KB/s（143ms / 20% 丢包） | `split -b 12m` + 并行 scp，但 **`-P 8` 会把链路打崩**（`Connection reset by peer`）。用 `-P 2~4`，并写重试循环直到逐块 md5 全过 |
+| ⚠️ **传输"完成"不能看大小** | 只认**逐块 md5**。曾用 `du -sm >= 62` 判完成，触发时首块还差 786KB；另一次 6 块里 4 块内容损坏但 scp 报完成 |
+| ⚠️ 后台命令用 `;` 串联时，**末尾命令的退出码会掩盖前面的失败** | scp 实际 `exit 124` 却因链末 `ssh md5sum` 成功而被报成 exit 0。串联时显式捕获每段 `$?` 并打印 |
 | 长传输被工具 2min 超时 kill → ECS 侧僵尸续写把分块撑坏 | **必须 `run_in_background`** |
 | 替换运行中的二进制报 `Text file busy` | 用 `mv` rename 换芯，别覆写 |
-| 换芯前没备份 | DB + 二进制都备份，命名 `*.pre-<tag>-<ts>` |
-| 判断机器在线看 DB 的 `machines.active` | 那是持久化旧值**不可信**，要看 hub 内存态 `/api/machines` |
+| 换芯前没备份 | 二进制 + 主库 + **gateway 库**都备份，命名 `*.pre-<tag>-<ts>` |
+| 判断机器在线看 DB 的 `machines.active` | 那是持久化旧值**不可信**，要看 hub 内存态 `/api/machines`（用 `POST /api/auth` 拿 `{"accessToken": <cliApiToken>}` 换 JWT） |
+| 归档会话没能杀掉本机 CLI 进程 | `archiveSession()` 是经 **RPC** 发 `killSession`，CLI 与 hub 断连时抛 `RpcTargetMissingError`，走容错分支只改元数据**不杀进程**。断连的孤儿只能本机清 |
 
 ### 2.7 本仓库禁止
 
