@@ -11,12 +11,14 @@ import { useServerUrl } from '@/hooks/useServerUrl'
 import { useSSE } from '@/hooks/useSSE'
 import { useReconnectingState } from '@/hooks/useReconnectingState'
 import { useSyncingState } from '@/hooks/useSyncingState'
+import { getInitialNotificationSoundEnabled } from '@/hooks/useNotificationSound'
 import { usePushNotifications } from '@/hooks/usePushNotifications'
 import { useViewportHeight } from '@/hooks/useViewportHeight'
 import { useVisibilityReporter } from '@/hooks/useVisibilityReporter'
 import { queryKeys } from '@/lib/query-keys'
 import { AppContextProvider } from '@/lib/app-context'
 import { clearMessageWindow, syncTailMessages } from '@/lib/message-window-store'
+import { installNotificationChimeUnlock, playNotificationChime } from '@/lib/notificationChime'
 import { useAppGoBack } from '@/hooks/useAppGoBack'
 import { useTranslation } from '@/lib/use-translation'
 import { VoiceProvider } from '@/lib/voice-context'
@@ -77,6 +79,10 @@ function AppInner() {
     const matchRoute = useMatchRoute()
     const router = useRouter()
     const { addToast } = useToast()
+
+    // Pre-unlock the chime AudioContext on the first user gesture so a later
+    // toast can actually make sound (browser autoplay policy).
+    useEffect(() => installNotificationChimeUnlock(), [])
 
     useEffect(() => {
         const tg = getTelegramWebApp()
@@ -340,6 +346,12 @@ function AppInner() {
     }, [t])
 
     const handleToast = useCallback((event: ToastEvent) => {
+        // Read the preference at toast time: the settings toggle lives in a
+        // different component, and same-document localStorage writes fire no
+        // 'storage' event — App-level React state would go stale.
+        if (getInitialNotificationSoundEnabled()) {
+            playNotificationChime()
+        }
         const localized = translateIncomingToast(event.data.title, event.data.body)
         addToast({
             title: localized.title,
