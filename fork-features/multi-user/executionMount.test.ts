@@ -5,6 +5,7 @@ import { createExecutionMiddleware, mountExecutionRoutes } from './executionMoun
 import type { SyncEngine } from '../../hub/src/sync/syncEngine'
 import type { WebAppEnv } from '../../hub/src/web/middleware/auth'
 import { MultiUserGatewayStore } from './gatewayStore'
+import { Store as HubStore } from '../../hub/src/store'
 import { SSEManager } from '../../hub/src/sse/sseManager'
 import { VisibilityTracker } from '../../hub/src/visibility/visibilityTracker'
 
@@ -112,7 +113,8 @@ describe('createExecutionMiddleware', () => {
             store,
             jwtSecret,
             getSyncEngine: () => engine,
-            getSseManager: () => null
+            getSseManager: () => null,
+            getStore: () => null
         })
 
         const response = await app.request('/api/sessions', {
@@ -144,7 +146,8 @@ describe('createExecutionMiddleware', () => {
             store,
             jwtSecret,
             getSyncEngine: () => null,
-            getSseManager: () => sseManager
+            getSseManager: () => sseManager,
+            getStore: () => null
         })
         const controller = new AbortController()
         const response = await app.request('/api/events', {

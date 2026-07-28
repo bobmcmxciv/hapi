@@ -3,12 +3,12 @@ import { jwtVerify } from 'jose'
 import { toSessionSummary } from '../../shared/src/sessionSummary'
 import type { Session, SyncEngine } from '../../hub/src/sync/syncEngine'
 import type { SSEManager } from '../../hub/src/sse/sseManager'
+import type { Store } from '../../hub/src/store'
 import type { WebAppEnv } from '../../hub/src/web/middleware/auth'
 import type { MultiUserGatewayStore } from './gatewayStore'
 import { ExecutionDispatcher } from './executionDispatcher'
 import type { Account, Capability, ResourceType } from './domain'
-// 注：usage 页的 buildUsageSummaryResponse / parseIsoParam 属于批次 C，
-// 随 fork-features/usage 一起落回，这里先只引 SSE 谓词与机器继承。
+import { buildUsageSummaryResponse, parseIsoParam } from '../usage/usageAggregate'
 import { createSessionMachineResolver } from './machineInheritance'
 import { createSseEventFilterFactory } from './sseVisibility'
 import { streamSSE } from 'hono/streaming'
@@ -144,6 +144,7 @@ export function mountExecutionRoutes(app: Hono<WebAppEnv>, deps: {
     jwtSecret: Uint8Array
     getSyncEngine: () => SyncEngine | null
     getSseManager: () => SSEManager | null
+    getStore: () => Store | null
 }): void {
     app.get('/api/events', async (c) => {
         const accountId = await gatewayAccountId(c.req.raw, deps.jwtSecret)

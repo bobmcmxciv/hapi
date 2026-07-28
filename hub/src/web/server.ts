@@ -298,7 +298,8 @@ function createWebApp(options: {
         store: multiUserStore,
         jwtSecret: options.jwtSecret,
         getSyncEngine: options.getSyncEngine,
-        getSseManager: options.getSseManager
+        getSseManager: options.getSseManager,
+        getStore: () => options.store
     })
     app.use('/api/*', createExecutionMiddleware({
         store: multiUserStore,
