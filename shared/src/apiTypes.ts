@@ -334,6 +334,27 @@ export type ResourceGrantSummary = {
     createdAt: number
 }
 
+// ---- Token usage summary (aggregated from stored assistant message usage) ----
+
+export type UsageModelSummary = {
+    model: string
+    requestCount: number
+    inputTokens: number
+    outputTokens: number
+    cacheCreationInputTokens: number
+    cacheReadInputTokens: number
+}
+
+export type UsageSummaryResponse = {
+    models: UsageModelSummary[]
+    totals: Omit<UsageModelSummary, 'model'>
+    /** 该 namespace 下可筛选的机器 host 列表（用于前端下拉）。 */
+    hosts: string[]
+    /** 本次统计实际生效的筛选条件，回显给前端确认。 */
+    filter: { since: string | null; until: string | null; host: string | null }
+    generatedAt: number
+}
+
 export const CreateAccountRequestSchema = z.object({
     username: z.string().min(1).max(64),
     password: z.string().min(8).max(256).optional(),

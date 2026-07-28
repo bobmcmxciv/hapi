@@ -21,8 +21,10 @@ import {
     mergeSessionMessages,
     copyMessageToSession as copyStoredMessageToSession,
     getAllMessages,
+    aggregateUsageForSessions,
     type CancelQueuedMessageResult,
     type LookupQueuedMessageResult,
+    type UsageAggregateRow,
 } from './messages'
 
 export class MessageStore {
@@ -46,6 +48,13 @@ export class MessageStore {
 
     getAllMessages(sessionId: string): StoredMessage[] {
         return getAllMessages(this.db, sessionId)
+    }
+
+    aggregateUsageForSessions(
+        sessionIds: string[],
+        opts?: { sinceIso?: string | null; untilIso?: string | null }
+    ): UsageAggregateRow[] {
+        return aggregateUsageForSessions(this.db, sessionIds, opts)
     }
 
     getMessages(sessionId: string, limit: number = 200): StoredMessage[] {

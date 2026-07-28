@@ -27,6 +27,8 @@ export type {
     AccountSummary,
     ApiTokenSummary,
     ResourceGrantSummary,
+    UsageModelSummary,
+    UsageSummaryResponse,
     MachinesResponse,
     MessagesResponse,
     OpencodeModelsResponse,

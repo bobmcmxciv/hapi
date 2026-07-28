@@ -4,6 +4,7 @@ import type {
     AccountSummary,
     ApiTokenSummary,
     ResourceGrantSummary,
+    UsageSummaryResponse,
     CodexLocalSessionsResponse,
     CodexDuplicateSessionsResponse,
     CodexMergeDuplicateSessionsResponse,
@@ -204,6 +205,15 @@ export class ApiClient {
 
     async listAccounts(): Promise<{ accounts: AccountSummary[] }> {
         return await this.request('/api/admin/accounts')
+    }
+
+    async getUsageSummary(params?: { since?: string | null; until?: string | null; host?: string | null }): Promise<UsageSummaryResponse> {
+        const search = new URLSearchParams()
+        if (params?.since) search.set('since', params.since)
+        if (params?.until) search.set('until', params.until)
+        if (params?.host) search.set('host', params.host)
+        const qs = search.toString()
+        return await this.request(`/api/usage/summary${qs ? `?${qs}` : ''}`)
     }
 
     async createAccount(payload: { username: string; password?: string; role?: 'admin' | 'user'; defaultNamespace?: string }): Promise<{ account: AccountSummary }> {
