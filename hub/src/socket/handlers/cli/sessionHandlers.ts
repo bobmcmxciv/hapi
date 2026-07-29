@@ -99,10 +99,12 @@ export type SessionHandlersDeps = {
     /** Drops the queued-thinking grace so synchronous CLI handlers (e.g. slash
      *  commands) don't leave the spinner stuck for the full grace window. */
     onMessagesConsumed?: (sessionId: string) => void
+    /** fork-features/multi-user: strips injected gateway memory out of CLI-reported titles. */
+    sanitizeSessionMetadata?: (metadata: unknown) => unknown
 }
 
 export function registerSessionHandlers(socket: CliSocketWithData, deps: SessionHandlersDeps): void {
-    const { store, resolveSessionAccess, emitAccessError, onSessionAlive, onSessionReady, onSessionEnd, onWebappEvent, onBackgroundTaskDelta, onSessionActivity, onSweepImmediateQueued, onMessagesConsumed } = deps
+    const { store, resolveSessionAccess, emitAccessError, onSessionAlive, onSessionReady, onSessionEnd, onWebappEvent, onBackgroundTaskDelta, onSessionActivity, onSweepImmediateQueued, onMessagesConsumed, sanitizeSessionMetadata } = deps
 
     socket.on('message', (data: unknown) => {
         const parsed = messageSchema.safeParse(data)
@@ -238,7 +240,13 @@ export function registerSessionHandlers(socket: CliSocketWithData, deps: Session
 
         const result = store.sessions.updateSessionMetadata(
             sid,
-            preserveHubOwnedMetadata(metadata, sessionAccess.value.metadata),
+            // fork(memory-title)：先清洗（剥掉被 CLI 兜底截成标题的 <hapi_user_context>
+            // 记忆块），再走上游的 hub 自有字段保留——两层各管各的，顺序不能反：
+            // preserve 在前会把脏标题当成"CLI 想改的值"原样放行。
+            preserveHubOwnedMetadata(
+                sanitizeSessionMetadata ? sanitizeSessionMetadata(metadata) : metadata,
+                sessionAccess.value.metadata
+            ),
             expectedVersion,
             sessionAccess.value.namespace
         )
