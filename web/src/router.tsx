@@ -771,7 +771,7 @@ function SessionPage() {
         hasMore: messagesHasMore,
         loadMore: loadMoreMessages,
         refetch: refetchMessages,
-        unseenCount,
+        viewMode: messagesViewMode,
         messagesVersion,
         historyVersion,
         setViewMode,
@@ -1134,7 +1134,7 @@ function SessionPage() {
             isSyncingTail={messagesSyncingTail}
             isLoadingMoreMessages={messagesLoadingMore}
             isSending={isSending}
-            unseenCount={unseenCount}
+            viewMode={messagesViewMode}
             messagesVersion={messagesVersion}
             historyVersion={historyVersion}
             onBack={goBack}

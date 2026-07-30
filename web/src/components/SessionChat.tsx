@@ -21,6 +21,7 @@ import { reduceChatBlocks } from '@/chat/reducer'
 import { reconcileChatBlocks } from '@/chat/reconcile'
 import { buildConversationOutline } from '@/chat/outline'
 import { buildVisibleChatBlocks, isToolGroupBlock, type ToolGroupBlock } from '@/chat/toolGroups'
+import { useUnseenBlockCount } from '@/hooks/useUnseenBlockCount'
 import { isQueuedForInvocation } from '@/lib/messages'
 import { inactiveSessionCanResume } from '@/lib/sessionResume'
 import {
@@ -429,7 +430,7 @@ type SessionChatProps = {
     isSyncingTail: boolean
     isLoadingMoreMessages: boolean
     isSending: boolean
-    unseenCount: number
+    viewMode: 'tail' | 'history'
     messagesVersion: number
     historyVersion: number
     onBack: () => void
@@ -1069,6 +1070,11 @@ function SessionChatInner(props: SessionChatProps) {
         visibleGroupsRef.current = visibleBlocks.filter(isToolGroupBlock)
     }, [visibleBlocks])
 
+    // "N new messages" counts rendered blocks, not raw messages: a subagent run
+    // is dozens of sidechain messages but a single Task card, and a tool_use +
+    // tool_result pair is one card.
+    const unseenCount = useUnseenBlockCount(props.viewMode, visibleBlocks)
+
     const outlineItems = useMemo(
         () => buildConversationOutline(reconciled.blocks),
         [reconciled.blocks]
@@ -1436,7 +1442,7 @@ function SessionChatInner(props: SessionChatProps) {
                         hasMoreMessages={props.hasMoreMessages}
                         isLoadingMoreMessages={props.isLoadingMoreMessages}
                         onLoadMore={props.onLoadMore}
-                        unseenCount={props.unseenCount}
+                        unseenCount={unseenCount}
                         rawMessagesCount={visibleMessages.length}
                         normalizedMessagesCount={normalizedMessages.length}
                         messagesVersion={props.messagesVersion}
