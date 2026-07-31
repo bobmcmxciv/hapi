@@ -1,5 +1,13 @@
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import { setCursorAcpModelsSnapshot } from '@/cursor/utils/cursorAcpModelsBridge'
+import { mkdtempSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+
+// Isolate the on-disk cursor-models cache to this file's own HAPI_HOME so
+// parallel vitest workers don't race on the shared $HAPI_HOME/cache path
+// (see heavygee/hapi#101).
+process.env.HAPI_HOME = mkdtempSync(join(tmpdir(), 'hapi-cursor-models-'))
 
 const { spawnMock } = vi.hoisted(() => ({
     spawnMock: vi.fn()

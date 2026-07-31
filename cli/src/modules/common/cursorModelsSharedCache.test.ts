@@ -1,9 +1,17 @@
 import { afterEach, describe, expect, test } from 'vitest';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
     readSharedCursorModelsCache,
     writeSharedCursorModelsCache,
     _resetSharedCursorModelsCacheForTests
 } from './cursorModelsSharedCache';
+
+// Isolate the on-disk cursor-models cache to this file's own HAPI_HOME so
+// parallel vitest workers don't race on the shared $HAPI_HOME/cache path
+// (see heavygee/hapi#101).
+process.env.HAPI_HOME = mkdtempSync(join(tmpdir(), 'hapi-cursor-models-shared-cache-'));
 
 afterEach(() => {
     _resetSharedCursorModelsCacheForTests();
