@@ -6,9 +6,9 @@ import {
     ConversationOutlinePanel,
     captureScrollAnchor,
     getHistoryCoverageRetryDelay,
-    hasAppliedHistoryVersion,
+    getPullToLoadState,
     getScrollIntent,
-    loadUntilVisibleBoundaryChanges,
+    hasAppliedHistoryVersion,
     locateOutlineTargetMessage,
     prependMissingUserSnapshot,
     restoreScrollAnchor,
@@ -263,6 +263,13 @@ describe('top-triggered history loading', () => {
         expect(getHistoryCoverageRetryDelay(2_800, 1_000)).toBe(1_816)
         expect(getHistoryCoverageRetryDelay(900, 1_000)).toBe(16)
     })
+
+    it('shows pull feedback at 16px and arms release loading at 64px', () => {
+        expect(getPullToLoadState(15)).toBe('idle')
+        expect(getPullToLoadState(16)).toBe('pulling')
+        expect(getPullToLoadState(63)).toBe('pulling')
+        expect(getPullToLoadState(64)).toBe('ready')
+    })
 })
 
 describe('outline target loading', () => {
@@ -321,34 +328,5 @@ describe('share turn snapshots', () => {
         const fallback = { html: '', text: 'prompt', role: 'user' as const }
 
         expect(prependMissingUserSnapshot([user], fallback)).toEqual([user])
-    })
-})
-
-describe('visible older-history loading', () => {
-    it('continues across pages hidden inside a collapsed tool group', async () => {
-        let page = 0
-        let visibleBoundary = 'current-group'
-        const loadOlder = vi.fn(async () => {
-            page += 1
-            if (page === 3) visibleBoundary = 'older-message'
-            return true
-        })
-
-        await expect(loadUntilVisibleBoundaryChanges({
-            getVisibleBoundary: () => visibleBoundary,
-            hasMoreMessages: () => true,
-            loadOlder
-        })).resolves.toBe(true)
-        expect(loadOlder).toHaveBeenCalledTimes(3)
-    })
-
-    it('stops when the history source cannot load another page', async () => {
-        const loadOlder = vi.fn(async () => false)
-        await expect(loadUntilVisibleBoundaryChanges({
-            getVisibleBoundary: () => 'current-group',
-            hasMoreMessages: () => true,
-            loadOlder
-        })).resolves.toBe(false)
-        expect(loadOlder).toHaveBeenCalledTimes(1)
     })
 })

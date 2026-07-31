@@ -972,6 +972,8 @@ export default {
   'misc.loading': '加载中…',
   'misc.newMessage': '{n} 条新消息',
   'misc.loadingMessages': '加载消息中…',
+  'misc.pullToLoadOlder': '继续下拉加载更早消息',
+  'misc.releaseToLoadOlder': '松开加载',
   'misc.typeMessage': "输入 'continue' 继续...",
   'misc.typeAMessage': '输入消息...',
   'misc.offline': '离线',

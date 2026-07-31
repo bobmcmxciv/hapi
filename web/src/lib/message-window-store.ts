@@ -1,8 +1,25 @@
 import type { ApiClient } from '@/api/client'
+import { normalizeDecryptedMessage } from '@/chat/normalize'
 import type { DecryptedMessage, MessageStatus, MessagesResponse } from '@/types/api'
 import { isQueuedForInvocation, mergeMessages } from '@/lib/messages'
 
 export type MessageViewMode = 'tail' | 'history'
+
+export type OlderLoadOutcome =
+    | {
+        kind: 'applied'
+        historyVersion: number
+        hasMore: boolean
+        addedRenderableCount: number
+    }
+    | {
+        kind: 'stopped'
+        reason: 'unavailable' | 'busy' | 'invalidated' | 'epoch-reset' | 'exhausted'
+    }
+    | {
+        kind: 'failed'
+        error: Error
+    }
 
 export type MessageWindowState = {
     sessionId: string
@@ -441,6 +458,30 @@ function optimisticMessage(message: DecryptedMessage): boolean {
     return Boolean(message.localId && message.id === message.localId)
 }
 
+function shouldRetainWindowMessage(message: DecryptedMessage): boolean {
+    return isQueuedForInvocation(message) || normalizeDecryptedMessage(message) !== null
+}
+
+function countNewRenderableMessages(
+    previous: InternalState,
+    incoming: DecryptedMessage[]
+): number {
+    const representedIds = new Set(previous.messages.map((message) => message.id))
+    const representedLocalIds = new Set(
+        previous.messages.flatMap((message) => message.localId ? [message.localId] : [])
+    )
+    let count = 0
+    for (const message of incoming) {
+        if (!shouldRetainWindowMessage(message)) continue
+        if (representedIds.has(message.id)) continue
+        if (message.localId && representedLocalIds.has(message.localId)) continue
+        count += 1
+        representedIds.add(message.id)
+        if (message.localId) representedLocalIds.add(message.localId)
+    }
+    return count
+}
+
 function mergeIntoWindow(
     previous: InternalState,
     incoming: DecryptedMessage[],
@@ -449,13 +490,14 @@ function mergeIntoWindow(
         regularLimit?: number
     } = {}
 ): InternalState {
-    if (incoming.length === 0) {
+    const retainedIncoming = incoming.filter(shouldRetainWindowMessage)
+    if (retainedIncoming.length === 0) {
         return previous
     }
     const mode = options.mode ?? (previous.viewMode === 'history' ? 'prepend' : 'append')
     const regularLimit = options.regularLimit
         ?? (previous.viewMode === 'history' ? HISTORY_WINDOW_SIZE : VISIBLE_WINDOW_SIZE)
-    const merged = mergeMessages(previous.messages, incoming)
+    const merged = mergeMessages(previous.messages, retainedIncoming)
     const { kept, dropped } = trimPreservingQueued(merged, regularLimit, mode)
     let next = buildState(previous, {
         messages: kept
@@ -492,6 +534,7 @@ function applyLatestResponse(
         requestBaseline: Map<string, DecryptedMessage>
     }
 ): InternalState {
+    const retainedResponseMessages = response.messages.filter(shouldRetainWindowMessage)
     const concurrentServerRows = previous.messages.filter((message) => (
         !optimisticMessage(message)
         && options.requestBaseline.get(message.id) !== message
@@ -502,7 +545,7 @@ function applyLatestResponse(
             || options.requestBaseline.get(message.id) !== message
         ))
         : previous.messages
-    const authoritative = mergeMessages(preserved, response.messages)
+    const authoritative = mergeMessages(preserved, retainedResponseMessages)
     const incoming = mergeMessages(authoritative, concurrentServerRows)
     const { kept, dropped } = trimPreservingQueued(incoming, VISIBLE_WINDOW_SIZE, 'append')
     const snapshotHead = pagePosition(response.page.snapshotHeadAt, response.page.snapshotHeadSeq)
@@ -751,11 +794,23 @@ export function syncTailMessages(
     return waitForTailSyncDrain(sessionId, controller, observed)
 }
 
-export async function fetchOlderMessages(api: ApiClient, sessionId: string): Promise<boolean> {
+export async function fetchOlderMessages(
+    api: ApiClient,
+    sessionId: string,
+    options: {
+        onBeforeApply?: (historyVersion: number) => boolean
+    } = {}
+): Promise<OlderLoadOutcome> {
     const initial = getState(sessionId)
     const before = readPosition(initial.oldestPositionAt, initial.oldestPositionSeq)
-    if (initial.isSyncingTail || initial.isLoadingMore || !initial.hasMore || !before) {
-        return false
+    if (initial.isSyncingTail || initial.isLoadingMore) {
+        return { kind: 'stopped', reason: 'busy' }
+    }
+    if (!initial.hasMore) {
+        return { kind: 'stopped', reason: 'exhausted' }
+    }
+    if (!before) {
+        return { kind: 'stopped', reason: 'unavailable' }
     }
     const generation = initial.olderGeneration + 1
     updateState(sessionId, (previous) => buildState(previous, {
@@ -770,7 +825,9 @@ export async function fetchOlderMessages(api: ApiClient, sessionId: string): Pro
             beforeSeq: before.seq,
             limit: PAGE_SIZE
         })
-        if (getState(sessionId).olderGeneration !== generation) return false
+        if (getState(sessionId).olderGeneration !== generation) {
+            return { kind: 'stopped', reason: 'invalidated' }
+        }
 
         if (initial.epoch !== null && response.page.epoch !== initial.epoch) {
             updateState(sessionId, (previous) => {
@@ -784,36 +841,80 @@ export async function fetchOlderMessages(api: ApiClient, sessionId: string): Pro
                 })
             })
             await syncTailMessages(api, sessionId, { ensureAfterCurrent: true })
-            return false
+            return { kind: 'stopped', reason: 'epoch-reset' }
         }
 
+        let historyVersion = 0
+        let addedRenderableCount = 0
+        let applyRejected = false
+        // Prepend trimming and its prepared scroll restore must reach the UI
+        // in one publication; the normal 150ms notification throttle would
+        // expose rows that this state has already evicted.
         updateState(sessionId, (previous) => {
             if (previous.olderGeneration !== generation) return previous
+            addedRenderableCount = countNewRenderableMessages(previous, response.messages)
+            const nextHistoryVersion = previous.historyVersion + 1
+            if (options.onBeforeApply && !options.onBeforeApply(nextHistoryVersion)) {
+                applyRejected = true
+                return buildState(previous, {
+                    olderGeneration: previous.olderGeneration + 1,
+                    isLoadingMore: false,
+                    warning: null
+                })
+            }
             const merged = mergeIntoWindow(previous, response.messages, {
                 mode: 'prepend',
                 regularLimit: OLDER_LOAD_WINDOW_SIZE
             })
+            historyVersion = nextHistoryVersion
             return buildState(merged, {
                 hasMore: response.page.hasMore,
                 epoch: response.page.epoch,
                 oldestPositionAt: response.page.nextBeforeAt,
                 oldestPositionSeq: response.page.nextBeforeSeq,
                 isLoadingMore: false,
-                historyVersion: previous.historyVersion + 1,
+                historyVersion,
                 warning: null
             })
-        })
-        return true
+        }, true)
+        if (applyRejected || historyVersion === 0) {
+            return { kind: 'stopped', reason: 'invalidated' }
+        }
+        return {
+            kind: 'applied',
+            historyVersion,
+            hasMore: response.page.hasMore,
+            addedRenderableCount
+        }
     } catch (error) {
+        if (getState(sessionId).olderGeneration !== generation) {
+            return { kind: 'stopped', reason: 'invalidated' }
+        }
+        const loadError = error instanceof Error
+            ? error
+            : new Error('Failed to load older messages')
         updateState(sessionId, (previous) => {
             if (previous.olderGeneration !== generation) return previous
             return buildState(previous, {
                 isLoadingMore: false,
-                warning: error instanceof Error ? error.message : 'Failed to load older messages'
+                warning: loadError.message
             })
         })
-        return false
+        return { kind: 'failed', error: loadError }
     }
+}
+
+export function cancelOlderMessageLoad(sessionId: string): void {
+    updateState(sessionId, (previous) => {
+        if (!previous.isLoadingMore) {
+            return previous
+        }
+        return buildState(previous, {
+            olderGeneration: previous.olderGeneration + 1,
+            isLoadingMore: false,
+            warning: null
+        })
+    }, true)
 }
 
 export function setMessageViewMode(sessionId: string, mode: MessageViewMode): void {

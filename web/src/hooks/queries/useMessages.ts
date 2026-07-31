@@ -3,6 +3,7 @@ import type { ApiClient } from '@/api/client'
 import type { DecryptedMessage } from '@/types/api'
 import {
     activateMessageWindow,
+    cancelOlderMessageLoad,
     fetchOlderMessages,
     getMessageWindowState,
     setMessageViewMode,
@@ -10,6 +11,7 @@ import {
     syncTailMessages,
     type MessageViewMode,
     type MessageWindowState,
+    type OlderLoadOutcome,
 } from '@/lib/message-window-store'
 
 export const EMPTY_STATE: MessageWindowState = {
@@ -36,7 +38,8 @@ export function useMessages(api: ApiClient | null, sessionId: string | null): {
     viewMode: MessageViewMode
     messagesVersion: number
     historyVersion: number
-    loadMore: () => Promise<boolean>
+    loadMore: (onBeforeApply?: (historyVersion: number) => boolean) => Promise<OlderLoadOutcome>
+    cancelLoadMore: () => void
     refetch: () => Promise<void>
     setViewMode: (mode: MessageViewMode) => void
 } {
@@ -61,10 +64,18 @@ export function useMessages(api: ApiClient | null, sessionId: string | null): {
         }
     }, [api, sessionId])
 
-    const loadMore = useCallback(async () => {
-        if (!api || !sessionId || !state.hasMore || state.isLoadingMore) return false
-        return await fetchOlderMessages(api, sessionId)
-    }, [api, sessionId, state.hasMore, state.isLoadingMore])
+    const loadMore = useCallback(async (onBeforeApply?: (historyVersion: number) => boolean) => {
+        if (!api || !sessionId) {
+            return { kind: 'stopped', reason: 'unavailable' } as const
+        }
+        return await fetchOlderMessages(api, sessionId, { onBeforeApply })
+    }, [api, sessionId])
+
+    const cancelLoadMore = useCallback(() => {
+        if (sessionId) {
+            cancelOlderMessageLoad(sessionId)
+        }
+    }, [sessionId])
 
     const refetch = useCallback(async () => {
         if (!api || !sessionId) return
@@ -90,6 +101,7 @@ export function useMessages(api: ApiClient | null, sessionId: string | null): {
         messagesVersion: state.messagesVersion,
         historyVersion: state.historyVersion,
         loadMore,
+        cancelLoadMore,
         refetch,
         setViewMode,
     }
