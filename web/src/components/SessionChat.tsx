@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { flushSync } from 'react-dom'
 import { useNavigate } from '@tanstack/react-router'
 import { stopSpeaking } from '@/realtime/messageSummarySpeaker'
-import { AssistantRuntimeProvider, useAssistantApi, useAssistantState } from '@assistant-ui/react'
+import { AssistantRuntimeProvider, useAui, useAuiState } from '@assistant-ui/react'
 import { DragDropZone } from '@/components/AssistantChat/DragDropZone'
 import type { ApiClient } from '@/api/client'
 import type {
@@ -244,8 +244,8 @@ function isUninvokedScheduledMessage(message: DecryptedMessage): boolean {
  *    refresh of /sessions/:id doesn't re-attach the same payload.
  */
 function ShareSeedConsumer(props: { sessionId: string; sessionActive: boolean }) {
-    const assistantApi = useAssistantApi()
-    const composerText = useAssistantState(({ composer }) => composer.text)
+    const assistantApi = useAui()
+    const composerText = useAuiState((s) => s.composer.text)
     const composerTextRef = useRef(composerText)
     const initRef = useRef(false)
     const transferIdRef = useRef<string | null>(null)
@@ -333,7 +333,7 @@ export function ScratchlistDrawerHost(props: {
     onSend: (text: string, attachments?: AttachmentMetadata[], scheduledAt?: number | null) => Promise<boolean>
     onExitScratchlistMode: () => void
 }) {
-    const assistantApi = useAssistantApi()
+    const assistantApi = useAui()
     const handlePromoteToComposer = useCallback(async (entry: ScratchlistEntry) => {
         assistantApi.composer().setText(entry.text)
         // Exit scratchlist mode before rehydrating attachments so addAttachment

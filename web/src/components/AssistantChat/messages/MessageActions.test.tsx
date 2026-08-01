@@ -7,7 +7,7 @@ import { MessageActions } from './MessageActions'
 const copy = vi.fn()
 
 vi.mock('@assistant-ui/react', () => ({
-    useAssistantState: (selector: (state: { message: { createdAt: Date } }) => unknown) => selector({
+    useAuiState: (selector: (state: { message: { createdAt: Date } }) => unknown) => selector({
         message: { createdAt: new Date(2026, 6, 12, 10, 30) }
     })
 }))

@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useNavigate } from '@tanstack/react-router'
-import { MessagePrimitive, useAssistantState } from '@assistant-ui/react'
+import { MessagePrimitive, useAuiState, type TextMessagePart } from '@assistant-ui/react'
 import { useHappyChatContext } from '@/components/AssistantChat/context'
 import type { HappyChatMessageMetadata } from '@/lib/assistant-runtime'
 import { MessageStatusIndicator } from '@/components/AssistantChat/messages/MessageStatusIndicator'
@@ -55,44 +55,44 @@ export function HappyUserMessage() {
         ctx.sessionId,
         sessionFlavor
     )
-    const role = useAssistantState(({ message }) => message.role)
-    const messageId = useAssistantState(({ message }) => message.id)
+    const role = useAuiState((s) => s.message.role)
+    const messageId = useAuiState((s) => s.message.id)
     const elementId = getConversationMessageAnchorId(messageId)
     // Raw hub-DB message id (unprefixed). `message.id` is the composed
     // assistant-ui threadMessageId `${kind}:${block.id}` — hub's fork
     // endpoint matches on the raw id, not the composed one.
-    const hubMessageId = useAssistantState(({ message }) => {
-        if (message.role !== 'user') return undefined
-        const custom = message.metadata.custom as Partial<HappyChatMessageMetadata> | undefined
+    const hubMessageId = useAuiState((s) => {
+        if (s.message.role !== 'user') return undefined
+        const custom = s.message.metadata.custom as Partial<HappyChatMessageMetadata> | undefined
         return custom?.hubMessageId
     })
-    const text = useAssistantState(({ message }) => {
-        if (message.role !== 'user') return ''
-        return message.content.find((part) => part.type === 'text')?.text ?? ''
+    const text = useAuiState((s) => {
+        if (s.message.role !== 'user') return ''
+        return s.message.content.find((part): part is TextMessagePart => part.type === 'text')?.text ?? ''
     })
-    const status = useAssistantState(({ message }) => {
-        if (message.role !== 'user') return undefined
-        const custom = message.metadata.custom as Partial<HappyChatMessageMetadata> | undefined
+    const status = useAuiState((s) => {
+        if (s.message.role !== 'user') return undefined
+        const custom = s.message.metadata.custom as Partial<HappyChatMessageMetadata> | undefined
         return custom?.status
     })
-    const localId = useAssistantState(({ message }) => {
-        if (message.role !== 'user') return null
-        const custom = message.metadata.custom as Partial<HappyChatMessageMetadata> | undefined
+    const localId = useAuiState((s) => {
+        if (s.message.role !== 'user') return null
+        const custom = s.message.metadata.custom as Partial<HappyChatMessageMetadata> | undefined
         return custom?.localId ?? null
     })
-    const attachments = useAssistantState(({ message }) => {
-        if (message.role !== 'user') return undefined
-        const custom = message.metadata.custom as Partial<HappyChatMessageMetadata> | undefined
+    const attachments = useAuiState((s) => {
+        if (s.message.role !== 'user') return undefined
+        const custom = s.message.metadata.custom as Partial<HappyChatMessageMetadata> | undefined
         return custom?.attachments
     })
-    const isCliOutput = useAssistantState(({ message }) => {
-        const custom = message.metadata.custom as Partial<HappyChatMessageMetadata> | undefined
+    const isCliOutput = useAuiState((s) => {
+        const custom = s.message.metadata.custom as Partial<HappyChatMessageMetadata> | undefined
         return custom?.kind === 'cli-output'
     })
-    const cliText = useAssistantState(({ message }) => {
-        const custom = message.metadata.custom as Partial<HappyChatMessageMetadata> | undefined
+    const cliText = useAuiState((s) => {
+        const custom = s.message.metadata.custom as Partial<HappyChatMessageMetadata> | undefined
         if (custom?.kind !== 'cli-output') return ''
-        return message.content.find((part) => part.type === 'text')?.text ?? ''
+        return s.message.content.find((part): part is TextMessagePart => part.type === 'text')?.text ?? ''
     })
     if (role !== 'user') return null
     const canRetry = status === 'failed' && typeof localId === 'string' && Boolean(ctx.onRetryMessage)

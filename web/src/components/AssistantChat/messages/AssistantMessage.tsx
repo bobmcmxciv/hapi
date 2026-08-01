@@ -1,4 +1,4 @@
-import { MessagePrimitive, useAssistantState } from '@assistant-ui/react'
+import { MessagePrimitive, useAuiState, type TextMessagePart } from '@assistant-ui/react'
 import { MarkdownText } from '@/components/assistant-ui/markdown-text'
 import { Reasoning, ReasoningGroup } from '@/components/assistant-ui/reasoning'
 import { HappyToolMessage } from '@/components/AssistantChat/messages/ToolMessage'
@@ -22,35 +22,35 @@ const MESSAGE_PART_COMPONENTS = {
 } as const
 
 export function HappyAssistantMessage() {
-    const messageId = useAssistantState(({ message }) => message.id)
+    const messageId = useAuiState((s) => s.message.id)
     const elementId = getConversationMessageAnchorId(messageId)
-    const isCliOutput = useAssistantState(({ message }) => {
-        const custom = message.metadata.custom as Partial<HappyChatMessageMetadata> | undefined
+    const isCliOutput = useAuiState((s) => {
+        const custom = s.message.metadata.custom as Partial<HappyChatMessageMetadata> | undefined
         return custom?.kind === 'cli-output'
     })
-    const codexReview = useAssistantState(({ message }) => {
-        const custom = message.metadata.custom as Partial<HappyChatMessageMetadata> | undefined
+    const codexReview = useAuiState((s) => {
+        const custom = s.message.metadata.custom as Partial<HappyChatMessageMetadata> | undefined
         return custom?.kind === 'codex-review' ? custom.review : undefined
     })
-    const cliText = useAssistantState(({ message }) => {
-        const custom = message.metadata.custom as Partial<HappyChatMessageMetadata> | undefined
+    const cliText = useAuiState((s) => {
+        const custom = s.message.metadata.custom as Partial<HappyChatMessageMetadata> | undefined
         if (custom?.kind !== 'cli-output') return ''
-        return message.content.find((part) => part.type === 'text')?.text ?? ''
+        return s.message.content.find((part): part is TextMessagePart => part.type === 'text')?.text ?? ''
     })
-    const toolOnly = useAssistantState(({ message }) => {
-        if (message.role !== 'assistant') return false
-        const parts = message.content
+    const toolOnly = useAuiState((s) => {
+        if (s.message.role !== 'assistant') return false
+        const parts = s.message.content
         return parts.length > 0 && parts.every((part) => part.type === 'tool-call')
     })
-    const copyText = useAssistantState(({ message }) => {
-        if (message.role !== 'assistant') return ''
-        return getAssistantCopyText(message.content)
+    const copyText = useAuiState((s) => {
+        if (s.message.role !== 'assistant') return ''
+        return getAssistantCopyText(s.message.content)
     })
 
-    const durationMs = useAssistantState(({ message }) => (message.metadata.custom as Partial<HappyChatMessageMetadata> | undefined)?.durationMs)
-    const usage = useAssistantState(({ message }) => (message.metadata.custom as Partial<HappyChatMessageMetadata> | undefined)?.usage)
-    const messageModel = useAssistantState(({ message }) => (message.metadata.custom as Partial<HappyChatMessageMetadata> | undefined)?.model)
-    const turnCount = useAssistantState(({ message }) => (message.metadata.custom as Partial<HappyChatMessageMetadata> | undefined)?.turnCount)
+    const durationMs = useAuiState(({ message }) => (message.metadata.custom as Partial<HappyChatMessageMetadata> | undefined)?.durationMs)
+    const usage = useAuiState(({ message }) => (message.metadata.custom as Partial<HappyChatMessageMetadata> | undefined)?.usage)
+    const messageModel = useAuiState(({ message }) => (message.metadata.custom as Partial<HappyChatMessageMetadata> | undefined)?.model)
+    const turnCount = useAuiState(({ message }) => (message.metadata.custom as Partial<HappyChatMessageMetadata> | undefined)?.turnCount)
 
     const metadata = { durationMs, usage, model: messageModel ?? null, turnCount }
 

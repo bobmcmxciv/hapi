@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import { ThreadPrimitive, useAssistantState } from '@assistant-ui/react'
+import { ThreadPrimitive, useAuiState } from '@assistant-ui/react'
 import type { ApiClient } from '@/api/client'
 import type { HappyRuntimeExtras } from '@/lib/assistant-runtime'
 import type { Session, SessionMetadataSummary } from '@/types/api'
@@ -434,7 +434,7 @@ export function HappyThread(props: {
 }) {
     const { t } = useTranslation()
     const { terminalToolDisplayMode } = useTerminalToolDisplayMode()
-    const runtimeExtras = useAssistantState(({ thread }) => thread.extras) as HappyRuntimeExtras | undefined
+    const runtimeExtras = useAuiState((s) => s.thread.extras) as HappyRuntimeExtras | undefined
     const appliedMessagesVersion = runtimeExtras?.messagesVersion ?? props.messagesVersion
     const appliedHistoryVersion = runtimeExtras?.historyVersion ?? props.historyVersion
     const viewportRef = useRef<HTMLDivElement | null>(null)
