@@ -212,6 +212,9 @@ export function buildThreadStartParams(args: {
     if (args.mode.model) {
         params.model = args.mode.model;
     }
+    if (args.mode.personality) {
+        params.personality = args.mode.personality;
+    }
 
     const threadServiceTier = toAppServerServiceTier(args.mode.serviceTier);
     if (threadServiceTier !== undefined) {
@@ -291,6 +294,10 @@ export function buildTurnStartParams(args: {
     const turnServiceTier = toAppServerServiceTier(args.mode?.serviceTier);
     if (turnServiceTier !== undefined) {
         params.serviceTier = turnServiceTier;
+    }
+
+    if (args.mode?.personality) {
+        params.personality = args.mode.personality;
     }
 
     return params;

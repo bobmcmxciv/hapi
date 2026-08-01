@@ -241,6 +241,41 @@ describe('appServerConfig', () => {
         expect('serviceTier' in nullParams).toBe(false);
     });
 
+    it('forwards personality only when explicitly set on the mode', () => {
+        const omitted = buildTurnStartParams({
+            threadId: 'thread-1',
+            message: 'hello',
+            cwd: '/workspace/project',
+            mode: { permissionMode: 'default', model: 'gpt-5.5', collaborationMode: 'default' }
+        });
+        expect('personality' in omitted).toBe(false);
+
+        const set = buildTurnStartParams({
+            threadId: 'thread-1',
+            message: 'hello',
+            cwd: '/workspace/project',
+            mode: {
+                permissionMode: 'default',
+                model: 'gpt-5.5',
+                collaborationMode: 'default',
+                personality: 'pragmatic'
+            }
+        });
+        expect(set.personality).toBe('pragmatic');
+
+        const thread = buildThreadStartParams({
+            cwd: '/workspace/project',
+            mode: {
+                permissionMode: 'default',
+                model: 'gpt-5.5',
+                collaborationMode: 'default',
+                personality: 'friendly'
+            },
+            mcpServers
+        });
+        expect(thread.personality).toBe('friendly');
+    });
+
     it('builds turn params with mode defaults', () => {
         const params = buildTurnStartParams({
             threadId: 'thread-1',
