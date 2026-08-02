@@ -94,6 +94,14 @@ function MachineFilterChip(props: {
     )
 }
 
+/**
+ * 各主机平铺成一排 chip，一次点击即切换筛选。
+ *
+ * 全宽度常显（此前是 `max-md:hidden`，窄屏折叠成漏斗二级菜单）：会话侧栏是
+ * 固定宽度（默认 420px），而 Tailwind 断点看的是**视口**宽度，于是桌面用户也
+ * 落进折叠分支，切主机从"一次点击"退化成"点漏斗 → 再选"。本身是 flex-wrap，
+ * 窄侧栏下自动换行不会溢出。
+ */
 export function MachineFilterBar(props: {
     machines: MachineFilterItem[]
     totalCount: number
@@ -105,7 +113,7 @@ export function MachineFilterBar(props: {
         <div
             role="group"
             aria-label={t('sessions.machineFilter.label')}
-            className="flex flex-wrap items-center gap-1.5 px-2 pb-2 max-md:hidden"
+            className="flex flex-wrap items-center gap-1.5 px-2 pb-2"
         >
             <button
                 type="button"

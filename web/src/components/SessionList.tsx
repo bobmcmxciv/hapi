@@ -27,7 +27,7 @@ import { getSessionTitle } from '@/lib/sessionTitle'
 import { getWorktreeSessionLabel } from '@/lib/sessionWorktreeLabel'
 import type { Machine } from '@/types/api'
 import { getMachinePlatform, presentMachineHealth } from '@/lib/machineHealth'
-import { MachineFilterBar, MachineFilterMenu } from '@/components/MachineFilterBar'
+import { MachineFilterBar } from '@/components/MachineFilterBar'
 import { useSessionListMachineFilter } from '@/hooks/useSessionListMachineFilter'
 import { useCursorChatStoreStatus } from '@/hooks/queries/useCursorChatStoreStatus'
 import { SessionRowSummary } from '@/components/SessionRowSummary'
@@ -1459,14 +1459,6 @@ export function SessionList(props: {
                     {!(showSearch && searchExpanded) ? (
                         <>
                             <div className="flex-1" />
-                            {showMachineFilterBar ? (
-                                <MachineFilterMenu
-                                    machines={machineFilterItems}
-                                    totalCount={allSessions.length}
-                                    value={activeMachineFilter}
-                                    onChange={setMachineFilter}
-                                />
-                            ) : null}
                             {renderHeader ? (
                                 <button
                                     type="button"

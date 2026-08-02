@@ -113,10 +113,14 @@ describe('MachineFilterBar', () => {
         expect(mint.className).toContain('border')
     })
 
-    it('is hidden below the md breakpoint (mobile uses MachineFilterMenu)', () => {
+    it('stays visible at every width so switching machines is one click', () => {
+        // fork：不再按视口断点折叠。会话侧栏是固定宽度（默认 420px），断点看的
+        // 却是视口宽度，桌面用户也会落进折叠分支，切主机退化成两步操作。
         renderBar()
 
-        expect(screen.getByRole('group', { name: 'Filter sessions by machine' }).className).toContain('max-md:hidden')
+        const group = screen.getByRole('group', { name: 'Filter sessions by machine' })
+        expect(group.className).not.toContain('max-md:hidden')
+        expect(group.className).toContain('flex-wrap')
     })
 })
 
