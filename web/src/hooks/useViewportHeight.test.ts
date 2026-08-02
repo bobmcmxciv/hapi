@@ -126,7 +126,7 @@ describe('useViewportHeight stale-value recovery (mounted hook)', () => {
 
     afterEach(() => {
         if (originalVisualViewport) Object.defineProperty(window, 'visualViewport', originalVisualViewport)
-        else delete (window as Record<string, unknown>)['visualViewport']
+        else delete (window as unknown as Record<string, unknown>)['visualViewport']
         if (originalInnerHeight) Object.defineProperty(window, 'innerHeight', originalInnerHeight)
         root.style.removeProperty('--app-viewport-height')
     })
