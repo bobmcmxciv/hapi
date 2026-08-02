@@ -42,7 +42,9 @@ export function useSkills(
             return await api.getSkills(sessionId)
         },
         enabled: Boolean(api && sessionId),
-        staleTime: Infinity,
+        staleTime: 30_000,
+        refetchInterval: 30_000,
+        refetchOnWindowFocus: 'always',
         gcTime: 30 * 60 * 1000,
         retry: false,
     })
