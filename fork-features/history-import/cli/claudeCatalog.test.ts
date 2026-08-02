@@ -40,7 +40,9 @@ describe('listImportableClaudeSessions', () => {
 
         const filtered = await listImportableClaudeSessions({ provider: 'claude', cwd: '/workspace', query: 'prompt 50' })
         expect(filtered.sessions.map((session) => session.preview)).toEqual(['prompt 50'])
-    })
+        // Windows 临时目录写 51 个 transcript + utimes 常態性贴着 bun 默认 5s 超时线
+        // （实测 5.0-5.1s），超时后清理与未完成的 setup 竞态还会再抛一个 ENOENT。
+    }, 30000)
 
     it('keeps valid sessions visible when another transcript has a partial final line', async () => {
         process.env.CLAUDE_CONFIG_DIR = root
