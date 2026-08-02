@@ -175,6 +175,9 @@ export function HappyUserMessage() {
                     </div>
                     {showStatus ? (
                         <div className="happy-message-actions-first-line flex shrink-0 items-center gap-1">
+                            {/* fork 曾在这里加内联复制按钮（d6628444），后被上游
+                                e836851f 有意移除——MessageActions 已带 copyText，
+                                内联按钮是重复入口。上游决策获胜，不再落回。 */}
                             <MessageStatusIndicator status={status} onRetry={onRetry} />
                         </div>
                     ) : null}
@@ -187,7 +190,7 @@ export function HappyUserMessage() {
                             aria-label="Rewind to this message"
                             onClick={handleRewind}
                             disabled={sessionActionPending}
-                            className="rounded p-0.5 text-[var(--app-hint)] opacity-60 transition-[opacity,color] hover:text-[var(--app-fg)] disabled:cursor-not-allowed disabled:opacity-40 sm:opacity-0 sm:group-hover/msg:opacity-100"
+                            className="rounded p-0.5 text-[var(--app-hint)] opacity-60 transition-[opacity,color] hover:text-[var(--app-fg)] disabled:cursor-not-allowed disabled:opacity-40"
                         >
                             <RewindIcon className="h-3.5 w-3.5" />
                         </button>
