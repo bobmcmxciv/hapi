@@ -158,7 +158,7 @@ export function HappyUserMessage() {
                                 <button
                                     type="button"
                                     title="Copy"
-                                    className="rounded-md p-0.5 opacity-60 transition-[opacity,background-color] hover:bg-[var(--app-chat-user-chip-bg)] sm:opacity-0 sm:group-hover/msg:opacity-100"
+                                    className="rounded-md p-0.5 opacity-60 transition-[opacity,background-color] hover:bg-[var(--app-chat-user-chip-bg)]"
                                     onClick={() => copy(text)}
                                 >
                                     {copied
@@ -178,7 +178,7 @@ export function HappyUserMessage() {
                             aria-label="Rewind to this message"
                             onClick={handleRewind}
                             disabled={sessionActionPending}
-                            className="rounded p-0.5 text-[var(--app-hint)] opacity-60 transition-[opacity,color] hover:text-[var(--app-fg)] disabled:cursor-not-allowed disabled:opacity-40 sm:opacity-0 sm:group-hover/msg:opacity-100"
+                            className="rounded p-0.5 text-[var(--app-hint)] opacity-60 transition-[opacity,color] hover:text-[var(--app-fg)] disabled:cursor-not-allowed disabled:opacity-40"
                         >
                             <RewindIcon className="h-3.5 w-3.5" />
                         </button>

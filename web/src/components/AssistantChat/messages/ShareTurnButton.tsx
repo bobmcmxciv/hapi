@@ -54,7 +54,7 @@ export function ShareTurnButton(props: {
             data-hapi-share-action="true"
             title={t('message.shareTurn')}
             aria-label={t('message.shareTurn')}
-            className={props.className ?? 'rounded-md p-0.5 opacity-60 transition-[opacity,background-color] hover:bg-[var(--app-subtle-bg)] sm:opacity-0 sm:group-hover/msg:opacity-100'}
+            className={props.className ?? 'rounded-md p-0.5 opacity-60 transition-[opacity,background-color] hover:bg-[var(--app-subtle-bg)]'}
             onClick={(event) => {
                 event.stopPropagation()
                 const messageElement = event.currentTarget.closest('[data-hapi-message-role]')

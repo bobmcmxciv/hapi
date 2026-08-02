@@ -485,18 +485,11 @@ html:has(.chat-scroll-y) #root {
     margin-top: max(0px, calc((var(--app-chat-line-height) - var(--app-message-action-size)) / 2));
 }
 
-@media (hover: hover) and (pointer: fine) {
-    .happy-message-actions {
-        opacity: 0;
-        pointer-events: none;
-        transition: opacity 150ms ease;
-    }
-
-    .happy-message:hover .happy-message-actions,
-    .happy-message:focus-within .happy-message-actions {
-        opacity: 1;
-        pointer-events: auto;
-    }
+/* 消息操作图标（复制 / 分享 / 详情 / 时间 / 朗读）常驻可见。
+   此前桌面端 opacity:0 + :hover 才显形，导致功能形同隐藏——尤其朗读按钮，
+   不把鼠标压上去根本不知道存在。图标本身已是低对比 hint 色，常驻不喧宾夺主。 */
+.happy-message-actions {
+    transition: opacity 150ms ease;
 }
 
 .aui-md :where(.contains-task-list) {
