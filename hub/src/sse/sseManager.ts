@@ -20,6 +20,9 @@ type SSEConnection = SSESubscription & {
      * their original order. `drainPending` flushes and clears it.
      */
     pending: Array<{ event: SyncEvent; eventId: string }> | null
+    // fork(multi-user)：账号级事件可见性谓词。namespace 在网关下是全账号共享的，
+    // 仅靠 namespace 匹配会把未授权会话的事件广播给其他账号。
+    canDeliver?: (event: SyncEvent) => boolean
 }
 
 export type SSEResumeResult = {
@@ -73,6 +76,7 @@ export class SSEManager {
         resumeFrom?: string | null
         send: (event: SyncEvent, eventId?: string) => void | Promise<void>
         sendHeartbeat: () => void | Promise<void>
+        canDeliver?: (event: SyncEvent) => boolean
     }): SSESubscription & SSEResumeResult {
         const subscription: SSEConnection = {
             id: options.id,
@@ -82,7 +86,8 @@ export class SSEManager {
             machineId: options.machineId ?? null,
             send: options.send,
             sendHeartbeat: options.sendHeartbeat,
-            pending: null
+            pending: null,
+            canDeliver: options.canDeliver
         }
 
         const { resume, replay } = this.resolveResume(subscription, options.resumeFrom ?? null)
@@ -301,6 +306,9 @@ export class SSEManager {
     }
 
     private shouldSend(connection: SSEConnection, event: SyncEvent): boolean {
+        if (connection.canDeliver && !connection.canDeliver(event)) {
+            return false
+        }
         if (event.type !== 'connection-changed') {
             const eventNamespace = event.namespace
             if (!eventNamespace || eventNamespace !== connection.namespace) {

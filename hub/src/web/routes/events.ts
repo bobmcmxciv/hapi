@@ -36,7 +36,9 @@ const visibilitySchema = z.object({
 export function createEventsRoutes(
     getSseManager: () => SSEManager | null,
     getSyncEngine: () => SyncEngine | null,
-    getVisibilityTracker: () => VisibilityTracker | null
+    getVisibilityTracker: () => VisibilityTracker | null,
+    // fork(multi-user)：按认证账号构造 SSE 事件可见性谓词；返回 null = 不过滤（admin）。
+    getSseEventFilter?: (accountId: number) => ((event: Parameters<Parameters<SSEManager['subscribe']>[0]['send']>[0]) => boolean) | null
 ): Hono<WebAppEnv> {
     const app = new Hono<WebAppEnv>()
 
@@ -84,6 +86,8 @@ export function createEventsRoutes(
             }
         }
 
+        const canDeliver = getSseEventFilter?.(c.get('userId')) ?? undefined
+
         const response = streamSSE(c, async (stream) => {
             // Reconnects supply the last SSE id they saw; when the manager
             // still has everything after it, the missed events are replayed
@@ -96,6 +100,7 @@ export function createEventsRoutes(
                 machineId,
                 visibility,
                 resumeFrom,
+                canDeliver,
                 send: (event, eventId) => stream.writeSSE({ data: JSON.stringify(event), id: eventId }),
                 sendHeartbeat: async () => {
                     await stream.writeSSE({
