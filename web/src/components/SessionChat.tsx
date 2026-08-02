@@ -17,6 +17,7 @@ import type {
 import type { ChatBlock, ModelRefusalFallbackEvent, NormalizedMessage } from '@/chat/types'
 import type { Suggestion } from '@/hooks/useActiveSuggestions'
 import { normalizeDecryptedMessage } from '@/chat/normalize'
+import { applyUsageReportBackfill } from '@/lib/usageReportBackfill'
 import { reduceChatBlocks } from '@/chat/reducer'
 import { reconcileChatBlocks } from '@/chat/reconcile'
 import { buildConversationOutline } from '@/chat/outline'
@@ -1047,6 +1048,13 @@ function SessionChatInner(props: SessionChatProps) {
         return normalized
     }, [visibleMessages])
 
+    // fork：经 OpenAI 兼容代理的模型 assistant.usage 结构性全零，逐条页脚的
+    // Tokens 只能从 usage_report 帧的相邻差值回填（口径同用量页聚合层）。
+    const usageBackfilledMessages = useMemo(
+        () => applyUsageReportBackfill(visibleMessages, normalizedMessages),
+        [visibleMessages, normalizedMessages]
+    )
+
     useEffect(() => {
         const displayedIds = modelRefusalFallbackToastIdsRef.current
         for (const message of normalizedMessages) {
@@ -1085,10 +1093,10 @@ function SessionChatInner(props: SessionChatProps) {
     }, [goalStateSourceMessages])
 
     const reduced = useMemo(
-        () => reduceChatBlocks(normalizedMessages, props.session.agentState, {
+        () => reduceChatBlocks(usageBackfilledMessages, props.session.agentState, {
             goalStateMessages: normalizedGoalStateMessages
         }),
-        [normalizedMessages, normalizedGoalStateMessages, props.session.agentState]
+        [usageBackfilledMessages, normalizedGoalStateMessages, props.session.agentState]
     )
     const reconciled = useMemo(
         () => reconcileChatBlocks(reduced.blocks, blocksByIdRef.current),
