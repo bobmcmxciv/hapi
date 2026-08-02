@@ -38,11 +38,13 @@ export function createEventsRoutes(
     getSyncEngine: () => SyncEngine | null,
     getVisibilityTracker: () => VisibilityTracker | null,
     // fork(multi-user)：按认证账号构造 SSE 事件可见性谓词；返回 null = 不过滤（admin）。
-    getSseEventFilter?: (accountId: number) => ((event: Parameters<Parameters<SSEManager['subscribe']>[0]['send']>[0]) => boolean) | null
+    // 传入的是 JWT 的 `gaid`（网关账号 id），不是 `uid`（core user id）——网关下
+    // 所有账号共享同一个 core user，用 uid 会把每个人都判成同一个账号。
+    getSseEventFilter?: (request: Request) => Promise<((event: Parameters<Parameters<SSEManager['subscribe']>[0]['send']>[0]) => boolean) | null>
 ): Hono<WebAppEnv> {
     const app = new Hono<WebAppEnv>()
 
-    app.get('/events', (c) => {
+    app.get('/events', async (c) => {
         const manager = getSseManager()
         if (!manager) {
             return c.json({ error: 'Not connected' }, 503)
@@ -86,7 +88,7 @@ export function createEventsRoutes(
             }
         }
 
-        const canDeliver = getSseEventFilter?.(c.get('userId')) ?? undefined
+        const canDeliver = (await getSseEventFilter?.(c.req.raw)) ?? undefined
 
         const response = streamSSE(c, async (stream) => {
             // Reconnects supply the last SSE id they saw; when the manager

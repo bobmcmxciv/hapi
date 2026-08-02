@@ -51,3 +51,23 @@ export function createSseEventFilterFactory(
         }
     }
 }
+
+/**
+ * 路由侧适配器：从请求的 JWT 里取**网关账号 id（`gaid`）**再构造谓词。
+ *
+ * 必须用 `gaid` 而不是 `uid`：网关下所有账号共享同一个 core user（`uid` 恒为 1），
+ * 用 `uid` 会把每个登录者都判成账号 1——admin 之外的人全部被误杀，连被授权的
+ * 会话也收不到事件（2026-08-02 生产实测：授权后仍 0 事件）。
+ */
+export function createSseRequestFilterFactory(
+    store: MultiUserGatewayStore,
+    resolveAccountId: (request: Request) => Promise<number | null>
+): (request: Request) => Promise<((event: SyncEvent) => boolean) | null> {
+    const byAccount = createSseEventFilterFactory(store)
+    return async (request) => {
+        const accountId = await resolveAccountId(request)
+        // 解析不出账号身份时不放行任何带资源 id 的事件（fail-closed）。
+        if (accountId === null) return (event) => !('sessionId' in event) && !('machineId' in event)
+        return byAccount(accountId)
+    }
+}

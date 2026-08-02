@@ -43,9 +43,9 @@ import { loadEmbeddedAssetMap, type EmbeddedWebAsset } from './embeddedAssets'
 import { isBunCompiled } from '../utils/bunCompiled'
 import type { Store } from '../store'
 import { mountMultiUserGateway, mountMultiUserPostAuth } from '../../../fork-features/multi-user/hubMount'
-import { createSseEventFilterFactory } from '../../../fork-features/multi-user/sseVisibility'
+import { createSseRequestFilterFactory } from '../../../fork-features/multi-user/sseVisibility'
 import type { MultiUserGatewayStore } from '../../../fork-features/multi-user/gatewayStore'
-import { createExecutionMiddleware, mountExecutionRoutes } from '../../../fork-features/multi-user/executionMount'
+import { createExecutionMiddleware, gatewayAccountId, mountExecutionRoutes } from '../../../fork-features/multi-user/executionMount'
 import { resolveGatewayCliNamespace } from '../../../fork-features/multi-user/cliAdapter'
 import { mountAgentOrchestrationRoutes } from '../../../fork-features/agent-orchestration/hub'
 
@@ -305,7 +305,8 @@ function createWebApp(options: {
         options.getSyncEngine,
         options.getVisibilityTracker,
         // fork(multi-user)：SSE 事件按账号可读集过滤，语义与 /api/sessions 同构。
-        createSseEventFilterFactory(multiUserStore)
+        // 身份取 JWT 的 gaid（网关账号），不是 uid（core user，网关下恒为同一个）。
+        createSseRequestFilterFactory(multiUserStore, request => gatewayAccountId(request, options.jwtSecret))
     ))
     app.route('/api', createSessionsRoutes(options.getSyncEngine))
     app.route('/api', createMessagesRoutes(options.getSyncEngine))
