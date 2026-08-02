@@ -5,6 +5,7 @@ import type { Machine, MachineDirectoryEntry } from '@/types/api'
 import { queryKeys } from '@/lib/query-keys'
 import { useTranslation } from '@/lib/use-translation'
 import { useCopyToClipboard } from '@/hooks/useCopyToClipboard'
+import { SelectControl } from '@/components/ui/select-control'
 
 function FolderIcon(props: { className?: string }) {
     return (
@@ -313,11 +314,12 @@ export function WorkspaceBrowser(props: {
     const machineSelector = (
         <div className="flex items-center gap-2">
             <MachineIcon className="h-4 w-4 text-[var(--app-hint)] shrink-0" />
-            <select
+            <SelectControl
                 value={machineId ?? ''}
                 onChange={e => setMachineId(e.target.value || null)}
                 disabled={machinesLoading}
-                className="flex-1 bg-transparent text-sm text-[var(--app-fg)] outline-none"
+                containerClassName="flex-1"
+                className="bg-transparent text-sm text-[var(--app-fg)] outline-none"
             >
                 {machines.map(m => (
                     <option key={m.id} value={m.id}>
@@ -328,7 +330,7 @@ export function WorkspaceBrowser(props: {
                 {machines.length === 0 && (
                     <option value="">{machinesLoading ? t('loading') : t('misc.noMachines')}</option>
                 )}
-            </select>
+            </SelectControl>
         </div>
     )
 
@@ -371,17 +373,17 @@ export function WorkspaceBrowser(props: {
 
                 {workspaceRoots.length > 1 && (
                     <div className="mt-2">
-                        <select
+                        <SelectControl
                             value={selectedRoot ?? ''}
                             onChange={(e) => setSelectedRoot(e.target.value || null)}
-                            className="w-full bg-transparent text-xs text-[var(--app-hint)] outline-none"
+                            className="bg-transparent text-xs text-[var(--app-hint)] outline-none"
                         >
                             {workspaceRoots.map((root) => (
                                 <option key={root} value={root}>
                                     {root}
                                 </option>
                             ))}
-                        </select>
+                        </SelectControl>
                     </div>
                 )}
 

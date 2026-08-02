@@ -616,9 +616,13 @@ export class Store {
         }
     }
 
+    /**
+     * Fork 与 upstream 各自发过一个 v15（列集不同），这里重跑幂等的 V14→V15
+     * 对账以兼容两种形状。同时（upstream 语义）V16 也是 contentCodec 的能力
+     * 标记：messages.content 自此可能是 zstd 压缩 BLOB，版本提升让旧 hub 以
+     * schema-mismatch 拒开，而不是把压缩消息静默渲染成 null——本身无 DDL。
+     */
     private migrateFromV15ToV16(): void {
-        // Both the upstream and fork branches shipped schema v15 with one of
-        // these columns. Re-run the idempotent reconciliation for either shape.
         this.migrateFromV14ToV15()
     }
 

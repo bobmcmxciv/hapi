@@ -564,6 +564,37 @@ describe('appServerConfig', () => {
         ]);
     });
 
+    it('builds a structured leading skill input from the native catalog', () => {
+        expect(buildUserInputFromMessage('$hapi inspect @"README.md"', [{
+            name: 'hapi',
+            path: '/home/user/.agents/skills/hapi/SKILL.md',
+            description: 'Manage HAPI',
+            scope: 'user',
+            enabled: true
+        }])).toEqual([
+            { type: 'skill', name: 'hapi', path: '/home/user/.agents/skills/hapi/SKILL.md' },
+            { type: 'text', text: ' inspect ' },
+            { type: 'mention', name: 'README.md', path: 'README.md' }
+        ]);
+    });
+
+    it('keeps unknown and disabled skill references as text', () => {
+        const skills = [{
+            name: 'disabled-skill',
+            path: '/skills/disabled/SKILL.md',
+            description: 'Disabled',
+            scope: 'user' as const,
+            enabled: false
+        }];
+
+        expect(buildUserInputFromMessage('$unknown run', skills)).toEqual([
+            { type: 'text', text: '$unknown run' }
+        ]);
+        expect(buildUserInputFromMessage('$disabled-skill run', skills)).toEqual([
+            { type: 'text', text: '$disabled-skill run' }
+        ]);
+    });
+
     it('builds mention inputs from quoted @file tokens with spaces', () => {
         expect(buildUserInputFromMessage('please inspect @"docs/My File.md" now')).toEqual([
             { type: 'text', text: 'please inspect ' },

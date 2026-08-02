@@ -18,9 +18,12 @@ export class Session extends AgentSessionBase<EnhancedMode> {
     readonly mcpServers: Record<string, any>;
     readonly allowedTools?: string[];
     readonly hookSettingsPath: string;
+    /** Settings for the interactive TUI: also forwards permission-mode-carrying hooks. */
+    readonly localHookSettingsPath: string;
     readonly startedBy: 'runner' | 'terminal';
     readonly startingMode: 'local' | 'remote';
     localLaunchFailure: LocalLaunchFailure | null = null;
+    private nativeSkillNames = new Set<string>();
 
     constructor(opts: {
         api: ApiClient;
@@ -38,6 +41,7 @@ export class Session extends AgentSessionBase<EnhancedMode> {
         startedBy: 'runner' | 'terminal';
         startingMode: 'local' | 'remote';
         hookSettingsPath: string;
+        localHookSettingsPath?: string;
         permissionMode?: PermissionMode;
         model?: SessionModel;
         effort?: SessionEffort;
@@ -67,6 +71,7 @@ export class Session extends AgentSessionBase<EnhancedMode> {
         this.mcpServers = opts.mcpServers;
         this.allowedTools = opts.allowedTools;
         this.hookSettingsPath = opts.hookSettingsPath;
+        this.localHookSettingsPath = opts.localHookSettingsPath ?? opts.hookSettingsPath;
         this.startedBy = opts.startedBy;
         this.startingMode = opts.startingMode;
         this.permissionMode = opts.permissionMode;
@@ -91,6 +96,17 @@ export class Session extends AgentSessionBase<EnhancedMode> {
 
     setEffort = (effort: SessionEffort): void => {
         this.effort = effort;
+    };
+
+    setNativeSkillNames = (names: readonly string[]): void => {
+        this.nativeSkillNames = new Set(names);
+    };
+
+    expandSkillReference = (message: string, trailingContext = ''): string => {
+        const match = /^\s*\$([^\s]+)(?=\s|$)/.exec(message);
+        if (!match || !this.nativeSkillNames.has(match[1])) return message;
+        const expanded = `/${match[1]}${message.slice(match[0].length)}`;
+        return trailingContext ? `${expanded}\n\n${trailingContext}` : expanded;
     };
 
     recordLocalLaunchFailure = (message: string, exitReason: LocalLaunchExitReason): void => {

@@ -113,3 +113,60 @@ export function parseSessionPathHref(href: string): string | null {
         return null
     }
 }
+
+/** Live / fallback fields for composer mention chip hover tooltips. */
+export type SessionMentionTooltipSource = {
+    id: string
+    title: string
+    active: boolean
+    lifecycleState?: string | null
+    path?: string | null
+    worktreePath?: string | null
+    /** Preformatted relative time (sidebar "ago"), when available. */
+    relativeTime?: string | null
+    thinking?: boolean
+    /** Sidebar attention label (permission / input / unread / …). */
+    attentionLabel?: string | null
+}
+
+export type SessionMentionTooltipModel = {
+    title: string
+    lines: string[]
+    ariaLabel: string
+}
+
+/**
+ * Expand a truncated `@chip` into full title + meta for aria-label / fallback tip.
+ * Visual hover uses SessionRowSummary when a live SessionSummary is available.
+ */
+export function formatSessionMentionTooltip(
+    session: SessionMentionTooltipSource | null,
+    fallbackTitle: string,
+    id: string
+): SessionMentionTooltipModel {
+    const shortId = id.slice(0, 8)
+    const rawTitle = (session?.title || fallbackTitle || shortId).replace(/\s+/g, ' ').trim()
+    const title = rawTitle || shortId
+
+    let status: string | null = null
+    if (session) {
+        if (session.lifecycleState === 'archived') status = 'Archived'
+        else if (session.thinking) status = 'Thinking'
+        else if (session.attentionLabel) status = session.attentionLabel
+        else status = session.active ? 'Active' : 'Inactive'
+    }
+
+    const path = (session?.worktreePath || session?.path || '').trim() || null
+    const lines: string[] = [
+        status ? `Session · ${shortId} · ${status}` : `Session · ${shortId}`,
+    ]
+    const ago = session?.relativeTime?.trim()
+    if (ago) lines.push(ago)
+    if (path) lines.push(path)
+
+    return {
+        title,
+        lines,
+        ariaLabel: [title, ...lines].join('. '),
+    }
+}

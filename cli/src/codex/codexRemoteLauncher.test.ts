@@ -13,6 +13,20 @@ const harness = vi.hoisted(() => ({
     listCollaborationModeCalls: 0,
     collaborationModeResponse: { data: [{ mode: 'default' }, { mode: 'plan' }] } as unknown,
     failListCollaborationModes: false,
+    listSkillsCalls: [] as unknown[],
+    skillsListResponse: {
+        data: [{
+            cwd: '/tmp/hapi-update',
+            skills: [{
+                name: 'hapi',
+                description: 'Manage HAPI',
+                path: '/home/user/.agents/skills/hapi/SKILL.md',
+                scope: 'user',
+                enabled: true
+            }],
+            errors: []
+        }]
+    } as unknown,
     startThreadIds: [] as string[],
     startThreadParams: [] as Array<Record<string, unknown>>,
     resumeThreadIds: [] as string[],
@@ -105,6 +119,11 @@ vi.mock('./codexAppServerClient', () => {
                 throw new Error('collaborationMode/list failed');
             }
             return harness.collaborationModeResponse;
+        }
+
+        async listSkills(params: unknown): Promise<unknown> {
+            harness.listSkillsCalls.push(params);
+            return harness.skillsListResponse;
         }
 
         async setExperimentalFeatureEnablement(params: unknown): Promise<unknown> {
@@ -1141,6 +1160,20 @@ describe('codexRemoteLauncher', () => {
         harness.listCollaborationModeCalls = 0;
         harness.collaborationModeResponse = { data: [{ mode: 'default' }, { mode: 'plan' }] };
         harness.failListCollaborationModes = false;
+        harness.listSkillsCalls = [];
+        harness.skillsListResponse = {
+            data: [{
+                cwd: '/tmp/hapi-update',
+                skills: [{
+                    name: 'hapi',
+                    description: 'Manage HAPI',
+                    path: '/home/user/.agents/skills/hapi/SKILL.md',
+                    scope: 'user',
+                    enabled: true
+                }],
+                errors: []
+            }]
+        };
         harness.startThreadIds = [];
         harness.startThreadParams = [];
         harness.resumeThreadIds = [];
@@ -1284,6 +1317,73 @@ describe('codexRemoteLauncher', () => {
             turn: { id: 'turn-1' }
         });
         expect(await running).toBe('exit');
+    });
+
+    it('uses the native skill catalog for completion and structured turn input', async () => {
+        const { session, rpcHandlers } = createSessionStub(['$hapi inspect']);
+
+        await codexRemoteLauncher(session as never);
+
+        expect(harness.listSkillsCalls).toEqual([{
+            cwds: ['/tmp/hapi-update'],
+            forceReload: false
+        }]);
+        expect(Array.from(rpcHandlers.keys())).toContain('listSkills');
+        expect(await rpcHandlers.get('listSkills')?.({})).toEqual({
+            success: true,
+            skills: [{ name: 'hapi', description: 'Manage HAPI' }]
+        });
+        expect(harness.startTurnParams[0]?.input).toEqual([
+            { type: 'skill', name: 'hapi', path: '/home/user/.agents/skills/hapi/SKILL.md' },
+            { type: 'text', text: ' inspect' }
+        ]);
+    });
+
+    it('keeps the filesystem skill handler when native discovery reports errors', async () => {
+        harness.skillsListResponse = {
+            data: [{
+                cwd: '/tmp/hapi-update',
+                skills: [],
+                errors: ['failed to read skills']
+            }]
+        };
+        const { session, rpcHandlers } = createSessionStub();
+
+        await codexRemoteLauncher(session as never);
+
+        expect(rpcHandlers.has('listSkills')).toBe(false);
+    });
+
+    it('reloads the native skill catalog after skills/changed', async () => {
+        const { session, rpcHandlers } = createSessionStub();
+
+        await codexRemoteLauncher(session as never);
+        harness.skillsListResponse = {
+            data: [{
+                cwd: '/tmp/hapi-update',
+                skills: [{
+                    name: 'new-skill',
+                    description: 'New skill',
+                    path: '/tmp/new-skill/SKILL.md',
+                    scope: 'repo',
+                    enabled: true
+                }],
+                errors: []
+            }]
+        };
+
+        harness.dispatchNotification?.('skills/changed', {});
+        await vi.waitFor(() => {
+            expect(harness.listSkillsCalls.at(-1)).toEqual({
+                cwds: ['/tmp/hapi-update'],
+                forceReload: true
+            });
+        });
+
+        expect(await rpcHandlers.get('listSkills')?.({})).toEqual({
+            success: true,
+            skills: [{ name: 'new-skill', description: 'New skill' }]
+        });
     });
 
     it('routes app-server MCP elicitation through the existing user-input transport', async () => {

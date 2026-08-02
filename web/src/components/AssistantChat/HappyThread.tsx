@@ -52,6 +52,7 @@ type ShareTurnState = {
     id: number
     snapshots: ShareTurnSnapshot[]
     title: string
+    sourceContentWidth: number | null
 } | null
 
 type ShareTurnSnapshot = {
@@ -116,6 +117,7 @@ const TOP_PULL_TRIGGER_PX = 64
 // run after its bounded retry budget is exhausted.
 const WHEEL_GESTURE_GAP_MS = 250
 const KEYBOARD_SCROLL_INTENT_WINDOW_MS = 750
+const POINTER_CANCEL_INTENT_WINDOW_MS = 750
 const UPWARD_SCROLL_KEYS = new Set(['ArrowUp', 'PageUp', 'Home'])
 
 export function getPullToLoadState(distancePx: number): PullToLoadState {
@@ -157,8 +159,13 @@ export function getScrollIntent(params: {
     }
 }
 
-export function shouldCancelInitialScrollSettling(intent: ScrollIntent): boolean {
-    return intent.isScrollingUp && intent.distanceFromBottom > MANUAL_SCROLL_EPSILON_PX
+export function shouldCancelInitialScrollSettling(
+    intent: ScrollIntent,
+    hasExplicitUpwardIntent: boolean
+): boolean {
+    return hasExplicitUpwardIntent
+        && intent.isScrollingUp
+        && intent.distanceFromBottom > MANUAL_SCROLL_EPSILON_PX
 }
 
 export function captureScrollAnchor(viewport: HTMLElement): ScrollAnchor | null {
@@ -461,6 +468,28 @@ export function HappyThread(props: {
         failureCount: 0,
         autoPaused: false
     })
+
+    useLayoutEffect(() => {
+        const viewport = viewportRef.current
+        if (!viewport) return
+
+        const updateScrollbarGutter = () => {
+            const supportsStableBothEdges = typeof CSS !== 'undefined'
+                && typeof CSS.supports === 'function'
+                && CSS.supports('scrollbar-gutter: stable both-edges')
+            const gutter = supportsStableBothEdges
+                ? Math.max(0, (viewport.offsetWidth - viewport.clientWidth) / 2)
+                : 0
+            viewport.style.setProperty('--chat-scroll-gutter-inline', `${gutter}px`)
+        }
+
+        updateScrollbarGutter()
+        if (typeof ResizeObserver === 'undefined') return
+
+        const observer = new ResizeObserver(updateScrollbarGutter)
+        observer.observe(viewport)
+        return () => observer.disconnect()
+    }, [])
     const requestOlderRef = useRef<(source: HistoryLoadSource) => Promise<OlderHistoryLoadResult>>(
         () => Promise.resolve('transient-stop')
     )
@@ -579,17 +608,27 @@ export function HappyThread(props: {
         }
 
         let pointerResumeActive = false
+        let pointerResumeUntil = 0
         let pointerResumeLatched = false
         let keyboardResumeUntil = 0
         let lastWheelAt = 0
         let wheelIntentUntil = 0
         let wheelLatched = false
 
+        const hasExplicitUpwardIntent = (intent: ScrollIntent): boolean => {
+            return intent.isScrollingUp && (
+                pointerResumeActive
+                || pointerResumeUntil >= Date.now()
+                || keyboardResumeUntil >= Date.now()
+                || wheelIntentUntil >= Date.now()
+            )
+        }
+
         const consumeExplicitUpwardIntent = (intent: ScrollIntent): boolean => {
-            if (!intent.isScrollingUp) {
+            if (!hasExplicitUpwardIntent(intent)) {
                 return false
             }
-            if (pointerResumeActive && !pointerResumeLatched) {
+            if ((pointerResumeActive || pointerResumeUntil >= Date.now()) && !pointerResumeLatched) {
                 pointerResumeLatched = true
                 return true
             }
@@ -635,10 +674,11 @@ export function HappyThread(props: {
             // Keep the keyboard/pointer intent armed while the user moves
             // through ordinary history. Consume it only when the viewport
             // actually reaches the preload area.
+            const hadExplicitUpwardIntent = hasExplicitUpwardIntent(intent)
             const explicitUpwardIntent = needsCoverage && consumeExplicitUpwardIntent(intent)
 
             if (isInitialScrollSettling()) {
-                if (shouldCancelInitialScrollSettling(intent)) {
+                if (shouldCancelInitialScrollSettling(intent, hadExplicitUpwardIntent)) {
                     initialScrollDeadlineRef.current = 0
                     clearInitialScrollTimers()
                     setAutoScrollMode(false)
@@ -713,11 +753,27 @@ export function HappyThread(props: {
                 return
             }
             pointerResumeActive = true
+            pointerResumeUntil = 0
             pointerResumeLatched = false
         }
 
-        const handlePointerEnd = () => {
+        const clearPointerIntent = () => {
             pointerResumeActive = false
+            pointerResumeUntil = 0
+            pointerResumeLatched = false
+        }
+
+        const handlePointerCancel = (event: PointerEvent) => {
+            const hadActivePointer = pointerResumeActive
+            pointerResumeActive = false
+            if (hadActivePointer && (event.pointerType === 'touch' || event.pointerType === 'pen')) {
+                // Native panning cancels the pointer before some mobile browsers
+                // dispatch the resulting scroll event. Retain that explicit input
+                // briefly so initial bottom-settling cannot reclaim the viewport.
+                pointerResumeUntil = Date.now() + POINTER_CANCEL_INTENT_WINDOW_MS
+                return
+            }
+            pointerResumeUntil = 0
             pointerResumeLatched = false
         }
 
@@ -795,9 +851,9 @@ export function HappyThread(props: {
         viewport.addEventListener('touchmove', handleTouchMove, { passive: true })
         viewport.addEventListener('touchend', handleTouchEnd, { passive: true })
         viewport.addEventListener('touchcancel', handleTouchCancel, { passive: true })
-        window.addEventListener('pointerup', handlePointerEnd, { passive: true })
-        window.addEventListener('pointercancel', handlePointerEnd, { passive: true })
-        window.addEventListener('blur', handlePointerEnd)
+        window.addEventListener('pointerup', clearPointerIntent, { passive: true })
+        window.addEventListener('pointercancel', handlePointerCancel, { passive: true })
+        window.addEventListener('blur', clearPointerIntent)
         return () => {
             viewport.removeEventListener('scroll', handleScroll)
             viewport.removeEventListener('keydown', handleKeyDown)
@@ -807,9 +863,9 @@ export function HappyThread(props: {
             viewport.removeEventListener('touchmove', handleTouchMove)
             viewport.removeEventListener('touchend', handleTouchEnd)
             viewport.removeEventListener('touchcancel', handleTouchCancel)
-            window.removeEventListener('pointerup', handlePointerEnd)
-            window.removeEventListener('pointercancel', handlePointerEnd)
-            window.removeEventListener('blur', handlePointerEnd)
+            window.removeEventListener('pointerup', clearPointerIntent)
+            window.removeEventListener('pointercancel', handlePointerCancel)
+            window.removeEventListener('blur', clearPointerIntent)
         }
     }, []) // Stable: no dependencies, reads from refs
 
@@ -1311,6 +1367,9 @@ export function HappyThread(props: {
     ) => {
         const content = contentRef.current
         if (!content) return
+        const messageContainer = content.querySelector<HTMLElement>('.happy-thread-messages')
+        const sourceContentWidth = messageContainer?.getBoundingClientRect().width
+            ?? content.getBoundingClientRect().width
 
         let target: HTMLElement | null = typeof messageTarget === 'string'
             ? document.getElementById(messageTarget)
@@ -1323,6 +1382,7 @@ export function HappyThread(props: {
                 id: ++shareTurnIdRef.current,
                 snapshots: fallbackSnapshot ? [fallbackSnapshot] : [],
                 title: props.metadata?.summary?.text ?? props.metadata?.name ?? props.metadata?.path ?? props.sessionId.slice(0, 8),
+                sourceContentWidth: sourceContentWidth > 0 ? sourceContentWidth : null,
             })
             return
         }
@@ -1366,6 +1426,7 @@ export function HappyThread(props: {
             id: ++shareTurnIdRef.current,
             snapshots: completeSnapshots,
             title: props.metadata?.summary?.text ?? props.metadata?.name ?? props.metadata?.path ?? props.sessionId.slice(0, 8),
+            sourceContentWidth: sourceContentWidth > 0 ? sourceContentWidth : null,
         })
     }, [props.metadata, props.sessionId])
 
@@ -1385,15 +1446,6 @@ export function HappyThread(props: {
             loadOlderMessagesPreservingScroll: loadOlderFromConsumer
         }}>
             <ThreadPrimitive.Root className="flex min-h-0 flex-1 flex-col relative">
-                {props.isSyncingTail && props.rawMessagesCount > 0 ? (
-                    <div
-                        role="status"
-                        className="pointer-events-none absolute right-3 top-3 z-20 flex items-center gap-1.5 rounded-full border border-[var(--app-border)] bg-[var(--app-bg)]/90 px-2.5 py-1 text-xs text-[var(--app-hint)] shadow-sm backdrop-blur"
-                    >
-                        <Spinner size="sm" label={null} className="text-current" />
-                        <span>{t('misc.loadingMessages')}</span>
-                    </div>
-                ) : null}
                 {!props.isSyncingTail && (
                     props.isLoadingMoreMessages || pullToLoadState !== 'idle'
                 ) ? (
@@ -1423,10 +1475,10 @@ export function HappyThread(props: {
                 >
                     <div
                         ref={viewportRef}
-                        className="app-scroll-y min-h-0 flex-1 overflow-x-hidden"
+                        className="app-scroll-y chat-scroll-y min-h-0 flex-1 overflow-x-hidden"
                         tabIndex={0}
                     >
-                        <div ref={contentRef} className="mx-auto w-full max-w-content min-w-0 p-3">
+                        <div ref={contentRef} className="chat-scroll-content mx-auto w-full max-w-content min-w-0 p-3">
                             <div ref={topSentinelRef} className="h-px w-full" aria-hidden="true" />
                             {showSkeleton ? (
                                 <MessageSkeleton />
@@ -1487,6 +1539,7 @@ export function HappyThread(props: {
                     showFastBadge={props.session.metadata?.flavor === 'codex' && isFastServiceTier(props.session.serviceTier)}
                     worktreeBranch={props.session.metadata?.worktree?.branch ?? null}
                     sourceSnapshots={shareTurn?.snapshots ?? []}
+                    sourceContentWidth={shareTurn?.sourceContentWidth ?? null}
                     onClose={() => setShareTurn(null)}
                 />
             </ThreadPrimitive.Root>

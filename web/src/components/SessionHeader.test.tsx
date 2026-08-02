@@ -1,43 +1,116 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { cleanup, render, screen } from '@testing-library/react'
+import { act, cleanup, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Session } from '@/types/api'
 import { I18nProvider } from '@/lib/i18n-context'
 import { ToastProvider } from '@/lib/toast-context'
-import { SessionHeader } from './SessionHeader'
+import { resolveSessionHeaderMachineLabel, SessionHeader } from './SessionHeader'
 
-afterEach(() => cleanup())
+afterEach(() => {
+    cleanup()
+    localStorage.clear()
+})
+
+function baseSession(overrides: Partial<Session> = {}): Session {
+    return {
+        id: 'session-1',
+        namespace: 'default',
+        seq: 0,
+        createdAt: 0,
+        updatedAt: 0,
+        active: true,
+        activeAt: 0,
+        metadata: { flavor: 'codex', path: '/repo', host: 'machine' },
+        metadataVersion: 0,
+        agentState: null,
+        agentStateVersion: 0,
+        thinking: false,
+        thinkingAt: 0,
+        model: null,
+        modelReasoningEffort: null,
+        effort: null,
+        serviceTier: null,
+        resumeWithSessionModel: false,
+        ...overrides
+    }
+}
+
+function renderHeader(session: Session, extra?: { serviceTier?: string | null }) {
+    return render(
+        <QueryClientProvider client={new QueryClient()}>
+            <ToastProvider>
+                <I18nProvider>
+                    <SessionHeader
+                        session={session}
+                        serviceTier={extra?.serviceTier}
+                        onBack={vi.fn()}
+                        api={null}
+                    />
+                </I18nProvider>
+            </ToastProvider>
+        </QueryClientProvider>
+    )
+}
+
+describe('resolveSessionHeaderMachineLabel', () => {
+    it('prefers cached/display labels, then host, then short machine id', () => {
+        expect(resolveSessionHeaderMachineLabel(
+            baseSession({ metadata: { flavor: 'cursor', path: '/r', host: 'host.local', machineId: 'abc123456789' } }),
+            { abc123456789: 'Workstation' }
+        )).toBe('Workstation')
+
+        expect(resolveSessionHeaderMachineLabel(
+            baseSession({ metadata: { flavor: 'cursor', path: '/r', host: 'host.local', machineId: 'abc123456789' } }),
+            {}
+        )).toBe('host.local')
+
+        expect(resolveSessionHeaderMachineLabel(
+            baseSession({ metadata: { flavor: 'cursor', path: '/r', host: '', machineId: 'abc123456789' } }),
+            {}
+        )).toBe('abc12345')
+
+        expect(resolveSessionHeaderMachineLabel(
+            baseSession({ metadata: { flavor: 'cursor', path: '/r', host: '' } }),
+            {}
+        )).toBeNull()
+    })
+})
 
 describe('SessionHeader', () => {
     it('shows an inherited catalog-default Fast tier', () => {
-        const session: Session = {
-            id: 'session-1',
-            namespace: 'default',
-            seq: 0,
-            createdAt: 0,
-            updatedAt: 0,
-            active: true,
-            activeAt: 0,
-            metadata: { flavor: 'codex', path: '/repo', host: 'machine' },
-            metadataVersion: 0,
-            agentState: null,
-            agentStateVersion: 0,
-            thinking: false,
-            thinkingAt: 0,
-            model: null,
-            modelReasoningEffort: null,
-            effort: null,
-            serviceTier: null,
-            resumeWithSessionModel: false
-        }
+        renderHeader(baseSession(), { serviceTier: 'priority' })
+        expect(screen.getByText('fast')).toBeInTheDocument()
+        expect(screen.queryByText('reasoning default')).not.toBeInTheDocument()
+    })
 
-        render(
+    it('shows Pi ordinary effort as reasoning metadata', () => {
+        renderHeader(baseSession({
+            metadata: { flavor: 'pi', path: '/repo', host: 'machine' },
+            modelReasoningEffort: null,
+            effort: 'max'
+        }))
+
+        expect(screen.getByTestId('session-header-reasoning')).toHaveTextContent('reasoning max')
+    })
+
+    it('keeps model reasoning effort for Codex and hides ordinary effort for non-Pi flavors', () => {
+        const { rerender } = renderHeader(baseSession({
+            modelReasoningEffort: 'xhigh',
+            effort: 'max'
+        }))
+
+        expect(screen.getByTestId('session-header-reasoning')).toHaveTextContent('reasoning xhigh')
+
+        rerender(
             <QueryClientProvider client={new QueryClient()}>
                 <ToastProvider>
                     <I18nProvider>
                         <SessionHeader
-                            session={session}
-                            serviceTier="priority"
+                            session={baseSession({
+                                metadata: { flavor: 'claude', path: '/repo', host: 'machine' },
+                                modelReasoningEffort: null,
+                                effort: 'max'
+                            })}
                             onBack={vi.fn()}
                             api={null}
                         />
@@ -46,6 +119,57 @@ describe('SessionHeader', () => {
             </QueryClientProvider>
         )
 
-        expect(screen.getByText('fast')).toBeInTheDocument()
+        expect(screen.queryByTestId('session-header-reasoning')).not.toBeInTheDocument()
+    })
+
+    it('hides Pi reasoning metadata when the header reasoning setting is disabled', () => {
+        localStorage.setItem('hapi-session-header-metadata', JSON.stringify({ reasoning: false }))
+        renderHeader(baseSession({
+            metadata: { flavor: 'pi', path: '/repo', host: 'machine' },
+            effort: 'max'
+        }))
+
+        expect(screen.queryByTestId('session-header-reasoning')).not.toBeInTheDocument()
+    })
+
+    it('shows machine label and relative last-active age in the meta row', () => {
+        const fiveMinutesAgo = Date.now() - 5 * 60_000
+        renderHeader(baseSession({
+            activeAt: fiveMinutesAgo,
+            updatedAt: fiveMinutesAgo,
+            metadata: {
+                flavor: 'cursor',
+                path: '/home/heavygee/coding/hapi',
+                host: 'oos-linux',
+                machineId: 'machine-deadbeef'
+            }
+        }))
+
+        expect(screen.getByTestId('session-header-machine')).toHaveTextContent(/oos-linux/)
+        expect(screen.getByTestId('session-header-age')).toHaveTextContent(/5m ago|5分钟前/)
+    })
+
+    it('advances relative age on the minute tick without a session prop change', () => {
+        vi.useFakeTimers()
+        const now = new Date('2026-07-29T16:00:00.000Z')
+        vi.setSystemTime(now)
+
+        try {
+            renderHeader(baseSession({
+                activeAt: now.getTime() - 30_000,
+                updatedAt: now.getTime() - 30_000,
+                metadata: { flavor: 'cursor', path: '/r', host: 'host.local' }
+            }))
+
+            expect(screen.getByTestId('session-header-age')).toHaveTextContent(/just now|刚刚/)
+
+            act(() => {
+                vi.advanceTimersByTime(60_000)
+            })
+
+            expect(screen.getByTestId('session-header-age')).toHaveTextContent(/1m ago|1分钟前/)
+        } finally {
+            vi.useRealTimers()
+        }
     })
 })

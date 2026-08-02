@@ -499,7 +499,7 @@ describe('ApiMachineClient SpawnHappySession handler', () => {
 
         client.setRPCHandlers({
             spawnSession,
-            stopSession: vi.fn(async () => true),
+            stopSession: vi.fn(async () => 'stopped' as const),
             requestShutdown: vi.fn()
         })
 

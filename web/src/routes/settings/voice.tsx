@@ -5,6 +5,7 @@ import { getLanguageDisplayName } from '@/lib/languages'
 import { useTranslation } from '@/lib/use-translation'
 import { VoiceRespondsControls } from '@/components/settings/VoiceAdvancedControls'
 import { SettingsChoiceGroup, SettingsLinkRow, SettingsPageContent, SettingsSection } from '@/components/settings/SettingsPrimitives'
+import { SelectControl } from '@/components/ui/select-control'
 import { useVoiceSettings } from './useVoiceSettings'
 
 export default function SettingsVoicePage() {
@@ -34,16 +35,17 @@ export default function SettingsVoicePage() {
                 ) : null}
                 <label className="flex min-h-12 items-center justify-between gap-3 px-3 py-3">
                     <span className="text-sm font-medium text-[var(--app-fg)]">{t('settings.voice.language')}</span>
-                    <select
+                    <SelectControl
                         value={voice.voiceLanguage ?? ''}
                         onChange={(event) => {
                             const language = voice.voiceLanguages.find((option) => (option.code ?? '') === event.target.value)
                             if (language) voice.setVoiceLanguage(language)
                         }}
-                        className="max-w-[55%] rounded-lg border border-[var(--app-border)] bg-[var(--app-bg)] px-2 py-1.5 text-sm text-[var(--app-fg)]"
+                        containerClassName="w-full max-w-[55%]"
+                        className="rounded-lg border border-[var(--app-border)] bg-[var(--app-bg)] py-1.5 pl-2 text-sm text-[var(--app-fg)]"
                     >
                         {voice.voiceLanguages.map((language) => <option key={language.code ?? 'auto'} value={language.code ?? ''}>{language.code === null ? t('settings.voice.autoDetect') : getLanguageDisplayName(language)}</option>)}
-                    </select>
+                    </SelectControl>
                 </label>
                 <SettingsLinkRow
                     label={t('settings.voice.voice')}

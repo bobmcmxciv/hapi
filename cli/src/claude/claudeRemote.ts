@@ -11,6 +11,7 @@ import { systemPrompt } from "./utils/systemPrompt";
 import { PermissionResult } from "./sdk/types";
 import { getHapiBlobsDir } from "@/constants/uploadPaths";
 import { getDefaultClaudeCodePath } from "./sdk/utils";
+import { filterCatalogAffectingClaudeArgs } from "./sdk/metadataExtractor";
 
 export async function claudeRemote(opts: {
 
@@ -148,6 +149,7 @@ export async function claudeRemote(opts: {
     // Prepare SDK options
     let mode = initial.mode;
     const sdkOptions: Options = {
+        additionalArgs: filterCatalogAffectingClaudeArgs(opts.claudeArgs),
         cwd: opts.path,
         resume: startFrom ?? undefined,
         forkSession,

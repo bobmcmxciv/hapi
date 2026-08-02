@@ -297,6 +297,7 @@ export function query(config: {
     const {
         prompt,
         options: {
+            additionalArgs = [],
             additionalDirectories = [],
             allowedTools = [],
             appendSystemPrompt,
@@ -347,6 +348,7 @@ export function query(config: {
     if (forkSession) args.push('--fork-session')
     if (resumeSessionAt) args.push('--resume-session-at', resumeSessionAt)
     if (sessionId) args.push('--session-id', sessionId)
+    args.push(...additionalArgs)
     if (settingsPath) args.push('--settings', settingsPath)
     if (allowedTools.length > 0) args.push('--allowedTools', allowedTools.join(','))
     if (disallowedTools.length > 0) args.push('--disallowedTools', disallowedTools.join(','))

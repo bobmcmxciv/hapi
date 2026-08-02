@@ -85,6 +85,24 @@ vi.mock('@/hooks/useShowActiveSessionsOnly', () => ({
     useShowActiveSessionsOnly: () => ({ showActiveSessionsOnly: false, setShowActiveSessionsOnly: vi.fn() }),
 }))
 
+vi.mock('@/hooks/useSessionHeaderMetadata', () => ({
+    useSessionHeaderMetadata: () => ({
+        preferences: {
+            showLabels: true,
+            agent: true,
+            model: true,
+            reasoning: true,
+            fastMode: true,
+            machine: true,
+            lastActive: true,
+            createdAt: false,
+            updatedAt: false,
+            worktree: true,
+        },
+        setPreference: vi.fn(),
+    }),
+}))
+
 vi.mock('@/hooks/useSessionPreviewLimit', () => ({
     MIN_SESSION_PREVIEW_LIMIT: 1,
     MAX_SESSION_PREVIEW_LIMIT: 99,
@@ -212,6 +230,12 @@ describe('responsive settings pages', () => {
         expect(setColorTheme).toHaveBeenCalledWith('nord')
         expect(screen.getByRole('radio', { name: '120%' })).toBeInTheDocument()
         expect(screen.getByRole('spinbutton', { name: 'Sessions Before Folding' })).toHaveValue(8)
+        expect(screen.getByRole('checkbox', { name: 'Show field labels' })).toBeChecked()
+        expect(screen.getByRole('checkbox', { name: 'Reasoning effort' })).toBeChecked()
+        expect(screen.getByRole('checkbox', { name: 'Machine' })).toBeChecked()
+        expect(screen.getByRole('checkbox', { name: 'Active time' })).toBeChecked()
+        expect(screen.getByRole('checkbox', { name: 'Created time' })).not.toBeChecked()
+        expect(screen.getByRole('checkbox', { name: 'Updated time' })).not.toBeChecked()
         expect(screen.queryByRole('listbox')).not.toBeInTheDocument()
     })
 

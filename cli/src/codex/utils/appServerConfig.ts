@@ -6,6 +6,7 @@ import type {
     ApprovalPolicy,
     SandboxMode,
     SandboxPolicy,
+    SkillMetadata,
     ThreadStartParams,
     TurnStartParams,
     UserInput
@@ -139,13 +140,26 @@ function mentionNameFromPath(path: string): string {
     return parts[parts.length - 1] ?? path;
 }
 
-export function buildUserInputFromMessage(message: string): UserInput[] {
+export function buildUserInputFromMessage(
+    message: string,
+    skills: readonly SkillMetadata[] = []
+): UserInput[] {
     const inputs: UserInput[] = [];
+    const skillMatch = /^\s*\$([^\s]+)(?=\s|$)/.exec(message);
+    const skill = skillMatch
+        ? skills.find(candidate => candidate.enabled && candidate.name === skillMatch[1])
+        : undefined;
+    const inputMessage = skill && skillMatch
+        ? message.slice(skillMatch[0].length)
+        : message;
+    if (skill) {
+        inputs.push({ type: 'skill', name: skill.name, path: skill.path });
+    }
     const mentionPattern = /(^|\s)@"((?:\\.|[^"\\])*)"/g;
     let lastIndex = 0;
     let match: RegExpExecArray | null;
 
-    while ((match = mentionPattern.exec(message)) !== null) {
+    while ((match = mentionPattern.exec(inputMessage)) !== null) {
         const prefix = match[1] ?? '';
         const rawPath = match[2] ?? '';
         const pathText = rawPath;
@@ -153,7 +167,7 @@ export function buildUserInputFromMessage(message: string): UserInput[] {
         if (!path) continue;
 
         const atIndex = match.index + prefix.length;
-        const textBeforeMention = message.slice(lastIndex, atIndex);
+        const textBeforeMention = inputMessage.slice(lastIndex, atIndex);
         if (textBeforeMention) {
             inputs.push({ type: 'text', text: textBeforeMention });
         }
@@ -166,7 +180,7 @@ export function buildUserInputFromMessage(message: string): UserInput[] {
         lastIndex = mentionPattern.lastIndex - (rawPath.length - pathText.length);
     }
 
-    const remainder = message.slice(lastIndex);
+    const remainder = inputMessage.slice(lastIndex);
     if (remainder || inputs.length === 0) {
         inputs.push({ type: 'text', text: remainder });
     }
@@ -232,6 +246,7 @@ export function buildTurnStartParams(args: {
     cliOverrides?: CodexCliOverrides;
     baseInstructions?: string;
     developerInstructions?: string;
+    skills?: readonly SkillMetadata[];
     overrides?: {
         approvalPolicy?: TurnStartParams['approvalPolicy'];
         sandboxPolicy?: TurnStartParams['sandboxPolicy'];
@@ -242,7 +257,7 @@ export function buildTurnStartParams(args: {
     const params: TurnStartParams = {
         threadId: args.threadId,
         cwd: args.cwd,
-        input: buildUserInputFromMessage(args.message)
+        input: buildUserInputFromMessage(args.message, args.skills)
     };
 
     const allowCliOverrides = args.mode?.permissionMode === 'default';

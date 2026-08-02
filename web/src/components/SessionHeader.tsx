@@ -1,4 +1,5 @@
-import { useId, useMemo, useRef, useState } from 'react'
+import { useEffect, useId, useMemo, useRef, useState } from 'react'
+import { useQueryClient } from '@tanstack/react-query'
 import type { Session } from '@/types/api'
 import type { ApiClient } from '@/api/client'
 import { isTelegramApp } from '@/hooks/useTelegram'
@@ -12,12 +13,39 @@ import { SessionIdDialog } from '@/components/SessionIdDialog'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { useScratchlistCount } from '@/lib/use-scratchlist-count'
 import { formatReopenError } from '@/lib/reopenError'
-import { formatCodexReasoningLabel, shouldShowCodexReasoningLabel } from '@/lib/codexStatusLabels'
+import { formatReasoningLabel, getReasoningEffortForFlavor } from '@/lib/codexStatusLabels'
 import { formatUsageSnapshotLabel, getSessionModelLabel } from '@/lib/sessionModelLabel'
 import { useTranslation } from '@/lib/use-translation'
 import { AgentFlavorIcon } from '@/components/AgentFlavorIcon'
 import { isFastServiceTier } from '@/components/AssistantChat/codexFastMode'
 import { getSessionTitle } from '@/lib/sessionTitle'
+import { useToast } from '@/lib/toast-context'
+import { queryKeys } from '@/lib/query-keys'
+import { markCodexSessionsImported } from '@/lib/codexImportedSessions'
+import { useMachineLabels } from '@/hooks/useMachineLabels'
+import { formatAbsoluteDateTime, formatRelativeTime } from '@/lib/relativeTime'
+import { useSessionHeaderMetadata } from '@/hooks/useSessionHeaderMetadata'
+import { formatSessionHeaderTimestamp } from '@/lib/sessionHeaderTimestamp'
+import { selectMobileSessionHeaderSecondary } from '@/lib/sessionHeaderMobileMetadata'
+
+/** Same preference order as session-list chips: display label → host → short id. */
+export function resolveSessionHeaderMachineLabel(
+    session: Session,
+    labelsById: Record<string, string>
+): string | null {
+    const machineId = session.metadata?.machineId?.trim() || null
+    if (machineId && labelsById[machineId]) {
+        return labelsById[machineId]
+    }
+    const host = session.metadata?.host?.trim()
+    if (host) {
+        return host
+    }
+    if (machineId) {
+        return machineId.slice(0, 8)
+    }
+    return null
+}
 
 function FilesIcon(props: { className?: string }) {
     return (
@@ -103,22 +131,33 @@ export function SessionHeader(props: {
     onSessionReopened?: (newSessionId: string) => void
     onSessionForked?: (newSessionId: string) => void
 }) {
-    const { t } = useTranslation()
+    const { t, locale } = useTranslation()
+    const queryClient = useQueryClient()
+    const { addToast } = useToast()
     const { session, api, onSessionDeleted, onSessionReopened, onSessionForked } = props
     const title = useMemo(() => getSessionTitle(session), [session])
-    const worktreeBranch = session.metadata?.worktree?.branch
+    const worktreeBranch = session.metadata?.worktree?.branch?.trim() || null
+    const { preferences: headerMetadata } = useSessionHeaderMetadata()
     const modelLabel = getSessionModelLabel(session)
     const agentFlavor = session.metadata?.flavor ?? null
-    const reasoningLabel = shouldShowCodexReasoningLabel(agentFlavor)
-        ? formatCodexReasoningLabel(session.modelReasoningEffort)
+    const agentLabel = agentFlavor?.trim() || null
+    const reasoningEffort = getReasoningEffortForFlavor(
+        agentFlavor,
+        session.modelReasoningEffort,
+        session.effort
+    )
+    const reasoningLabel = reasoningEffort
+        ? formatReasoningLabel(reasoningEffort, headerMetadata.showLabels)
         : null
     // Match expected Fast badge semantics (#1004): only explicit service tier, no effort/model heuristics.
     const showFastBadge = agentFlavor === 'codex' && isFastServiceTier(props.serviceTier ?? session.serviceTier)
+    const createdAtLabel = headerMetadata.createdAt ? formatSessionHeaderTimestamp(session.createdAt, locale) : null
+    const updatedAtLabel = headerMetadata.updatedAt ? formatSessionHeaderTimestamp(session.updatedAt, locale) : null
     const codexSessionId = session.metadata?.flavor === 'codex'
         ? session.metadata.codexSessionId?.trim() || null
         : null
+    const { machines } = useMachines(api, Boolean(api))
     const sessionMachineId = session.metadata?.machineId ?? null
-    const { machines } = useMachines(api, Boolean(sessionMachineId))
     const machineUsage = machines.find((machine) => machine.id === sessionMachineId)?.metadata?.usage
     const usageSnapshot = ['openusage', 'cc-switch']
         .flatMap((providerId) => machineUsage?.snapshots.find((snapshot) => snapshot.providerId === providerId) ?? [])
@@ -126,6 +165,37 @@ export function SessionHeader(props: {
     const usageLabel = session.metadata?.flavor === 'claude'
         ? formatUsageSnapshotLabel(usageSnapshot, t('session.item.remaining'))
         : null
+    const machineLabelsById = useMachineLabels(machines)
+    const machineLabel = useMemo(
+        () => resolveSessionHeaderMachineLabel(session, machineLabelsById),
+        [session, machineLabelsById]
+    )
+    const lastActiveAt = session.activeAt || session.updatedAt || session.createdAt
+    // Relative labels cross minute/hour boundaries without new patches; tick
+    // once a minute so "just now" does not freeze forever on inactive sessions.
+    const [relativeTimeTick, setRelativeTimeTick] = useState(0)
+    useEffect(() => {
+        const timer = window.setInterval(() => {
+            setRelativeTimeTick((tick) => tick + 1)
+        }, 60_000)
+        return () => window.clearInterval(timer)
+    }, [])
+    const ageLabel = useMemo(
+        () => (headerMetadata.lastActive && lastActiveAt > 0 ? formatRelativeTime(lastActiveAt, t) : null),
+        [headerMetadata.lastActive, lastActiveAt, t, relativeTimeTick]
+    )
+    const ageAbsolute = ageLabel ? formatAbsoluteDateTime(lastActiveAt) : null
+    const mobileSecondary = selectMobileSessionHeaderSecondary({
+        model: headerMetadata.model && modelLabel !== null,
+        reasoning: headerMetadata.reasoning && reasoningLabel !== null,
+        machine: headerMetadata.machine && machineLabel !== null,
+        lastActive: ageLabel !== null,
+        updatedAt: updatedAtLabel !== null,
+        createdAt: createdAtLabel !== null,
+        worktree: headerMetadata.worktree && Boolean(worktreeBranch),
+        fastMode: headerMetadata.fastMode && showFastBadge,
+    })
+    const showMobileMetadata = (headerMetadata.agent && agentLabel !== null) || mobileSecondary !== null
 
     const [menuOpen, setMenuOpen] = useState(false)
     const [menuAnchorPoint, setMenuAnchorPoint] = useState<{ x: number; y: number }>({ x: 0, y: 0 })
@@ -225,30 +295,62 @@ export function SessionHeader(props: {
                         <div className="truncate font-semibold">
                             {title}
                         </div>
-                        <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-[var(--app-hint)]">
-                            <span className="inline-flex items-center gap-1">
-                                <AgentFlavorIcon flavor={session.metadata?.flavor} className="h-3.5 w-3.5 shrink-0 -translate-y-px" />
-                                {session.metadata?.flavor?.trim() || 'unknown'}
-                            </span>
-                            {usageLabel ? (
-                                <span>{usageLabel}</span>
-                            ) : modelLabel ? (
-                                <span>
-                                    {t(modelLabel.key)}: {modelLabel.value}
+                        {showMobileMetadata ? (
+                            <div className="flex min-w-0 flex-nowrap items-center gap-2 overflow-hidden text-xs text-[var(--app-hint)] sm:hidden">
+                                {headerMetadata.agent && agentLabel ? (
+                                    <span className="inline-flex shrink-0 items-center gap-1">
+                                        <AgentFlavorIcon flavor={session.metadata?.flavor} className="h-3.5 w-3.5 shrink-0 -translate-y-px" />
+                                        {agentLabel}
+                                    </span>
+                                ) : null}
+                                {mobileSecondary === 'model' && modelLabel ? <span className="truncate">{headerMetadata.showLabels ? `${t(modelLabel.key)}: ` : ''}{modelLabel.value}</span> : null}
+                                {mobileSecondary === 'reasoning' && reasoningLabel ? <span className="truncate">{reasoningLabel}</span> : null}
+                                {mobileSecondary === 'machine' && machineLabel ? <span className="truncate">{headerMetadata.showLabels ? `${t('session.item.machine')}: ` : ''}{machineLabel}</span> : null}
+                                {mobileSecondary === 'lastActive' && ageLabel ? <span className="truncate" title={ageAbsolute ?? undefined}>{ageLabel}</span> : null}
+                                {mobileSecondary === 'updatedAt' && updatedAtLabel ? <span className="truncate">{headerMetadata.showLabels ? `${t('session.header.updatedAt')}: ` : ''}{updatedAtLabel}</span> : null}
+                                {mobileSecondary === 'createdAt' && createdAtLabel ? <span className="truncate">{headerMetadata.showLabels ? `${t('session.header.createdAt')}: ` : ''}{createdAtLabel}</span> : null}
+                                {mobileSecondary === 'worktree' && worktreeBranch ? <span className="truncate">{headerMetadata.showLabels ? `${t('session.item.worktree')}: ` : ''}{worktreeBranch}</span> : null}
+                                {mobileSecondary === 'fastMode' ? <span className="truncate text-[#34C759]">fast</span> : null}
+                            </div>
+                        ) : null}
+                        <div className="hidden flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-[var(--app-hint)] sm:flex">
+                            {headerMetadata.agent && agentLabel ? (
+                                <span className="inline-flex items-center gap-1">
+                                    <AgentFlavorIcon flavor={session.metadata?.flavor} className="h-3.5 w-3.5 shrink-0 -translate-y-px" />
+                                    {agentLabel}
                                 </span>
                             ) : null}
-                            {reasoningLabel ? (
+                            {headerMetadata.machine && machineLabel ? (
+                                <span data-testid="session-header-machine" className="max-w-[12rem] truncate" title={machineLabel}>
+                                    {headerMetadata.showLabels ? `${t('session.item.machine')}: ` : ''}{machineLabel}
+                                </span>
+                            ) : null}
+                            {ageLabel ? (
+                                <span data-testid="session-header-age" title={ageAbsolute ?? undefined}>
+                                    {ageLabel}
+                                </span>
+                            ) : null}
+                            {headerMetadata.model && usageLabel ? (
+                                <span>{usageLabel}</span>
+                            ) : headerMetadata.model && modelLabel ? (
+                                <span>
+                                    {headerMetadata.showLabels ? `${t(modelLabel.key)}: ` : ''}{modelLabel.value}
+                                </span>
+                            ) : null}
+                            {headerMetadata.reasoning && reasoningLabel ? (
                                 <span data-testid="session-header-reasoning">
                                     {reasoningLabel}
                                 </span>
                             ) : null}
-                            {showFastBadge ? (
+                            {headerMetadata.fastMode && showFastBadge ? (
                                 <span data-testid="session-header-fast" className="text-[#34C759]">
                                     fast
                                 </span>
                             ) : null}
-                            {worktreeBranch ? (
-                                <span>{t('session.item.worktree')}: {worktreeBranch}</span>
+                            {createdAtLabel ? <span>{headerMetadata.showLabels ? `${t('session.header.createdAt')}: ` : ''}{createdAtLabel}</span> : null}
+                            {updatedAtLabel ? <span>{headerMetadata.showLabels ? `${t('session.header.updatedAt')}: ` : ''}{updatedAtLabel}</span> : null}
+                            {headerMetadata.worktree && worktreeBranch ? (
+                                <span>{headerMetadata.showLabels ? `${t('session.item.worktree')}: ` : ''}{worktreeBranch}</span>
                             ) : null}
                         </div>
                     </div>
@@ -337,6 +439,7 @@ export function SessionHeader(props: {
                     confirmingLabel={t('dialog.reopen.dismiss')}
                     onConfirm={async () => setReopenError(null)}
                     isPending={false}
+                    centerTitle
                 />
             ) : null}
 
@@ -371,6 +474,7 @@ export function SessionHeader(props: {
                 onConfirm={archiveSession}
                 isPending={isPending}
                 destructive
+                centerTitle
             />
 
             <ConfirmDialog
@@ -392,6 +496,7 @@ export function SessionHeader(props: {
                 onConfirm={handleDelete}
                 isPending={isPending}
                 destructive
+                centerTitle
             />
         </>
     )

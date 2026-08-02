@@ -53,7 +53,7 @@ import {
 } from '../../../fork-features/omp-host-integration/machine'
 type MachineRpcHandlers = {
     spawnSession: (options: SpawnSessionOptions) => Promise<SpawnSessionResult>
-    stopSession: (sessionId: string) => Promise<boolean>
+    stopSession: (sessionId: string) => Promise<'stopped' | 'already_gone' | 'still_alive'>
     requestShutdown: () => void
 }
 
@@ -469,12 +469,8 @@ export class ApiMachineClient {
                 throw new Error('Session ID is required')
             }
 
-            const success = await stopSession(sessionId)
-            if (!success) {
-                throw new Error('Session not found or failed to stop')
-            }
-
-            return { message: 'Session stopped' }
+            const status = await stopSession(sessionId)
+            return { status }
         })
 
         this.rpcHandlerManager.registerHandler(RPC_METHODS.StopRunner, () => {

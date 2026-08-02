@@ -265,6 +265,10 @@ export default function UsagePage() {
                                         start={customStart}
                                         end={customEnd}
                                         sessionActivityDates={EMPTY_ACTIVITY_DATES}
+                                        onClear={() => {
+                                            setCustomStart('')
+                                            setCustomEnd('')
+                                        }}
                                         onChange={(start, end) => {
                                             setCustomStart(start)
                                             setCustomEnd(end)

@@ -10,6 +10,7 @@ const DEFAULT_COLLAPSE_LINE_THRESHOLD = 18
 const DEFAULT_COLLAPSE_CHAR_THRESHOLD = 1800
 const DEFAULT_COLLAPSED_HEIGHT = 260
 const DEFAULT_SCROLL_HEIGHT = 420
+const GUTTER_HORIZONTAL_PADDING_REM = 1.5
 
 function shouldCollapseCode(code: string, lineThreshold: number, charThreshold: number): boolean {
     if (code.length > charThreshold) return true
@@ -96,7 +97,7 @@ export function CodeBlock(props: {
     // (minmax(0,1fr)) so long lines wrap instead of overflowing; unwrapped it
     // grows to its content (max-content) inside the horizontal-scroll body.
     const codeGridStyle = {
-        gridTemplateColumns: `${lineNumberWidth}ch ${codeWrap ? 'minmax(0, 1fr)' : 'max-content'}`
+        gridTemplateColumns: `calc(${lineNumberWidth}ch + ${GUTTER_HORIZONTAL_PADDING_REM}rem) ${codeWrap ? 'minmax(0, 1fr)' : 'max-content'}`
     } satisfies CSSProperties
     const codeCellStyle = codeWrap
         ? { whiteSpace: 'pre-wrap' as const, wordBreak: 'break-word' as const }
@@ -115,7 +116,7 @@ export function CodeBlock(props: {
     }
 
     return (
-        <div ref={rootRef} className="aui-code-surface relative min-w-0 max-w-full overflow-clip rounded-xl bg-[var(--app-code-bg)] shadow-none">
+        <div ref={rootRef} data-hapi-code-block="true" className="aui-code-surface relative min-w-0 max-w-full overflow-clip rounded-xl bg-[var(--app-code-bg)] shadow-none">
             <div className={cn('aui-code-surface-header flex items-center justify-between gap-3 bg-[var(--app-code-header-bg)] px-3 py-2', collapsible && expanded && 'sticky top-0 z-10')}>
                 {collapsible ? (
                     <button type="button" onClick={toggleExpanded} title={expanded ? t('collapse.collapse') : t('collapse.expand')} className="flex min-w-0 flex-1 cursor-pointer items-center gap-1.5 text-left font-mono text-[11px] uppercase tracking-[0.08em] text-[var(--app-code-header-fg)] transition-colors hover:text-[var(--app-fg)]">
@@ -129,6 +130,10 @@ export function CodeBlock(props: {
                     {showWrapToggle ? (
                         <button
                             type="button"
+                            data-hapi-code-wrap-toggle="true"
+                            data-hapi-wrap-enable-label={t('code.wrap.enable')}
+                            data-hapi-wrap-disable-label={t('code.wrap.disable')}
+                            data-hapi-share-export-exclude="true"
                             onClick={(event) => {
                                 event.stopPropagation()
                                 setCodeWrap(!codeWrap)
@@ -143,6 +148,10 @@ export function CodeBlock(props: {
                     {showCopyButton ? (
                         <button
                             type="button"
+                            data-hapi-code-copy="true"
+                            data-hapi-copy-label={t('code.copy')}
+                            data-hapi-copied-label={t('message.copied')}
+                            data-hapi-share-export-exclude="true"
                             onClick={(event) => {
                                 event.stopPropagation()
                                 copy(props.code)
@@ -150,17 +159,24 @@ export function CodeBlock(props: {
                             className="shrink-0 rounded-md p-1 text-[var(--app-code-header-fg)] transition-colors hover:bg-[var(--app-code-copy-hover-bg)] hover:text-[var(--app-fg)]"
                             title={t('code.copy')}
                         >
-                            {copied ? <CheckIcon className="h-3.5 w-3.5" /> : <CopyIcon className="h-3.5 w-3.5" />}
+                            <span data-hapi-copy-default="true" className={copied ? 'hidden' : ''}>
+                                <CopyIcon className="h-3.5 w-3.5" />
+                            </span>
+                            <span data-hapi-copy-success="true" className={copied ? '' : 'hidden'}>
+                                <CheckIcon className="h-3.5 w-3.5" />
+                            </span>
                         </button>
                     ) : null}
                 </div>
             </div>
 
             <div
+                data-hapi-code-body="true"
                 className={`min-w-0 w-full max-w-full ${codeWrap ? '' : 'overflow-x-auto'}`}
                 style={bodyStyle}
             >
                 <pre
+                    data-hapi-code-grid="true"
                     className={`shiki m-0 grid ${codeWrap ? 'w-full' : 'w-max min-w-full'} font-mono ${codeTextClass}`}
                     style={codeGridStyle}
                 >

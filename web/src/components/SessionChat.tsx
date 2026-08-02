@@ -37,6 +37,12 @@ import { QueuedMessagesBar } from '@/components/AssistantChat/QueuedMessagesBar'
 import { TodoPanel } from '@/fork-features/task-panel/TodoPanel'
 import { ScratchlistDrawer } from '@/components/AssistantChat/ScratchlistPanel'
 import { useHubScratchlist } from '@/lib/use-hub-scratchlist'
+import { useSessions } from '@/hooks/queries/useSessions'
+import { getSessionTitle } from '@/lib/sessionTitle'
+import { formatSessionMentionTooltip } from '@/lib/sessionReference'
+import { classifySessionAttention, getSessionAttentionLabelKey } from '@/lib/sessionAttention'
+import { getSessionLastSeenAt } from '@/lib/sessionLastSeen'
+import { formatRelativeTime } from '@/lib/relativeTime'
 import { ScratchlistMigrationBanner } from '@/components/AssistantChat/ScratchlistMigrationBanner'
 import { useToast } from '@/lib/toast-context'
 import { useHappyRuntime } from '@/lib/assistant-runtime'
@@ -56,6 +62,8 @@ import { useTranslation } from '@/lib/use-translation'
 import { SessionHeader } from '@/components/SessionHeader'
 import { CursorMigrationBanner } from '@/components/CursorMigrationBanner'
 import { TeamPanel } from '@/components/TeamPanel'
+import { SessionStatusPanel } from '@/components/SessionStatusPanel'
+import { buildSessionStatusData } from '@/chat/sessionStatus'
 import { usePlatform } from '@/hooks/usePlatform'
 import { useSessionActions } from '@/hooks/mutations/useSessionActions'
 import { useCcSwitchProvider } from '@/hooks/mutations/useCcSwitchProvider'
@@ -507,6 +515,41 @@ function SessionChatInner(props: SessionChatProps) {
     const [cursorSelectedBase, setCursorSelectedBase] = useState('auto')
     const lastSyncedCursorModelRef = useRef<string | null | undefined>(undefined)
     const scratchlist = useHubScratchlist(props.session.id, props.api)
+    const { sessions: allSessions } = useSessions(props.api)
+    const resolveSessionMentionTooltip = useCallback((id: string, title: string) => {
+        const hit = allSessions.find((s) => s.id === id) ?? null
+        if (!hit) {
+            return {
+                model: formatSessionMentionTooltip(null, title, id),
+                session: null,
+            }
+        }
+        const attention = classifySessionAttention(hit, {
+            selected: false,
+            lastSeenAt: getSessionLastSeenAt(hit.id),
+        })
+        const attentionLabel = attention
+            ? t(getSessionAttentionLabelKey(attention))
+            : null
+        return {
+            model: formatSessionMentionTooltip(
+                {
+                    id: hit.id,
+                    title: getSessionTitle(hit),
+                    active: hit.active,
+                    lifecycleState: hit.metadata?.lifecycleState ?? null,
+                    path: hit.metadata?.path ?? null,
+                    worktreePath: hit.metadata?.worktree?.worktreePath ?? null,
+                    relativeTime: formatRelativeTime(hit.updatedAt, t),
+                    thinking: hit.thinking,
+                    attentionLabel,
+                },
+                title,
+                id
+            ),
+            session: hit,
+        }
+    }, [allSessions, t])
     const [scratchlistMode, setScratchlistMode] = useState(false)
     // Mode resets across sessions implicitly: SessionChat is keyed by
     // session.id at the public-export boundary, so a session switch
@@ -1051,6 +1094,22 @@ function SessionChatInner(props: SessionChatProps) {
         () => reconcileChatBlocks(reduced.blocks, blocksByIdRef.current),
         [reduced.blocks]
     )
+    const sessionStatus = useMemo(
+        () => buildSessionStatusData({
+            goal: reduced.latestGoal,
+            tasks: props.session.todos,
+            blocks: reconciled.blocks,
+            messages: normalizedMessages,
+            backgroundTaskCount: props.session.backgroundTaskCount
+        }),
+        [
+            reduced.latestGoal,
+            props.session.todos,
+            props.session.backgroundTaskCount,
+            reconciled.blocks,
+            normalizedMessages
+        ]
+    )
     const hasRunningChildAgent = useMemo(
         () => hasAbortableAgentRun(reduced.blocks),
         [reduced.blocks]
@@ -1407,6 +1466,8 @@ function SessionChatInner(props: SessionChatProps) {
 
             <CursorMigrationBanner metadata={props.session.metadata} />
 
+            {sessionStatus ? <SessionStatusPanel data={sessionStatus} /> : null}
+
             {props.session.teamState && (
                 <TeamPanel teamState={props.session.teamState} />
             )}
@@ -1504,13 +1565,13 @@ function SessionChatInner(props: SessionChatProps) {
                     <HappyComposer
                         key={`composer-${props.session.id}`}
                         sessionId={props.session.id}
+                        resolveSessionMentionTooltip={resolveSessionMentionTooltip}
                         disabled={props.isSending}
                         pendingSchedule={pendingSchedule}
                         onSchedule={setPendingSchedule}
                         onClearSchedule={() => setPendingSchedule(null)}
                         permissionMode={props.session.permissionMode}
                         collaborationMode={codexCollaborationModeSupported ? props.session.collaborationMode : undefined}
-                        threadGoal={reduced.latestGoal}
                         model={agentFlavor === 'omp'
                             ? props.session.model ?? (ompModelsState.currentModel
                                 ? `${ompModelsState.currentModel.provider}/${ompModelsState.currentModel.modelId}`
@@ -1576,6 +1637,7 @@ function SessionChatInner(props: SessionChatProps) {
                         contextSize={reduced.latestUsage?.contextSize}
                         contextCacheRead={reduced.latestUsage?.cacheRead}
                         contextWindow={reduced.latestUsage?.contextWindow ?? piContextWindow}
+                        contextModel={reduced.latestUsage?.model ?? props.session.model}
                         controlledByUser={controlledByUser}
                         onCollaborationModeChange={
                             codexCollaborationModeSupported && props.session.active && !controlledByUser

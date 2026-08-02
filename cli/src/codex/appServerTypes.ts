@@ -62,6 +62,29 @@ export interface ModelListResponse {
     [key: string]: unknown;
 }
 
+export interface SkillsListParams {
+    cwds: string[];
+    forceReload?: boolean;
+}
+
+export interface SkillMetadata {
+    name: string;
+    description: string;
+    path: string;
+    scope: string;
+    enabled: boolean;
+    [key: string]: unknown;
+}
+
+export interface SkillsListResponse {
+    data?: Array<{
+        cwd: string;
+        skills: SkillMetadata[];
+        errors?: unknown[];
+    }>;
+    [key: string]: unknown;
+}
+
 export interface CollaborationModeListItem {
     name?: string;
     mode?: 'plan' | 'default' | string | null;

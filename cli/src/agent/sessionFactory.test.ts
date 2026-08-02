@@ -153,6 +153,12 @@ describe('bootstrapExistingSession', () => {
                 file: '/sessions/omp-thread-1.jsonl',
                 name: 'OMP thread'
             },
+            piSessionId: 'pi-thread-1',
+            piResumeAttempt: {
+                state: 'resuming',
+                machineId: 'machine-1',
+                startedAt: 123,
+            },
             summary: {
                 text: 'resume me',
                 updatedAt: 100
@@ -186,6 +192,12 @@ describe('bootstrapExistingSession', () => {
                 id: 'omp-thread-1',
                 file: '/sessions/omp-thread-1.jsonl',
                 name: 'OMP thread'
+            },
+            piSessionId: 'pi-thread-1',
+            piResumeAttempt: {
+                state: 'resuming',
+                machineId: 'machine-1',
+                startedAt: 123,
             },
             summary: {
                 text: 'resume me',

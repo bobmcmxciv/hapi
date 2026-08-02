@@ -70,6 +70,18 @@ export const MetadataSchema = z.object({
     piSessionId: z.string().optional(),
     ompSession: OmpNativeSessionSchema.optional(),
     ompThinking: OmpThinkingStateSchema.optional(),
+    piResumeAttempt: z.object({
+        state: z.enum(['resuming', 'terminating', 'quarantined']),
+        machineId: z.string(),
+        startedAt: z.number(),
+        childSessionId: z.string().optional(),
+        archiveSnapshot: z.object({
+            lifecycleState: z.string().optional(),
+            lifecycleStateSince: z.number().optional(),
+            archivedBy: z.string().optional(),
+            archiveReason: z.string().optional(),
+        }).optional(),
+    }).optional(),
     tools: z.array(z.string()).optional(),
     slashCommands: z.array(z.string()).optional(),
     homeDir: z.string().optional(),
@@ -394,6 +406,7 @@ export const RunnerStateSchema = z.object({
     pid: z.number().optional(),
     httpPort: z.number().optional(),
     startedAt: z.number().optional(),
+    capabilities: z.object({ piExistingSessionResume: z.literal(true).optional() }).optional(),
     shutdownRequestedAt: z.number().optional(),
     shutdownSource: z.union([z.enum(['mobile-app', 'cli', 'os-signal', 'unknown']), z.string()]).optional(),
     lastSpawnError: z.object({
