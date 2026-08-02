@@ -247,4 +247,10 @@ describe('isClaudeChatVisibleMessage', () => {
         expect(isClaudeChatVisibleMessage({ type: 'assistant' })).toBe(true)
         expect(isClaudeChatVisibleMessage({ type: 'user' })).toBe(true)
     })
+
+    // 用量记账帧只喂统计，没有任何可读内容。这个集合是黑名单（非 system 类型一律可见），
+    // 所以一旦漏登记就会被当普通消息渲染成一坨原始 JSON。
+    test('hides usage_report accounting frames', () => {
+        expect(isClaudeChatVisibleMessage({ type: 'usage_report' })).toBe(false)
+    })
 })

@@ -32,7 +32,15 @@ const NON_CHAT_CLAUDE_MESSAGE_TYPES = new Set([
     'control_request',
     'control_response',
     'control_cancel_request',
-    'log'
+    'log',
+    // 用量记账帧：sdkToLogConverter 从 SDK 的 result 消息产出，供 usageAggregate 统计
+    // 那些在 message_start 里报不出 token 的上游（OpenAI 兼容代理只在流末尾给 usage，
+    // assistant 事件因此恒为 0）。纯数据、无用户可读内容。
+    // 注意这个集合是黑名单：isClaudeChatVisibleMessage 对非 system 类型一律返回 true，
+    // 不登记在这里的新类型默认可见，会被渲染成一坨原始 JSON。
+    // 只挡「导出/渲染」，不挡「入库」——hub 侧过滤发生在 isExportVisibleStoredMessage，
+    // 落库路径不看这个集合，所以统计仍读得到。
+    'usage_report'
 ])
 
 export function isNonChatClaudeMessageType(type: unknown): boolean {
