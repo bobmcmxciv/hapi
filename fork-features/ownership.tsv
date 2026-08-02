@@ -6,6 +6,7 @@
 Dockerfile	fork-owned	#179	origin-only delta; fork commits 8edeeef3,6da30689
 README.md	trunk-patch	#203	origin-only delta; disposition fork-specific #203: advertise the fork-owned OMP flavor and guide
 bun.lock	trunk-patch	#171	origin-only delta; fork commits a6f9e3f9,45b07ac7,c36d2daf,d3199037
+bunfig.toml	fork-owned	converge-0.25.1	hoisted linker：根级 fork-features/ 非 workspace，其 zod/vitest/hono 靠根 node_modules 提升解析；bun 1.3 默认 isolated 会致 TS2307
 cli/README.md	upstream-sync	#180	merge-base 87f5c78a; changed only on upstream/main
 cli/src/agent/backends/acp/AcpMessageHandler.test.ts	trunk-patch	#175	origin-only delta; fork commits d28853c7
 cli/src/agent/backends/acp/AcpMessageHandler.ts	trunk-patch	#175	origin-only delta; fork commits d28853c7
@@ -168,6 +169,8 @@ fork-features/multi-user/notificationAdapter.test.ts	fork-owned	#171	origin-only
 fork-features/multi-user/notificationAdapter.ts	fork-owned	#171	origin-only delta; fork commits a6f9e3f9
 fork-features/multi-user/password.ts	fork-owned	#171	origin-only delta; fork commits a6f9e3f9
 fork-features/multi-user/socketAdapter.ts	fork-owned	#171	origin-only delta; fork commits a6f9e3f9
+fork-features/multi-user/sseVisibility.test.ts	fork-owned	sse-isolation	含经 SSEManager 的端到端投递用例
+fork-features/multi-user/sseVisibility.ts	fork-owned	sse-isolation	SSE 事件账号可见性谓词工厂，语义与 /api/sessions 同构
 fork-features/multi-user/token.ts	fork-owned	#171	origin-only delta; fork commits a6f9e3f9
 fork-features/ownership.tsv	fork-owned	#169	#169 closing PR inventory implementation
 fork-features/session-fork/cliHandler.test.ts	fork-owned	#170	origin-only delta; fork commits aee648ee,e1611788
@@ -201,6 +204,7 @@ fork-features/trunk-patches.md	fork-owned	#171	fork trunk-patch registry; update
 fork-features/upstream-fix-dispositions.tsv	fork-owned	#179	#179 upstream-fix disposition ledger
 fork-features/usage/usageAggregate.test.ts	fork-owned	usage-page	origin-only delta; token usage stats (2026-07-28)
 fork-features/usage/usageAggregate.ts	fork-owned	usage-page	origin-only delta; token usage stats SQL + response assembly (2026-07-28)
+hub/src/cursor/cursorLegacyMigrator.ts	upstream-fix	win-sqlite-gc	删源库吃 Windows EBUSY：sqlite3_close_v2 句柄挂 GC，win32 下 GC 后重试一次
 hub/src/fork-features/task-panel/taskProjection.test.ts	fork-owned	#181	origin-only delta; fork commits 17fee65e
 hub/src/fork-features/task-panel/taskProjection.ts	fork-owned	#181	origin-only delta; fork commits 17fee65e
 hub/src/notifications/notificationHub.test.ts	trunk-patch	#174	origin-only delta; fork commits 413e76cc
@@ -211,6 +215,7 @@ hub/src/socket/server.ts	trunk-patch	#171	origin-only delta; fork commits a6f9e3
 hub/src/socket/socketLimits.test.ts	trunk-patch	#176	origin-only delta; fork commits 3edb7db8
 hub/src/socket/socketLimits.ts	trunk-patch	#176	origin-only delta; fork commits 3edb7db8
 hub/src/socket/socketTypes.ts	trunk-patch	#171	origin-only delta; fork commits a6f9e3f9
+hub/src/sse/sseManager.ts	trunk-patch	sse-isolation	订阅新增可选 canDeliver 谓词；SSE 层无按账号过滤的注册 API
 hub/src/startHub.ts	trunk-patch	#171	origin-only delta; fork commits a6f9e3f9
 hub/src/store/index.ts	trunk-patch	#174	#170 removed unused helper; remaining persisted-session hook closed by #174
 hub/src/store/messageStore.ts	trunk-patch	usage-page	origin-only delta; single seam exposing db to fork-features/usage aggregation (2026-07-28)
@@ -227,6 +232,7 @@ hub/src/sync/sessionModel.test.ts	trunk-patch	#173	both refs changed; fork commi
 hub/src/sync/syncEngine.ts	trunk-patch	#173	both refs changed; fork commits 8d828436,17e79d08,51929072,9e76994b,3994ee9a,fc7d7b4a,b4c31e88,a8815d47,bfa252da,c853bcbf,c58622c2,e009becc,fc377386,d840284a,413e76cc,3582e989,3686370a
 hub/src/telegram/sessionView.test.ts	trunk-patch	#174	origin-only delta; fork commits 413e76cc
 hub/src/web/routes/cli.ts	trunk-patch	#171	origin-only delta; fork commits a6f9e3f9
+hub/src/web/routes/events.ts	trunk-patch	sse-isolation	按认证 userId 取谓词注入订阅；路由工厂参数为唯一注入点
 hub/src/web/routes/git.test.ts	trunk-patch	#176	origin-only delta; fork commits 3edb7db8,b4c31e88,bfa252da,d28853c7
 hub/src/web/routes/git.ts	trunk-patch	#176	origin-only delta; fork commits 3edb7db8,b4c31e88,bfa252da
 hub/src/web/routes/machines.test.ts	trunk-patch	#173	origin-only delta; fork commits 51929072,3994ee9a,fc7d7b4a,a8815d47,c853bcbf
@@ -441,6 +447,8 @@ web/src/lib/sessionResume.test.ts	trunk-patch	#179	both refs changed; fork commi
 web/src/lib/sessionResume.ts	trunk-patch	#179	both refs changed; fork commits 291c8db0; disposition fork-specific #179: session ID feature
 web/src/lib/sessionTitle.ts	upstream-sync	#180	merge-base 87f5c78a; changed only on upstream/main
 web/src/lib/toast-context.tsx	upstream-fix	#179	origin-only delta; fork commits d1f9f394; disposition upstream-issue https://github.com/tiann/hapi/issues/1077: general fix reported against latest upstream main
+web/src/lib/usageReportBackfill.test.ts	fork-owned	usage-footer	回填口径单测（首帧基线/回落全额/同轮同 delta）
+web/src/lib/usageReportBackfill.ts	fork-owned	usage-footer	usage_report 帧差值回填逐条页脚 token
 web/src/realtime/messageSummarySpeaker.test.ts	fork-owned	#179	origin-only delta; fork commits 7faed2eb
 web/src/realtime/messageSummarySpeaker.ts	fork-owned	#179	origin-only delta; fork commits 7faed2eb
 web/src/router.tsx	trunk-patch	#171	both refs changed; fork commits a6f9e3f9,0894d3d2,3582e989

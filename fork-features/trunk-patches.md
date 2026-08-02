@@ -450,3 +450,21 @@ registration API; compare shapes before keeping both.
 | 2026-07-06 | #57 c1 (issue #58) — shared contract for per-message fork. Edits: (1) forkedFromMessageId added to trunk patch #1; (18)/(19) new entries for useFlavorCapabilities.ts/.test.tsx (upstream-dir hook files formerly unregistered from #55); patched #13/#16/#17 for new two-dim capability shape (`{capabilities: {flavor: {fork, files}}}` instead of `{fork: string[]}`). Non-trunk: forkCapabilities.ts converted from boolean allow-list to static map + accessors; rpcPayloads.ts gained `forkPoint {messageId, tailOffset}`; hubMount returns full map; hubForkController swaps `FORK_CAPABLE_FLAVORS.includes` for `isForkCapableFlavor`. Test outcome: `bun test fork-features/` 65/65 pass (was 53, +12 for forkCapabilities.test.ts + expanded rpcPayloads.test.ts); web 1162/1162; hub 467/467 (3 pre-existing skip); shared 110/110. Full `bun run typecheck` (cli+web+hub) clean. `git grep FORK_CAPABLE_FLAVORS` returns nothing (acceptance #10). |
 | 2026-07-06 | #57 c5 (issue #62) — web user-message rewind button. Edits: new trunk patch #20 (UserMessage.tsx: RewindIcon + capability-gated button + handleRewind → forkSession → setForkedFromText → navigate). Existing trunk patches touched: #13 (`web/src/api/client.ts` gains `forkPoint?` opts on `forkSession`), #14 (`useSessionActions.ts` fork mutation accepts `{forkPoint?}` arg). Non-trunk additions: `web/src/lib/fork-restore.ts` (one-shot sessionStorage handoff feeding #63 c6) + its `.test.ts`; `web/src/components/AssistantChat/messages/UserMessage.test.tsx` (7 cases: 4 capability-gating, 1 click flow, 1 empty-text-no-stash, 1 pending-disables). Test outcome: `bun test fork-features/` 87/87 pass; web 1176/1176; hub 467/470 (3 pre-existing skip); shared 110/110. Full `bun run typecheck` clean. |
 | 2026-07-06 | #57 c6 (issue #63) — composer restore from fork-restore text. Edits: trunk patch #21 (useComposerDraft.ts): consumeForkedFromText check in the same rAF callback BEFORE the getDraft path; on hit → clearDraft + setText. Non-trunk: new `web/src/hooks/useComposerDraft.forkRestore.test.ts` (5 cases: hit-prefills+skips-draft, miss-falls-back-to-draft, does-not-overwrite-existing-text, normal-unmount-save-after-consume, sessionId-undefined-no-op). Existing `useComposerDraft.test.ts` unchanged (6/6 still green — real fork-restore returns null with empty sessionStorage). Test outcome: `bun run test:web` 1181/1181 pass; `bun test fork-features/` 87/87 unchanged; hub 467/470; shared 110/110. Full `bun run typecheck` clean. |
+
+## SSE 账号隔离与逐条用量回填 (2026-08-02)
+
+多用户网关下所有账号共享同一 core namespace，SSE 仅按 namespace 广播会把
+未授权会话的事件（含完成提醒）投给其他账号；Web Push 一侧早有 audience
+过滤，SSE 一直是裸的。逐条页脚 token 则因经 OpenAI 兼容代理的模型
+`message_start` 给不出计数而结构性全零，真数只在 `usage_report` 帧里。
+判定与回填实现均为 fork 自有，下列上游文件只保留最小挂载点。
+
+| Files | Missing upstream seam | Why it cannot move out | Runtime path | Sync verification |
+|---|---|---|---|---|
+| `hub/src/sse/sseManager.ts` | 订阅无按账号过滤的注册 API | 投递判定发生在私有 `shouldSend` 内，旁路模块无法在广播前拦截单个连接 | 事件广播 → 连接谓词 → SSE 帧 | 两账号各开一条 all=true 连接，广播未授权会话事件，确认只有可读方收到 |
+| `hub/src/web/routes/events.ts` | 路由工厂参数是唯一注入点，无中间件级订阅装饰 | 谓词需按认证 `userId` 构造并随该次订阅生命周期存在 | JWT → 账号谓词 → `manager.subscribe` | 以普通账号登录，触发他人会话完成，确认无提醒 |
+| `web/src/components/SessionChat.tsx` | 无归一化后置管道或消息装饰注册 API | 回填必须发生在 `reduceChatBlocks` 之前、归一化之后的同一 memo 链上 | 原始消息 + 归一化消息 → 回填 → 块归约 → 页脚 | 打开经代理模型的会话，核对逐条 Tokens 非 0 且与用量页同源 |
+| `bunfig.toml` | 无 workspace 级 linker 配置以外的解析钩子 | 根级 `fork-features/` 不是 workspace，其 zod/vitest/hono 导入依赖 hoisted 提升 | 安装 → node_modules 布局 → cli/hub tsconfig rootDir=".." 解析 | `bun install` 后跑 `bun run typecheck`，确认无 TS2307 |
+
+每次上游同步都要复查是否出现原生的 SSE 订阅过滤、消息装饰管道与
+workspace 解析配置；出现即移除对应挂载点。
