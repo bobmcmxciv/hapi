@@ -9,14 +9,14 @@ import { Store } from './index'
  * Tests for V8→V9 schema migration: adding scheduled_at column to messages table.
  * Follows the same pattern as migration-v8.test.ts.
  */
-describe('Store V8→V9 migration: scheduled_at column', () => {
-    it('fresh DB has scheduled_at column in messages', () => {
+describe('Store V8→V9 migration: scheduled_at column', async () => {
+    it('fresh DB has scheduled_at column in messages', async () => {
         const store = new Store(':memory:')
         const cols = getMessageColumns(store)
         expect(cols).toContain('scheduled_at')
     })
 
-    it('V8 DB migrates to V9 via Store: scheduled_at added, existing rows have NULL scheduled_at', () => {
+    it('V8 DB migrates to V9 via Store: scheduled_at added, existing rows have NULL scheduled_at', async () => {
         const dir = mkdtempSync(join(tmpdir(), 'hapi-migration-v9-test-'))
         const dbPath = join(dir, 'test.db')
         let store: Store | undefined
@@ -49,11 +49,14 @@ describe('Store V8→V9 migration: scheduled_at column', () => {
             expect(m2.scheduledAt).toBeNull()
         } finally {
             store?.close()
-            rmSync(dir, { recursive: true, force: true })
+            // 释放对子 store 缓存 prepared statements 的最后一个可达引用，
+            // 否则 sqlite3_close_v2 永不真正关闭文件，Windows 下 rm 恒 EBUSY。
+            store = undefined
+            await rmDirWithRetry(dir)
         }
     })
 
-    it('V7 DB migrates to V9 (multi-hop: V7→V8→V9)', () => {
+    it('V7 DB migrates to V9 (multi-hop: V7→V8→V9)', async () => {
         const dir = mkdtempSync(join(tmpdir(), 'hapi-migration-v7-to-v9-'))
         const dbPath = join(dir, 'test.db')
         let store: Store | undefined
@@ -71,11 +74,14 @@ describe('Store V8→V9 migration: scheduled_at column', () => {
             expect(cols).toContain('scheduled_at')
         } finally {
             store?.close()
-            rmSync(dir, { recursive: true, force: true })
+            // 释放对子 store 缓存 prepared statements 的最后一个可达引用，
+            // 否则 sqlite3_close_v2 永不真正关闭文件，Windows 下 rm 恒 EBUSY。
+            store = undefined
+            await rmDirWithRetry(dir)
         }
     })
 
-    it('V6 DB migrates to V9 (multi-hop)', () => {
+    it('V6 DB migrates to V9 (multi-hop)', async () => {
         const dir = mkdtempSync(join(tmpdir(), 'hapi-migration-v6-to-v9-'))
         const dbPath = join(dir, 'test.db')
         let store: Store | undefined
@@ -94,11 +100,14 @@ describe('Store V8→V9 migration: scheduled_at column', () => {
             expect(sessionCols).toContain('model_reasoning_effort')
         } finally {
             store?.close()
-            rmSync(dir, { recursive: true, force: true })
+            // 释放对子 store 缓存 prepared statements 的最后一个可达引用，
+            // 否则 sqlite3_close_v2 永不真正关闭文件，Windows 下 rm 恒 EBUSY。
+            store = undefined
+            await rmDirWithRetry(dir)
         }
     })
 
-    it('V9 DB reopen is idempotent: schema unchanged', () => {
+    it('V9 DB reopen is idempotent: schema unchanged', async () => {
         const dir = mkdtempSync(join(tmpdir(), 'hapi-migration-v9-idempotent-'))
         const dbPath = join(dir, 'test.db')
         let store1: Store | undefined
@@ -115,11 +124,11 @@ describe('Store V8→V9 migration: scheduled_at column', () => {
         } finally {
             store2?.close()
             store1?.close()
-            rmSync(dir, { recursive: true, force: true })
+            await rmDirWithRetry(dir)
         }
     })
 
-    it('migrateFromV8ToV9 PRAGMA guard: scheduled_at column appears exactly once', () => {
+    it('migrateFromV8ToV9 PRAGMA guard: scheduled_at column appears exactly once', async () => {
         const dir = mkdtempSync(join(tmpdir(), 'hapi-migration-v9-guard-'))
         const dbPath = join(dir, 'test.db')
         let store: Store | undefined
@@ -137,11 +146,14 @@ describe('Store V8→V9 migration: scheduled_at column', () => {
             expect(count).toBe(1)
         } finally {
             store?.close()
-            rmSync(dir, { recursive: true, force: true })
+            // 释放对子 store 缓存 prepared statements 的最后一个可达引用，
+            // 否则 sqlite3_close_v2 永不真正关闭文件，Windows 下 rm 恒 EBUSY。
+            store = undefined
+            await rmDirWithRetry(dir)
         }
     })
 
-    it('idx_messages_scheduled_pending index exists on fresh DB', () => {
+    it('idx_messages_scheduled_pending index exists on fresh DB', async () => {
         const store = new Store(':memory:')
         const db: Database = (store as any).db
         const rows = db.prepare(
@@ -150,7 +162,7 @@ describe('Store V8→V9 migration: scheduled_at column', () => {
         expect(rows).toHaveLength(1)
     })
 
-    it('idx_messages_scheduled_pending index exists after V8→V9 migration', () => {
+    it('idx_messages_scheduled_pending index exists after V8→V9 migration', async () => {
         const dir = mkdtempSync(join(tmpdir(), 'hapi-index-v8-v9-'))
         const dbPath = join(dir, 'test.db')
         let store: Store | undefined
@@ -170,13 +182,16 @@ describe('Store V8→V9 migration: scheduled_at column', () => {
             expect(rows).toHaveLength(1)
         } finally {
             store?.close()
-            rmSync(dir, { recursive: true, force: true })
+            // 释放对子 store 缓存 prepared statements 的最后一个可达引用，
+            // 否则 sqlite3_close_v2 永不真正关闭文件，Windows 下 rm 恒 EBUSY。
+            store = undefined
+            await rmDirWithRetry(dir)
         }
     })
 })
 
-describe('Store V9: scheduled_at store operations', () => {
-    it('addMessage with scheduledAt stores the value', () => {
+describe('Store V9: scheduled_at store operations', async () => {
+    it('addMessage with scheduledAt stores the value', async () => {
         const store = new Store(':memory:')
         const session = store.sessions.getOrCreateSession('test', { path: '/tmp' }, null, 'default')
         const futureMs = Date.now() + 60_000
@@ -184,14 +199,14 @@ describe('Store V9: scheduled_at store operations', () => {
         expect(msg.scheduledAt).toBe(futureMs)
     })
 
-    it('addMessage without scheduledAt has scheduledAt = null', () => {
+    it('addMessage without scheduledAt has scheduledAt = null', async () => {
         const store = new Store(':memory:')
         const session = store.sessions.getOrCreateSession('test', { path: '/tmp' }, null, 'default')
         const msg = store.messages.addMessage(session.id, 'hello', 'local-1')
         expect(msg.scheduledAt).toBeNull()
     })
 
-    it('getMatureScheduledMessages returns messages with scheduled_at <= now', () => {
+    it('getMatureScheduledMessages returns messages with scheduled_at <= now', async () => {
         const store = new Store(':memory:')
         const session = store.sessions.getOrCreateSession('test', { path: '/tmp' }, null, 'default')
         const now = Date.now()
@@ -210,7 +225,7 @@ describe('Store V9: scheduled_at store operations', () => {
         expect(results).toHaveLength(1)
     })
 
-    it('getMatureScheduledMessages excludes already-invoked messages', () => {
+    it('getMatureScheduledMessages excludes already-invoked messages', async () => {
         const store = new Store(':memory:')
         const session = store.sessions.getOrCreateSession('test', { path: '/tmp' }, null, 'default')
         const now = Date.now()
@@ -224,7 +239,7 @@ describe('Store V9: scheduled_at store operations', () => {
         expect(results.find(m => m.id === msg.id)).toBeUndefined()
     })
 
-    it('getMatureScheduledMessages returns in scheduled_at ASC order', () => {
+    it('getMatureScheduledMessages returns in scheduled_at ASC order', async () => {
         const store = new Store(':memory:')
         const session = store.sessions.getOrCreateSession('test', { path: '/tmp' }, null, 'default')
         const now = Date.now()
@@ -236,7 +251,7 @@ describe('Store V9: scheduled_at store operations', () => {
         expect(results.map(m => m.id)).toEqual([msg1.id, msg2.id])
     })
 
-    it('getImmediateQueuedLocalMessages: returns only immediate queued, excludes mature AND future scheduled (HAPI Bot R4)', () => {
+    it('getImmediateQueuedLocalMessages: returns only immediate queued, excludes mature AND future scheduled (HAPI Bot R4)', async () => {
         const store = new Store(':memory:')
         const session = store.sessions.getOrCreateSession('test', { path: '/tmp' }, null, 'default')
         const now = Date.now()
@@ -254,7 +269,7 @@ describe('Store V9: scheduled_at store operations', () => {
         expect(ids).toEqual([immediate.id])
     })
 
-    it('getImmediateQueuedLocalMessages excludes already-invoked messages', () => {
+    it('getImmediateQueuedLocalMessages excludes already-invoked messages', async () => {
         const store = new Store(':memory:')
         const session = store.sessions.getOrCreateSession('test', { path: '/tmp' }, null, 'default')
         const now = Date.now()
@@ -266,7 +281,7 @@ describe('Store V9: scheduled_at store operations', () => {
         expect(results.find(m => m.id === msg.id)).toBeUndefined()
     })
 
-    it('getUninvokedLocalMessages still includes future scheduled (for Web bar display)', () => {
+    it('getUninvokedLocalMessages still includes future scheduled (for Web bar display)', async () => {
         const store = new Store(':memory:')
         const session = store.sessions.getOrCreateSession('test', { path: '/tmp' }, null, 'default')
         const future = Date.now() + 60_000
@@ -277,7 +292,7 @@ describe('Store V9: scheduled_at store operations', () => {
         expect(results.map(m => m.id)).toContain(scheduled.id)
     })
 
-    it('legacy DB (user_version=0 with V8-shape tables): step ladder backfills scheduled_at', () => {
+    it('legacy DB (user_version=0 with V8-shape tables): step ladder backfills scheduled_at', async () => {
         const dir = mkdtempSync(join(tmpdir(), 'hapi-legacy-v0-v9-'))
         const dbPath = join(dir, 'test.db')
         let store: Store | undefined
@@ -298,7 +313,10 @@ describe('Store V9: scheduled_at store operations', () => {
             expect(cols).toContain('scheduled_at')
         } finally {
             store?.close()
-            rmSync(dir, { recursive: true, force: true })
+            // 释放对子 store 缓存 prepared statements 的最后一个可达引用，
+            // 否则 sqlite3_close_v2 永不真正关闭文件，Windows 下 rm 恒 EBUSY。
+            store = undefined
+            await rmDirWithRetry(dir)
         }
     })
 })
@@ -552,4 +570,21 @@ function createV6Schema(db: Database): void {
         );
         CREATE INDEX IF NOT EXISTS idx_push_subscriptions_namespace ON push_subscriptions(namespace);
     `)
+}
+
+// bun 的 rmSync 不实现 maxRetries；sqlite3_close_v2 把文件句柄挂到 GC 上，
+// Windows 上目录删除会 EBUSY。强制回收后重试（与 Store.close 同一模式）。
+async function rmDirWithRetry(dir: string): Promise<void> {
+    for (let attempt = 0; ; attempt += 1) {
+        try {
+            rmSync(dir, { recursive: true, force: true })
+            return
+        } catch (error) {
+            if (attempt >= 50) throw error
+            Bun.gc(true)
+            // 必须真正让出事件循环：bun:sqlite 的句柄 finalize 挂在 loop 上，
+            // sleepSync 会把它饿死，重试永远打不中。
+            await Bun.sleep(100)
+        }
+    }
 }

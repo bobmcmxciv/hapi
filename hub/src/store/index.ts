@@ -87,7 +87,21 @@ export class Store {
         this.db.exec('PRAGMA synchronous = NORMAL')
         this.db.exec('PRAGMA foreign_keys = ON')
         this.db.exec('PRAGMA busy_timeout = 5000')
-        this.initSchema()
+        try {
+            this.initSchema()
+        } catch (error) {
+            // A schema-mismatch throw must not leak the sqlite handle: on
+            // Windows the open fd keeps the DB file locked (EBUSY on cleanup),
+            // and on Linux each failed Store construction leaks an fd.
+            try {
+                this.db.close()
+                if (process.platform === 'win32') {
+                    Bun.gc(true)
+                }
+            } catch {
+            }
+            throw error
+        }
 
         if (dbPath !== ':memory:' && !dbPath.startsWith('file::memory:')) {
             for (const path of [dbPath, `${dbPath}-wal`, `${dbPath}-shm`]) {

@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os'
 import { Store } from './index'
 
 describe('Store V12/V13→V16 schema reconciliation', () => {
-    it('fresh DB has both reconciled tables', () => {
+    it('fresh DB has both reconciled tables', async () => {
         const store = new Store(':memory:')
         expect(tableExists(store, 'message_epochs')).toBe(true)
         expect(tableExists(store, 'session_scratchlist')).toBe(true)
@@ -14,7 +14,7 @@ describe('Store V12/V13→V16 schema reconciliation', () => {
         store.close()
     })
 
-    it('scratchlist V12 DB migrates to V16 and preserves existing messages', () => {
+    it('scratchlist V12 DB migrates to V16 and preserves existing messages', async () => {
         const dir = mkdtempSync(join(tmpdir(), 'hapi-migration-v16-test-'))
         const dbPath = join(dir, 'test.db')
         let store: Store | undefined
@@ -39,14 +39,17 @@ describe('Store V12/V13→V16 schema reconciliation', () => {
             expect(store.messages.getMessages('session-1')).toHaveLength(1)
         } finally {
             store?.close()
-            rmSync(dir, { recursive: true, force: true })
+            // 释放对子 store 缓存 prepared statements 的最后一个可达引用，
+            // 否则 sqlite3_close_v2 永不真正关闭文件，Windows 下 rm 恒 EBUSY。
+            store = undefined
+            await rmDirWithRetry(dir)
         }
     })
 
     it.each([
         ['V12', 12],
         ['V13', 13]
-    ] as const)('repairs divergent %s DB missing session_scratchlist', (_label, version) => {
+    ] as const)('repairs divergent %s DB missing session_scratchlist', async (_label, version) => {
         const dir = mkdtempSync(join(tmpdir(), `hapi-migration-v${version}-repair-test-`))
         const dbPath = join(dir, 'test.db')
         let store: Store | undefined
@@ -76,7 +79,10 @@ describe('Store V12/V13→V16 schema reconciliation', () => {
             expect(store.messages.getMessages('session-1')).toHaveLength(1)
         } finally {
             store?.close()
-            rmSync(dir, { recursive: true, force: true })
+            // 释放对子 store 缓存 prepared statements 的最后一个可达引用，
+            // 否则 sqlite3_close_v2 永不真正关闭文件，Windows 下 rm 恒 EBUSY。
+            store = undefined
+            await rmDirWithRetry(dir)
         }
     })
 })
@@ -181,4 +187,21 @@ function createV12Schema(db: Database): void {
             FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
         );
     `)
+}
+
+// bun 的 rmSync 不实现 maxRetries；sqlite3_close_v2 把文件句柄挂到 GC 上，
+// Windows 上目录删除会 EBUSY。强制回收后重试（与 Store.close 同一模式）。
+async function rmDirWithRetry(dir: string): Promise<void> {
+    for (let attempt = 0; ; attempt += 1) {
+        try {
+            rmSync(dir, { recursive: true, force: true })
+            return
+        } catch (error) {
+            if (attempt >= 50) throw error
+            Bun.gc(true)
+            // 必须真正让出事件循环：bun:sqlite 的句柄 finalize 挂在 loop 上，
+            // sleepSync 会把它饿死，重试永远打不中。
+            await Bun.sleep(100)
+        }
+    }
 }
