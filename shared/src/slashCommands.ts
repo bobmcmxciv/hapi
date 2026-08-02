@@ -52,6 +52,8 @@ export const BUILTIN_SLASH_COMMANDS = {
     cursor: [
         { name: 'compress', description: 'Compress conversation context to free window space (pass-through to Cursor agent)', source: 'builtin' },
     ],
+    kimi: [],
+    pi: [],
 } as const satisfies Record<string, readonly SlashCommand[]>
 
 export function getBuiltinSlashCommands(agent: string): SlashCommand[] {

@@ -69,7 +69,44 @@ vi.mock('./piTransport', () => ({
     },
 }));
 
-import { runPi } from './runPi';
+import { buildPiCommandInventory, formatPiUserMessage, rewritePiSkillPrompt, runPi } from './runPi';
+
+describe('Pi command namespaces', () => {
+    const commands = [
+        { name: 'session-name', description: 'Rename session', source: 'extension' as const },
+        { name: 'fix-tests', description: 'Fix tests', source: 'prompt' as const },
+        { name: 'skill:brave-search', description: 'Search the web', source: 'skill' as const },
+    ];
+
+    it('exposes native skills through $ and keeps them out of slash completion', () => {
+        expect(buildPiCommandInventory(commands)).toEqual({
+            skills: [
+                { name: 'brave-search', description: 'Search the web' },
+            ],
+            slashCommands: [
+                { name: 'session-name', description: 'Rename session', source: 'plugin' },
+                { name: 'fix-tests', description: 'Fix tests', source: 'user' },
+            ],
+        });
+    });
+
+    it('rewrites HAPI $ skills to Pi native skill commands', () => {
+        expect(rewritePiSkillPrompt('$brave-search latest news', commands))
+            .toBe('/skill:brave-search latest news');
+        expect(rewritePiSkillPrompt('$new-skill now', [])).toBe('/skill:new-skill now');
+        expect(rewritePiSkillPrompt('$PATH', commands)).toBe('$PATH');
+    });
+
+    it('keeps the native skill command first when the message has attachments', () => {
+        expect(formatPiUserMessage('$brave-search', [{
+            id: 'attachment-1',
+            filename: 'query.txt',
+            mimeType: 'text/plain',
+            size: 5,
+            path: '/tmp/query.txt',
+        }], commands)).toBe('/skill:brave-search\n\n@/tmp/query.txt');
+    });
+});
 
 describe('runPi startup', () => {
     beforeEach(() => {
