@@ -3,7 +3,7 @@ import { SSEManager } from '../../hub/src/sse/sseManager'
 import { VisibilityTracker } from '../../hub/src/visibility/visibilityTracker'
 import type { SyncEvent } from '../../hub/src/sync/syncEngine'
 import { MultiUserGatewayStore } from './gatewayStore'
-import { createSseEventFilterFactory } from './sseVisibility'
+import { createSseEventFilterFactory, createSseRequestFilterFactory } from './sseVisibility'
 
 function setupStore(): { store: MultiUserGatewayStore; adminId: number; ownerId: number; strangerId: number; granteeId: number } {
     const store = new MultiUserGatewayStore(':memory:')
@@ -80,5 +80,29 @@ describe('createSseEventFilterFactory：SSE 事件的账号可见性', () => {
         expect(received.get('bob')).toHaveLength(1)
         expect(received.get('peter')).toHaveLength(1)
         expect(received.get('mnmn66')).toHaveLength(0)
+    })
+})
+
+describe('createSseRequestFilterFactory：身份取 gaid 而非 uid', () => {
+    it('用被授权账号的 gaid 解析时，能收到该会话事件', async () => {
+        const { store, granteeId } = setupStore()
+        const filter = createSseRequestFilterFactory(store, async () => granteeId)
+        const predicate = await filter(new Request('https://hub/api/events?all=true'))
+        expect(predicate!(sessionEvent('session-owned'))).toBe(true)
+    })
+
+    it('无关账号的 gaid 仍被拦截', async () => {
+        const { store, strangerId } = setupStore()
+        const filter = createSseRequestFilterFactory(store, async () => strangerId)
+        const predicate = await filter(new Request('https://hub/api/events?all=true'))
+        expect(predicate!(sessionEvent('session-owned'))).toBe(false)
+    })
+
+    it('解析不出账号时 fail-closed：带资源 id 的事件一律不投递', async () => {
+        const { store } = setupStore()
+        const filter = createSseRequestFilterFactory(store, async () => null)
+        const predicate = await filter(new Request('https://hub/api/events?all=true'))
+        expect(predicate!(sessionEvent('session-owned'))).toBe(false)
+        expect(predicate!({ type: 'connection-changed', data: {} } as never)).toBe(true)
     })
 })
