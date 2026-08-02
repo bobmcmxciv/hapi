@@ -9,6 +9,7 @@ import type { MultiUserGatewayStore } from './gatewayStore'
 import { ExecutionDispatcher } from './executionDispatcher'
 import type { Capability, ResourceType } from './domain'
 import { buildUsageSummaryResponse, parseIsoParam } from '../usage/usageAggregate'
+import { createSseEventFilterFactory } from './sseVisibility'
 import { streamSSE } from 'hono/streaming'
 import { randomUUID } from 'node:crypto'
 
@@ -91,6 +92,12 @@ export function mountExecutionRoutes(app: Hono<WebAppEnv>, deps: {
             ...deps.store.listAccessibleResources('session', account.id),
             ...deps.store.listAccessibleResources('machine', account.id)
         ].filter(binding => binding.ownerAccountId !== account.id)
+        // 账号可读集谓词：`all: true` 的那条订阅覆盖整个 core namespace，而网关下
+        // 多个账号共享同一个 namespace（历史账号都是 `default`），仅靠 namespace
+        // 匹配会把未授权会话的事件——包括完成提醒——投给同 namespace 的其他账号。
+        // 明确按 (sessionId|machineId) 绑定的那些订阅本身已是精确目标，谓词对它们
+        // 是恒真，不影响被授权资源的投递。
+        const canDeliver = createSseEventFilterFactory(deps.store)(account.id) ?? undefined
         return streamSSE(c, async stream => {
             const ids: string[] = []
             const subscribe = (input: { namespace: string; all?: boolean; sessionId?: string; machineId?: string }) => {
@@ -103,6 +110,7 @@ export function mountExecutionRoutes(app: Hono<WebAppEnv>, deps: {
                     sessionId: input.sessionId,
                     machineId: input.machineId,
                     visibility: ids.length === 1 ? 'visible' : 'hidden',
+                    canDeliver,
                     send: event => stream.writeSSE({ data: JSON.stringify(event) }),
                     sendHeartbeat: () => ids.length === 1
                         ? stream.writeSSE({ data: JSON.stringify({ type: 'heartbeat', namespace: account.defaultNamespace, data: { timestamp: Date.now() } }) })

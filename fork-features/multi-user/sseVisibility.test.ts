@@ -1,4 +1,6 @@
 import { describe, expect, it } from 'bun:test'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { SSEManager } from '../../hub/src/sse/sseManager'
 import { VisibilityTracker } from '../../hub/src/visibility/visibilityTracker'
 import type { SyncEvent } from '../../hub/src/sync/syncEngine'
@@ -104,5 +106,18 @@ describe('createSseRequestFilterFactory：身份取 gaid 而非 uid', () => {
         const predicate = await filter(new Request('https://hub/api/events?all=true'))
         expect(predicate!(sessionEvent('session-owned'))).toBe(false)
         expect(predicate!({ type: 'connection-changed', data: {} } as never)).toBe(true)
+    })
+})
+
+describe('executionMount 的 /api/events 才是真实路由（回归钉）', () => {
+    it('fork 自己的 SSE 路由必须给 all:true 订阅装上谓词', () => {
+        // 2026-08-02 生产事故：修复挂在 hub/src/web/routes/events.ts 上，
+        // 但 fork 在 executionMount 里注册了自己的 /api/events 且先生效，
+        // 于是过滤形同虚设——ns=default 的账号仍收到全命名空间事件。
+        const source = readFileSync(join(import.meta.dir, 'executionMount.ts'), 'utf8')
+        const route = source.slice(source.indexOf("app.get('/api/events'"))
+        expect(route).toContain('createSseEventFilterFactory')
+        expect(route.slice(0, route.indexOf('subscribe({ namespace: account.defaultNamespace, all: true })')))
+            .toContain('canDeliver')
     })
 })
