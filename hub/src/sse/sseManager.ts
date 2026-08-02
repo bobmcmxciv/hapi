@@ -13,6 +13,9 @@ export type SSESubscription = {
 type SSEConnection = SSESubscription & {
     send: (event: SyncEvent) => void | Promise<void>
     sendHeartbeat: () => void | Promise<void>
+    // fork(multi-user)：账号级事件可见性谓词。namespace 在网关下是全账号共享的，
+    // 仅靠 namespace 匹配会把未授权会话的事件广播给其他账号。
+    canDeliver?: (event: SyncEvent) => boolean
 }
 
 export class SSEManager {
@@ -35,6 +38,7 @@ export class SSEManager {
         visibility?: VisibilityState
         send: (event: SyncEvent) => void | Promise<void>
         sendHeartbeat: () => void | Promise<void>
+        canDeliver?: (event: SyncEvent) => boolean
     }): SSESubscription {
         const subscription: SSEConnection = {
             id: options.id,
@@ -43,7 +47,8 @@ export class SSEManager {
             sessionId: options.sessionId ?? null,
             machineId: options.machineId ?? null,
             send: options.send,
-            sendHeartbeat: options.sendHeartbeat
+            sendHeartbeat: options.sendHeartbeat,
+            canDeliver: options.canDeliver
         }
 
         this.connections.set(subscription.id, subscription)
@@ -148,6 +153,9 @@ export class SSEManager {
     }
 
     private shouldSend(connection: SSEConnection, event: SyncEvent): boolean {
+        if (connection.canDeliver && !connection.canDeliver(event)) {
+            return false
+        }
         if (event.type !== 'connection-changed') {
             const eventNamespace = event.namespace
             if (!eventNamespace || eventNamespace !== connection.namespace) {

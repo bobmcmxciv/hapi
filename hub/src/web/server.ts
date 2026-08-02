@@ -38,6 +38,7 @@ import { loadEmbeddedAssetMap, type EmbeddedWebAsset } from './embeddedAssets'
 import { isBunCompiled } from '../utils/bunCompiled'
 import type { Store } from '../store'
 import { mountMultiUserGateway, mountMultiUserPostAuth } from '../../../fork-features/multi-user/hubMount'
+import { createSseEventFilterFactory } from '../../../fork-features/multi-user/sseVisibility'
 import type { MultiUserGatewayStore } from '../../../fork-features/multi-user/gatewayStore'
 import { createExecutionMiddleware, mountExecutionRoutes } from '../../../fork-features/multi-user/executionMount'
 import { resolveGatewayCliNamespace } from '../../../fork-features/multi-user/cliAdapter'
@@ -271,7 +272,13 @@ function createWebApp(options: {
         getStore: () => options.store
     })
     app.use('/api/*', createExecutionMiddleware({ store: multiUserStore, jwtSecret: options.jwtSecret }))
-    app.route('/api', createEventsRoutes(options.getSseManager, options.getSyncEngine, options.getVisibilityTracker))
+    app.route('/api', createEventsRoutes(
+        options.getSseManager,
+        options.getSyncEngine,
+        options.getVisibilityTracker,
+        // fork(multi-user)：SSE 事件按账号可读集过滤，语义与 /api/sessions 同构。
+        createSseEventFilterFactory(multiUserStore)
+    ))
     app.route('/api', createSessionsRoutes(options.getSyncEngine))
     app.route('/api', createMessagesRoutes(options.getSyncEngine))
     app.route('/api', createPermissionsRoutes(options.getSyncEngine))
