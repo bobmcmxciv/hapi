@@ -100,9 +100,11 @@ describe('SessionList machine filter', () => {
         renderSessionList(multiMachineSessions)
 
         expect(screen.getByRole('group', { name: 'Filter sessions by machine' })).toBeTruthy()
-        // Mobile (below md) counterpart: a compact filter icon button in the header
-        expect(screen.getByRole('button', { name: 'Filter sessions by machine' })).toBeTruthy()
+        // fork：不再有 header 上的漏斗折叠入口——各主机平铺，一次点击即切换。
+        expect(screen.queryByRole('button', { name: 'Filter sessions by machine' })).toBeNull()
         expect(screen.getByRole('button', { name: /All \(2\)/ })).toBeTruthy()
+        expect(screen.getByRole('button', { name: /Mint \(1\)/ })).toBeTruthy()
+        expect(screen.getByRole('button', { name: /Teemo \(1\)/ })).toBeTruthy()
         expect(screen.getByText('work/hapi · Mint')).toBeTruthy()
         expect(screen.getByText('work/docs · Teemo')).toBeTruthy()
     })
