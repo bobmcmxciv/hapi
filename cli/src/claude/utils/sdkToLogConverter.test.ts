@@ -802,6 +802,49 @@ describe('SDKToLogConverter', () => {
         })
     })
 
+    // An OpenAI-compatible upstream only reports token counts when its stream ends,
+    // so `message_start` — and hence every `assistant` message usage — is zeroed.
+    // `result.modelUsage` is the only place the real counts appear.
+    describe('usage_report frames from result messages', () => {
+        const resultMsg = (modelUsage: unknown) => ({
+            type: 'result', subtype: 'success', num_turns: 1, total_cost_usd: 0,
+            duration_ms: 0, duration_api_ms: 0, is_error: false, session_id: 's',
+            modelUsage
+        }) as any
+
+        it('emits modelUsage keyed by the raw model id', () => {
+            const conv = new SDKToLogConverter(context)
+            const converted = conv.convert(resultMsg({
+                'gpt-5.6-sol': { inputTokens: 24971, outputTokens: 5, cacheReadInputTokens: 22272, contextWindow: 200000 }
+            })) as any
+            expect(converted?.type).toBe('usage_report')
+            expect(converted.modelUsage['gpt-5.6-sol'].inputTokens).toBe(24971)
+            expect(converted.modelUsage['gpt-5.6-sol'].cacheReadInputTokens).toBe(22272)
+        })
+
+        it('emits nothing when the result carries no modelUsage', () => {
+            const conv = new SDKToLogConverter(context)
+            expect(conv.convert(resultMsg(undefined))).toBeNull()
+        })
+
+        // A usage_report is out-of-band accounting, not a conversation turn. If it
+        // became lastUuid, the next real message would be parented to it, splicing
+        // the reply chain with a node the UI never renders.
+        it('does not enter the parent chain', () => {
+            const conv = new SDKToLogConverter(context)
+            const first = conv.convert({
+                type: 'assistant',
+                message: { role: 'assistant', content: [{ type: 'text', text: 'a' }] }
+            } as any)
+            conv.convert(resultMsg({ 'gpt-5.6-sol': { inputTokens: 10 } }))
+            const next = conv.convert({
+                type: 'assistant',
+                message: { role: 'assistant', content: [{ type: 'text', text: 'b' }] }
+            } as any)
+            expect(next?.parentUuid).toBe(first!.uuid!)
+        })
+    })
+
     describe('Parent-child relationships', () => {
         it('should track parent UUIDs across messages', () => {
             const msg1: SDKUserMessage = {

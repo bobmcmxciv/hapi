@@ -392,9 +392,9 @@ export class SDKToLogConverter {
             }
 
             case 'result': {
-                // Result messages are not converted to log messages
-                // They're SDK-specific messages that indicate session completion
-                // Not part of the actual conversation log.
+                // Result messages carry no conversation content, but they are the
+                // only place per-turn token counts are reliably reported, so they
+                // are converted to a non-chat `usage_report` frame (see below).
                 //
                 // But they carry the authoritative per-model contextWindow. modelUsage is
                 // keyed by the same raw model id the CLI reports on system/init, so the
@@ -415,6 +415,26 @@ export class SDKToLogConverter {
                                 : model
                             this.modelContextWindows.set(key, cw)
                         }
+                    }
+
+                    // Emit the token counts as a `usage_report` frame so usage
+                    // reporting works for upstreams that cannot populate
+                    // `message_start` — an OpenAI-compatible proxy only learns the
+                    // token counts when the upstream stream ends, so every
+                    // `assistant` message it produces carries usage 0 and those
+                    // models otherwise show "N requests, 0 tokens".
+                    //
+                    // Keyed by the SDK's raw model id — deliberately NOT the
+                    // contextWindow key above, which folds in "[1m]" and would no
+                    // longer match the `message.model` that assistant rows record.
+                    //
+                    // `usage_report` is registered in NON_CHAT_CLAUDE_MESSAGE_TYPES,
+                    // so the hub stores it (statistics can read it) but never
+                    // delivers it to the web (it would render as raw JSON).
+                    logMessage = {
+                        ...baseFields,
+                        type: 'usage_report',
+                        modelUsage: resultMsg.modelUsage
                     }
                 }
                 break
@@ -458,8 +478,11 @@ export class SDKToLogConverter {
                 break
         }
 
-        // Update last UUID for parent tracking
-        if (logMessage && logMessage.type !== 'summary') {
+        // Update last UUID for parent tracking. `summary` and `usage_report` are
+        // out-of-band records, not conversation turns — letting either become the
+        // parent would splice a non-conversation node into the reply chain and
+        // orphan the next real message from the turn it actually follows.
+        if (logMessage && logMessage.type !== 'summary' && logMessage.type !== 'usage_report') {
             this.lastUuid = uuid
         }
 

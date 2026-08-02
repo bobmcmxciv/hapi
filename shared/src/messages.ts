@@ -20,6 +20,33 @@ const VISIBLE_CLAUDE_SYSTEM_SUBTYPES = new Set([
     'model_refusal_fallback'
 ])
 
+// Claude 消息流里混着一批「非会话内容」的类型：心跳与控制帧，不承载任何用户可读
+// 的对话内容。tool_progress 就是长时间运行的工具每 30s 发一次的心跳（heartbeat /
+// elapsed_time_seconds），它想说的「这个工具跑了多久」工具卡片上的计时器已经在实时
+// 显示了。这类消息一旦当成普通消息渲染，只能退化成一大坨原始 JSON 糊在会话流里，
+// 所以统一在这里判成不可见：CLI 不上报、hub 不导出、web 不渲染（历史会话里已经存下
+// 来的也会被跳过）。
+const NON_CHAT_CLAUDE_MESSAGE_TYPES = new Set([
+    'rate_limit_event',
+    'tool_progress',
+    'control_request',
+    'control_response',
+    'control_cancel_request',
+    'log',
+    // 用量记账帧：sdkToLogConverter 从 SDK 的 result 消息产出，供 usageAggregate 统计
+    // 那些在 message_start 里报不出 token 的上游（OpenAI 兼容代理只在流末尾给 usage，
+    // assistant 事件因此恒为 0）。纯数据、无用户可读内容。
+    // 注意这个集合是黑名单：isClaudeChatVisibleMessage 对非 system 类型一律返回 true，
+    // 不登记在这里的新类型默认可见，会被渲染成一坨原始 JSON。
+    // 只挡「导出/渲染」，不挡「入库」——hub 侧过滤发生在 isExportVisibleStoredMessage，
+    // 落库路径不看这个集合，所以统计仍读得到。
+    'usage_report'
+])
+
+export function isNonChatClaudeMessageType(type: unknown): boolean {
+    return typeof type === 'string' && NON_CHAT_CLAUDE_MESSAGE_TYPES.has(type)
+}
+
 export function isRoleWrappedRecord(value: unknown): value is RoleWrappedRecord {
     if (!isObject(value)) return false
     return typeof value.role === 'string' && 'content' in value

@@ -87,6 +87,32 @@ export const RawJSONLinesSchema = z.discriminatedUnion("type", [
     aiTitle: z.string(),
   }),
 
+  // Token accounting frame, derived from the SDK `result` message.
+  //
+  // Needed because `usage` on an `assistant` message comes from the upstream's
+  // `message_start`, and an OpenAI-compatible proxy cannot fill it in: those
+  // upstreams only report usage at the *end* of the stream, so `message_start`
+  // is necessarily zeroed and every assistant row for such a model records
+  // 0 tokens. The `result` message is the only place the real counts appear.
+  //
+  // `modelUsage` is keyed by the SDK's raw model id (which may carry a context
+  // variant suffix like "[1m]") and is a **running total for the SDK process,
+  // not a per-turn figure** — a long-lived runner session reports cumulative
+  // counts on every frame (measured live: 55931 → 111945 → 168046 across three
+  // turns). Consumers must take deltas between adjacent frames of the same
+  // session, treating a drop as a process restart; see
+  // fork-features/usage/usageAggregate.ts.
+  RawJSONLinesBaseSchema.extend({
+    type: z.literal("usage_report"),
+    uuid: z.string(),
+    modelUsage: z.record(z.string(), z.object({
+      inputTokens: z.number().optional(),
+      outputTokens: z.number().optional(),
+      cacheReadInputTokens: z.number().optional(),
+      cacheCreationInputTokens: z.number().optional(),
+    }).passthrough()),
+  }),
+
   // System message - validates uuid and subtype data used by the UI.
   // `passthrough` preserves fields like `messageId` on `turn_duration` and any
   // future system subtype data the hub forwards to the web reducer.
