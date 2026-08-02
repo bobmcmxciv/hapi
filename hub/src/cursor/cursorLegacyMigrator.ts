@@ -992,7 +992,19 @@ export class CursorLegacyMigrator {
         let sourceRemoved = false
         if (!opts.keepSource) {
             try {
-                rmSync(legacy.storeDbPath, { force: true })
+                try {
+                    rmSync(legacy.storeDbPath, { force: true })
+                } catch (err) {
+                    // bun:sqlite closes via sqlite3_close_v2, so statements from
+                    // the fingerprint/blob-count reads keep the source store's
+                    // file handle alive until the next GC cycle. Windows refuses
+                    // to delete the file while that handle is pending (EBUSY);
+                    // force a collection and retry once (same pattern as
+                    // Store.close).
+                    if (process.platform !== 'win32') throw err
+                    Bun.gc(true)
+                    rmSync(legacy.storeDbPath, { force: true })
+                }
                 // Also drop SQLite sidecars if present (WAL + SHM).
                 tryRm(`${legacy.storeDbPath}-wal`)
                 tryRm(`${legacy.storeDbPath}-shm`)

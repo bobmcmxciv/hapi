@@ -9,14 +9,14 @@ import { Store } from './index'
  * Tests for V7→V8 schema migration: adding invoked_at column to messages table.
  * All migration tests open a real Store to exercise the actual migration code path.
  */
-describe('Store V7→V8 migration: invoked_at column', () => {
-    it('fresh DB has invoked_at column in messages', () => {
+describe('Store V7→V8 migration: invoked_at column', async () => {
+    it('fresh DB has invoked_at column in messages', async () => {
         const store = new Store(':memory:')
         const cols = getMessageColumns(store)
         expect(cols).toContain('invoked_at')
     })
 
-    it('V7 DB migrates to V8 via Store: invoked_at added, existing rows backfilled to created_at', () => {
+    it('V7 DB migrates to V8 via Store: invoked_at added, existing rows backfilled to created_at', async () => {
         const dir = mkdtempSync(join(tmpdir(), 'hapi-migration-v8-test-'))
         const dbPath = join(dir, 'test.db')
         let store: Store | undefined
@@ -49,11 +49,14 @@ describe('Store V7→V8 migration: invoked_at column', () => {
             expect(m2.invokedAt).toBe(2000)
         } finally {
             store?.close()
-            rmSync(dir, { recursive: true, force: true })
+            // 释放对子 store 缓存 prepared statements 的最后一个可达引用，
+            // 否则 sqlite3_close_v2 永不真正关闭文件，Windows 下 rm 恒 EBUSY。
+            store = undefined
+            await rmDirWithRetry(dir)
         }
     })
 
-    it('V6 DB migrates to V8 (multi-hop)', () => {
+    it('V6 DB migrates to V8 (multi-hop)', async () => {
         const dir = mkdtempSync(join(tmpdir(), 'hapi-migration-v6-test-'))
         const dbPath = join(dir, 'test.db')
         let store: Store | undefined
@@ -73,11 +76,14 @@ describe('Store V7→V8 migration: invoked_at column', () => {
             expect(sessionCols).toContain('model_reasoning_effort')
         } finally {
             store?.close()
-            rmSync(dir, { recursive: true, force: true })
+            // 释放对子 store 缓存 prepared statements 的最后一个可达引用，
+            // 否则 sqlite3_close_v2 永不真正关闭文件，Windows 下 rm 恒 EBUSY。
+            store = undefined
+            await rmDirWithRetry(dir)
         }
     })
 
-    it('V5 DB migrates to V8 (multi-hop)', () => {
+    it('V5 DB migrates to V8 (multi-hop)', async () => {
         const dir = mkdtempSync(join(tmpdir(), 'hapi-migration-v5-test-'))
         const dbPath = join(dir, 'test.db')
         let store: Store | undefined
@@ -94,11 +100,14 @@ describe('Store V7→V8 migration: invoked_at column', () => {
             expect(cols).toContain('invoked_at')
         } finally {
             store?.close()
-            rmSync(dir, { recursive: true, force: true })
+            // 释放对子 store 缓存 prepared statements 的最后一个可达引用，
+            // 否则 sqlite3_close_v2 永不真正关闭文件，Windows 下 rm 恒 EBUSY。
+            store = undefined
+            await rmDirWithRetry(dir)
         }
     })
 
-    it('V4 DB migrates to V8 (multi-hop)', () => {
+    it('V4 DB migrates to V8 (multi-hop)', async () => {
         const dir = mkdtempSync(join(tmpdir(), 'hapi-migration-v4-test-'))
         const dbPath = join(dir, 'test.db')
         let store: Store | undefined
@@ -115,11 +124,14 @@ describe('Store V7→V8 migration: invoked_at column', () => {
             expect(cols).toContain('invoked_at')
         } finally {
             store?.close()
-            rmSync(dir, { recursive: true, force: true })
+            // 释放对子 store 缓存 prepared statements 的最后一个可达引用，
+            // 否则 sqlite3_close_v2 永不真正关闭文件，Windows 下 rm 恒 EBUSY。
+            store = undefined
+            await rmDirWithRetry(dir)
         }
     })
 
-    it('V8 DB reopen is idempotent: schema unchanged', () => {
+    it('V8 DB reopen is idempotent: schema unchanged', async () => {
         const dir = mkdtempSync(join(tmpdir(), 'hapi-migration-v8-idempotent-'))
         const dbPath = join(dir, 'test.db')
         let store1: Store | undefined
@@ -136,11 +148,11 @@ describe('Store V7→V8 migration: invoked_at column', () => {
         } finally {
             store2?.close()
             store1?.close()
-            rmSync(dir, { recursive: true, force: true })
+            await rmDirWithRetry(dir)
         }
     })
 
-    it('migrateFromV7ToV8 PRAGMA guard: invoked_at column appears exactly once', () => {
+    it('migrateFromV7ToV8 PRAGMA guard: invoked_at column appears exactly once', async () => {
         const dir = mkdtempSync(join(tmpdir(), 'hapi-migration-v8-guard-'))
         const dbPath = join(dir, 'test.db')
         let store: Store | undefined
@@ -158,11 +170,14 @@ describe('Store V7→V8 migration: invoked_at column', () => {
             expect(count).toBe(1)
         } finally {
             store?.close()
-            rmSync(dir, { recursive: true, force: true })
+            // 释放对子 store 缓存 prepared statements 的最后一个可达引用，
+            // 否则 sqlite3_close_v2 永不真正关闭文件，Windows 下 rm 恒 EBUSY。
+            store = undefined
+            await rmDirWithRetry(dir)
         }
     })
 
-    it('markMessagesInvoked sets invoked_at on matching messages', () => {
+    it('markMessagesInvoked sets invoked_at on matching messages', async () => {
         const store = new Store(':memory:')
         const session = store.sessions.getOrCreateSession('test', { path: '/tmp' }, null, 'default')
         const msg1 = store.messages.addMessage(session.id, 'hello', 'local-1')
@@ -181,7 +196,7 @@ describe('Store V7→V8 migration: invoked_at column', () => {
         expect(m2.invokedAt).toBeNull()
     })
 
-    it('markMessagesInvoked is first-write-wins (subsequent calls are no-ops)', () => {
+    it('markMessagesInvoked is first-write-wins (subsequent calls are no-ops)', async () => {
         const store = new Store(':memory:')
         const session = store.sessions.getOrCreateSession('test', { path: '/tmp' }, null, 'default')
         store.messages.addMessage(session.id, 'hi', 'local-x')
@@ -198,21 +213,21 @@ describe('Store V7→V8 migration: invoked_at column', () => {
         expect(msgs[0].invokedAt).toBe(ts1)
     })
 
-    it('addMessage with localId leaves invoked_at NULL (ack path is messages-consumed)', () => {
+    it('addMessage with localId leaves invoked_at NULL (ack path is messages-consumed)', async () => {
         const store = new Store(':memory:')
         const session = store.sessions.getOrCreateSession('test', { path: '/tmp' }, null, 'default')
         const msg = store.messages.addMessage(session.id, 'content', 'local-1')
         expect(msg.invokedAt).toBeNull()
     })
 
-    it('addMessage without localId sets invoked_at = created_at (no ack path)', () => {
+    it('addMessage without localId sets invoked_at = created_at (no ack path)', async () => {
         const store = new Store(':memory:')
         const session = store.sessions.getOrCreateSession('test', { path: '/tmp' }, null, 'default')
         const msg = store.messages.addMessage(session.id, 'content')
         expect(msg.invokedAt).toBe(msg.createdAt)
     })
 
-    it('getUninvokedLocalMessages returns rows with localId and null invoked_at', () => {
+    it('getUninvokedLocalMessages returns rows with localId and null invoked_at', async () => {
         const store = new Store(':memory:')
         const session = store.sessions.getOrCreateSession('test', { path: '/tmp' }, null, 'default')
         const queued = store.messages.addMessage(session.id, 'q', 'local-q')
@@ -224,7 +239,7 @@ describe('Store V7→V8 migration: invoked_at column', () => {
         expect(uninvoked.map(m => m.id)).toEqual([queued.id])
     })
 
-    it('getUninvokedLocalMessages returns empty for session with no queued messages', () => {
+    it('getUninvokedLocalMessages returns empty for session with no queued messages', async () => {
         const store = new Store(':memory:')
         const session = store.sessions.getOrCreateSession('test', { path: '/tmp' }, null, 'default')
         store.messages.addMessage(session.id, 'plain')                                // invoked_at set
@@ -240,7 +255,7 @@ describe('Store V7→V8 migration: invoked_at column', () => {
     // (markMessagesInvoked). After the sweep, no queued ghosts may remain —
     // otherwise the floating bar would survive across reloads even though the
     // CLI is no longer running.
-    it('session-end pattern: getUninvokedLocalMessages + markMessagesInvoked clears all queued', () => {
+    it('session-end pattern: getUninvokedLocalMessages + markMessagesInvoked clears all queued', async () => {
         const store = new Store(':memory:')
         const session = store.sessions.getOrCreateSession('test', { path: '/tmp' }, null, 'default')
         store.messages.addMessage(session.id, 'q1', 'local-1')
@@ -268,8 +283,8 @@ describe('Store V7→V8 migration: invoked_at column', () => {
     })
 })
 
-describe('Store V8 byPosition pagination', () => {
-    it('getMessagesByPosition returns messages in ascending order', () => {
+describe('Store V8 byPosition pagination', async () => {
+    it('getMessagesByPosition returns messages in ascending order', async () => {
         const store = new Store(':memory:')
         const session = store.sessions.getOrCreateSession('test', { path: '/tmp' }, null, 'default')
         const msg1 = store.messages.addMessage(session.id, 'a', 'loc-1')
@@ -284,7 +299,7 @@ describe('Store V8 byPosition pagination', () => {
         expect(result.map(m => m.id)).toEqual([msg1.id, msg2.id, msg3.id])
     })
 
-    it('getMessagesByPosition sorts by invokedAt DESC, seq DESC (latest first, reversed to ascending)', () => {
+    it('getMessagesByPosition sorts by invokedAt DESC, seq DESC (latest first, reversed to ascending)', async () => {
         const store = new Store(':memory:')
         const session = store.sessions.getOrCreateSession('test', { path: '/tmp' }, null, 'default')
         // Insert 3 messages: msg1 has low seq but high invokedAt (queued message that was consumed late)
@@ -301,7 +316,7 @@ describe('Store V8 byPosition pagination', () => {
         expect(result[0].id).toBe(msg2.id)
     })
 
-    it('getMessagesByPosition composite cursor: second page has no gap or duplicate', () => {
+    it('getMessagesByPosition composite cursor: second page has no gap or duplicate', async () => {
         const store = new Store(':memory:')
         const session = store.sessions.getOrCreateSession('test', { path: '/tmp' }, null, 'default')
         // Add 5 messages with distinct invokedAt timestamps
@@ -335,7 +350,7 @@ describe('Store V8 byPosition pagination', () => {
         expect(page1Ids.size + page2Ids.size).toBe(5)
     })
 
-    it('long session: low-seq late-invokedAt message appears in first page', () => {
+    it('long session: low-seq late-invokedAt message appears in first page', async () => {
         const store = new Store(':memory:')
         const session = store.sessions.getOrCreateSession('test', { path: '/tmp' }, null, 'default')
         // Insert many normal messages first (low invokedAt)
@@ -354,7 +369,7 @@ describe('Store V8 byPosition pagination', () => {
         expect(ids[ids.length - 1]).toBe(queued.id)
     })
 
-    it('V7 mode getMessages is unchanged after V8 migration', () => {
+    it('V7 mode getMessages is unchanged after V8 migration', async () => {
         const dir = mkdtempSync(join(tmpdir(), 'hapi-v7-compat-'))
         const dbPath = join(dir, 'test.db')
         let store: Store | undefined
@@ -378,11 +393,14 @@ describe('Store V8 byPosition pagination', () => {
             expect(msgs[1].seq).toBe(2)
         } finally {
             store?.close()
-            rmSync(dir, { recursive: true, force: true })
+            // 释放对子 store 缓存 prepared statements 的最后一个可达引用，
+            // 否则 sqlite3_close_v2 永不真正关闭文件，Windows 下 rm 恒 EBUSY。
+            store = undefined
+            await rmDirWithRetry(dir)
         }
     })
 
-    it('idx_messages_session_position index exists on fresh DB', () => {
+    it('idx_messages_session_position index exists on fresh DB', async () => {
         const store = new Store(':memory:')
         const db: Database = (store as any).db
         const rows = db.prepare(
@@ -391,7 +409,7 @@ describe('Store V8 byPosition pagination', () => {
         expect(rows).toHaveLength(1)
     })
 
-    it('idx_messages_session_position index exists after V7→V8 migration', () => {
+    it('idx_messages_session_position index exists after V7→V8 migration', async () => {
         const dir = mkdtempSync(join(tmpdir(), 'hapi-index-v7-v8-'))
         const dbPath = join(dir, 'test.db')
         let store: Store | undefined
@@ -411,7 +429,10 @@ describe('Store V8 byPosition pagination', () => {
             expect(rows).toHaveLength(1)
         } finally {
             store?.close()
-            rmSync(dir, { recursive: true, force: true })
+            // 释放对子 store 缓存 prepared statements 的最后一个可达引用，
+            // 否则 sqlite3_close_v2 永不真正关闭文件，Windows 下 rm 恒 EBUSY。
+            store = undefined
+            await rmDirWithRetry(dir)
         }
     })
 
@@ -421,7 +442,7 @@ describe('Store V8 byPosition pagination', () => {
     // layer: a low-position queued row must NOT appear in the latest page once
     // it's been pushed out, but it must still be discoverable via the
     // uninvoked set so the floating bar can render it.
-    it('latest page + uninvoked union: queued rows pushed out of the page are still surfaced', () => {
+    it('latest page + uninvoked union: queued rows pushed out of the page are still surfaced', async () => {
         const store = new Store(':memory:')
         const session = store.sessions.getOrCreateSession('test', { path: '/tmp' }, null, 'default')
 
@@ -448,7 +469,7 @@ describe('Store V8 byPosition pagination', () => {
     // web side: page rows are returned in ascending position order, so
     // pageRows[0] is the oldest row in the page and is the correct anchor for
     // the next older fetch.
-    it('getMessagesByPosition ascending order: pageRows[0] is the oldest in the page', () => {
+    it('getMessagesByPosition ascending order: pageRows[0] is the oldest in the page', async () => {
         const store = new Store(':memory:')
         const session = store.sessions.getOrCreateSession('test', { path: '/tmp' }, null, 'default')
         const m1 = store.messages.addMessage(session.id, 'm1')
@@ -465,7 +486,7 @@ describe('Store V8 byPosition pagination', () => {
         expect(page[2].id).toBe(m3.id)
     })
 
-    it('legacy DB (user_version=0 with V7-shape tables): step ladder backfills invoked_at and index', () => {
+    it('legacy DB (user_version=0 with V7-shape tables): step ladder backfills invoked_at and index', async () => {
         const dir = mkdtempSync(join(tmpdir(), 'hapi-legacy-v0-'))
         const dbPath = join(dir, 'test.db')
         let store: Store | undefined
@@ -502,7 +523,10 @@ describe('Store V8 byPosition pagination', () => {
             expect(rows).toHaveLength(1)
         } finally {
             store?.close()
-            rmSync(dir, { recursive: true, force: true })
+            // 释放对子 store 缓存 prepared statements 的最后一个可达引用，
+            // 否则 sqlite3_close_v2 永不真正关闭文件，Windows 下 rm 恒 EBUSY。
+            store = undefined
+            await rmDirWithRetry(dir)
         }
     })
 })
@@ -828,4 +852,21 @@ function createV4Schema(db: Database): void {
         );
         CREATE INDEX IF NOT EXISTS idx_push_subscriptions_namespace ON push_subscriptions(namespace);
     `)
+}
+
+// bun 的 rmSync 不实现 maxRetries；sqlite3_close_v2 把文件句柄挂到 GC 上，
+// Windows 上目录删除会 EBUSY。强制回收后重试（与 Store.close 同一模式）。
+async function rmDirWithRetry(dir: string): Promise<void> {
+    for (let attempt = 0; ; attempt += 1) {
+        try {
+            rmSync(dir, { recursive: true, force: true })
+            return
+        } catch (error) {
+            if (attempt >= 50) throw error
+            Bun.gc(true)
+            // 必须真正让出事件循环：bun:sqlite 的句柄 finalize 挂在 loop 上，
+            // sleepSync 会把它饿死，重试永远打不中。
+            await Bun.sleep(100)
+        }
+    }
 }

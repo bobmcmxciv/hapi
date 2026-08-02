@@ -12,8 +12,8 @@ import { Store } from './index'
  * Upstream main: V9→V10 = service_tier, V10→V11 = fcm_devices.
  * Scratchlist v2 takes V11→V12 for the new table.
  */
-describe('Store V11→V12 migration: session_scratchlist table', () => {
-    it('fresh DB has session_scratchlist table with expected columns', () => {
+describe('Store V11→V12 migration: session_scratchlist table', async () => {
+    it('fresh DB has session_scratchlist table with expected columns', async () => {
         const store = new Store(':memory:')
         const cols = getColumns(store, 'session_scratchlist')
         expect(cols).toContain('session_id')
@@ -23,7 +23,7 @@ describe('Store V11→V12 migration: session_scratchlist table', () => {
         expect(cols).toContain('updated_at')
     })
 
-    it('fresh DB has the (session_id, created_at) index', () => {
+    it('fresh DB has the (session_id, created_at) index', async () => {
         const store = new Store(':memory:')
         const db: Database = (store as unknown as { db: Database }).db
         const rows = db.prepare(
@@ -32,7 +32,7 @@ describe('Store V11→V12 migration: session_scratchlist table', () => {
         expect(rows).toHaveLength(1)
     })
 
-    it('V11 DB migrates through V14 via Store: session_scratchlist created', () => {
+    it('V11 DB migrates through V14 via Store: session_scratchlist created', async () => {
         const dir = mkdtempSync(join(tmpdir(), 'hapi-migration-v12-test-'))
         const dbPath = join(dir, 'test.db')
         let store: Store | undefined
@@ -57,11 +57,14 @@ describe('Store V11→V12 migration: session_scratchlist table', () => {
             expect(sessions.map((r) => r.id)).toEqual(['s1'])
         } finally {
             store?.close()
-            rmSync(dir, { recursive: true, force: true })
+            // 释放对子 store 缓存 prepared statements 的最后一个可达引用，
+            // 否则 sqlite3_close_v2 永不真正关闭文件，Windows 下 rm 恒 EBUSY。
+            store = undefined
+            await rmDirWithRetry(dir)
         }
     })
 
-    it('V9 DB migrates through V14 (multi-hop service_tier + fcm_devices + scratchlist)', () => {
+    it('V9 DB migrates through V14 (multi-hop service_tier + fcm_devices + scratchlist)', async () => {
         const dir = mkdtempSync(join(tmpdir(), 'hapi-migration-v9-to-v12-'))
         const dbPath = join(dir, 'test.db')
         let store: Store | undefined
@@ -80,11 +83,14 @@ describe('Store V11→V12 migration: session_scratchlist table', () => {
             expect(scratchCols).toContain('entry_id')
         } finally {
             store?.close()
-            rmSync(dir, { recursive: true, force: true })
+            // 释放对子 store 缓存 prepared statements 的最后一个可达引用，
+            // 否则 sqlite3_close_v2 永不真正关闭文件，Windows 下 rm 恒 EBUSY。
+            store = undefined
+            await rmDirWithRetry(dir)
         }
     })
 
-    it('current DB reopen is idempotent: schema unchanged', () => {
+    it('current DB reopen is idempotent: schema unchanged', async () => {
         const dir = mkdtempSync(join(tmpdir(), 'hapi-migration-v12-idempotent-'))
         const dbPath = join(dir, 'test.db')
         let store1: Store | undefined
@@ -99,7 +105,7 @@ describe('Store V11→V12 migration: session_scratchlist table', () => {
         } finally {
             store2?.close()
             store1?.close()
-            rmSync(dir, { recursive: true, force: true })
+            await rmDirWithRetry(dir)
         }
     })
 
@@ -117,14 +123,14 @@ describe('Store V11→V12 migration: session_scratchlist table', () => {
     })
 })
 
-describe('ScratchlistStore: CRUD through the typed-table wrapper', () => {
+describe('ScratchlistStore: CRUD through the typed-table wrapper', async () => {
     function setup() {
         const store = new Store(':memory:')
         const session = store.sessions.getOrCreateSession('test', { path: '/tmp' }, null, 'default')
         return { store, sessionId: session.id }
     }
 
-    it('create returns the canonical row and assigns an entryId when omitted', () => {
+    it('create returns the canonical row and assigns an entryId when omitted', async () => {
         const { store, sessionId } = setup()
         const result = store.scratchlist.create(sessionId, 'hello')
         if (result.outcome !== 'created') {
@@ -136,7 +142,7 @@ describe('ScratchlistStore: CRUD through the typed-table wrapper', () => {
         expect(result.entry.updatedAt).toBe(result.entry.createdAt)
     })
 
-    it('create preserves caller-supplied entryId and createdAt for migration path', () => {
+    it('create preserves caller-supplied entryId and createdAt for migration path', async () => {
         const { store, sessionId } = setup()
         const result = store.scratchlist.create(sessionId, 'migrated', {
             entryId: 'legacy-id-1',
@@ -148,7 +154,7 @@ describe('ScratchlistStore: CRUD through the typed-table wrapper', () => {
         expect(result.entry.updatedAt).toBeGreaterThan(12345)
     })
 
-    it('create with an existing entryId is reported as duplicate and returns the existing row', () => {
+    it('create with an existing entryId is reported as duplicate and returns the existing row', async () => {
         const { store, sessionId } = setup()
         const first = store.scratchlist.create(sessionId, 'first', { entryId: 'dup-id' })
         if (first.outcome !== 'created') throw new Error(`Expected created`)
@@ -159,13 +165,13 @@ describe('ScratchlistStore: CRUD through the typed-table wrapper', () => {
         expect(second.entry.text).toBe('first')
     })
 
-    it('create against a non-existent session reports session-not-found (not a SQLite error)', () => {
+    it('create against a non-existent session reports session-not-found (not a SQLite error)', async () => {
         const store = new Store(':memory:')
         const result = store.scratchlist.create('does-not-exist', 'orphan')
         expect(result.outcome).toBe('session-not-found')
     })
 
-    it('list returns entries in createdAt DESC order (newest first)', () => {
+    it('list returns entries in createdAt DESC order (newest first)', async () => {
         const { store, sessionId } = setup()
         const a = store.scratchlist.create(sessionId, 'oldest', { entryId: 'a', createdAt: 1000 })
         const b = store.scratchlist.create(sessionId, 'middle', { entryId: 'b', createdAt: 2000 })
@@ -177,7 +183,7 @@ describe('ScratchlistStore: CRUD through the typed-table wrapper', () => {
         expect(entries.map((e) => e.entryId)).toEqual(['c', 'b', 'a'])
     })
 
-    it('update bumps updated_at without touching createdAt; returns null for missing entries', () => {
+    it('update bumps updated_at without touching createdAt; returns null for missing entries', async () => {
         const { store, sessionId } = setup()
         const created = store.scratchlist.create(sessionId, 'before', {
             entryId: 'u1',
@@ -195,14 +201,14 @@ describe('ScratchlistStore: CRUD through the typed-table wrapper', () => {
         expect(missing).toBeNull()
     })
 
-    it('delete returns true when the row existed, false otherwise', () => {
+    it('delete returns true when the row existed, false otherwise', async () => {
         const { store, sessionId } = setup()
         store.scratchlist.create(sessionId, 'doomed', { entryId: 'd1' })
         expect(store.scratchlist.delete(sessionId, 'd1')).toBe(true)
         expect(store.scratchlist.delete(sessionId, 'd1')).toBe(false)
     })
 
-    it('count tracks current rows', () => {
+    it('count tracks current rows', async () => {
         const { store, sessionId } = setup()
         expect(store.scratchlist.count(sessionId)).toBe(0)
         store.scratchlist.create(sessionId, 'a', { entryId: 'a' })
@@ -212,7 +218,7 @@ describe('ScratchlistStore: CRUD through the typed-table wrapper', () => {
         expect(store.scratchlist.count(sessionId)).toBe(1)
     })
 
-    it('entries from session A are not visible to session B', () => {
+    it('entries from session A are not visible to session B', async () => {
         const store = new Store(':memory:')
         const a = store.sessions.getOrCreateSession('a', { path: '/a' }, null, 'default')
         const b = store.sessions.getOrCreateSession('b', { path: '/b' }, null, 'default')
@@ -333,4 +339,21 @@ function createV11Schema(db: Database): void {
         CREATE INDEX IF NOT EXISTS idx_fcm_devices_namespace ON fcm_devices(namespace);
         CREATE INDEX IF NOT EXISTS idx_fcm_devices_token ON fcm_devices(token);
     `)
+}
+
+// bun 的 rmSync 不实现 maxRetries；sqlite3_close_v2 把文件句柄挂到 GC 上，
+// Windows 上目录删除会 EBUSY。强制回收后重试（与 Store.close 同一模式）。
+async function rmDirWithRetry(dir: string): Promise<void> {
+    for (let attempt = 0; ; attempt += 1) {
+        try {
+            rmSync(dir, { recursive: true, force: true })
+            return
+        } catch (error) {
+            if (attempt >= 50) throw error
+            Bun.gc(true)
+            // 必须真正让出事件循环：bun:sqlite 的句柄 finalize 挂在 loop 上，
+            // sleepSync 会把它饿死，重试永远打不中。
+            await Bun.sleep(100)
+        }
+    }
 }

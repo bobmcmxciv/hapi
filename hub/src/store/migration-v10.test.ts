@@ -5,13 +5,13 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { Store } from './index'
 
-describe('Store V10→V11 migration: fcm_devices', () => {
-    it('fresh DB has fcm_devices table', () => {
+describe('Store V10→V11 migration: fcm_devices', async () => {
+    it('fresh DB has fcm_devices table', async () => {
         const store = new Store(':memory:')
         expect(tableExists(store, 'fcm_devices')).toBe(true)
     })
 
-    it('V10 DB migrates to V11: fcm_devices created', () => {
+    it('V10 DB migrates to V11: fcm_devices created', async () => {
         const dir = mkdtempSync(join(tmpdir(), 'hapi-migration-v11-test-'))
         const dbPath = join(dir, 'test.db')
         let store: Store | undefined
@@ -27,11 +27,14 @@ describe('Store V10→V11 migration: fcm_devices', () => {
             expect(tableExists(store, 'fcm_devices')).toBe(true)
         } finally {
             store?.close()
-            rmSync(dir, { recursive: true, force: true })
+            // 释放对子 store 缓存 prepared statements 的最后一个可达引用，
+            // 否则 sqlite3_close_v2 永不真正关闭文件，Windows 下 rm 恒 EBUSY。
+            store = undefined
+            await rmDirWithRetry(dir)
         }
     })
 
-    it('repairs a V11 DB missing fcm_devices before committing the latest version', () => {
+    it('repairs a V11 DB missing fcm_devices before committing the latest version', async () => {
         const dir = mkdtempSync(join(tmpdir(), 'hapi-migration-v11-repair-test-'))
         const dbPath = join(dir, 'test.db')
         let store: Store | undefined
@@ -48,17 +51,21 @@ describe('Store V10→V11 migration: fcm_devices', () => {
 
             const migrated = new Database(dbPath, { readonly: true, strict: true })
             try {
+                // 必须等于 store/index.ts 的 SCHEMA_VERSION（私有常量未导出）。
                 expect(readUserVersion(migrated)).toBe(20)
             } finally {
                 migrated.close()
             }
         } finally {
             store?.close()
-            rmSync(dir, { recursive: true, force: true })
+            // 释放对子 store 缓存 prepared statements 的最后一个可达引用，
+            // 否则 sqlite3_close_v2 永不真正关闭文件，Windows 下 rm 恒 EBUSY。
+            store = undefined
+            await rmDirWithRetry(dir)
         }
     })
 
-    it('rolls back repaired tables and version when final schema validation fails', () => {
+    it('rolls back repaired tables and version when final schema validation fails', async () => {
         const dir = mkdtempSync(join(tmpdir(), 'hapi-migration-v11-rollback-test-'))
         const dbPath = join(dir, 'test.db')
         try {
@@ -77,11 +84,11 @@ describe('Store V10→V11 migration: fcm_devices', () => {
                 rolledBack.close()
             }
         } finally {
-            rmSync(dir, { recursive: true, force: true })
+            await rmDirWithRetry(dir)
         }
     })
 
-    it('upsert replaces token for same namespace+deviceId+platform', () => {
+    it('upsert replaces token for same namespace+deviceId+platform', async () => {
         const store = new Store(':memory:')
         store.fcm.upsertDevice('default', {
             token: 'tok-a',
@@ -98,6 +105,23 @@ describe('Store V10→V11 migration: fcm_devices', () => {
         expect(devices[0].token).toBe('tok-b')
     })
 })
+
+// bun 的 rmSync 不实现 maxRetries/retryDelay；Windows 上 sqlite 句柄释放有滞后，
+// 显式重试直到 EBUSY 消失（断言早已完成，这里只是临时目录清理）。
+async function rmDirWithRetry(dir: string): Promise<void> {
+    for (let attempt = 0; ; attempt += 1) {
+        try {
+            rmSync(dir, { recursive: true, force: true })
+            return
+        } catch (error) {
+            if (attempt >= 50) throw error
+            // 测试自开的 readonly 连接与 prepared statements 走 sqlite3_close_v2，
+            // 文件句柄挂在 GC 上；强制回收后 EBUSY 才会消失（与 Store.close 同理）。
+            Bun.gc(true)
+            await Bun.sleep(100)
+        }
+    }
+}
 
 function tableExists(store: Store, name: string): boolean {
     const db: Database = (store as unknown as { db: Database }).db

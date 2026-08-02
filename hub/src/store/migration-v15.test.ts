@@ -11,8 +11,8 @@ import { Store } from './index'
  * `sessions.resume_with_session_model`. V16 reconciles both shapes before
  * subsequent migrations advance the database to the current schema.
  */
-describe('Store V15 migration: reconcile divergent columns', () => {
-    it('fresh DB has both v15 columns at the current schema', () => {
+describe('Store V15 migration: reconcile divergent columns', async () => {
+    it('fresh DB has both v15 columns at the current schema', async () => {
         const store = new Store(':memory:')
         expect(getColumns(store, 'session_scratchlist')).toContain('attachments')
         expect(getColumns(store, 'sessions')).toContain('resume_with_session_model')
@@ -22,7 +22,7 @@ describe('Store V15 migration: reconcile divergent columns', () => {
         store.close()
     })
 
-    it('V14 DB migrates through both additions to the current schema', () => {
+    it('V14 DB migrates through both additions to the current schema', async () => {
         const dir = mkdtempSync(join(tmpdir(), 'hapi-migration-v14-current-'))
         const dbPath = join(dir, 'test.db')
         let store: Store | undefined
@@ -40,11 +40,14 @@ describe('Store V15 migration: reconcile divergent columns', () => {
             expect(getUserVersion(store)).toBe(20)
         } finally {
             store?.close()
-            rmSync(dir, { recursive: true, force: true })
+            // 释放对子 store 缓存 prepared statements 的最后一个可达引用，
+            // 否则 sqlite3_close_v2 永不真正关闭文件，Windows 下 rm 恒 EBUSY。
+            store = undefined
+            await rmDirWithRetry(dir)
         }
     })
 
-    it('upstream V15 DB gains the fork column', () => {
+    it('upstream V15 DB gains the fork column', async () => {
         const dir = mkdtempSync(join(tmpdir(), 'hapi-migration-upstream-v15-'))
         const dbPath = join(dir, 'test.db')
         let store: Store | undefined
@@ -63,11 +66,14 @@ describe('Store V15 migration: reconcile divergent columns', () => {
             expect(getUserVersion(store)).toBe(20)
         } finally {
             store?.close()
-            rmSync(dir, { recursive: true, force: true })
+            // 释放对子 store 缓存 prepared statements 的最后一个可达引用，
+            // 否则 sqlite3_close_v2 永不真正关闭文件，Windows 下 rm 恒 EBUSY。
+            store = undefined
+            await rmDirWithRetry(dir)
         }
     })
 
-    it('fork V15 DB gains the upstream column', () => {
+    it('fork V15 DB gains the upstream column', async () => {
         const dir = mkdtempSync(join(tmpdir(), 'hapi-migration-fork-v15-'))
         const dbPath = join(dir, 'test.db')
         let store: Store | undefined
@@ -86,11 +92,14 @@ describe('Store V15 migration: reconcile divergent columns', () => {
             expect(getUserVersion(store)).toBe(20)
         } finally {
             store?.close()
-            rmSync(dir, { recursive: true, force: true })
+            // 释放对子 store 缓存 prepared statements 的最后一个可达引用，
+            // 否则 sqlite3_close_v2 永不真正关闭文件，Windows 下 rm 恒 EBUSY。
+            store = undefined
+            await rmDirWithRetry(dir)
         }
     })
 
-    it('current schema reopen is idempotent', () => {
+    it('current schema reopen is idempotent', async () => {
         const dir = mkdtempSync(join(tmpdir(), 'hapi-migration-current-idempotent-'))
         const dbPath = join(dir, 'test.db')
         let first: Store | undefined
@@ -107,7 +116,7 @@ describe('Store V15 migration: reconcile divergent columns', () => {
         } finally {
             second?.close()
             first?.close()
-            rmSync(dir, { recursive: true, force: true })
+            await rmDirWithRetry(dir)
         }
     })
 })
@@ -224,4 +233,21 @@ function createV14Schema(db: Database): void {
         CREATE INDEX IF NOT EXISTS idx_session_scratchlist_session_created
             ON session_scratchlist(session_id, created_at DESC);
     `)
+}
+
+// bun 的 rmSync 不实现 maxRetries；sqlite3_close_v2 把文件句柄挂到 GC 上，
+// Windows 上目录删除会 EBUSY。强制回收后重试（与 Store.close 同一模式）。
+async function rmDirWithRetry(dir: string): Promise<void> {
+    for (let attempt = 0; ; attempt += 1) {
+        try {
+            rmSync(dir, { recursive: true, force: true })
+            return
+        } catch (error) {
+            if (attempt >= 50) throw error
+            Bun.gc(true)
+            // 必须真正让出事件循环：bun:sqlite 的句柄 finalize 挂在 loop 上，
+            // sleepSync 会把它饿死，重试永远打不中。
+            await Bun.sleep(100)
+        }
+    }
 }
