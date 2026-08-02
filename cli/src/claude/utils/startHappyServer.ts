@@ -235,6 +235,45 @@ function createHapiMcpServer(
         }
     });
 
+    mcp.registerTool<any, any>('inspect_peer', {
+        description: 'Read another HAPI session (metadata + recent message text). Resolves by session id / prefix on the same hub/namespace. Read-only: does not resume. Prefer this (or `hapi inspect-peer`) over JWT+curl. When the user cites [title](/sessions/<id>), pass that <id> as sessionIdPrefix.',
+        title: 'Inspect Peer Session',
+        inputSchema: inspectPeerInputSchema,
+    }, async (args: { sessionIdPrefix: string; messageLimit?: number }) => {
+        logger.debug('[hapiMCP] inspect_peer:', args.sessionIdPrefix);
+        try {
+            const result = await inspectPeer({
+                sessionIdPrefix: args.sessionIdPrefix,
+                messageLimit: args.messageLimit,
+            });
+            return {
+                content: [
+                    {
+                        type: 'text' as const,
+                        text: formatInspectPeerReport(result),
+                    },
+                ],
+                isError: false,
+            };
+        } catch (error) {
+            const message = error instanceof PingPeerError
+                ? error.message
+                : error instanceof Error
+                    ? error.message
+                    : String(error);
+            logger.debug('[hapiMCP] inspect_peer failed:', message);
+            return {
+                content: [
+                    {
+                        type: 'text' as const,
+                        text: `Failed to inspect peer: ${message}`,
+                    },
+                ],
+                isError: true,
+            };
+        }
+    });
+
     mcp.registerTool<any, any>('display_video', {
         description: 'Display a local mp4 or webm file inline in the current HAPI chat session. Call with the absolute filesystem path when the user should see a screen recording or video artifact.',
         title: 'Display Video',
@@ -308,45 +347,6 @@ function createHapiMcpServer(
                     {
                         type: 'text' as const,
                         text: `Failed to send file: ${message}`,
-                    },
-                ],
-                isError: true,
-            };
-        }
-    });
-
-    mcp.registerTool<any, any>('inspect_peer', {
-        description: 'Read another HAPI session (metadata + recent message text). Resolves by session id / prefix on the same hub/namespace. Read-only: does not resume. Prefer this (or `hapi inspect-peer`) over JWT+curl. When the user cites [title](/sessions/<id>), pass that <id> as sessionIdPrefix.',
-        title: 'Inspect Peer Session',
-        inputSchema: inspectPeerInputSchema,
-    }, async (args: { sessionIdPrefix: string; messageLimit?: number }) => {
-        logger.debug('[hapiMCP] inspect_peer:', args.sessionIdPrefix);
-        try {
-            const result = await inspectPeer({
-                sessionIdPrefix: args.sessionIdPrefix,
-                messageLimit: args.messageLimit,
-            });
-            return {
-                content: [
-                    {
-                        type: 'text' as const,
-                        text: formatInspectPeerReport(result),
-                    },
-                ],
-                isError: false,
-            };
-        } catch (error) {
-            const message = error instanceof PingPeerError
-                ? error.message
-                : error instanceof Error
-                    ? error.message
-                    : String(error);
-            logger.debug('[hapiMCP] inspect_peer failed:', message);
-            return {
-                content: [
-                    {
-                        type: 'text' as const,
-                        text: `Failed to inspect peer: ${message}`,
                     },
                 ],
                 isError: true,

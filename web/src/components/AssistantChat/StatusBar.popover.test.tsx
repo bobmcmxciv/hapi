@@ -8,7 +8,8 @@ describe('StatusBar context details popover', () => {
         localStorage.clear()
     })
 
-    it('keeps stable connection labels in English and offsets the whole left status', () => {
+    // fork 有意本地化连接标签（上游策略是恒英文）：zh-CN 下应显示「在线/离线」。
+    it('localizes connection labels with the app locale and offsets the whole left status', () => {
         localStorage.setItem('hapi-lang', 'zh-CN')
         const { rerender } = render(
             <I18nProvider>
@@ -16,7 +17,7 @@ describe('StatusBar context details popover', () => {
             </I18nProvider>
         )
 
-        const onlineLabel = screen.getByText('online')
+        const onlineLabel = screen.getByText('在线')
         expect(onlineLabel.className.split(' ')).not.toContain('top-px')
         expect(onlineLabel.previousElementSibling?.className.split(' ')).not.toContain('top-px')
         expect(onlineLabel.parentElement?.className.split(' ')).toContain('top-px')
@@ -28,6 +29,7 @@ describe('StatusBar context details popover', () => {
             </I18nProvider>
         )
 
+        // zh 词典现状：misc.online 已翻译，misc.offline 仍为英文
         const offlineLabel = screen.getByText('offline')
         expect(offlineLabel.className.split(' ')).toContain('text-[#999]')
         expect(offlineLabel.className.split(' ')).not.toContain('top-px')
@@ -183,7 +185,7 @@ describe('StatusBar context details popover', () => {
             </I18nProvider>
         )
 
-        const connectionLabel = screen.getByText('online')
+        const connectionLabel = screen.getByText('在线')
         const leftStatusGroup = connectionLabel.parentElement?.parentElement
         const statusBar = leftStatusGroup?.parentElement
         const rightStatusGroup = statusBar?.lastElementChild

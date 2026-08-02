@@ -1,4 +1,5 @@
 import type { Database } from 'bun:sqlite'
+import { decodeMessageContent } from '../../hub/src/store/contentCodec'
 
 export type UsageAggregateRow = {
     model: string
@@ -83,139 +84,111 @@ export function aggregateUsageForSessions(
         return []
     }
 
-    const params: string[] = [...sessionIds]
-    let timeClause = ''
-    if (opts?.sinceIso) {
-        timeClause += ` AND json_extract(content, '$.content.data.timestamp') >= ?`
-        params.push(opts.sinceIso)
-    }
-    if (opts?.untilIso) {
-        timeClause += ` AND json_extract(content, '$.content.data.timestamp') < ?`
-        params.push(opts.untilIso)
-    }
-
+    // contentCodec (schema V16) 之后 messages.content 可能是 zstd BLOB，
+    // json_extract / LIKE 都无法在 SQL 侧使用；改为整段取出 → 解码 → JS 聚合。
+    // 统计页低频调用，扫描一次可见会话的全部行是可接受的成本。
     const placeholders = sessionIds.map(() => '?').join(',')
     const rows = db.prepare(`
-        SELECT
-            model,
-            COUNT(*) AS requestCount,
-            COALESCE(SUM(inputTokens), 0) AS inputTokens,
-            COALESCE(SUM(outputTokens), 0) AS outputTokens,
-            COALESCE(SUM(cacheCreationInputTokens), 0) AS cacheCreationInputTokens,
-            COALESCE(SUM(cacheReadInputTokens), 0) AS cacheReadInputTokens
-        FROM (
-            SELECT DISTINCT
-                json_extract(content, '$.content.data.message.id') AS messageId,
-                json_extract(content, '$.content.data.message.model') AS model,
-                COALESCE(json_extract(content, '$.content.data.message.usage.input_tokens'), 0) AS inputTokens,
-                COALESCE(json_extract(content, '$.content.data.message.usage.output_tokens'), 0) AS outputTokens,
-                COALESCE(json_extract(content, '$.content.data.message.usage.cache_creation_input_tokens'), 0) AS cacheCreationInputTokens,
-                COALESCE(json_extract(content, '$.content.data.message.usage.cache_read_input_tokens'), 0) AS cacheReadInputTokens
-            FROM messages
-            WHERE session_id IN (${placeholders})
-              AND content LIKE '%"usage"%'
-              AND json_extract(content, '$.role') = 'agent'
-              AND json_extract(content, '$.content.type') = 'output'
-              AND json_extract(content, '$.content.data.type') = 'assistant'
-              AND json_extract(content, '$.content.data.message.id') IS NOT NULL
-              AND json_extract(content, '$.content.data.message.model') IS NOT NULL
-              AND json_extract(content, '$.content.data.message.model') != '<synthetic>'
-              ${timeClause}
-        )
-        GROUP BY model
-    `).all(...params) as UsageAggregateRow[]
+        SELECT session_id AS sessionId, seq, content
+        FROM messages
+        WHERE session_id IN (${placeholders})
+        ORDER BY session_id, seq
+    `).all(...sessionIds) as Array<{ sessionId: string; seq: number; content: string | Uint8Array }>
 
-    return mergeUsageReportFallback(rows, queryUsageReportTotals(db, sessionIds, opts))
-}
-
-/** Per-model token totals recovered from `usage_report` frames.
- *
- *  These come from the SDK `result` message (see sdkToLogConverter), which is the
- *  only place token counts appear for an upstream that cannot populate
- *  `message_start` — an OpenAI-compatible proxy learns the counts only when the
- *  upstream stream ends, so its `assistant` messages all carry usage 0.
- *
- *  **`modelUsage` is a running total, not a per-turn figure.** The SDK session is
- *  one long-lived agent process, and its `result` message reports everything that
- *  process has spent so far. Measured on a live 3-turn gpt-5.6-sol session:
- *
- *      seq=4  input=55931   output=5
- *      seq=8  input=111945  output=10
- *      seq=12 input=168046  output=15
- *
- *  Summing frames would report 335,922 for a session that actually consumed
- *  168,046 — an (n+1)/2 inflation that grows with turn count. So each frame
- *  contributes only its *delta* over the previous frame of the same session and
- *  model. A frame lower than its predecessor means the counter restarted (the
- *  session was resumed into a fresh process), so it contributes its full value.
- *
- *  Deltas are computed across every frame of the session and only then filtered
- *  by time: windowing the frames first would make the earliest surviving frame
- *  contribute its whole running total, re-inflating any window that starts
- *  mid-session. */
-function queryUsageReportTotals(
-    db: Database,
-    sessionIds: string[],
-    opts?: { sinceIso?: string | null; untilIso?: string | null }
-): Map<string, Omit<UsageAggregateRow, 'model' | 'requestCount'>> {
-    const params: string[] = [...sessionIds]
-    let timeClause = ''
-    if (opts?.sinceIso) {
-        timeClause += ` AND ts >= ?`
-        params.push(opts.sinceIso)
-    }
-    if (opts?.untilIso) {
-        timeClause += ` AND ts < ?`
-        params.push(opts.untilIso)
+    const sinceIso = opts?.sinceIso ?? null
+    const untilIso = opts?.untilIso ?? null
+    const inWindow = (ts: unknown): boolean => {
+        if (typeof ts !== 'string' || !ts) return false
+        if (sinceIso && ts < sinceIso) return false
+        if (untilIso && ts >= untilIso) return false
+        return true
     }
 
-    const placeholders = sessionIds.map(() => '?').join(',')
-    const rows = db.prepare(`
-        WITH frames AS (
-            SELECT
-                messages.session_id AS sessionId,
-                messages.seq AS seq,
-                json_extract(messages.content, '$.content.data.timestamp') AS ts,
-                usage_entry.key AS model,
-                COALESCE(json_extract(usage_entry.value, '$.inputTokens'), 0) AS inputTokens,
-                COALESCE(json_extract(usage_entry.value, '$.outputTokens'), 0) AS outputTokens,
-                COALESCE(json_extract(usage_entry.value, '$.cacheCreationInputTokens'), 0) AS cacheCreationInputTokens,
-                COALESCE(json_extract(usage_entry.value, '$.cacheReadInputTokens'), 0) AS cacheReadInputTokens
-            FROM messages,
-                 json_each(json_extract(messages.content, '$.content.data.modelUsage')) AS usage_entry
-            WHERE messages.session_id IN (${placeholders})
-              AND json_extract(messages.content, '$.role') = 'agent'
-              AND json_extract(messages.content, '$.content.type') = 'output'
-              AND json_extract(messages.content, '$.content.data.type') = 'usage_report'
-        ),
-        lagged AS (
-            SELECT
-                model, ts,
-                inputTokens, outputTokens, cacheCreationInputTokens, cacheReadInputTokens,
-                LAG(inputTokens) OVER w AS prevInput,
-                LAG(outputTokens) OVER w AS prevOutput,
-                LAG(cacheCreationInputTokens) OVER w AS prevCacheCreation,
-                LAG(cacheReadInputTokens) OVER w AS prevCacheRead
-            FROM frames
-            WINDOW w AS (PARTITION BY sessionId, model ORDER BY seq)
-        )
-        SELECT
-            model,
-            COALESCE(SUM(CASE WHEN prevInput IS NULL OR inputTokens < prevInput
-                              THEN inputTokens ELSE inputTokens - prevInput END), 0) AS inputTokens,
-            COALESCE(SUM(CASE WHEN prevOutput IS NULL OR outputTokens < prevOutput
-                              THEN outputTokens ELSE outputTokens - prevOutput END), 0) AS outputTokens,
-            COALESCE(SUM(CASE WHEN prevCacheCreation IS NULL OR cacheCreationInputTokens < prevCacheCreation
-                              THEN cacheCreationInputTokens ELSE cacheCreationInputTokens - prevCacheCreation END), 0) AS cacheCreationInputTokens,
-            COALESCE(SUM(CASE WHEN prevCacheRead IS NULL OR cacheReadInputTokens < prevCacheRead
-                              THEN cacheReadInputTokens ELSE cacheReadInputTokens - prevCacheRead END), 0) AS cacheReadInputTokens
-        FROM lagged
-        WHERE 1 = 1
-          ${timeClause}
-        GROUP BY model
-    `).all(...params) as Array<{ model: string } & Omit<UsageAggregateRow, 'model' | 'requestCount'>>
+    // —— assistant 行（官方口径）：按 message.id+model 去重后求和 ——
+    const seenTurn = new Set<string>()
+    const assistantAgg = new Map<string, UsageAggregateRow>()
+    // —— usage_report 帧：先按 (session, model) 全程算差值，再按时间窗过滤 ——
+    type FrameNums = { inputTokens: number; outputTokens: number; cacheCreationInputTokens: number; cacheReadInputTokens: number }
+    const prevFrame = new Map<string, FrameNums>()
+    const frameAgg = new Map<string, FrameNums>()
 
-    return new Map(rows.map(({ model, ...totals }) => [model, totals]))
+    for (const row of rows) {
+        let content: unknown
+        try {
+            content = decodeMessageContent(row.content as never)
+        } catch {
+            continue
+        }
+        if (!content || typeof content !== 'object') continue
+        const record = content as Record<string, unknown>
+        if (record.role !== 'agent') continue
+        const outer = record.content as Record<string, unknown> | undefined
+        if (!outer || outer.type !== 'output') continue
+        const data = outer.data as Record<string, unknown> | undefined
+        if (!data) continue
+
+        if (data.type === 'assistant') {
+            const message = data.message as Record<string, unknown> | undefined
+            const messageId = message?.id
+            const model = message?.model
+            if (typeof messageId !== 'string' || typeof model !== 'string' || model === '<synthetic>') continue
+            const usage = message?.usage as Record<string, unknown> | undefined
+            if (!usage) continue
+            if (!inWindow(data.timestamp)) continue
+            // Claude Code 同一 API 轮写多行、usage 逐行重复（实测 150,180 行только
+            // 69,935 个 distinct message.id），必须按轮去重否则整体虚高 ~2.15x。
+            const turnKey = `${messageId}::${model}`
+            if (seenTurn.has(turnKey)) continue
+            seenTurn.add(turnKey)
+            const agg = assistantAgg.get(model) ?? {
+                model, requestCount: 0, inputTokens: 0, outputTokens: 0,
+                cacheCreationInputTokens: 0, cacheReadInputTokens: 0
+            }
+            agg.requestCount += 1
+            agg.inputTokens += Number(usage.input_tokens) || 0
+            agg.outputTokens += Number(usage.output_tokens) || 0
+            agg.cacheCreationInputTokens += Number(usage.cache_creation_input_tokens) || 0
+            agg.cacheReadInputTokens += Number(usage.cache_read_input_tokens) || 0
+            assistantAgg.set(model, agg)
+            continue
+        }
+
+        if (data.type === 'usage_report') {
+            const modelUsage = data.modelUsage as Record<string, unknown> | undefined
+            if (!modelUsage) continue
+            for (const [model, entryRaw] of Object.entries(modelUsage)) {
+                const entry = (entryRaw ?? {}) as Record<string, unknown>
+                const nums: FrameNums = {
+                    inputTokens: Number(entry.inputTokens) || 0,
+                    outputTokens: Number(entry.outputTokens) || 0,
+                    cacheCreationInputTokens: Number(entry.cacheCreationInputTokens) || 0,
+                    cacheReadInputTokens: Number(entry.cacheReadInputTokens) || 0
+                }
+                const key = `${row.sessionId}::${model}`
+                const prev = prevFrame.get(key)
+                prevFrame.set(key, nums)
+                // modelUsage 是常驻进程运行总计：帧对前一帧取差值；回落=进程重启按全额。
+                const delta: FrameNums = prev ? {
+                    inputTokens: nums.inputTokens < prev.inputTokens ? nums.inputTokens : nums.inputTokens - prev.inputTokens,
+                    outputTokens: nums.outputTokens < prev.outputTokens ? nums.outputTokens : nums.outputTokens - prev.outputTokens,
+                    cacheCreationInputTokens: nums.cacheCreationInputTokens < prev.cacheCreationInputTokens ? nums.cacheCreationInputTokens : nums.cacheCreationInputTokens - prev.cacheCreationInputTokens,
+                    cacheReadInputTokens: nums.cacheReadInputTokens < prev.cacheReadInputTokens ? nums.cacheReadInputTokens : nums.cacheReadInputTokens - prev.cacheReadInputTokens
+                } : nums
+                // 时间窗在差值之后过滤：先窗后差会让窗内首帧把整段运行总计算进来。
+                if (!inWindow(data.timestamp)) continue
+                const agg = frameAgg.get(model) ?? {
+                    inputTokens: 0, outputTokens: 0, cacheCreationInputTokens: 0, cacheReadInputTokens: 0
+                }
+                agg.inputTokens += delta.inputTokens
+                agg.outputTokens += delta.outputTokens
+                agg.cacheCreationInputTokens += delta.cacheCreationInputTokens
+                agg.cacheReadInputTokens += delta.cacheReadInputTokens
+                frameAgg.set(model, agg)
+            }
+        }
+    }
+
+    return mergeUsageReportFallback([...assistantAgg.values()], frameAgg)
 }
 
 /** Strip a trailing context-window variant suffix: `gpt-5.6-sol[1m]` → `gpt-5.6-sol`.

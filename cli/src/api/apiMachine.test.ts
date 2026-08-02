@@ -96,8 +96,10 @@ describe('ApiMachineClient create-directory handler', () => {
 
         try {
             const result = await callCreateDirectory(client, machine.id, workspaceRoot, 'new-project')
-            expect(result).toEqual({ success: true, path: join(realpathSync(workspaceRoot), 'new-project') })
-            expect(realpathSync(join(workspaceRoot, 'new-project'))).toBe(join(realpathSync(workspaceRoot), 'new-project'))
+            // 处理器用 realpathSync.native 归一（Windows 上把 8.3 短名展开成长路径），
+            // 期望侧必须走同一 API，否则 ADMINI~1 vs Administrator 恒不等。
+            expect(result).toEqual({ success: true, path: join(realpathSync.native(workspaceRoot), 'new-project') })
+            expect(realpathSync.native(join(workspaceRoot, 'new-project'))).toBe(join(realpathSync.native(workspaceRoot), 'new-project'))
         } finally {
             client.shutdown()
             rmSync(workspaceRoot, { recursive: true, force: true })
