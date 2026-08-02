@@ -123,7 +123,9 @@ describe('AcpVerifyProbe — agent-acp-active lock acquisition (Codex #34 P2 v2)
         expect(existsSync(lockDir(hapiHome))).toBe(false)
     })
 
-    it('falls back to $HOME/.local/bin and $HOME/.npm-global/bin in PATH when spawning agent (live dogfood 2026-06-07 regression: hub systemd unit ships minimal PATH AND the migrator overrides HOME to a tmpdir for isolation)', async () => {
+    // 三个 PATH 兜底用例的 stub 是 #!/bin/sh 脚本（printenv），只在 Linux 语义下可执行；
+    // 生产 hub 跑在 ECS Linux，CI(Linux) 覆盖这三条。win32 本地跑必然 exit 1，显式跳过。
+    it.skipIf(process.platform === 'win32')('falls back to $HOME/.local/bin and $HOME/.npm-global/bin in PATH when spawning agent (live dogfood 2026-06-07 regression: hub systemd unit ships minimal PATH AND the migrator overrides HOME to a tmpdir for isolation)', async () => {
         // The dogfood failure mode: hapi-hub.service ships minimal PATH and
         // never sees ~/.local/bin/agent. The migrator additionally overrides
         // HOME for the verify probe (HAPI_HOME isolation) — so any naive
@@ -195,7 +197,9 @@ describe('AcpVerifyProbe — agent-acp-active lock acquisition (Codex #34 P2 v2)
         }
     })
 
-    it('preserves explicit options.env.PATH precedence over the cursor-bin fallback (Codex #34 P2 round-13 F3)', async () => {
+    // 三个 PATH 兜底用例的 stub 是 #!/bin/sh 脚本（printenv），只在 Linux 语义下可执行；
+    // 生产 hub 跑在 ECS Linux，CI(Linux) 覆盖这三条。win32 本地跑必然 exit 1，显式跳过。
+    it.skipIf(process.platform === 'win32')('preserves explicit options.env.PATH precedence over the cursor-bin fallback (Codex #34 P2 round-13 F3)', async () => {
         // When the caller deliberately supplies options.env.PATH with a
         // pinned `agent` (e.g. a staging Cursor install or a wrapper),
         // the cursor-bin fallback must NOT override it. We test by giving
@@ -235,7 +239,9 @@ describe('AcpVerifyProbe — agent-acp-active lock acquisition (Codex #34 P2 v2)
         }
     })
 
-    it('joins augmented PATH with path.delimiter (Codex #34 P2 round-13 F1: Windows uses ; not :)', async () => {
+    // 三个 PATH 兜底用例的 stub 是 #!/bin/sh 脚本（printenv），只在 Linux 语义下可执行；
+    // 生产 hub 跑在 ECS Linux，CI(Linux) 覆盖这三条。win32 本地跑必然 exit 1，显式跳过。
+    it.skipIf(process.platform === 'win32')('joins augmented PATH with path.delimiter (Codex #34 P2 round-13 F1: Windows uses ; not :)', async () => {
         // Indirect assertion via spawn behaviour: on linux the delimiter is
         // `:`. We can't actually drive a win32 spawn from this test runner,
         // but we can confirm the join uses path.delimiter by checking that

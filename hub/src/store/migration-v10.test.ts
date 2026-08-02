@@ -27,7 +27,7 @@ describe('Store V10→V11 migration: fcm_devices', () => {
             expect(tableExists(store, 'fcm_devices')).toBe(true)
         } finally {
             store?.close()
-            rmSync(dir, { recursive: true, force: true })
+            rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
         }
     })
 
@@ -54,7 +54,7 @@ describe('Store V10→V11 migration: fcm_devices', () => {
             }
         } finally {
             store?.close()
-            rmSync(dir, { recursive: true, force: true })
+            rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
         }
     })
 
@@ -77,7 +77,7 @@ describe('Store V10→V11 migration: fcm_devices', () => {
                 rolledBack.close()
             }
         } finally {
-            rmSync(dir, { recursive: true, force: true })
+            rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
         }
     })
 
