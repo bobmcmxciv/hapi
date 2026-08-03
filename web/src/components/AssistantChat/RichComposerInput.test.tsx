@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { flushSync } from 'react-dom'
 import { useState } from 'react'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -81,5 +81,37 @@ describe('RichComposerInput controlled synchronization', () => {
 
         expect(serializeComposerSegments(segmentsFromEditor(editor))).toBe('external draft')
         expect(selectionOffset(editor)).toBe('external draft'.length)
+    })
+})
+
+describe('IME 组合期间的占位符', () => {
+    afterEach(() => cleanup())
+
+    function renderEmpty() {
+        render(
+            <RichComposerInput
+                value=""
+                placeholder="给 HAPI 发消息"
+                onValueChange={() => {}}
+                onMirrorChange={() => {}}
+            />
+        )
+        return screen.getByTestId('rich-composer-input')
+    }
+
+    it('组合开始后隐藏占位符，避免与输入法组合中的文字叠印', () => {
+        const editor = renderEmpty()
+        expect(screen.queryByText('给 HAPI 发消息')).toBeTruthy()
+
+        // 输入法开始组合：value 仍是空串（尚未提交），占位符必须让位。
+        fireEvent.compositionStart(editor)
+        expect(screen.queryByText('给 HAPI 发消息')).toBeNull()
+    })
+
+    it('组合结束且内容仍为空时占位符回来', () => {
+        const editor = renderEmpty()
+        fireEvent.compositionStart(editor)
+        fireEvent.compositionEnd(editor)
+        expect(screen.queryByText('给 HAPI 发消息')).toBeTruthy()
     })
 })

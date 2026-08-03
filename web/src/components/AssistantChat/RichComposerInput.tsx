@@ -448,6 +448,10 @@ export const RichComposerInput = forwardRef<RichComposerInputHandle, Props>(func
     // null until first sync/emit so mount-time `value` always paints into the DOM.
     const lastEmittedRef = useRef<string | null>(null)
     const composingRef = useRef(false)
+    // 占位符是自绘的绝对定位覆盖层，判据只能看 `value`；而 IME 组合中的文字尚未
+    // 提交，`value` 仍是空字符串，占位符便与组合文字叠印在一起。ref 不触发重渲染，
+    // 所以另用 state 让占位符在组合期间让位。
+    const [composing, setComposing] = useState(false)
     const tooltipTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
     const hoveredChipRef = useRef<HTMLElement | null>(null)
     const [mentionTooltip, setMentionTooltip] = useState<MentionTooltipState | null>(null)
@@ -777,7 +781,7 @@ export const RichComposerInput = forwardRef<RichComposerInputHandle, Props>(func
 
     return (
         <div className="relative min-w-0 flex-1">
-            {(!value || value.length === 0) && placeholder ? (
+            {(!value || value.length === 0) && !composing && placeholder ? (
                 <div
                     aria-hidden
                     className="pointer-events-none absolute inset-0 text-base leading-snug text-[var(--app-hint)]"
@@ -806,9 +810,11 @@ export const RichComposerInput = forwardRef<RichComposerInputHandle, Props>(func
                 onPaste={handlePaste}
                 onCompositionStart={() => {
                     composingRef.current = true
+                    setComposing(true)
                 }}
                 onCompositionEnd={() => {
                     composingRef.current = false
+                    setComposing(false)
                     onEdit?.()
                     emitFromDom()
                 }}
