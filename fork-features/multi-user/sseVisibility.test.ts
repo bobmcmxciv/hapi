@@ -121,3 +121,19 @@ describe('executionMount 的 /api/events 才是真实路由（回归钉）', () 
             .toContain('canDeliver')
     })
 })
+
+describe('owner 自己的资源：谓词必须放行（否则 all 订阅拦下、bindings 又不订阅）', () => {
+    it('owner 能收到自己拥有的会话事件', () => {
+        const { store, ownerId } = setupStore()
+        const predicate = createSseEventFilterFactory(store)(ownerId)!
+        // executionMount 的 bindings 用 ownerAccountId !== account.id 过滤，
+        // 自有资源只靠 `all: true` 那条订阅送达——谓词一旦误拦就彻底收不到。
+        expect(predicate(sessionEvent('session-owned'))).toBe(true)
+    })
+
+    it('grantee 同时被 all 订阅与精确订阅覆盖，两条都应放行', () => {
+        const { store, granteeId } = setupStore()
+        const predicate = createSseEventFilterFactory(store)(granteeId)!
+        expect(predicate(sessionEvent('session-owned'))).toBe(true)
+    })
+})
