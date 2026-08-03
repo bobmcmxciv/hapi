@@ -217,3 +217,35 @@ describe('HappyComposer resume model setting', () => {
         expect(onEffortChange).toHaveBeenCalledWith('high')
     })
 })
+
+describe('HappyComposer IME composition', () => {
+    afterEach(() => {
+        cleanup()
+    })
+
+    function renderComposer() {
+        renderInProviders(<HappyComposer agentFlavor="claude" active />)
+        return screen.getByRole('textbox')
+    }
+
+    it('swallows the IME-confirming Enter so it does not also insert a newline', () => {
+        const textarea = renderComposer()
+
+        // 中文输入法英文模式：确认候选的那次 Enter。IME 经 composition 事件提交
+        // 文本，若不 preventDefault，同一个 keydown 的默认行为还会插一个换行。
+        const confirming = fireEvent.keyDown(textarea, { key: 'Enter', isComposing: true })
+        expect(confirming).toBe(false)
+
+        // 部分 Windows 输入法在这次 keydown 上 isComposing 已为 false，只剩 229。
+        const confirmingLegacy = fireEvent.keyDown(textarea, { key: 'Enter', keyCode: 229 })
+        expect(confirmingLegacy).toBe(false)
+    })
+
+    it('leaves non-Enter composition keys alone so candidate navigation works', () => {
+        const textarea = renderComposer()
+
+        for (const key of ['ArrowDown', 'ArrowUp', 'Backspace']) {
+            expect(fireEvent.keyDown(textarea, { key, isComposing: true })).toBe(true)
+        }
+    })
+})

@@ -66,3 +66,50 @@ describe('TodoPanel', () => {
         expect(screen.getByTestId('todo-panel')).toHaveTextContent('仅属于 session A')
     })
 })
+
+describe('TodoPanel 合并会话状态', () => {
+    const status = {
+        goal: { objective: '合并两个面板', status: 'in_progress', timeUsedSeconds: 90 },
+        tasks: [],
+        subagents: [
+            { id: 'sub-1', title: '子代理甲', state: 'running', detail: '扫描仓库', startedAt: Date.now() - 5000, endedAt: null }
+        ],
+        terminals: [{ id: 'term-1', command: 'bun run build', cwd: '/repo', startedAt: Date.now() - 8000 }],
+        undiscoveredTerminalCount: 0,
+        possibleTerminalCommands: []
+    } as never
+
+    function renderWithStatus(todos: TodoItem[], s: unknown = status) {
+        return render(
+            <I18nProvider>
+                <TodoPanel sessionId="session-117" todos={todos} status={s as never} />
+            </I18nProvider>
+        )
+    }
+
+    it('把目标 / 子代理 / 后台终端渲染进任务清单面板', () => {
+        renderWithStatus([{ id: '1', content: '写代码', status: 'in_progress', priority: 'high' }])
+
+        const panel = screen.getByTestId('todo-panel')
+        expect(panel.textContent).toContain('写代码')
+        expect(panel.textContent).toContain('合并两个面板')
+        expect(panel.textContent).toContain('子代理甲')
+        expect(panel.textContent).toContain('bun run build')
+    })
+
+    it('没有任务但有状态内容时仍然渲染', () => {
+        renderWithStatus([])
+        expect(screen.getByTestId('todo-panel')).toBeTruthy()
+    })
+
+    it('任务与状态都为空时不渲染', () => {
+        renderWithStatus([], null)
+        expect(screen.queryByTestId('todo-panel')).toBeNull()
+    })
+
+    it('折叠态没有进行中任务时回退显示会话目标', () => {
+        localStorage.setItem('hapi.todo-panel.collapsed', '1')
+        renderWithStatus([{ id: '1', content: '已完成项', status: 'completed', priority: 'low' }])
+        expect(screen.getByTestId('todo-panel').textContent).toContain('合并两个面板')
+    })
+})

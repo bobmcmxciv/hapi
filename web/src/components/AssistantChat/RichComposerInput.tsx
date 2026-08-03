@@ -714,7 +714,11 @@ export const RichComposerInput = forwardRef<RichComposerInputHandle, Props>(func
     // in-editor moves. Native CE drop + plaintext-only / paste path is enough for #1215.
 
     const handleKeyDown = useCallback((e: ReactKeyboardEvent<HTMLDivElement>) => {
-        if (e.nativeEvent.isComposing) {
+        // keyCode 229 alongside isComposing: some Windows IMEs report the
+        // candidate-confirming keydown with isComposing already false.
+        // The composer's own handler decides what to swallow (it preventDefaults
+        // the confirming Enter so it does not also insert a line break).
+        if (e.nativeEvent.isComposing || e.keyCode === 229) {
             onKeyDown?.(e)
             return
         }
