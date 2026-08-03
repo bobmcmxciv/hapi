@@ -176,6 +176,8 @@ ssh ecs 'sqlite3 /root/.hapi/hapi.db "PRAGMA table_info(sessions);"'
 | ⚠️ 后台命令用 `;` 串联时，**末尾命令的退出码会掩盖前面的失败** | scp 实际 `exit 124` 却因链末 `ssh md5sum` 成功而被报成 exit 0。串联时显式捕获每段 `$?` 并打印 |
 | 长传输被工具 2min 超时 kill → ECS 侧僵尸续写把分块撑坏 | **必须 `run_in_background`** |
 | 替换运行中的二进制报 `Text file busy` | 用 `mv` rename 换芯，别覆写 |
+| ⚠️ 换芯目标不是 `/usr/bin/hapi` | 那是软链 → `hapi.cjs`（4KB 启动脚手架）。真正要换的是平台包里的 **`/usr/lib/node_modules/@twsxtd/hapi/node_modules/@twsxtd/hapi-linux-x64/bin/hapi`**（~145MB），用 `find /usr/lib/node_modules/@twsxtd -name hapi -type f -size +1M` 确认 |
+| ⚠️ 改了行为但线上不生效，先查**是不是改错了路由** | `/api/events` 有两个实现，`fork-features/multi-user/executionMount.ts` 的那个注册更早、**实际生效**，`hub/src/web/routes/events.ts` 不被调用。见 `hapi-sse-dual-route-trap` 记忆 |
 | 换芯前没备份 | 二进制 + 主库 + **gateway 库**都备份，命名 `*.pre-<tag>-<ts>` |
 | 判断机器在线看 DB 的 `machines.active` | 那是持久化旧值**不可信**，要看 hub 内存态 `/api/machines`（用 `POST /api/auth` 拿 `{"accessToken": <cliApiToken>}` 换 JWT） |
 | 归档会话没能杀掉本机 CLI 进程 | `archiveSession()` 是经 **RPC** 发 `killSession`，CLI 与 hub 断连时抛 `RpcTargetMissingError`，走容错分支只改元数据**不杀进程**。断连的孤儿只能本机清 |
