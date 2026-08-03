@@ -80,7 +80,6 @@ import { useTranslation } from '@/lib/use-translation'
 import { SessionHeader } from '@/components/SessionHeader'
 import { CursorMigrationBanner } from '@/components/CursorMigrationBanner'
 import { TeamPanel } from '@/components/TeamPanel'
-import { SessionStatusPanel } from '@/components/SessionStatusPanel'
 import { buildSessionStatusData } from '@/chat/sessionStatus'
 import { usePlatform } from '@/hooks/usePlatform'
 import { useSessionActions } from '@/hooks/mutations/useSessionActions'
@@ -1804,8 +1803,9 @@ function SessionChatInner(props: SessionChatProps) {
 
             <CursorMigrationBanner metadata={props.session.metadata} />
 
-            {sessionStatus ? <SessionStatusPanel data={sessionStatus} /> : null}
-
+            {/* fork(task-panel)：独立的 SessionStatusPanel 并入任务清单面板
+                （fork-features/task-panel/TodoPanel），不再单独渲染；
+                上游 0.27 的 flex 包裹层保留。 */}
             <div className="flex flex-col min-h-0 flex-1">
             {props.session.teamState && (
                 <TeamPanel teamState={props.session.teamState} />
@@ -1888,7 +1888,7 @@ function SessionChatInner(props: SessionChatProps) {
                     />
 
                     <div className="px-3">
-                        <TodoPanel sessionId={props.session.id} todos={props.session.todos} />
+                        <TodoPanel sessionId={props.session.id} todos={props.session.todos} status={sessionStatus} />
                         {/*
                          * Scratchlist drawer - composer-controlled. Only
                          * mounted when the operator clicks the notepad icon

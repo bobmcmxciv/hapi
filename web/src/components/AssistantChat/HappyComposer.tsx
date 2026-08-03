@@ -1145,6 +1145,15 @@ export function HappyComposer(props: {
         // keydowns where isComposing is momentarily false (Safari + some
         // Windows IMEs on the "confirm candidate with Enter" keystroke).
         if (e.nativeEvent.isComposing || e.keyCode === 229) {
+            // The confirming Enter must not also insert a line break: the IME
+            // commits its text through composition events, while the same
+            // keydown's default action still adds a newline to the field.
+            // Very visible with a Chinese IME in English mode — every confirmed
+            // word gained a stray blank line. Only Enter is swallowed; arrows
+            // and the rest keep their default so candidate navigation works.
+            if (key === 'Enter') {
+                e.preventDefault()
+            }
             return
         }
 
