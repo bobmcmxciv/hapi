@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { renderHook, act, waitFor } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import type { ReactNode } from 'react'
-import { useSendMessage } from './useSendMessage'
+import { useSendMessage, type SendMessageAcceptance } from './useSendMessage'
 import { ApiError, type ApiClient } from '@/api/client'
 
 vi.mock('@/lib/message-window-store', () => ({
@@ -63,6 +63,10 @@ describe('useSendMessage', () => {
 
         await waitFor(() => {
             expect(onSuccess).toHaveBeenCalledWith('session-A')
+        })
+        expect(result.current.sendSettlement).toEqual({
+            attemptId: 'local-id-1',
+            status: 'success',
         })
     })
 
@@ -479,6 +483,10 @@ describe('useSendMessage', () => {
             await waitFor(() => {
                 expect(updateMock).toHaveBeenCalledWith('session-A', 'local-id-1', 'failed')
             })
+            expect(result.current.sendSettlement).toEqual({
+                attemptId: 'local-id-1',
+                status: 'error',
+            })
             // No composer-restore: onError is NOT fired and the optimistic
             // row is NOT removed -- both would destroy the attachment UX.
             expect(onError).not.toHaveBeenCalled()
@@ -556,17 +564,17 @@ describe('useSendMessage', () => {
         expect(onSuccess).not.toHaveBeenCalled()
     })
 
-    it('resolves true when the send is accepted', async () => {
+    it('returns the attempt id when the send is accepted', async () => {
         const api = createMockApi()
         const { result } = renderHook(
             () => useSendMessage(api, 'session-A'),
             { wrapper: createWrapper() },
         )
-        let acceptedPromise: Promise<boolean> | undefined
+        let acceptedPromise: Promise<SendMessageAcceptance | false> | undefined
         act(() => {
             acceptedPromise = result.current.sendMessage('hello')
         })
-        await expect(acceptedPromise!).resolves.toBe(true)
+        await expect(acceptedPromise!).resolves.toEqual({ attemptId: 'local-id-1' })
     })
 
     it('resolves false when blocked (no api) so the caller can preserve schedule state', async () => {
@@ -575,7 +583,7 @@ describe('useSendMessage', () => {
             () => useSendMessage(null, 'session-A', { onBlocked }),
             { wrapper: createWrapper() },
         )
-        let acceptedPromise: Promise<boolean> | undefined
+        let acceptedPromise: Promise<SendMessageAcceptance | false> | undefined
         act(() => {
             acceptedPromise = result.current.sendMessage('hello')
         })
@@ -589,7 +597,7 @@ describe('useSendMessage', () => {
             () => useSendMessage(api, null),
             { wrapper: createWrapper() },
         )
-        let acceptedPromise: Promise<boolean> | undefined
+        let acceptedPromise: Promise<SendMessageAcceptance | false> | undefined
         act(() => {
             acceptedPromise = result.current.sendMessage('hello')
         })
@@ -606,14 +614,14 @@ describe('useSendMessage', () => {
             }),
             { wrapper: createWrapper() },
         )
-        let acceptedPromise: Promise<boolean> | undefined
+        let acceptedPromise: Promise<SendMessageAcceptance | false> | undefined
         act(() => {
             acceptedPromise = result.current.sendMessage('hello')
         })
         await expect(acceptedPromise!).resolves.toBe(false)
     })
 
-    it('resolves true after async resolveSessionId succeeds and mutation starts', async () => {
+    it('returns the attempt id after async resolveSessionId succeeds and mutation starts', async () => {
         const api = createMockApi()
         const { result } = renderHook(
             () => useSendMessage(api, 'session-original', {
@@ -622,11 +630,11 @@ describe('useSendMessage', () => {
             }),
             { wrapper: createWrapper() },
         )
-        let acceptedPromise: Promise<boolean> | undefined
+        let acceptedPromise: Promise<SendMessageAcceptance | false> | undefined
         act(() => {
             acceptedPromise = result.current.sendMessage('hello')
         })
-        await expect(acceptedPromise!).resolves.toBe(true)
+        await expect(acceptedPromise!).resolves.toEqual({ attemptId: 'local-id-1' })
     })
 
     // #918: the inactive-session 409 path
