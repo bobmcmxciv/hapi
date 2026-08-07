@@ -157,7 +157,9 @@ function downloadGeneratedFile(fileName: string, blob: Blob): void {
     anchor.href = url
     anchor.download = fileName
     anchor.click()
-    URL.revokeObjectURL(url)
+    // iOS Safari 异步接手 object URL，同步撤销会让下载静默失败；
+    // 与下方 handleOpen 的 60s 延迟撤销保持同一口径。
+    window.setTimeout(() => URL.revokeObjectURL(url), 60_000)
 }
 
 export function GeneratedFileCard(props: { block: GeneratedFileBlock }) {

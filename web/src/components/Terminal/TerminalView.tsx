@@ -59,11 +59,16 @@ export function TerminalView(props: {
         const webLinksAddon = new WebLinksAddon()
         terminal.loadAddon(fitAddon)
         terminal.loadAddon(webLinksAddon)
-        // Android 上不用 canvas 渲染器：xterm 已弃用 CanvasAddon，而 Android
-        // Chromium 的 canvas 加速光栅化会在部分 GPU 驱动上直接崩掉浏览器
-        // （小米平板 + Edge 实测闪退）。Android 走 xterm 默认 DOM 渲染器。
+        // 移动端一律不用 canvas 渲染器，只有桌面端加载：xterm 已弃用 CanvasAddon。
+        // Android Chromium 的 canvas 加速光栅化在部分 GPU 驱动上会直接崩掉浏览器
+        // （小米平板 + Edge 实测闪退）；iOS/iPadOS 的 canvas backing store 计入
+        // WebKit 单页内存预算，是整页崩溃刷新的常见来源。iPadOS 的 UA 伪装成
+        // 桌面 Mac，靠 maxTouchPoints 识别。移动端走 xterm 默认 DOM 渲染器。
+        const userAgent = navigator.userAgent
+        const isMobileLike = /Android|iPhone|iPad|iPod/i.test(userAgent)
+            || (/Mac/i.test(userAgent) && navigator.maxTouchPoints > 1)
         let canvasAddon: CanvasAddon | null = null
-        if (!/Android/i.test(navigator.userAgent)) {
+        if (!isMobileLike) {
             try {
                 canvasAddon = new CanvasAddon()
                 terminal.loadAddon(canvasAddon)
