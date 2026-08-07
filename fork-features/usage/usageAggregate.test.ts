@@ -179,6 +179,56 @@ describe('aggregateUsageForSessions', () => {
         expect(rows[0]).toMatchObject({ model: 'gpt-5.6-sol', inputTokens: 2600 })
     })
 
+    it('assistant 侧只剩涓流（流式恒 0、零星非流式有真数）而帧更大时，整体改用帧——两源取大，不相加', () => {
+        const store = makeStore()
+        const session = makeSession(store, 'trickle')
+        // 线上 hub 实测形态（2026-08-06）：8090 轮 gpt-5.6-sol 的 assistant 行合计仅 70 万
+        // token（全部来自零星非流式轮），帧里是 1.34 亿。旧规则「全零才替换」被这股
+        // 涓流卡死，帧数据整个被丢弃。
+        store.messages.addMessage(session.id, assistantEnvelope({
+            messageId: 'msg_t1', model: 'gpt-5.6-sol', timestamp: '2026-08-06T10:00:00.000Z'
+        }))
+        store.messages.addMessage(session.id, assistantEnvelope({
+            messageId: 'msg_t2', model: 'gpt-5.6-sol', timestamp: '2026-08-06T10:01:00.000Z',
+            usage: { input: 66276, output: 120 }
+        }))
+        store.messages.addMessage(session.id, usageReportEnvelope({
+            timestamp: '2026-08-06T10:01:30.000Z',
+            modelUsage: { 'gpt-5.6-sol': { inputTokens: 17753347, outputTokens: 26271, cacheReadInputTokens: 15860736 } }
+        }))
+
+        const rows = store.messages.aggregateUsageForSessions([session.id])
+        expect(rows).toHaveLength(1)
+        expect(rows[0]).toMatchObject({
+            model: 'gpt-5.6-sol',
+            requestCount: 2,
+            inputTokens: 17753347,
+            outputTokens: 26271,
+            cacheReadInputTokens: 15860736
+        })
+    })
+
+    it('帧比 assistant 小（帧只覆盖窗口一部分）时保留 assistant 数字', () => {
+        const store = makeStore()
+        const session = makeSession(store, 'frames-smaller')
+        store.messages.addMessage(session.id, assistantEnvelope({
+            messageId: 'msg_f1', model: 'claude-sonnet-5', timestamp: '2026-08-06T10:00:00.000Z',
+            usage: { input: 1000, output: 200, cacheRead: 5000 }
+        }))
+        // 帧序列只捕到了会话末尾一小段
+        store.messages.addMessage(session.id, usageReportEnvelope({
+            timestamp: '2026-08-06T10:00:30.000Z',
+            modelUsage: { 'claude-sonnet-5': { inputTokens: 400, outputTokens: 80 } }
+        }))
+
+        const rows = store.messages.aggregateUsageForSessions([session.id])
+        expect(rows).toHaveLength(1)
+        expect(rows[0]).toMatchObject({
+            model: 'claude-sonnet-5', requestCount: 1,
+            inputTokens: 1000, outputTokens: 200, cacheReadInputTokens: 5000
+        })
+    })
+
     it('assistant 侧已有真实 usage 时忽略 usage_report，绝不相加（否则 Claude 官方来源数字翻倍）', () => {
         const store = makeStore()
         const session = makeSession(store, 'claude-no-double-count')
