@@ -297,6 +297,8 @@ web/src/chat/reducerTimeline.ts	trunk-patch	#176	both refs changed; fork commits
 web/src/chat/reducerTools.ts	upstream-sync	#180	merge-base 87f5c78a; changed only on upstream/main
 web/src/chat/toolGroups.test.ts	upstream-sync	#180	merge-base 87f5c78a; changed only on upstream/main
 web/src/chat/types.ts	trunk-patch	#176	both refs changed; fork commits 92f048f7,b4c31e88,d1f9f394
+web/src/components/AppErrorBoundary.test.tsx	fork-owned	web-stability	崩溃兜底组件测试（渲染异常→兜底 UI→重试出口）
+web/src/components/AppErrorBoundary.tsx	fork-owned	web-stability	根级/路由级渲染崩溃兜底（CrashFallback + AppErrorBoundary），不依赖任何上层 provider
 web/src/components/AssistantChat/HappyComposer.test.tsx	fork-owned	#174	origin-only delta; fork commits 8240268f,bec12318,413e76cc
 web/src/components/AssistantChat/HappyComposer.tsx	trunk-patch	#174	origin-only delta; fork commits 8240268f,606c6579,a8815d47,473d69b4,413e76cc
 web/src/components/AssistantChat/HappyThread.tsx	upstream-fix	#179	origin-only delta; fork commits 0bc807dc; disposition upstream-issue https://github.com/tiann/hapi/issues/1067: general fix reported against latest upstream main
@@ -347,6 +349,7 @@ web/src/components/SessionList.directory-action.test.tsx	upstream-fix	#179	origi
 web/src/components/SessionList.test.ts	upstream-sync	#180	merge-base 87f5c78a; changed only on upstream/main
 web/src/components/SessionList.tsx	trunk-patch	#170	both refs changed; fork commits 167af3dc,37fb5e9a,7dca6478,473d69b4,bf1a6b9a
 web/src/components/SyncingBanner.tsx	upstream-fix	#179	origin-only delta; fork commits 0aba2643; disposition upstream-issue https://github.com/tiann/hapi/issues/1066: general fix reported against latest upstream main
+web/src/components/Terminal/TerminalView.tsx	trunk-patch	web-stability	CanvasAddon 仅桌面端加载：Android GPU 驱动崩浏览器、iOS canvas 计入 WebKit 内存预算，移动端走 DOM 渲染器
 web/src/components/ToastContainer.tsx	upstream-fix	#179	origin-only delta; fork commits d1f9f394; disposition upstream-issue https://github.com/tiann/hapi/issues/1077: general fix reported against latest upstream main
 web/src/components/ToolCard/ToolCard.test.ts	upstream-sync	#180	merge-base 87f5c78a; changed only on upstream/main
 web/src/components/ToolCard/ToolCard.tsx	trunk-patch	#178	both refs changed; fork commits 498aefb3,e9e7dbd7,302180e5,72c96399
@@ -409,6 +412,7 @@ web/src/hooks/useHideArchivedSessions.ts	fork-owned	#179	origin-only delta; fork
 web/src/hooks/useLongPress.test.tsx	fork-owned	#179	origin-only delta; fork commits 5e3d135a,1bbfcc20
 web/src/hooks/useLongPress.ts	upstream-fix	#179	origin-only delta; fork commits 5e3d135a,1bbfcc20; disposition upstream-issue https://github.com/tiann/hapi/issues/1065: general fix reported against latest upstream main
 web/src/hooks/usePreserveSidebarScroll.ts	fork-owned	#179	origin-only delta; fork commits 0894d3d2
+web/src/hooks/useSSE.ts	trunk-patch	web-stability	handleSyncEvent 包 try/catch + reportCrash——畸形服务端事件不再炸穿整页
 web/src/hooks/useSessionBrowserTitle.test.tsx	upstream-sync	#180	merge-base 87f5c78a; changed only on upstream/main
 web/src/hooks/useSessionBrowserTitle.ts	upstream-sync	#180	merge-base 87f5c78a; changed only on upstream/main
 web/src/hooks/useTheme.test.ts	upstream-sync	#180	merge-base 87f5c78a; changed only on upstream/main
@@ -421,6 +425,8 @@ web/src/lib/assistant-runtime.test.ts	trunk-patch	#203	both refs changed; dispos
 web/src/lib/assistant-runtime.ts	trunk-patch	#176,#203	origin-only delta; fork commits b4c31e88,253e5184; disposition fork-specific #203: filter unsupported OMP quota cards
 web/src/lib/changelog.test.ts	fork-owned	#179	origin-only delta; fork commits 4a0c5f0b
 web/src/lib/changelog.ts	fork-owned	#179	origin-only delta; fork commits 4a0c5f0b
+web/src/lib/crashGuard.test.ts	fork-owned	web-stability	crashGuard 单测（错配措辞识别/护栏窗口/去重限量/积压补发）
+web/src/lib/crashGuard.ts	fork-owned	web-stability	全局错误捕获 + chunk 错配自动恢复（60s 防环护栏）+ 崩溃上报，hub 端点在 executionMount
 web/src/lib/file-preview.ts	fork-owned	#177	origin-only delta; fork commits e737b4b3
 web/src/lib/fork-restore.test.ts	fork-owned	#170	origin-only delta; fork commits 88f9dc20,fbfd26f5,5262a261
 web/src/lib/fork-restore.ts	fork-owned	#170	origin-only delta; fork commits 88f9dc20,fbfd26f5,5262a261
@@ -449,6 +455,7 @@ web/src/lib/sessionTitle.ts	upstream-sync	#180	merge-base 87f5c78a; changed only
 web/src/lib/toast-context.tsx	upstream-fix	#179	origin-only delta; fork commits d1f9f394; disposition upstream-issue https://github.com/tiann/hapi/issues/1077: general fix reported against latest upstream main
 web/src/lib/usageReportBackfill.test.ts	fork-owned	usage-footer	回填口径单测（首帧基线/回落全额/同轮同 delta）
 web/src/lib/usageReportBackfill.ts	fork-owned	usage-footer	usage_report 帧差值回填逐条页脚 token
+web/src/main.tsx	trunk-patch	web-stability	installCrashGuard、AppErrorBoundary 包根、bootstrap().catch 静态兜底页
 web/src/realtime/messageSummarySpeaker.test.ts	fork-owned	#179	origin-only delta; fork commits 7faed2eb
 web/src/realtime/messageSummarySpeaker.ts	fork-owned	#179	origin-only delta; fork commits 7faed2eb
 web/src/router.tsx	trunk-patch	#171	both refs changed; fork commits a6f9e3f9,0894d3d2,3582e989
@@ -456,6 +463,7 @@ web/src/routes/sessions/file.test.tsx	trunk-patch	#179	origin-only delta; fork c
 web/src/routes/sessions/file.tsx	trunk-patch	#177	origin-only delta; fork commits bfa252da,7a5232bf,e737b4b3,d3199037
 web/src/routes/settings/display.tsx	upstream-sync	#180	merge-base 87f5c78a; changed only on upstream/main
 web/src/routes/settings/index.test.tsx	upstream-sync	#180	merge-base 87f5c78a; changed only on upstream/main
+web/src/sw.ts	trunk-patch	web-stability	cleanupOutdatedCaches + NavigationRoute 精缓存 index.html（denylist api/cli/download/health）
 web/src/types/api.ts	upstream-sync	#180	merge-base 87f5c78a; changed only on upstream/main
 web/src/types/global.d.ts	trunk-patch	#179	origin-only delta; fork commits 4a0c5f0b; disposition fork-specific #179: fork PWA changelog feature
 web/vite.config.ts	trunk-patch	#179	origin-only delta; fork commits 4a0c5f0b,69c5250d; disposition fork-specific #179: fork PWA changelog feature; fork release/build metadata

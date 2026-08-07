@@ -468,3 +468,28 @@ registration API; compare shapes before keeping both.
 
 每次上游同步都要复查是否出现原生的 SSE 订阅过滤、消息装饰管道与
 workspace 解析配置；出现即移除对应挂载点。
+
+## Web 崩溃防线与移动端稳定性 (2026-08-07)
+
+此前 web 前端零 ErrorBoundary、零全局错误捕获、零崩溃上报：任何渲染异常
+= 白屏无出口；hub 每次换芯资产 hash 全变，后台老 PWA 动态 import 旧 chunk
+即白屏；hub 侧对以上一切全盲。防线主体是 fork 自有的
+`web/src/lib/crashGuard.ts` + `web/src/components/AppErrorBoundary.tsx`，
+上报端点挂在 fork 自有的 `executionMount.ts`（`POST /api/client-errors`，
+trunk `createAuthMiddleware` 已挡在前面，端点内只做限量与字段裁剪）。
+下列上游文件只保留最小挂载点：
+
+| Files | Missing upstream seam | Why it cannot move out | Runtime path | Sync verification |
+|---|---|---|---|---|
+| `web/src/main.tsx` | 无 bootstrap 生命周期/根组件包装注册 API | installCrashGuard 必须先于一切模块副作用；AppErrorBoundary 必须包在 I18n/Query provider 之外才能兜它们自身的崩溃；bootstrap().catch 是 React 接管失败时唯一出口 | 页面加载 → crashGuard 监听 → React 树（或静态兜底页） | 生产构建下 eval 一次 `import('/assets/不存在.js')`，确认自动整刷一次且 60s 内不二刷 |
+| `web/src/router.tsx` | createRouter 配置是唯一注入点 | defaultErrorComponent 把渲染异常收在单路由内，根边界只兜路由体系外 | 路由渲染异常 → RouteErrorFallback → CrashFallback | 略（组件测试覆盖 CrashFallback；路由集成随根边界 e2e） |
+| `web/src/sw.ts` | Workbox 装配是内联脚本，无 precache 策略扩展点 | NavigationRoute 必须与 precacheAndRoute 同一 SW 实例注册，保证 html 与 chunk 永远同版本 | 导航请求 → 精缓存 index.html → 同代 chunk | 构建后 grep dist/sw.js 含 denylist 正则与 navigate 处理；浏览器确认 SW controlled + workbox-precache 存在 |
+| `web/src/hooks/useSSE.ts` | 事件消费链无错误边界/装饰 API | try/catch 必须贴在 handleSyncEvent 调用点，晚一层就已炸穿 EventSource handler | SSE 帧 → parse → guarded handleSyncEvent → reportCrash | 单测 + 现网观察 `[ClientError] source:sse` 日志 |
+| `web/src/App.tsx` | 无认证就绪回调注册 API | attachCrashReporter 需要认证过的 ApiClient，只有 AppInner 拿得到 | 认证就绪 → attach → 积压崩溃补发 hub | 现网 journald 出现 `[ClientError]` 行即通 |
+| `web/src/api/client.ts` | 认证请求原语私有 | reportClientError 复用既有 token 刷新与错误语义 | crashGuard → ApiClient → POST /api/client-errors | executionMount.test.ts 3 例 |
+| `web/src/components/Terminal/TerminalView.tsx` | 渲染器选择无策略注入点 | CanvasAddon 桌面白名单判据只能贴在 loadAddon 处 | 终端挂载 → UA/触点判定 → DOM 或 canvas 渲染器 | 移动 UA 下确认未加载 CanvasAddon（devtools 断点或日志） |
+| `web/src/components/ImagePreview.tsx`、`web/src/components/AssistantChat/messages/ToolMessage.tsx` | 图片渲染无全局属性钩子 | `loading=lazy`/`decoding=async` 与 60s 延迟 revoke 都是单点属性/时序修正 | 会话流图片渲染 / 生成文件下载 | 长会话滚动无整页崩溃；iOS 下载不再静默失败 |
+
+上游若出现原生 ErrorBoundary、崩溃上报、SW 导航回退或移动端渲染器策略，
+先比形态再决定去留——尤其 tiann#1358/#1377（滚动）与后续任何
+`error-boundary` 字样的提交。
