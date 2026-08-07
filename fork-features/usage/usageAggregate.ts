@@ -232,66 +232,74 @@ function canonicalModelName(model: string): string {
     return model.replace(/\s*\[[^\]]*\]\s*$/, '')
 }
 
-/** Substitute `usage_report` totals for models whose `assistant` rows recorded no
- *  tokens at all.
+/** Per canonical model, report the larger of the two sources — never their sum.
  *
- *  **Substitute, never add.** Every session emits `result`, so a Claude model has
- *  both sources populated and summing them would double every official-source
- *  figure. Falling back only when the assistant side is entirely zero leaves
- *  Claude numbers bit-for-bit unchanged and repairs only the models that are
- *  actually broken.
+ *  **Winner-take-all, never add.** Every session emits `result`, so a Claude
+ *  model has both sources populated with (near-)identical numbers, and summing
+ *  them would double every official-source figure. Taking the per-model max
+ *  keeps that safe (equal totals leave the assistant side untouched) while
+ *  repairing the models the assistant side undercounts.
  *
- *  Matching is done on the canonical (variant-stripped) name, and report totals
- *  that collapse to the same canonical name are summed first, so one bare
- *  assistant row absorbs every variant's usage. A canonical name is only ever
- *  substituted into once — if two assistant rows collapse together, the second
- *  keeps its zeros rather than double-counting the same tokens.
+ *  The previous rule substituted only when the assistant side was *entirely*
+ *  zero. That gate breaks on proxied models: cx2cc-style streams record zero
+ *  usage on every streamed turn, but the occasional non-stream turn carries
+ *  real usage — observed live on the hub: 8,090 `gpt-5.6-sol` turns totalling
+ *  702k tokens on the assistant side while the frames held 134M. The 702k
+ *  trickle made `hasTokens` true and the 134M fallback was dropped on the
+ *  floor. Comparing totals instead of testing for zero fixes exactly that
+ *  case, and only ever moves a model's figure *up* to the better source.
  *
- *  `requestCount` always stays with the assistant side: it counts API turns, and
- *  a `usage_report` frame is emitted per *turn*, which is the coarser unit. A
- *  model seen only in `usage_report` still gets a row under its canonical name,
- *  with requestCount 0 — unless it carries no tokens at all, in which case it is
- *  dropped rather than rendered as an all-zero phantom row on the usage page. */
+ *  Both sides collapse to the canonical (variant-stripped) name before the
+ *  comparison, so every `…[1m]` variant's usage is absorbed into one row.
+ *
+ *  `requestCount` always stays with the assistant side: it counts API turns,
+ *  and a `usage_report` frame is emitted per *turn*, which is the coarser
+ *  unit. A model seen only in `usage_report` still gets a row under its
+ *  canonical name, with requestCount 0 — unless it carries no tokens at all,
+ *  in which case it is dropped rather than rendered as an all-zero phantom
+ *  row on the usage page. */
 export function mergeUsageReportFallback(
     assistantRows: UsageAggregateRow[],
     reportTotals: Map<string, Omit<UsageAggregateRow, 'model' | 'requestCount'>>
 ): UsageAggregateRow[] {
-    const byCanonical = new Map<string, Omit<UsageAggregateRow, 'model' | 'requestCount'>>()
-    for (const [model, totals] of reportTotals) {
-        const key = canonicalModelName(model)
-        const acc = byCanonical.get(key)
-        byCanonical.set(key, acc
-            ? {
-                inputTokens: acc.inputTokens + totals.inputTokens,
-                outputTokens: acc.outputTokens + totals.outputTokens,
-                cacheCreationInputTokens: acc.cacheCreationInputTokens + totals.cacheCreationInputTokens,
-                cacheReadInputTokens: acc.cacheReadInputTokens + totals.cacheReadInputTokens
-            }
-            : { ...totals })
-    }
-
-    const present = new Set<string>()
-    const substituted = new Set<string>()
-    const merged = assistantRows.map(row => {
-        const key = canonicalModelName(row.model)
-        present.add(key)
-        const hasTokens = row.inputTokens > 0
-            || row.outputTokens > 0
-            || row.cacheCreationInputTokens > 0
-            || row.cacheReadInputTokens > 0
-        const fallback = byCanonical.get(key)
-        if (hasTokens || !fallback || substituted.has(key)) return row
-        substituted.add(key)
-        return { ...row, ...fallback }
+    type Nums = Omit<UsageAggregateRow, 'model' | 'requestCount'>
+    const total = (n: Nums): number =>
+        n.inputTokens + n.outputTokens + n.cacheCreationInputTokens + n.cacheReadInputTokens
+    const add = (a: Nums, b: Nums): Nums => ({
+        inputTokens: a.inputTokens + b.inputTokens,
+        outputTokens: a.outputTokens + b.outputTokens,
+        cacheCreationInputTokens: a.cacheCreationInputTokens + b.cacheCreationInputTokens,
+        cacheReadInputTokens: a.cacheReadInputTokens + b.cacheReadInputTokens
     })
 
-    for (const [model, totals] of byCanonical) {
-        if (present.has(model)) continue
-        const empty = totals.inputTokens === 0
-            && totals.outputTokens === 0
-            && totals.cacheCreationInputTokens === 0
-            && totals.cacheReadInputTokens === 0
-        if (empty) continue
+    const frameByCanonical = new Map<string, Nums>()
+    for (const [model, totals] of reportTotals) {
+        const key = canonicalModelName(model)
+        const acc = frameByCanonical.get(key)
+        frameByCanonical.set(key, acc ? add(acc, totals) : { ...totals })
+    }
+
+    // message.model is documented bare, so this collapse is a no-op in
+    // practice; it keeps the source comparison well-defined if a
+    // variant-suffixed name ever slips into an assistant row.
+    const assistantByCanonical = new Map<string, UsageAggregateRow>()
+    for (const row of assistantRows) {
+        const key = canonicalModelName(row.model)
+        const acc = assistantByCanonical.get(key)
+        assistantByCanonical.set(key, acc
+            ? { model: key, requestCount: acc.requestCount + row.requestCount, ...add(acc, row) }
+            : { ...row, model: key })
+    }
+
+    const merged: UsageAggregateRow[] = []
+    for (const [key, row] of assistantByCanonical) {
+        const frames = frameByCanonical.get(key)
+        merged.push(frames && total(frames) > total(row) ? { ...row, ...frames } : row)
+    }
+
+    for (const [model, totals] of frameByCanonical) {
+        if (assistantByCanonical.has(model)) continue
+        if (total(totals) === 0) continue
         merged.push({ model, requestCount: 0, ...totals })
     }
     return merged
