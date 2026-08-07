@@ -14,6 +14,8 @@ import {
 } from '@tanstack/react-router'
 import { getScrollRestorationKey } from '@/lib/scrollRestorationKey'
 import { usePreserveSidebarScroll } from '@/hooks/usePreserveSidebarScroll'
+import { CrashFallback } from '@/components/AppErrorBoundary'
+import { isChunkLoadError, reportCrash, tryRecoverFromStaleChunks } from '@/lib/crashGuard'
 import { App } from '@/App'
 import { SessionChat } from '@/components/SessionChat'
 import { SessionList } from '@/components/SessionList'
@@ -1311,12 +1313,31 @@ export const routeTree = rootRoute.addChildren([
 
 type RouterHistory = Parameters<typeof createRouter>[0]['history']
 
+// 路由级错误边界：把渲染异常收在单个路由内，根级 AppErrorBoundary 只兜
+// 路由体系外的崩溃。chunk 错配（部署换版后旧资产消失）优先走自动刷新恢复。
+function RouteErrorFallback(props: { error: Error; reset: () => void }) {
+    const [recovering] = useState(() => isChunkLoadError(props.error) && tryRecoverFromStaleChunks())
+    useEffect(() => {
+        if (recovering) return
+        reportCrash(props.error, 'route-error')
+    }, [props.error, recovering])
+    if (recovering) {
+        return (
+            <div className="flex min-h-[100dvh] items-center justify-center p-6 text-center text-sm opacity-70">
+                正在更新到最新版本… · Updating…
+            </div>
+        )
+    }
+    return <CrashFallback error={props.error} onRetry={props.reset} />
+}
+
 export function createAppRouter(history?: RouterHistory) {
     return createRouter({
         routeTree,
         history,
         scrollRestoration: true,
         getScrollRestorationKey,
+        defaultErrorComponent: RouteErrorFallback,
     })
 }
 

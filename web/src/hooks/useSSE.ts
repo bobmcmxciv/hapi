@@ -21,6 +21,7 @@ import type {
     SyncEvent
 } from '@/types/api'
 import { queryKeys } from '@/lib/query-keys'
+import { reportCrash } from '@/lib/crashGuard'
 import { clearMessageWindow, getMessageWindowState, ingestIncomingMessages, markMessagesConsumed, removeOptimisticMessage, updateMessageStatus } from '@/lib/message-window-store'
 
 type SSESubscription = {
@@ -863,9 +864,20 @@ export function useSSE(options: {
                 return
             }
 
-            handleSyncEvent(parsed as SyncEvent)
+            // 事件处理链会写 store 与 queryClient——一条意外结构的服务端事件
+            // 不能变成未捕获异常炸掉整个页面，收拢后上报再继续消费后续事件。
+            // 但**失败时不推进重放游标**：上游 0.27 的 at-least-once 依赖
+            // "handler 抛错→游标停在事件之前→重连重放"，吞掉异常后这条链断了，
+            // 这里用提前 return 复刻同一语义——页面活着，事件也不丢。
+            try {
+                handleSyncEvent(parsed as SyncEvent)
+            } catch (error) {
+                console.error('[SSE] event handler failed', parsed.type, error)
+                reportCrash(error, 'sse')
+                return
+            }
 
-            // Track the hub's replay cursor - after handling, so a throwing
+            // Track the hub's replay cursor - after handling, so a failed
             // handler leaves the cursor behind the event and the hub replays
             // it on the next reconnect (at-least-once). EventSource keeps
             // lastEventId sticky across frames, so heartbeats (no id field)

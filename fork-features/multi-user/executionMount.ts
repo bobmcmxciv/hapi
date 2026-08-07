@@ -139,6 +139,9 @@ function collectVisibleSessions(
     return [...visible.values()]
 }
 
+const CLIENT_ERROR_WINDOW_MS = 10 * 60 * 1000
+const CLIENT_ERROR_MAX_PER_WINDOW = 30
+
 export function mountExecutionRoutes(app: Hono<WebAppEnv>, deps: {
     store: MultiUserGatewayStore
     jwtSecret: Uint8Array
@@ -146,6 +149,42 @@ export function mountExecutionRoutes(app: Hono<WebAppEnv>, deps: {
     getSseManager: () => SSEManager | null
     getStore: () => Store | null
 }): void {
+    // 前端崩溃上报。此前客户端 JS 错误只落浏览器 console，hub 侧对线上
+    // 崩溃完全盲。写进 console（→ journald）即可，不进库；trunk 的
+    // createAuthMiddleware 已挡在前面，这里只做限量与字段裁剪。
+    const clientErrorBuckets = new Map<number, { count: number; resetAt: number }>()
+    app.post('/api/client-errors', async (c) => {
+        const body = await c.req.json().catch(() => null) as Record<string, unknown> | null
+        const message = typeof body?.message === 'string' ? body.message : null
+        if (!message) return c.json({ error: 'Invalid report' }, 400)
+        const userId = c.get('userId')
+        const now = Date.now()
+        const bucket = clientErrorBuckets.get(userId)
+        if (!bucket || bucket.resetAt <= now) {
+            clientErrorBuckets.set(userId, { count: 1, resetAt: now + CLIENT_ERROR_WINDOW_MS })
+        } else if (bucket.count >= CLIENT_ERROR_MAX_PER_WINDOW) {
+            // 打满即静默丢弃：上报是尽力而为的诊断通道，不值得让客户端重试。
+            return c.json({ ok: true })
+        } else {
+            bucket.count += 1
+        }
+        const gaid = await gatewayAccountId(c.req.raw, deps.jwtSecret)
+        const clip = (value: unknown, max: number): string | undefined =>
+            typeof value === 'string' ? value.slice(0, max) : undefined
+        console.error('[ClientError]', JSON.stringify({
+            uid: userId,
+            gaid,
+            source: clip(body?.source, 40),
+            message: message.slice(0, 500),
+            stack: clip(body?.stack, 4000),
+            url: clip(body?.url, 300),
+            userAgent: clip(body?.userAgent, 300),
+            appVersion: clip(body?.appVersion, 60),
+            occurredAt: typeof body?.occurredAt === 'number' ? body.occurredAt : undefined
+        }))
+        return c.json({ ok: true })
+    })
+
     app.get('/api/events', async (c) => {
         const accountId = await gatewayAccountId(c.req.raw, deps.jwtSecret)
         const account = accountId === null ? null : deps.store.getAccount(accountId)

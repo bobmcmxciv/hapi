@@ -1,6 +1,6 @@
 /// <reference lib="webworker" />
-import { precacheAndRoute } from 'workbox-precaching'
-import { registerRoute } from 'workbox-routing'
+import { cleanupOutdatedCaches, createHandlerBoundToURL, getCacheKeyForURL, precacheAndRoute } from 'workbox-precaching'
+import { NavigationRoute, registerRoute } from 'workbox-routing'
 import { CacheFirst, NetworkFirst } from 'workbox-strategies'
 import { ExpirationPlugin } from 'workbox-expiration'
 import {
@@ -29,7 +29,20 @@ type PushPayload = {
     }
 }
 
+cleanupOutdatedCaches()
 precacheAndRoute(self.__WB_MANIFEST)
+
+// 导航请求一律回精缓存里的 index.html：保证 html 与 chunk 永远来自同一个
+// SW 版本的 precache，堵住「网络上的新 html + 缓存里的旧 chunk」（或反向）
+// 的错配白屏——生产 hub 每次换芯资产 hash 全变、旧资产即刻消失，此前深链
+// 导航走网络就会踩中。denylist 放行必须由 hub 直接应答的路径（API、CLI
+// 通道、文件下载、健康检查）。dev 模式的 SW 不预缓存 index.html，此时跳过。
+const precachedIndexUrl = ['index.html', '/index.html'].find((url) => getCacheKeyForURL(url))
+if (precachedIndexUrl) {
+    registerRoute(new NavigationRoute(createHandlerBoundToURL(precachedIndexUrl), {
+        denylist: [/^\/api\//, /^\/cli\//, /^\/download\//, /^\/health$/]
+    }))
+}
 
 registerRoute(
     ({ url }) => url.pathname === '/api/sessions',
