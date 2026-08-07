@@ -268,6 +268,10 @@ export function ImagePreview(props: {
                 <img
                     src={props.src}
                     alt={props.label}
+                    // 会话流里可能同时挂几十张 base64 大图；不加 lazy/async 时浏览器
+                    // 会把视口外的图全部同步解码成位图，是移动端 OOM 的主要来源之一。
+                    loading="lazy"
+                    decoding="async"
                     className={props.imageClassName ?? 'max-h-[calc(100vh-14rem)] max-w-full object-contain transition-transform group-hover:scale-[1.01]'}
                     draggable={false}
                 />
@@ -358,6 +362,7 @@ export function ImagePreview(props: {
                         <img
                             src={activePreview.src}
                             alt={activePreview.label}
+                            decoding="async"
                             draggable={false}
                             className="absolute left-1/2 top-1/2 max-h-[90vh] max-w-[90vw] select-none object-contain"
                             style={{
