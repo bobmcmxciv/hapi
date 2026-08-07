@@ -493,3 +493,25 @@ trunk `createAuthMiddleware` 已挡在前面，端点内只做限量与字段裁
 上游若出现原生 ErrorBoundary、崩溃上报、SW 导航回退或移动端渲染器策略，
 先比形态再决定去留——尤其 tiann#1358/#1377（滚动）与后续任何
 `error-boundary` 字样的提交。
+
+## 经代理会话的上下文窗口 (2026-08-08)
+
+cx2cc 这类 OpenAI 兼容代理下，assistant 行的 `model` 是代理别名
+（`gpt-5.6-sol`），底层仍是 Claude Code SDK。`getContextBudgetTokens` 只认
+`isClaudeModelPreset` 与 `claude-` 前缀，别名走到末尾 `return null`——状态栏
+彻底没有分母，标签退化成 `ctx 158k`。**空 model 早就回退默认窗口了，别名不该
+比空值更差**，这是上游逻辑的一处不对称，非 fork 引入。
+
+回退取保守的 200k 而非 1M：显式 `context_window` 存在时优先级更高、根本走不到
+这里；走到这里说明毫无窗口信号，宁可高估使用率也不给假安全感。线上实测佐证——
+host FA608_INDEX 的会话在上下文 167,410 tokens 时触发 Claude Code 自动压缩
+（`compact_boundary` preTokens=167,277），正是 200k 窗口行为；该数字同时证明
+`calculateContextSize` 的 `input + cache_read + cache_creation` 求和口径正确
+（代理未把缓存计入 `input_tokens`，不存在双重计数）。
+
+| Files | Missing upstream seam | Why it cannot move out | Runtime path | Sync verification |
+|---|---|---|---|---|
+| `web/src/chat/modelConfig.ts` | 窗口推断无 provider/别名注册表 | 判据是单函数末尾的一处回退分支，旁路模块无法介入 | usage → latestUsage.contextWindow ?? 推断 → StatusBar 分母 | 开一个经代理会话，状态栏须出现 `ctx <window> (<n>% left)` 而非裸 `ctx <n>` |
+| `web/src/lib/usageReportBackfill.ts` | — （fork 自有） | 回填改为**合并**而非整体替换 usage：帧里没有 `context_window`/`service_tier`/`cost_usd`，整体替换会连带抹掉分母 | 帧 delta → 合并进 message_start usage → 状态栏 | 单测钉死非计数字段保留 |
+
+上游若给出 provider 感知的窗口注册表或在会话级下发窗口，改用它并移除本回退。

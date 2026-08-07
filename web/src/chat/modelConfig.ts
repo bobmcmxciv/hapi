@@ -87,7 +87,18 @@ export function getContextBudgetTokens(model: string | null | undefined, flavor?
                 ? LARGE_CLAUDE_CONTEXT_WINDOW_TOKENS
                 : DEFAULT_CLAUDE_CONTEXT_WINDOW_TOKENS
         }
-        return null
+        // 模型 id 不是已知的 Claude 形态——典型是经 OpenAI 兼容代理
+        // （cx2cc）跑的会话：assistant 行的 model 是代理自己的别名
+        // （如 `gpt-5.6-sol`），底层仍然是 Claude Code SDK 在跑。此前这里
+        // 返回 null，状态栏就完全没有分母，只剩「167K used」——上下文窗口
+        // 直接消失。空 model 的分支早就退回默认窗口了，别名不该比空值更差。
+        //
+        // 退回保守的 200k 下限（不是 1M）：显式 context_window 存在时根本
+        // 走不到这里（那条路优先），走到这里说明毫无窗口信号，此时宁可高估
+        // 使用率也不要给出「还很空」的假安全感。实测佐证：某 cx2cc 会话在
+        // 上下文 167,410 tokens 时触发了 Claude Code 自动压缩
+        // （compact_boundary preTokens=167,277），正是 200k 窗口的行为。
+        return DEFAULT_CLAUDE_CONTEXT_WINDOW_TOKENS
     })()
 
     if (!windowTokens) return null
