@@ -298,6 +298,8 @@ web/src/api/client.test.ts	upstream-sync	#180	merge-base 87f5c78a; changed only 
 web/src/api/client.ts	trunk-patch	#171	both refs changed; fork commits a6f9e3f9,51929072,9e76994b,3994ee9a,fc7d7b4a,b4c31e88,a8815d47,bfa252da,d28853c7,c853bcbf,c58622c2,5262a261,7dca6478,2ef4c618,413e76cc
 web/src/chat/agentTimestamp.test.ts	upstream-sync	#180	merge-base 87f5c78a; changed only on upstream/main
 web/src/chat/agentTimestamp.ts	upstream-sync	#180	merge-base 87f5c78a; changed only on upstream/main
+web/src/chat/modelConfig.test.ts	trunk-patch	ctx-window-proxy	钉死代理别名与空 model 走同一条保守回退（190k）
+web/src/chat/modelConfig.ts	trunk-patch	ctx-window-proxy	claude flavor 遇未知 model id（cx2cc 代理别名如 gpt-5.6-sol）回退默认 200k 窗口，此前返回 null 导致状态栏分母消失
 web/src/chat/normalize.test.ts	trunk-patch	#179	origin-only delta; fork commits 92f048f7,d1f9f394; disposition fork-specific #179,https://github.com/tiann/hapi/issues/1077: Codex compact summary feature; shared path also carries separately reported upstream fix
 web/src/chat/normalizeAgent.test.ts	upstream-sync	#180	merge-base 87f5c78a; changed only on upstream/main
 web/src/chat/normalizeAgent.ts	trunk-patch	#176	both refs changed; fork commits 92f048f7,b4c31e88,d1f9f394
@@ -317,6 +319,7 @@ web/src/components/AssistantChat/HappyComposer.test.tsx	fork-owned	#174	origin-o
 web/src/components/AssistantChat/HappyComposer.tsx	trunk-patch	#174	origin-only delta; fork commits 8240268f,606c6579,a8815d47,473d69b4,413e76cc
 web/src/components/AssistantChat/HappyThread.tsx	upstream-fix	#179	origin-only delta; fork commits 0bc807dc; disposition upstream-issue https://github.com/tiann/hapi/issues/1067: general fix reported against latest upstream main
 web/src/components/AssistantChat/PiThinkingLevelPanel.tsx	upstream-sync	#180	merge-base 87f5c78a; changed only on upstream/main
+web/src/components/AssistantChat/StatusBar.test.ts	trunk-patch	ctx-window-proxy	用线上真实 cx2cc 数字钉死代理会话仍有分母
 web/src/components/AssistantChat/claudeModelOptions.test.ts	trunk-patch	#174	origin-only delta; fork commits 8240268f,606c6579,7e3edb0f
 web/src/components/AssistantChat/claudeModelOptions.ts	trunk-patch	#174	origin-only delta; fork commits 8240268f,606c6579
 web/src/components/AssistantChat/messages/AssistantMessage.tsx	trunk-patch	#178	origin-only delta; fork commits 302180e5,7faed2eb

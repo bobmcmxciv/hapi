@@ -138,8 +138,11 @@ export function applyUsageReportBackfill(
     const patch = computeUsageReportBackfill(raw)
     if (patch.size === 0) return normalized as NormalizedMessage[]
     return normalized.map(message => {
-        const usage = patch.get(message.id)
-        if (!usage || message.role !== 'agent') return message
-        return { ...message, usage }
+        const patched = patch.get(message.id)
+        if (!patched || message.role !== 'agent') return message
+        // 只覆盖四个 token 计数。`context_window` / `service_tier` / `cost_usd`
+        // 来自 message_start，帧里根本没有——整体替换会把状态栏的上下文窗口
+        // 分母连带抹掉，用户看到的就是「有用量、没窗口」。
+        return { ...message, usage: { ...message.usage, ...patched } }
     })
 }

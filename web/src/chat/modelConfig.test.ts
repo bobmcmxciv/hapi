@@ -31,4 +31,17 @@ describe('getContextBudgetTokens', () => {
     it('returns null for unknown non-Claude sessions', () => {
         expect(getContextBudgetTokens('gemini-3-pro', 'gemini')).toBeNull()
     })
+
+    // cx2cc：assistant 行的 model 是代理别名，底层仍是 Claude Code SDK。
+    // 这类会话此前拿不到分母，状态栏的上下文窗口整个消失。
+    it('falls back to the conservative Claude budget for proxy model aliases', () => {
+        expect(getContextBudgetTokens('gpt-5.6-sol', 'claude')).toBe(190_000)
+        expect(getContextBudgetTokens('gpt-5.6-sol[1m]', 'claude')).toBe(190_000)
+    })
+
+    it('keeps the no-model fallback identical to the alias fallback', () => {
+        expect(getContextBudgetTokens(null, 'claude')).toBe(190_000)
+        expect(getContextBudgetTokens('', 'claude')).toBe(190_000)
+        expect(getContextBudgetTokens('   ', 'claude')).toBe(190_000)
+    })
 })

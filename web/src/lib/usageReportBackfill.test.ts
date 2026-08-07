@@ -121,4 +121,30 @@ describe('applyUsageReportBackfill', () => {
         const target = { id: 'x', role: 'agent' } as unknown as NormalizedMessage
         expect(applyUsageReportBackfill([], [target])[0]).toBe(target)
     })
+
+    // 回填只带 token 计数；context_window 只存在于 message_start。整体替换
+    // 会连带抹掉分母，状态栏就变成「有用量、没上下文窗口」。
+    it('保留 context_window 等非计数字段', () => {
+        const raw = [
+            frame('f0', { m: { inputTokens: 10, outputTokens: 1 } }),
+            assistantRow('m1', 'api-1', 'm', ZERO),
+            frame('f1', { m: { inputTokens: 40, outputTokens: 4 } })
+        ]
+        const target: NormalizedMessage = {
+            id: 'm1', localId: null, createdAt: 2, role: 'agent', isSidechain: false, content: [],
+            model: 'm',
+            usage: { input_tokens: 0, output_tokens: 0, context_window: 1_000_000, service_tier: 'standard', cost_usd: 0.5 },
+            meta: undefined
+        } as unknown as NormalizedMessage
+
+        const patched = applyUsageReportBackfill(raw, [target])[0]!
+
+        expect(patched.usage).toMatchObject({
+            input_tokens: 30,
+            output_tokens: 3,
+            context_window: 1_000_000,
+            service_tier: 'standard',
+            cost_usd: 0.5
+        })
+    })
 })
