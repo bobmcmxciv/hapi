@@ -267,6 +267,7 @@ export default function UsagePage() {
                                         // 0.27 起日历新增两个必填 prop。用量页没有「会话活跃日」
                                         // 这一维数据（它统计的是 token 不是会话），给空集即不高亮任何日期。
                                         sessionActivityDates={EMPTY_ACTIVITY_DATES}
+                                        align="right"
                                         onChange={(start, end) => {
                                             setCustomStart(start)
                                             setCustomEnd(end)
