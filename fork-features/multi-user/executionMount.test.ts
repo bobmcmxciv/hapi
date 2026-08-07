@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { Hono } from 'hono'
 import { SignJWT } from 'jose'
 import { createExecutionMiddleware, mountExecutionRoutes } from './executionMount'
@@ -354,5 +354,98 @@ describe('/api/usage/summary：可见性与会话列表同构，聚合走真实 
         const response = await app.request('/api/usage/summary')
         expect(response.status).toBe(401)
         gateway.close()
+    })
+})
+
+describe('POST /api/client-errors', () => {
+    const jwtSecret = new TextEncoder().encode('test-secret-test-secret-test-secret')
+
+    function buildApp(store: MultiUserGatewayStore, userId = 7) {
+        const app = new Hono<WebAppEnv>()
+        app.use('*', async (c, next) => {
+            c.set('userId', userId)
+            c.set('namespace', 'default')
+            await next()
+        })
+        mountExecutionRoutes(app, {
+            store,
+            jwtSecret,
+            getSyncEngine: () => null,
+            getSseManager: () => null,
+            getStore: () => null
+        })
+        return app
+    }
+
+    it('把上报写进 console.error 并回 ok，带 uid/gaid 归因', async () => {
+        const store = new MultiUserGatewayStore(':memory:')
+        const owner = store.createAccount('owner', 'user', 'owner-namespace', null)
+        const token = await new SignJWT({ gaid: owner.id }).setProtectedHeader({ alg: 'HS256' }).sign(jwtSecret)
+        const app = buildApp(store)
+        const spy = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+
+        const response = await app.request('/api/client-errors', {
+            method: 'POST',
+            headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+            body: JSON.stringify({
+                message: 'TypeError: boom',
+                stack: 'TypeError: boom\n  at render',
+                source: 'error-boundary',
+                url: 'https://hub.example/sessions/x',
+                userAgent: 'test-agent',
+                appVersion: '0.25.1',
+                occurredAt: 1754500000000
+            })
+        })
+
+        expect(response.status).toBe(200)
+        expect(await response.json()).toEqual({ ok: true })
+        expect(spy).toHaveBeenCalledTimes(1)
+        const payload = JSON.parse(spy.mock.calls[0]?.[1] as string) as Record<string, unknown>
+        expect(payload).toMatchObject({
+            uid: 7,
+            gaid: owner.id,
+            source: 'error-boundary',
+            message: 'TypeError: boom',
+            appVersion: '0.25.1'
+        })
+        spy.mockRestore()
+        store.close()
+    })
+
+    it('缺 message 的载荷拒收 400', async () => {
+        const store = new MultiUserGatewayStore(':memory:')
+        const app = buildApp(store)
+        const spy = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+
+        const response = await app.request('/api/client-errors', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ stack: 'no message here' })
+        })
+
+        expect(response.status).toBe(400)
+        expect(spy).not.toHaveBeenCalled()
+        spy.mockRestore()
+        store.close()
+    })
+
+    it('同一账号打满窗口配额后静默丢弃，不再落日志', async () => {
+        const store = new MultiUserGatewayStore(':memory:')
+        const app = buildApp(store)
+        const spy = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+
+        for (let index = 0; index < 35; index += 1) {
+            const response = await app.request('/api/client-errors', {
+                method: 'POST',
+                headers: { 'content-type': 'application/json' },
+                body: JSON.stringify({ message: `crash ${index}` })
+            })
+            expect(response.status).toBe(200)
+        }
+
+        expect(spy).toHaveBeenCalledTimes(30)
+        spy.mockRestore()
+        store.close()
     })
 })

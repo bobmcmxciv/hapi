@@ -13,6 +13,7 @@ import type {
     SyncEvent
 } from '@/types/api'
 import { queryKeys } from '@/lib/query-keys'
+import { reportCrash } from '@/lib/crashGuard'
 import { clearMessageWindow, getMessageWindowState, ingestIncomingMessages, markMessagesConsumed, removeOptimisticMessage, updateMessageStatus } from '@/lib/message-window-store'
 
 type SSESubscription = {
@@ -641,7 +642,14 @@ export function useSSE(options: {
                 return
             }
 
-            handleSyncEvent(parsed as SyncEvent)
+            // 事件处理链会写 store 与 queryClient——一条意外结构的服务端事件
+            // 不能变成未捕获异常炸掉整个页面，收拢后上报再继续消费后续事件。
+            try {
+                handleSyncEvent(parsed as SyncEvent)
+            } catch (error) {
+                console.error('[SSE] event handler failed', parsed.type, error)
+                reportCrash(error, 'sse')
+            }
         }
 
         eventSource.onmessage = handleMessage

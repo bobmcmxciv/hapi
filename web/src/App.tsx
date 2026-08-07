@@ -16,6 +16,7 @@ import { usePushNotifications } from '@/hooks/usePushNotifications'
 import { useViewportHeight } from '@/hooks/useViewportHeight'
 import { useVisibilityReporter } from '@/hooks/useVisibilityReporter'
 import { queryKeys } from '@/lib/query-keys'
+import { attachCrashReporter } from '@/lib/crashGuard'
 import { AppContextProvider } from '@/lib/app-context'
 import { clearMessageWindow, syncTailMessages } from '@/lib/message-window-store'
 import { installNotificationChimeUnlock, playNotificationChime } from '@/lib/notificationChime'
@@ -83,6 +84,15 @@ function AppInner() {
     // Pre-unlock the chime AudioContext on the first user gesture so a later
     // toast can actually make sound (browser autoplay policy).
     useEffect(() => installNotificationChimeUnlock(), [])
+
+    // 认证就绪后把崩溃上报接到 hub；attach 之前发生的崩溃在 crashGuard 里
+    // 积压，此刻补发。上报失败静默——诊断通道不能反过来制造错误。
+    useEffect(() => {
+        if (!api) return
+        attachCrashReporter((report) => {
+            void api.reportClientError(report).catch(() => undefined)
+        })
+    }, [api])
 
     useEffect(() => {
         const tg = getTelegramWebApp()

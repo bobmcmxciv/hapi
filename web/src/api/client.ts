@@ -25,6 +25,7 @@ import type {
     SessionResponse,
     SessionsResponse
 } from '@/types/api'
+import type { ClientErrorReport } from '@/lib/crashGuard'
 import type {
     CodexModelsResponse,
     CursorMigrateOutcome,
@@ -280,6 +281,13 @@ export class ApiClient {
         await this.request('/api/visibility', {
             method: 'POST',
             body: JSON.stringify(payload)
+        })
+    }
+
+    async reportClientError(report: ClientErrorReport): Promise<void> {
+        await this.request('/api/client-errors', {
+            method: 'POST',
+            body: JSON.stringify(report)
         })
     }
 
