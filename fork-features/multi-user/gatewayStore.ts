@@ -1,5 +1,6 @@
 import { Database } from 'bun:sqlite'
 import type {
+    AccessLevel,
     Account,
     AccountRole,
     ApiToken,
@@ -340,20 +341,51 @@ export class MultiUserGatewayStore {
         return rows.map(toBinding)
     }
 
-    listAudienceAccountIds(type: ResourceType, id: string, capability: 'read' | 'operate'): number[] {
+    /**
+     * 账号对某个资源的权限档位。admin 恒为 `owner`（资源是否存在由调用方另行判定），
+     * 其余按「拥有者 > 授权角色 > 无」。
+     */
+    accessLevel(type: ResourceType, id: string, accountId: number): AccessLevel {
+        const account = this.getAccount(accountId)
+        if (!account || account.disabledAt !== null) return 'none'
+        if (account.role === 'admin') return 'owner'
+        const resource = this.getResource(type, id)
+        if (!resource) return 'none'
+        if (resource.ownerAccountId === accountId) return 'owner'
+        return this.getGrant(type, id, accountId) ?? 'none'
+    }
+
+    /**
+     * 该资源的通知受众。`machineId` 传入时（会话所在机器），机器上的授权同样计入 ——
+     * 与 `sessionAccessLevel` 的继承规则保持一致，否则被授权机器的人收不到该机器上
+     * 新会话的完成提醒。
+     */
+    listAudienceAccountIds(
+        type: ResourceType,
+        id: string,
+        capability: 'read' | 'operate',
+        machineId?: string | null
+    ): number[] {
         const resource = this.getResource(type, id)
         if (!resource) return []
         const admins = this.db.prepare(`
             SELECT id FROM gateway_accounts
             WHERE role='admin' AND disabled_at IS NULL
         `).all() as Array<{ id: number }>
-        const grants = this.listGrants(type, id)
-            .filter(grant => capability === 'read' || grant.role === 'operator')
-            .map(grant => grant.accountId)
+        const relevant = (grant: { role: GrantRole }) => capability === 'read' || grant.role === 'operator'
+        const grants = this.listGrants(type, id).filter(relevant).map(grant => grant.accountId)
+        const machineBinding = type === 'session' && machineId ? this.getResource('machine', machineId) : null
+        const inherited = machineBinding
+            ? [
+                machineBinding.ownerAccountId,
+                ...this.listGrants('machine', machineId!).filter(relevant).map(grant => grant.accountId)
+            ]
+            : []
         return Array.from(new Set([
             resource.ownerAccountId,
             ...admins.map(account => account.id),
-            ...grants
+            ...grants,
+            ...inherited
         ]))
     }
 

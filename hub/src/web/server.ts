@@ -46,6 +46,7 @@ import { mountMultiUserGateway, mountMultiUserPostAuth } from '../../../fork-fea
 import { createSseRequestFilterFactory } from '../../../fork-features/multi-user/sseVisibility'
 import type { MultiUserGatewayStore } from '../../../fork-features/multi-user/gatewayStore'
 import { createExecutionMiddleware, gatewayAccountId, mountExecutionRoutes } from '../../../fork-features/multi-user/executionMount'
+import { createSessionMachineResolver } from '../../../fork-features/multi-user/machineInheritance'
 import { resolveGatewayCliNamespace } from '../../../fork-features/multi-user/cliAdapter'
 import { mountAgentOrchestrationRoutes } from '../../../fork-features/agent-orchestration/hub'
 
@@ -299,14 +300,23 @@ function createWebApp(options: {
         getSyncEngine: options.getSyncEngine,
         getSseManager: options.getSseManager
     })
-    app.use('/api/*', createExecutionMiddleware({ store: multiUserStore, jwtSecret: options.jwtSecret }))
+    app.use('/api/*', createExecutionMiddleware({
+        store: multiUserStore,
+        jwtSecret: options.jwtSecret,
+        // 会话继承所在机器的授权，需要按 sessionId 反查 metadata.machineId。
+        getSyncEngine: options.getSyncEngine
+    }))
     app.route('/api', createEventsRoutes(
         options.getSseManager,
         options.getSyncEngine,
         options.getVisibilityTracker,
         // fork(multi-user)：SSE 事件按账号可读集过滤，语义与 /api/sessions 同构。
         // 身份取 JWT 的 gaid（网关账号），不是 uid（core user，网关下恒为同一个）。
-        createSseRequestFilterFactory(multiUserStore, request => gatewayAccountId(request, options.jwtSecret))
+        createSseRequestFilterFactory(
+            multiUserStore,
+            request => gatewayAccountId(request, options.jwtSecret),
+            createSessionMachineResolver(options.getSyncEngine)
+        )
     ))
     app.route('/api', createSessionsRoutes(options.getSyncEngine))
     app.route('/api', createMessagesRoutes(options.getSyncEngine))

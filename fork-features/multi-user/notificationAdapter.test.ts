@@ -45,6 +45,55 @@ describe('MultiUserNotificationAdapter', () => {
         expect(permission.sort()).toEqual(['admin-ns', 'operator-ns', 'owner-ns'])
     })
 
+    it('机器上的授权同样进受众：被授权机器的人收得到该机器新会话的提醒', async () => {
+        const store = new MultiUserGatewayStore(':memory:')
+        stores.push(store)
+        const owner = store.createAccount('owner', 'user', 'owner-ns')
+        const machineViewer = store.createAccount('machine-viewer', 'user', 'machine-viewer-ns')
+        const machineOperator = store.createAccount('machine-operator', 'user', 'machine-operator-ns')
+        store.bindResource({ resourceType: 'session', resourceId: 's1', ownerAccountId: owner.id, coreNamespace: 'runtime' })
+        store.bindResource({ resourceType: 'machine', resourceId: 'fa608', ownerAccountId: owner.id, coreNamespace: 'runtime' })
+        store.grant('machine', 'fa608', machineViewer.id, 'viewer')
+        store.grant('machine', 'fa608', machineOperator.id, 'operator')
+        const ready: string[] = []
+        const permission: string[] = []
+        const downstream: NotificationChannel = {
+            sendReady: async value => { ready.push(value.namespace) },
+            sendPermissionRequest: async value => { permission.push(value.namespace) },
+            sendTaskNotification: async () => {}
+        }
+        const adapter = new MultiUserNotificationAdapter(store, downstream)
+        const onMachine = { ...session, metadata: { path: '/tmp', host: 'FA608_INDEX', machineId: 'fa608' } } as Session
+
+        await adapter.sendReady(onMachine)
+        await adapter.sendPermissionRequest(onMachine)
+
+        expect(ready.sort()).toEqual(['machine-operator-ns', 'machine-viewer-ns', 'owner-ns'])
+        // viewer 只读，权限请求不该发给他
+        expect(permission.sort()).toEqual(['machine-operator-ns', 'owner-ns'])
+    })
+
+    it('会话不在被授权的机器上时受众不变', async () => {
+        const store = new MultiUserGatewayStore(':memory:')
+        stores.push(store)
+        const owner = store.createAccount('owner', 'user', 'owner-ns')
+        const machineViewer = store.createAccount('machine-viewer', 'user', 'machine-viewer-ns')
+        store.bindResource({ resourceType: 'session', resourceId: 's1', ownerAccountId: owner.id, coreNamespace: 'runtime' })
+        store.bindResource({ resourceType: 'machine', resourceId: 'fa608', ownerAccountId: owner.id, coreNamespace: 'runtime' })
+        store.grant('machine', 'fa608', machineViewer.id, 'viewer')
+        const ready: string[] = []
+        const downstream: NotificationChannel = {
+            sendReady: async value => { ready.push(value.namespace) },
+            sendPermissionRequest: async () => {},
+            sendTaskNotification: async () => {}
+        }
+        const adapter = new MultiUserNotificationAdapter(store, downstream)
+
+        await adapter.sendReady({ ...session, metadata: { path: '/tmp', host: 'vircs', machineId: 'vircs' } } as Session)
+
+        expect(ready.sort()).toEqual(['owner-ns'])
+    })
+
     it('routes migrated Telegram and Push destinations through their account bindings', () => {
         const gatewayStore = new MultiUserGatewayStore(':memory:')
         const coreStore = new Store(':memory:')

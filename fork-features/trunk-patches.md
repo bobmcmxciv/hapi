@@ -443,3 +443,96 @@ trunk hook as soon as an equivalent seam exists.
 | 2026-07-06 | #57 c1 (issue #58) — shared contract for per-message fork. Edits: (1) forkedFromMessageId added to trunk patch #1; (18)/(19) new entries for useFlavorCapabilities.ts/.test.tsx (upstream-dir hook files formerly unregistered from #55); patched #13/#16/#17 for new two-dim capability shape (`{capabilities: {flavor: {fork, files}}}` instead of `{fork: string[]}`). Non-trunk: forkCapabilities.ts converted from boolean allow-list to static map + accessors; rpcPayloads.ts gained `forkPoint {messageId, tailOffset}`; hubMount returns full map; hubForkController swaps `FORK_CAPABLE_FLAVORS.includes` for `isForkCapableFlavor`. Test outcome: `bun test fork-features/` 65/65 pass (was 53, +12 for forkCapabilities.test.ts + expanded rpcPayloads.test.ts); web 1162/1162; hub 467/467 (3 pre-existing skip); shared 110/110. Full `bun run typecheck` (cli+web+hub) clean. `git grep FORK_CAPABLE_FLAVORS` returns nothing (acceptance #10). |
 | 2026-07-06 | #57 c5 (issue #62) — web user-message rewind button. Edits: new trunk patch #20 (UserMessage.tsx: RewindIcon + capability-gated button + handleRewind → forkSession → setForkedFromText → navigate). Existing trunk patches touched: #13 (`web/src/api/client.ts` gains `forkPoint?` opts on `forkSession`), #14 (`useSessionActions.ts` fork mutation accepts `{forkPoint?}` arg). Non-trunk additions: `web/src/lib/fork-restore.ts` (one-shot sessionStorage handoff feeding #63 c6) + its `.test.ts`; `web/src/components/AssistantChat/messages/UserMessage.test.tsx` (7 cases: 4 capability-gating, 1 click flow, 1 empty-text-no-stash, 1 pending-disables). Test outcome: `bun test fork-features/` 87/87 pass; web 1176/1176; hub 467/470 (3 pre-existing skip); shared 110/110. Full `bun run typecheck` clean. |
 | 2026-07-06 | #57 c6 (issue #63) — composer restore from fork-restore text. Edits: trunk patch #21 (useComposerDraft.ts): consumeForkedFromText check in the same rAF callback BEFORE the getDraft path; on hit → clearDraft + setText. Non-trunk: new `web/src/hooks/useComposerDraft.forkRestore.test.ts` (5 cases: hit-prefills+skips-draft, miss-falls-back-to-draft, does-not-overwrite-existing-text, normal-unmount-save-after-consume, sessionId-undefined-no-op). Existing `useComposerDraft.test.ts` unchanged (6/6 still green — real fork-restore returns null with empty sessionStorage). Test outcome: `bun run test:web` 1181/1181 pass; `bun test fork-features/` 87/87 unchanged; hub 467/470; shared 110/110. Full `bun run typecheck` clean. |
+
+## SSE 账号隔离与逐条用量回填 (2026-08-02)
+
+多用户网关下所有账号共享同一 core namespace，SSE 仅按 namespace 广播会把
+未授权会话的事件（含完成提醒）投给其他账号；Web Push 一侧早有 audience
+过滤，SSE 一直是裸的。逐条页脚 token 则因经 OpenAI 兼容代理的模型
+`message_start` 给不出计数而结构性全零，真数只在 `usage_report` 帧里。
+判定与回填实现均为 fork 自有，下列上游文件只保留最小挂载点。
+
+| Files | Missing upstream seam | Why it cannot move out | Runtime path | Sync verification |
+|---|---|---|---|---|
+| `hub/src/sse/sseManager.ts` | 订阅无按账号过滤的注册 API | 投递判定发生在私有 `shouldSend` 内，旁路模块无法在广播前拦截单个连接 | 事件广播 → 连接谓词 → SSE 帧 | 两账号各开一条 all=true 连接，广播未授权会话事件，确认只有可读方收到 |
+| `hub/src/web/routes/events.ts` | 路由工厂参数是唯一注入点，无中间件级订阅装饰 | 谓词需按认证 `userId` 构造并随该次订阅生命周期存在 | JWT → 账号谓词 → `manager.subscribe` | 以普通账号登录，触发他人会话完成，确认无提醒 |
+| `web/src/components/SessionChat.tsx` | 无归一化后置管道或消息装饰注册 API | 回填必须发生在 `reduceChatBlocks` 之前、归一化之后的同一 memo 链上 | 原始消息 + 归一化消息 → 回填 → 块归约 → 页脚 | 打开经代理模型的会话，核对逐条 Tokens 非 0 且与用量页同源 |
+| `bunfig.toml` | 无 workspace 级 linker 配置以外的解析钩子 | 根级 `fork-features/` 不是 workspace，其 zod/vitest/hono 导入依赖 hoisted 提升 | 安装 → node_modules 布局 → cli/hub tsconfig rootDir=".." 解析 | `bun install` 后跑 `bun run typecheck`，确认无 TS2307 |
+
+每次上游同步都要复查是否出现原生的 SSE 订阅过滤、消息装饰管道与
+workspace 解析配置；出现即移除对应挂载点。
+
+## Web 崩溃防线与移动端稳定性 (2026-08-07)
+
+此前 web 前端零 ErrorBoundary、零全局错误捕获、零崩溃上报：任何渲染异常
+= 白屏无出口；hub 每次换芯资产 hash 全变，后台老 PWA 动态 import 旧 chunk
+即白屏；hub 侧对以上一切全盲。防线主体是 fork 自有的
+`web/src/lib/crashGuard.ts` + `web/src/components/AppErrorBoundary.tsx`，
+上报端点挂在 fork 自有的 `executionMount.ts`（`POST /api/client-errors`，
+trunk `createAuthMiddleware` 已挡在前面，端点内只做限量与字段裁剪）。
+下列上游文件只保留最小挂载点：
+
+| Files | Missing upstream seam | Why it cannot move out | Runtime path | Sync verification |
+|---|---|---|---|---|
+| `web/src/main.tsx` | 无 bootstrap 生命周期/根组件包装注册 API | installCrashGuard 必须先于一切模块副作用；AppErrorBoundary 必须包在 I18n/Query provider 之外才能兜它们自身的崩溃；bootstrap().catch 是 React 接管失败时唯一出口 | 页面加载 → crashGuard 监听 → React 树（或静态兜底页） | 生产构建下 eval 一次 `import('/assets/不存在.js')`，确认自动整刷一次且 60s 内不二刷 |
+| `web/src/router.tsx` | createRouter 配置是唯一注入点 | defaultErrorComponent 把渲染异常收在单路由内，根边界只兜路由体系外 | 路由渲染异常 → RouteErrorFallback → CrashFallback | 略（组件测试覆盖 CrashFallback；路由集成随根边界 e2e） |
+| `web/src/sw.ts` | Workbox 装配是内联脚本，无 precache 策略扩展点 | NavigationRoute 必须与 precacheAndRoute 同一 SW 实例注册，保证 html 与 chunk 永远同版本 | 导航请求 → 精缓存 index.html → 同代 chunk | 构建后 grep dist/sw.js 含 denylist 正则与 navigate 处理；浏览器确认 SW controlled + workbox-precache 存在 |
+| `web/src/hooks/useSSE.ts` | 事件消费链无错误边界/装饰 API | try/catch 必须贴在 handleSyncEvent 调用点，晚一层就已炸穿 EventSource handler | SSE 帧 → parse → guarded handleSyncEvent → reportCrash | 单测 + 现网观察 `[ClientError] source:sse` 日志 |
+| `web/src/App.tsx` | 无认证就绪回调注册 API | attachCrashReporter 需要认证过的 ApiClient，只有 AppInner 拿得到 | 认证就绪 → attach → 积压崩溃补发 hub | 现网 journald 出现 `[ClientError]` 行即通 |
+| `web/src/api/client.ts` | 认证请求原语私有 | reportClientError 复用既有 token 刷新与错误语义 | crashGuard → ApiClient → POST /api/client-errors | executionMount.test.ts 3 例 |
+| `web/src/components/Terminal/TerminalView.tsx` | 渲染器选择无策略注入点 | CanvasAddon 桌面白名单判据只能贴在 loadAddon 处 | 终端挂载 → UA/触点判定 → DOM 或 canvas 渲染器 | 移动 UA 下确认未加载 CanvasAddon（devtools 断点或日志） |
+| `web/src/components/ImagePreview.tsx`、`web/src/components/AssistantChat/messages/ToolMessage.tsx` | 图片渲染无全局属性钩子 | `loading=lazy`/`decoding=async` 与 60s 延迟 revoke 都是单点属性/时序修正 | 会话流图片渲染 / 生成文件下载 | 长会话滚动无整页崩溃；iOS 下载不再静默失败 |
+
+上游若出现原生 ErrorBoundary、崩溃上报、SW 导航回退或移动端渲染器策略，
+先比形态再决定去留——尤其 tiann#1358/#1377（滚动）与后续任何
+`error-boundary` 字样的提交。
+
+## 经代理会话的上下文窗口 (2026-08-08)
+
+cx2cc 这类 OpenAI 兼容代理下，assistant 行的 `model` 是代理别名
+（`gpt-5.6-sol`），底层仍是 Claude Code SDK。`getContextBudgetTokens` 只认
+`isClaudeModelPreset` 与 `claude-` 前缀，别名走到末尾 `return null`——状态栏
+彻底没有分母，标签退化成 `ctx 158k`。**空 model 早就回退默认窗口了，别名不该
+比空值更差**，这是上游逻辑的一处不对称，非 fork 引入。
+
+回退取保守的 200k 而非 1M：显式 `context_window` 存在时优先级更高、根本走不到
+这里；走到这里说明毫无窗口信号，宁可高估使用率也不给假安全感。线上实测佐证——
+host FA608_INDEX 的会话在上下文 167,410 tokens 时触发 Claude Code 自动压缩
+（`compact_boundary` preTokens=167,277），正是 200k 窗口行为；该数字同时证明
+`calculateContextSize` 的 `input + cache_read + cache_creation` 求和口径正确
+（代理未把缓存计入 `input_tokens`，不存在双重计数）。
+
+| Files | Missing upstream seam | Why it cannot move out | Runtime path | Sync verification |
+|---|---|---|---|---|
+| `web/src/chat/modelConfig.ts` | 窗口推断无 provider/别名注册表 | 判据是单函数末尾的一处回退分支，旁路模块无法介入 | usage → latestUsage.contextWindow ?? 推断 → StatusBar 分母 | 开一个经代理会话，状态栏须出现 `ctx <window> (<n>% left)` 而非裸 `ctx <n>` |
+| `web/src/lib/usageReportBackfill.ts` | — （fork 自有） | 回填改为**合并**而非整体替换 usage：帧里没有 `context_window`/`service_tier`/`cost_usd`，整体替换会连带抹掉分母 | 帧 delta → 合并进 message_start usage → 状态栏 | 单测钉死非计数字段保留 |
+
+上游若给出 provider 感知的窗口注册表或在会话级下发窗口，改用它并移除本回退。
+
+## 机器授权向下继承到会话 (2026-08-08)
+
+把一台机器授权给某个账号后，该机器上**新建**的会话对他仍然不可见：会话是独立的
+`gateway_resources` 行，owner 是创建者（通常 admin），没有任何 grant 指向被授权人。
+生产库实测（2026-08-08，FA608_INDEX = `ede96a43…` 授权给 mnmn66）：最近 400 条会话
+里有 62 条跑在这台机器上，全部靠**逐条补 session grant** 才看得见——机器授权在
+「新会话」这一维上形同虚设。
+
+判定收敛到 fork 自有的 `fork-features/multi-user/machineInheritance.ts`：
+`sessionAccessLevel = max(会话自身授权, 所在机器授权)`，机器归属**现查** core 侧
+`session.metadata.machineId`（CLI 建会话时必填），网关库不冗余存一份——存一份就会
+漂移，且存量会话补不上。三个消费点共用它：ExecutionDispatcher（单会话读/写）、
+sseVisibility（事件投递谓词）、executionMount 的 `collectVisibleSessions`
+（`/api/sessions` 与 `/api/usage/summary` 的可见集）。
+
+同批修掉两处相邻缺陷：
+- `/api/events` 的订阅从「逐资源」改成「逐 namespace + 谓词」。逐条订阅只能覆盖
+  连接建立那一刻已存在的资源，机器上后来新建的会话事件永远进不来；顺带把
+  mnmn66 这类账号的订阅数从 50+ 降到 1。
+- 未绑定资源的放行窗口收紧到**账号自己的 namespace**。订阅按 namespace 铺开后，
+  无条件放行等于把别人 namespace 里尚未绑定的会话全抄送过去。
+
+| Files | Missing upstream seam | Why it cannot move out | Runtime path | Sync verification |
+|---|---|---|---|---|
+| `hub/src/web/server.ts` | `createExecutionMiddleware` / `createSseRequestFilterFactory` 的 deps 内联装配 | 继承判定要按 sessionId 反查 `metadata.machineId`，只有 `getSyncEngine` 拿得到；两处各加一个 dep | hub 启动 → 执行中间件 / SSE 谓词 → 机器继承 | 冷启 hub，用被授权机器（非会话）的账号 JWT 打 `GET /api/sessions` 与 `GET /api/events` |
+
+上游若出现原生的资源层级/继承授权模型，先比形态再决定去留。

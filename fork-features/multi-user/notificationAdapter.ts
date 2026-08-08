@@ -30,7 +30,7 @@ export function createPushNotificationRouting(
         },
         endpointsForAudience(session, capability) {
             const audienceAccountIds = new Set(
-                gatewayStore.listAudienceAccountIds('session', session.id, capability)
+                gatewayStore.listAudienceAccountIds('session', session.id, capability, session.metadata?.machineId)
             )
             const accountIdByEndpoint = new Map(
                 gatewayStore.listPushSubscriptionAccounts(session.namespace)
@@ -77,7 +77,8 @@ export class MultiUserNotificationAdapter implements NotificationChannel {
             await send(session)
             return
         }
-        const namespaces = this.store.listAudienceAccountIds('session', session.id, capability)
+        const namespaces = this.store
+            .listAudienceAccountIds('session', session.id, capability, session.metadata?.machineId)
             .flatMap(this.namespacesForAccount)
         await Promise.all(Array.from(new Set(namespaces)).map(namespace => send({ ...session, namespace })))
     }
