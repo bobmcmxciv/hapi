@@ -21,6 +21,12 @@ interface Settings {
   apiUrl?: string
   // Extra headers for CLI -> hub requests (priority: env HAPI_EXTRA_HEADERS_JSON > this)
   extraHeaders?: unknown
+  // Per-machine launch defaults advertised to the web New Session form.
+  // Set these on machines whose Claude Code is fronted by an Anthropic-
+  // compatible proxy so sessions start on the model that actually serves them
+  // (e.g. "gpt-5.6-sol[1m]" + "xhigh") instead of an Anthropic placeholder.
+  defaultLaunchModel?: string
+  defaultLaunchEffort?: string
   // Legacy field name (for migration, read-only)
   serverUrl?: string
 }

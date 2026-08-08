@@ -12,12 +12,12 @@ import { configuration } from '@/configuration';
 import packageJson from '../../package.json';
 import { getEnvironmentInfo } from '@/ui/doctor';
 import { spawnHappyCLI } from '@/utils/spawnHappyCLI';
-import { writeRunnerState, RunnerLocallyPersistedState, readRunnerState, acquireRunnerLock, releaseRunnerLock } from '@/persistence';
+import { writeRunnerState, RunnerLocallyPersistedState, readRunnerState, readSettings, acquireRunnerLock, releaseRunnerLock } from '@/persistence';
 import { getCliArgs } from '@/utils/cliArgs';
 import { getProcessStartMarker, isProcessAlive, isWindows, killProcess, killProcessByChildProcess, killProcessTreeByPid } from '@/utils/process';
 import { getCcSwitchProviderLaunchEnv } from '@/modules/common/ccSwitch';
 import { PERMISSION_MODES } from '@hapi/protocol/modes';
-import { RUNNER_CAPABILITIES } from '@hapi/protocol';
+import { RUNNER_CAPABILITIES, resolveMachineLaunchDefaults } from '@hapi/protocol';
 import { withRetry } from '@/utils/time';
 import { isRetryableConnectionError } from '@/utils/errorUtils';
 
@@ -1130,13 +1130,24 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
       logger.debug(`[RUNNER RUN] OMP unavailable: ${ompAvailability.error}`);
     }
 
+    // Operator-set per-machine launch defaults (~/.hapi/settings.json). Read
+    // once at registration; invalid values resolve to undefined and simply
+    // leave the New Session form on its normal `auto` default.
+    const runnerSettings = await readSettings();
+    const machineLaunchDefaults = resolveMachineLaunchDefaults({
+      model: runnerSettings.defaultLaunchModel,
+      effort: runnerSettings.defaultLaunchEffort
+    });
+    logger.debug(`[RUNNER RUN] Machine launch defaults: ${JSON.stringify(machineLaunchDefaults ?? null)}`);
+
     // Get or create machine (with retry for transient connection errors)
     const machine = await withRetry(
       () => api.getOrCreateMachine({
         machineId,
         metadata: buildMachineMetadata({
           workspaceRoots,
-          ompAvailable: ompAvailability.available
+          ompAvailable: ompAvailability.available,
+          launchDefaults: machineLaunchDefaults
         }),
         runnerState: initialRunnerState
       }),
@@ -1156,7 +1167,8 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
     // Create realtime machine session
     const apiMachine = api.machineSyncClient(machine, {
       workspaceRoots,
-      ompAvailable: ompAvailability.available
+      ompAvailable: ompAvailability.available,
+      launchDefaults: machineLaunchDefaults
     });
 
     // Set RPC handlers

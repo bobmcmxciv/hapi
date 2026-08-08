@@ -114,22 +114,36 @@ function resolvePreferredOptionValue(
     return availableValues.includes(preferredValue) ? preferredValue : fallbackValue
 }
 
+/**
+ * Launch defaults advertised by the selected machine (machine metadata,
+ * sourced from that machine's ~/.hapi/settings.json). Used only when this
+ * browser has no stored preference for the (machine, agent) pair: an explicit
+ * user choice always wins, but a fresh browser/phone/profile should still
+ * start on the model that actually serves that machine rather than `auto`.
+ */
+export type MachineAdvertisedLaunchDefaults = {
+    model?: string
+    effort?: string
+}
+
 export function resolvePreferredLaunchSettings(
     agent: AgentType,
-    preferred: PreferredLaunchSettings | null
+    preferred: PreferredLaunchSettings | null,
+    machineDefaults?: MachineAdvertisedLaunchDefaults
 ): PreferredLaunchSettings {
-    const preferredModel = preferred?.model ?? 'auto'
+    const preferredModel = preferred?.model ?? machineDefaults?.model ?? 'auto'
     const staticModelValues = MODEL_OPTIONS[agent].map((option) => option.value)
     const model = staticModelValues.length > 0 && agent !== 'codex' && agent !== 'copilot'
         ? resolvePreferredOptionValue(preferredModel, staticModelValues, 'auto')
         : preferredModel
+    const fallbackEffort = preferred?.effort ?? machineDefaults?.effort ?? 'auto'
     const effort = agent === 'claude'
         ? resolvePreferredOptionValue(
-            preferred?.effort ?? 'auto',
+            fallbackEffort,
             CLAUDE_EFFORT_OPTIONS.map((option) => option.value),
             'auto'
         )
-        : (preferred?.effort ?? 'auto')
+        : fallbackEffort
     const modelReasoningEffort = agent === 'opencode'
         ? resolvePreferredOptionValue(
             preferred?.modelReasoningEffort ?? 'default',
