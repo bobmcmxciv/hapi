@@ -23,6 +23,11 @@ const SPECIFIC_MODEL_OPTIONS = [
     { value: 'claude-haiku-4-5', label: 'Haiku 4.5' },
 ]
 
+const PROXY_MODEL_OPTIONS = [
+    { value: 'gpt-5.6-sol', label: 'gpt-5.6-sol' },
+    { value: 'gpt-5.6-sol[1m]', label: 'gpt-5.6-sol[1m]' },
+]
+
 describe('getClaudeComposerModelOptions', () => {
     it('keeps custom ids out of the listed options because the custom radio owns them', () => {
         expect(getClaudeComposerModelOptions('claude-opus-4-1-20250805')).toEqual([
@@ -35,6 +40,7 @@ describe('getClaudeComposerModelOptions', () => {
             { value: 'opus[1m]', label: 'Opus 1M' },
             { value: 'haiku', label: 'Haiku' },
             ...SPECIFIC_MODEL_OPTIONS,
+            ...PROXY_MODEL_OPTIONS,
         ])
     })
 
@@ -49,6 +55,7 @@ describe('getClaudeComposerModelOptions', () => {
             { value: 'opus[1m]', label: 'Opus 1M' },
             { value: 'haiku', label: 'Haiku' },
             ...SPECIFIC_MODEL_OPTIONS,
+            ...PROXY_MODEL_OPTIONS,
         ])
     })
 
@@ -67,6 +74,11 @@ describe('isListedClaudeModel', () => {
         expect(isListedClaudeModel('vendor-claude-ultra')).toBe(false)
         expect(isListedClaudeModel(null)).toBe(false)
     })
+
+    it('counts the proxy-served ids as listed, not custom', () => {
+        expect(isListedClaudeModel('gpt-5.6-sol')).toBe(true)
+        expect(isListedClaudeModel('gpt-5.6-sol[1m]')).toBe(true)
+    })
 })
 
 describe('getNextClaudeComposerModel', () => {
@@ -74,8 +86,12 @@ describe('getNextClaudeComposerModel', () => {
         expect(getNextClaudeComposerModel('claude-opus-4-1-20250805')).toBeNull()
     })
 
-    it('cycles from the final specific model id to Default', () => {
-        expect(getNextClaudeComposerModel('claude-haiku-4-5')).toBeNull()
+    it('cycles from the last built-in id into the proxy-served ids', () => {
+        expect(getNextClaudeComposerModel('claude-haiku-4-5')).toBe('gpt-5.6-sol')
+    })
+
+    it('cycles from the final option back to Default', () => {
+        expect(getNextClaudeComposerModel('gpt-5.6-sol[1m]')).toBeNull()
     })
 })
 

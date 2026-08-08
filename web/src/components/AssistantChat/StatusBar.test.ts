@@ -4,6 +4,7 @@ import {
     formatCompactContextUsageLabel,
     formatContextUsageLabel,
     getContextUsageDetails,
+    resolveContextHeuristicModel,
     shouldShowCodexFastBadge
 } from './StatusBar'
 
@@ -52,6 +53,39 @@ describe('context usage labels', () => {
         expect(budget).toBe(190_000)
         expect(formatContextUsageLabel(contextSize, budget)).toBe('88% · 167k / 190k')
         expect(formatContextUsageLabel(contextSize, budget)).not.toContain('used')
+    })
+})
+
+/**
+ * 实测（vircs 直连 cx2cc，`claude --model 'gpt-5.6-sol[1m]'`）：
+ * `system/init.model` = `gpt-5.6-sol[1m]`，但 `assistant.message.model` =
+ * `gpt-5.6-sol`（代理只报裸名），且该 assistant 行的 usage 里没有
+ * `context_window`。观测名一律裸名，`[1m]` 只活在启动声明里。
+ */
+describe('resolveContextHeuristicModel', () => {
+    it('保留启动声明的 [1m]，不被裸的观测别名冲掉', () => {
+        expect(resolveContextHeuristicModel('gpt-5.6-sol[1m]', 'gpt-5.6-sol')).toBe('gpt-5.6-sol[1m]')
+        expect(getContextBudgetTokens(
+            resolveContextHeuristicModel('gpt-5.6-sol[1m]', 'gpt-5.6-sol'),
+            'claude'
+        )).toBe(990_000)
+    })
+
+    it('Anthropic 自家的 1M preset 同样会被裸 id 冲掉，一并保留', () => {
+        expect(resolveContextHeuristicModel('sonnet[1m]', 'claude-sonnet-5')).toBe('sonnet[1m]')
+    })
+
+    it('两边都不带 [1m] 时仍然观测优先——中途换模型要跟得上', () => {
+        expect(resolveContextHeuristicModel('opus', 'claude-haiku-4-5')).toBe('claude-haiku-4-5')
+    })
+
+    it('观测名自己带 [1m] 时不覆盖它', () => {
+        expect(resolveContextHeuristicModel('opus[1m]', 'claude-opus-4-8[1m]')).toBe('claude-opus-4-8[1m]')
+    })
+
+    it('没有观测名时退回启动声明', () => {
+        expect(resolveContextHeuristicModel('gpt-5.6-sol[1m]', null)).toBe('gpt-5.6-sol[1m]')
+        expect(resolveContextHeuristicModel(null, null)).toBeNull()
     })
 })
 

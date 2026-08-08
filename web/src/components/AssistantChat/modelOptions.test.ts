@@ -12,6 +12,11 @@ const SPECIFIC_CLAUDE_MODEL_OPTIONS = [
     { value: 'claude-haiku-4-5', label: 'Haiku 4.5' },
 ]
 
+const PROXY_CLAUDE_MODEL_OPTIONS = [
+    { value: 'gpt-5.6-sol', label: 'gpt-5.6-sol' },
+    { value: 'gpt-5.6-sol[1m]', label: 'gpt-5.6-sol[1m]' },
+]
+
 describe('getModelOptionsForFlavor', () => {
     it('never offers the unsupported default reset in an active AGY session', () => {
         for (const currentModel of [null, 'auto']) {
@@ -57,6 +62,7 @@ describe('getModelOptionsForFlavor', () => {
             { value: 'opus[1m]', label: 'Opus 1M' },
             { value: 'haiku', label: 'Haiku' },
             ...SPECIFIC_CLAUDE_MODEL_OPTIONS,
+            ...PROXY_CLAUDE_MODEL_OPTIONS,
         ])
     })
 
@@ -75,6 +81,7 @@ describe('getModelOptionsForFlavor', () => {
             { value: 'opus[1m]', label: 'Opus 1M' },
             { value: 'haiku', label: 'Haiku' },
             ...SPECIFIC_CLAUDE_MODEL_OPTIONS,
+            ...PROXY_CLAUDE_MODEL_OPTIONS,
         ])
     })
 

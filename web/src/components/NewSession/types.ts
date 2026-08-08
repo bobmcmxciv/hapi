@@ -7,6 +7,8 @@ import {
     CLAUDE_MODEL_IDS,
     CLAUDE_MODEL_LABELS,
     CLAUDE_MODEL_PRESETS,
+    CLAUDE_PROXY_MODEL_IDS,
+    CLAUDE_PROXY_MODEL_LABELS,
     GEMINI_MODEL_LABELS,
     GEMINI_MODEL_PRESETS
 } from '@hapi/protocol'
@@ -37,6 +39,9 @@ export const MODEL_OPTIONS: Record<AgentType, { value: string; label: string }[]
         { value: 'auto', label: 'Default' },
         ...modelPresetOptions(CLAUDE_MODEL_PRESETS, CLAUDE_MODEL_LABELS),
         ...modelPresetOptions(CLAUDE_MODEL_IDS, CLAUDE_MODEL_ID_LABELS),
+        // Proxy-served ids last: they only work on machines pointed at an
+        // Anthropic-compatible proxy, so they should not crowd the presets.
+        ...modelPresetOptions(CLAUDE_PROXY_MODEL_IDS, CLAUDE_PROXY_MODEL_LABELS),
     ],
     codex: [
         { value: 'auto', label: 'Default' },

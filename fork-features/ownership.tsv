@@ -262,8 +262,8 @@ shared/src/flavors.test.ts	trunk-patch	#172	origin-only delta; fork commits 3686
 shared/src/flavors.ts	trunk-patch	#172	origin-only delta; fork commits 3686370a
 shared/src/messages.test.ts	fork-owned	#179	origin-only delta; fork commits d1f9f394
 shared/src/messages.ts	upstream-fix	#179	origin-only delta; fork commits d1f9f394; disposition upstream-issue https://github.com/tiann/hapi/issues/1077: general fix reported against latest upstream main
-shared/src/models.test.ts	trunk-patch	#174	origin-only delta; fork commits 606c6579,7e3edb0f
-shared/src/models.ts	trunk-patch	#174	origin-only delta; fork commits 606c6579,7e3edb0f
+shared/src/models.test.ts	trunk-patch	#174	origin-only delta; fork commits 606c6579,7e3edb0f; proxy-models: 钉死代理别名 label == id 且不混入内建 preset 命名空间
+shared/src/models.ts	trunk-patch	#174	origin-only delta; fork commits 606c6579,7e3edb0f; proxy-models: 新增 CLAUDE_PROXY_MODEL_LABELS/_IDS（Anthropic 兼容代理直供的 model id，如 cx2cc 的 gpt-5.6-sol）
 shared/src/modes.ts	trunk-patch	#172	origin-only delta; fork commits 7e0010b8,3686370a
 shared/src/piThinkingLevel.ts	upstream-sync	#180	merge-base 87f5c78a; changed only on upstream/main
 shared/src/rpcMethods.test.ts	fork-owned	#170	origin-only delta; fork commits 2138d84b
@@ -298,8 +298,8 @@ web/src/api/client.test.ts	upstream-sync	#180	merge-base 87f5c78a; changed only 
 web/src/api/client.ts	trunk-patch	#171	both refs changed; fork commits a6f9e3f9,51929072,9e76994b,3994ee9a,fc7d7b4a,b4c31e88,a8815d47,bfa252da,d28853c7,c853bcbf,c58622c2,5262a261,7dca6478,2ef4c618,413e76cc
 web/src/chat/agentTimestamp.test.ts	upstream-sync	#180	merge-base 87f5c78a; changed only on upstream/main
 web/src/chat/agentTimestamp.ts	upstream-sync	#180	merge-base 87f5c78a; changed only on upstream/main
-web/src/chat/modelConfig.test.ts	trunk-patch	ctx-window-proxy	钉死代理别名与空 model 走同一条保守回退（190k）
-web/src/chat/modelConfig.ts	trunk-patch	ctx-window-proxy	claude flavor 遇未知 model id（cx2cc 代理别名如 gpt-5.6-sol）回退默认 200k 窗口，此前返回 null 导致状态栏分母消失
+web/src/chat/modelConfig.test.ts	trunk-patch	ctx-window-proxy	钉死裸代理别名与空 model 走同一条保守回退（190k）；proxy-models 追加钉死带 [1m] 的别名走 990k
+web/src/chat/modelConfig.ts	trunk-patch	ctx-window-proxy	claude flavor 遇未知 model id（cx2cc 代理别名如 gpt-5.6-sol）回退默认 200k 窗口，此前返回 null 导致状态栏分母消失；proxy-models 把 [1m] 后缀提到族判定之前（后缀是启动声明，Claude Code 对任意 model id 都认）
 web/src/chat/normalize.test.ts	trunk-patch	#179	origin-only delta; fork commits 92f048f7,d1f9f394; disposition fork-specific #179,https://github.com/tiann/hapi/issues/1077: Codex compact summary feature; shared path also carries separately reported upstream fix
 web/src/chat/normalizeAgent.test.ts	upstream-sync	#180	merge-base 87f5c78a; changed only on upstream/main
 web/src/chat/normalizeAgent.ts	trunk-patch	#176	both refs changed; fork commits 92f048f7,b4c31e88,d1f9f394
@@ -320,8 +320,9 @@ web/src/components/AssistantChat/HappyComposer.tsx	trunk-patch	#174	origin-only 
 web/src/components/AssistantChat/HappyThread.tsx	upstream-fix	#179	origin-only delta; fork commits 0bc807dc; disposition upstream-issue https://github.com/tiann/hapi/issues/1067: general fix reported against latest upstream main
 web/src/components/AssistantChat/PiThinkingLevelPanel.tsx	upstream-sync	#180	merge-base 87f5c78a; changed only on upstream/main
 web/src/components/AssistantChat/StatusBar.test.ts	trunk-patch	ctx-window-proxy	用线上真实 cx2cc 数字钉死代理会话仍有分母
-web/src/components/AssistantChat/claudeModelOptions.test.ts	trunk-patch	#174	origin-only delta; fork commits 8240268f,606c6579,7e3edb0f
-web/src/components/AssistantChat/claudeModelOptions.ts	trunk-patch	#174	origin-only delta; fork commits 8240268f,606c6579
+web/src/components/AssistantChat/StatusBar.tsx	trunk-patch	proxy-models	contextModel（观测名，恒为裸名）与 session.model（启动声明，带 [1m]）冲突时保留 [1m]，否则 1M 会话按 200k 计
+web/src/components/AssistantChat/claudeModelOptions.test.ts	trunk-patch	#174	origin-only delta; fork commits 8240268f,606c6579,7e3edb0f; proxy-models: 代理 id 算 listed 不算 custom，循环切换在末尾回到 Default
+web/src/components/AssistantChat/claudeModelOptions.ts	trunk-patch	#174	origin-only delta; fork commits 8240268f,606c6579; proxy-models: 代理 id 进 CLAUDE_SELECTABLE_MODELS，会话中途也能切
 web/src/components/AssistantChat/messages/AssistantMessage.tsx	trunk-patch	#178	origin-only delta; fork commits 302180e5,7faed2eb
 web/src/components/AssistantChat/messages/GeneratedFileCard.test.ts	fork-owned	#176	origin-only delta; fork commits 3edb7db8
 web/src/components/AssistantChat/messages/GeneratedImageCard.test.tsx	fork-owned	#175	origin-only delta; fork commits d28853c7
@@ -335,7 +336,7 @@ web/src/components/AssistantChat/messages/UserMessage.test.tsx	fork-owned	#170	o
 web/src/components/AssistantChat/messages/UserMessage.tsx	trunk-patch	#178	origin-only delta; fork commits 302180e5,253e5184,5262a261
 web/src/components/AssistantChat/messages/user-bubble.test.tsx	trunk-patch	#178	origin-only delta; fork commits 302180e5
 web/src/components/AssistantChat/messages/user-bubble.tsx	trunk-patch	#178	origin-only delta; fork commits 302180e5
-web/src/components/AssistantChat/modelOptions.test.ts	trunk-patch	#174	origin-only delta; fork commits 606c6579,7e3edb0f,7e0010b8
+web/src/components/AssistantChat/modelOptions.test.ts	trunk-patch	#174	origin-only delta; fork commits 606c6579,7e3edb0f,7e0010b8; proxy-models: 期望数组随选项表一起加代理 id
 web/src/components/AssistantChat/modelOptions.ts	trunk-patch	#172	origin-only delta; fork commits 7e0010b8,3686370a
 web/src/components/AssistantChat/piThinkingLevelOptions.ts	upstream-sync	#180	merge-base 87f5c78a; changed only on upstream/main
 web/src/components/CliOutputBlock.test.tsx	trunk-patch	#178	origin-only delta; fork commits 302180e5
@@ -348,8 +349,8 @@ web/src/components/FileMarkdownView.tsx	fork-owned	#177	origin-only delta; fork 
 web/src/components/ImagePreview.tsx	upstream-fix	#179	origin-only delta; fork commits 0aba2643; disposition upstream-issue https://github.com/tiann/hapi/issues/1066: general fix reported against latest upstream main
 web/src/components/LoginPrompt.test.tsx	trunk-patch	#171	origin-only delta; fork commits ba37bcfb
 web/src/components/LoginPrompt.tsx	trunk-patch	#171	origin-only delta; fork commits a6f9e3f9
-web/src/components/NewSession/types.test.ts	trunk-patch	#174	origin-only delta; fork commits 606c6579,7e3edb0f
-web/src/components/NewSession/types.ts	trunk-patch	#174	origin-only delta; fork commits 606c6579,3686370a
+web/src/components/NewSession/types.test.ts	trunk-patch	#174	origin-only delta; fork commits 606c6579,7e3edb0f; proxy-models: 钉死代理 id 排在内建模型之后
+web/src/components/NewSession/types.ts	trunk-patch	#174	origin-only delta; fork commits 606c6579,3686370a; proxy-models: MODEL_OPTIONS.claude 末尾追加代理 id，新建会话即可直选
 web/src/components/OfflineBanner.tsx	upstream-fix	#179	origin-only delta; fork commits 0aba2643; disposition upstream-issue https://github.com/tiann/hapi/issues/1066: general fix reported against latest upstream main
 web/src/components/PwaUpdateBanner.test.tsx	trunk-patch	#179	origin-only delta; fork commits 4a0c5f0b,0aba2643; disposition fork-specific #179,https://github.com/tiann/hapi/issues/1066: fork PWA changelog feature; shared path also carries separately reported upstream fix
 web/src/components/PwaUpdateBanner.tsx	trunk-patch	#179	origin-only delta; fork commits 4a0c5f0b,0aba2643; disposition fork-specific #179,https://github.com/tiann/hapi/issues/1066: fork PWA changelog feature; shared path also carries separately reported upstream fix

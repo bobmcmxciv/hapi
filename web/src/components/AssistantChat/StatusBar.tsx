@@ -193,6 +193,30 @@ export function shouldShowComposerStatusBar(agentFlavor: string | null | undefin
     return agentFlavor !== 'cursor'
 }
 
+/**
+ * Pick the model id the context-window fallback heuristic should run on.
+ *
+ * The usage-bearing message's own model normally wins (see StatusBar's
+ * `contextModel` doc) — it tracks mid-session switches and covers local
+ * sessions whose `session.model` is null. But that observed id is always
+ * reported bare: Anthropic reports `claude-sonnet-5` for `sonnet[1m]`, and an
+ * Anthropic-compatible proxy reports its own alias (`gpt-5.6-sol`) for
+ * `gpt-5.6-sol[1m]`. The `[1m]` suffix survives only on the launch selection,
+ * so dropping it here would meter a 1M session against 200k.
+ *
+ * Only reachable when no explicit `context_window` arrived (local mode, or
+ * before the first result of a proxied session) — otherwise the real window
+ * wins over any heuristic.
+ */
+export function resolveContextHeuristicModel(
+    model: string | null | undefined,
+    contextModel: string | null | undefined
+): string | null | undefined {
+    const declared1m = model?.trim().endsWith('[1m]') ?? false
+    const observed1m = contextModel?.trim().endsWith('[1m]') ?? false
+    return declared1m && !observed1m ? model : contextModel ?? model
+}
+
 export function StatusBar(props: {
     active: boolean
     thinking: boolean
@@ -227,7 +251,7 @@ export function StatusBar(props: {
         [props.active, props.thinking, props.agentState, props.voiceStatus, props.backgroundTaskCount, t]
     )
 
-    const contextHeuristicModel = props.contextModel ?? props.model
+    const contextHeuristicModel = resolveContextHeuristicModel(props.model, props.contextModel)
     const contextWarning = useMemo(
         () => {
             if (props.contextSize === undefined) return null
