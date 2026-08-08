@@ -620,9 +620,20 @@ export function NewSession(props: {
             return
         }
 
+        // Machine-advertised defaults (that machine's ~/.hapi/settings.json,
+        // relayed through machine metadata) seed the form when this browser has
+        // no stored preference — so a proxy-fronted machine opens on the model
+        // that actually serves it instead of `auto`.
+        const selectedMachine = props.machines.find((candidate) => candidate.id === machineId)
         const preferred = resolvePreferredLaunchSettings(
             agent,
-            loadPreferredLaunchSettings(machineId, agent)
+            loadPreferredLaunchSettings(machineId, agent),
+            agent === 'claude'
+                ? {
+                    model: selectedMachine?.metadata?.defaultLaunchModel,
+                    effort: selectedMachine?.metadata?.defaultLaunchEffort
+                }
+                : undefined
         )
 
         setModel(agent === 'opencode' ? 'auto' : preferred.model)
@@ -632,7 +643,7 @@ export function NewSession(props: {
         setOpencodeSelectedModel(
             agent === 'opencode' && preferred.model !== 'auto' ? preferred.model : null
         )
-    }, [agent, machineId])
+    }, [agent, machineId, props.machines])
 
     useEffect(() => {
         if (

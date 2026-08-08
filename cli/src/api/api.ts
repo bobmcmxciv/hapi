@@ -1,6 +1,6 @@
 import axios from 'axios'
 import type { AgentState, CreateMachineResponse, CreateSessionResponse, RunnerState, Machine, MachineMetadata, Metadata, Session } from '@/api/types'
-import type { LocalResumeTarget, ResumableSession } from '@hapi/protocol'
+import type { LocalResumeTarget, MachineLaunchDefaults, ResumableSession } from '@hapi/protocol'
 import {
     AgentStateSchema,
     CreateMachineResponseSchema,
@@ -280,13 +280,14 @@ export class ApiClient {
 
     machineSyncClient(
         machine: Machine,
-        options?: { workspaceRoots?: string[]; ompAvailable?: boolean }
+        options?: { workspaceRoots?: string[]; ompAvailable?: boolean; launchDefaults?: MachineLaunchDefaults }
     ): ApiMachineClient {
         return new ApiMachineClient(
             this.token,
             machine,
             options?.workspaceRoots,
-            options?.ompAvailable ?? false
+            options?.ompAvailable ?? false,
+            options?.launchDefaults
         )
     }
 }

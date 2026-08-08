@@ -8,7 +8,7 @@ import { realpathSync } from 'node:fs'
 import { basename, dirname, isAbsolute, join, relative, resolve as resolvePath } from 'node:path'
 import { logger } from '@/ui/logger'
 import { configuration } from '@/configuration'
-import type { ClientToServerEvents, ServerToClientEvents, Update, UpdateMachineBody } from '@hapi/protocol'
+import type { ClientToServerEvents, MachineLaunchDefaults, ServerToClientEvents, Update, UpdateMachineBody } from '@hapi/protocol'
 import {
     ArchiveCodexSessionRpcRequestSchema,
     ListCodexSessionsRpcRequestSchema,
@@ -128,7 +128,8 @@ export class ApiMachineClient {
         private readonly token: string,
         private readonly machine: Machine,
         private readonly workspaceRoots?: string[],
-        private readonly ompAvailable: boolean = false
+        private readonly ompAvailable: boolean = false,
+        private readonly launchDefaults?: MachineLaunchDefaults
     ) {
         // Realpath roots once so all subsequent comparisons are against
         // canonical, symlink-resolved locations. Falls back to lexical
@@ -602,6 +603,36 @@ export class ApiMachineClient {
                 })
             } else if (desiredWorkspaceRoots?.length) {
                 console.log(`[HAPI] Workspace roots already up to date on hub: ${formatWorkspaceRoots(desiredWorkspaceRoots)}`)
+            }
+
+            // Launch defaults come from the operator-editable
+            // ~/.hapi/settings.json, so they can change between runner starts.
+            // getOrCreateMachine does not rewrite metadata for an already
+            // registered machine, so reconcile them here the same way
+            // workspaceRoots are — otherwise editing settings.json would never
+            // reach the hub and the New Session form would keep the stale value.
+            const desiredLaunchModel = this.launchDefaults?.model
+            const desiredLaunchEffort = this.launchDefaults?.effort
+            if (desiredLaunchModel !== this.machine.metadata?.defaultLaunchModel
+                || desiredLaunchEffort !== this.machine.metadata?.defaultLaunchEffort) {
+                logger.debug(`[API MACHINE] Syncing launch defaults to hub: model=${desiredLaunchModel ?? '(none)'} effort=${desiredLaunchEffort ?? '(none)'}`)
+                this.updateMachineMetadata((current) => {
+                    const base = (current ?? this.machine.metadata ?? {}) as MachineMetadata
+                    const next = { ...base } as MachineMetadata
+                    if (desiredLaunchModel) {
+                        next.defaultLaunchModel = desiredLaunchModel
+                    } else {
+                        delete next.defaultLaunchModel
+                    }
+                    if (desiredLaunchEffort) {
+                        next.defaultLaunchEffort = desiredLaunchEffort
+                    } else {
+                        delete next.defaultLaunchEffort
+                    }
+                    return next
+                }).catch((error) => {
+                    logger.debug('[API MACHINE] Failed to sync launch defaults', error)
+                })
             }
 
             const hubOmpAvailable = this.machine.metadata?.capabilities?.omp === true

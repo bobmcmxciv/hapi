@@ -396,6 +396,11 @@ export const MachineMetadataSchema = z.object({
     happyLibDir: z.string().optional(),
     workspaceRoots: z.array(z.string()).optional(),
     capabilities: MachineCapabilitiesSchema.optional(),
+    // Per-machine launch defaults advertised by the runner, so a machine whose
+    // Claude Code is fronted by an Anthropic-compatible proxy can present its
+    // real model in New Session instead of `auto`. See machineLaunchDefaults.ts.
+    defaultLaunchModel: z.string().optional(),
+    defaultLaunchEffort: z.string().optional(),
     usage: MachineUsageStateSchema.optional()
 })
 

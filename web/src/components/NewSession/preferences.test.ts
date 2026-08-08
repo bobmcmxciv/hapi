@@ -135,6 +135,59 @@ describe('NewSession preferences', () => {
         })
     })
 
+    describe('machine-advertised launch defaults', () => {
+        // cx2cc-fronted machines (DESKTOP-HT3P09U / FA608_INDEX / TXFA608INDEX
+        // / DESKTOP-4SQALMG) actually run gpt-5.6-sol. Without a machine
+        // default the form opened on `auto` and operators picked an Anthropic
+        // preset as a placeholder, so the UI showed a model that never ran and
+        // the context window was metered against the wrong family.
+        const MACHINE_DEFAULTS = { model: 'gpt-5.6-sol[1m]', effort: 'xhigh' }
+
+        it('seeds model and effort when this browser has no stored preference', () => {
+            expect(resolvePreferredLaunchSettings('claude', null, MACHINE_DEFAULTS)).toEqual({
+                model: 'gpt-5.6-sol[1m]',
+                cursorSelectedBase: 'auto',
+                effort: 'xhigh',
+                modelReasoningEffort: 'default'
+            })
+        })
+
+        it('lets an explicit stored preference win over the machine default', () => {
+            expect(resolvePreferredLaunchSettings('claude', {
+                model: 'opus[1m]',
+                cursorSelectedBase: 'auto',
+                effort: 'max',
+                modelReasoningEffort: 'default'
+            }, MACHINE_DEFAULTS)).toEqual({
+                model: 'opus[1m]',
+                cursorSelectedBase: 'auto',
+                effort: 'max',
+                modelReasoningEffort: 'default'
+            })
+        })
+
+        it('still falls back to auto when the advertised model is not selectable', () => {
+            expect(resolvePreferredLaunchSettings('claude', null, {
+                model: 'model-that-does-not-exist',
+                effort: 'nonsense'
+            })).toEqual({
+                model: 'auto',
+                cursorSelectedBase: 'auto',
+                effort: 'auto',
+                modelReasoningEffort: 'default'
+            })
+        })
+
+        it('behaves exactly as before when no machine default is advertised', () => {
+            expect(resolvePreferredLaunchSettings('claude', null)).toEqual({
+                model: 'auto',
+                cursorSelectedBase: 'auto',
+                effort: 'auto',
+                modelReasoningEffort: 'default'
+            })
+        })
+    })
+
     it('keeps dynamic model values for catalog validation after restore', () => {
         expect(resolvePreferredLaunchSettings('codex', {
             model: 'gpt-5.6-sol',
