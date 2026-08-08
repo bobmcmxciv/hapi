@@ -172,7 +172,8 @@ ssh ecs 'sqlite3 /root/.hapi/hapi.db "PRAGMA table_info(sessions);"'
 | ⚠️ `bun run test:cli` 的 `runner.integration.test.ts` 会 spawn 真实 runner + CLI，**失败时不清理** | 每个孤儿进程约 450MB 提交，跑几次就吃光提交量。识别：`bun.exe` + `--cwd <worktree>\cli` + **零出站连接**；真实会话是 `hapi.exe` 且连着 hub:443。清理前必须用这两个特征区分 |
 | ECS 出网被锁死，GitHub / npmmirror 全 `http=000` | 唯一通道是 **scp 推送**（入站 22） |
 | 单条 scp 只有 ~24KB/s（143ms / 20% 丢包） | `split -b 12m` + 并行 scp，但 **`-P 8` 会把链路打崩**（`Connection reset by peer`）。用 `-P 2~4`，并写重试循环直到逐块 md5 全过 |
-| ⚠️ **传输"完成"不能看大小** | 只认**逐块 md5**。曾用 `du -sm >= 62` 判完成，触发时首块还差 786KB；另一次 6 块里 4 块内容损坏但 scp 报完成 |
+| ⚠️ **传输"完成"不能看大小** | 只认**逐块 md5**。曾用 `du -sm >= 62` 判完成，触发时首块还差 786KB；另一次 6 块里 4 块内容损坏但 scp 报完成；2026-08-08 又中一次（6 块里 part-ae 尺寸满、md5 不符） |
+| ⚠️ git-bash 的 `md5sum` 输出是 `<hash> *<name>`（二进制模式带 `*`） | 直接拿它当文件名会在 ECS 上落成 `*part-aa`；拿它跟远端 `md5sum` 结果比会**永远判成全都缺**，脚本无限重传。两边都先 `tr -d '*'` 归一再 `comm` |
 | ⚠️ 后台命令用 `;` 串联时，**末尾命令的退出码会掩盖前面的失败** | scp 实际 `exit 124` 却因链末 `ssh md5sum` 成功而被报成 exit 0。串联时显式捕获每段 `$?` 并打印 |
 | 长传输被工具 2min 超时 kill → ECS 侧僵尸续写把分块撑坏 | **必须 `run_in_background`** |
 | 替换运行中的二进制报 `Text file busy` | 用 `mv` rename 换芯，别覆写 |
