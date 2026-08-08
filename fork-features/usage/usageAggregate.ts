@@ -74,6 +74,163 @@ export function buildUsageSummaryResponse(
  *
  *  `<synthetic>` is Claude Code's locally fabricated placeholder assistant
  *  message (no real API turn, no token counts) — excluded outright. */
+/** 一条与用量有关的事件，从 messages.content 解码后抽出的紧凑形态。
+ *
+ *  只保留聚合真正用得到的字段：解码是整个统计端点的成本大头（生产库
+ *  356,844 行 / 1.2 GB content，每次打开统计页全量 zstd 解码一遍，实测
+ *  8.7~36.0s），而事件本身极小，可以按会话缓存下来反复用。
+ *
+ *  时间窗**不**参与缓存：窗口过滤与帧差值都在聚合阶段用这些事件重算，
+ *  所以任意 since/until 都命中同一份缓存。 */
+type UsageEvent =
+    | {
+        kind: 'assistant'
+        ts: string | null
+        messageId: string
+        model: string
+        inputTokens: number
+        outputTokens: number
+        cacheCreationInputTokens: number
+        cacheReadInputTokens: number
+    }
+    | {
+        kind: 'frame'
+        ts: string | null
+        model: string
+        /** 常驻进程运行总计（累计值，非增量）——差值在聚合阶段算。 */
+        inputTokens: number
+        outputTokens: number
+        cacheCreationInputTokens: number
+        cacheReadInputTokens: number
+    }
+
+type SessionUsageEvents = {
+    /** 已覆盖到的最大 seq；库里该会话 max(seq) 与之相等即可直接复用。 */
+    maxSeq: number
+    events: UsageEvent[]
+}
+
+/** 会话 → 已解码事件。会话一旦不再产生新消息就永远命中缓存：生产库 931 个
+ *  会话里近 1 小时有更新的只有 3 个（2,760 行 / 10.4 MB），稳态解码量因此
+ *  从 1.2 GB 降到约 10 MB。hub 是单进程常驻，缓存随进程生命周期存活；
+ *  重启后第一次调用重建，之后恢复。 */
+const sessionEventCache = new Map<string, SessionUsageEvents>()
+
+/** 仅供测试：清空缓存，让用例之间互不影响。 */
+export function __resetUsageEventCacheForTests(): void {
+    sessionEventCache.clear()
+}
+
+/** 把一行 messages.content 解码成 0..n 条用量事件。
+ *  过滤条件与聚合口径必须和原实现逐条一致。 */
+function extractUsageEvents(rawContent: string | Uint8Array): UsageEvent[] {
+    let content: unknown
+    try {
+        content = decodeMessageContent(rawContent as never)
+    } catch {
+        return []
+    }
+    if (!content || typeof content !== 'object') return []
+    const record = content as Record<string, unknown>
+    if (record.role !== 'agent') return []
+    const outer = record.content as Record<string, unknown> | undefined
+    if (!outer || outer.type !== 'output') return []
+    const data = outer.data as Record<string, unknown> | undefined
+    if (!data) return []
+    const ts = typeof data.timestamp === 'string' ? data.timestamp : null
+
+    if (data.type === 'assistant') {
+        const message = data.message as Record<string, unknown> | undefined
+        const messageId = message?.id
+        const model = message?.model
+        if (typeof messageId !== 'string' || typeof model !== 'string' || model === '<synthetic>') return []
+        const usage = message?.usage as Record<string, unknown> | undefined
+        if (!usage) return []
+        return [{
+            kind: 'assistant',
+            ts,
+            messageId,
+            model,
+            inputTokens: Number(usage.input_tokens) || 0,
+            outputTokens: Number(usage.output_tokens) || 0,
+            cacheCreationInputTokens: Number(usage.cache_creation_input_tokens) || 0,
+            cacheReadInputTokens: Number(usage.cache_read_input_tokens) || 0
+        }]
+    }
+
+    if (data.type === 'usage_report') {
+        const modelUsage = data.modelUsage as Record<string, unknown> | undefined
+        if (!modelUsage) return []
+        const events: UsageEvent[] = []
+        for (const [model, entryRaw] of Object.entries(modelUsage)) {
+            const entry = (entryRaw ?? {}) as Record<string, unknown>
+            events.push({
+                kind: 'frame',
+                ts,
+                model,
+                inputTokens: Number(entry.inputTokens) || 0,
+                outputTokens: Number(entry.outputTokens) || 0,
+                cacheCreationInputTokens: Number(entry.cacheCreationInputTokens) || 0,
+                cacheReadInputTokens: Number(entry.cacheReadInputTokens) || 0
+            })
+        }
+        return events
+    }
+
+    return []
+}
+
+/** 取回这批会话的用量事件，只对有新消息的会话解码增量。 */
+function loadSessionEvents(db: Database, sessionIds: string[]): Map<string, UsageEvent[]> {
+    const placeholders = sessionIds.map(() => '?').join(',')
+    // 走 idx_messages_session(session_id, seq)，只读索引不碰 content。
+    const heads = db.prepare(`
+        SELECT session_id AS sessionId, MAX(seq) AS maxSeq
+        FROM messages
+        WHERE session_id IN (${placeholders})
+        GROUP BY session_id
+    `).all(...sessionIds) as Array<{ sessionId: string; maxSeq: number }>
+
+    const result = new Map<string, UsageEvent[]>()
+    const stale: Array<{ sessionId: string; fromSeq: number; maxSeq: number }> = []
+    for (const head of heads) {
+        const cached = sessionEventCache.get(head.sessionId)
+        if (cached && cached.maxSeq === head.maxSeq) {
+            result.set(head.sessionId, cached.events)
+            continue
+        }
+        // 缓存落后就只补 seq 之后的部分；没有缓存则全量。消息只追加不改写，
+        // 所以前缀事件保持有效；max(seq) 回退（会话被清空/重建）时整段重扫。
+        const fromSeq = cached && cached.maxSeq < head.maxSeq ? cached.maxSeq : 0
+        stale.push({ sessionId: head.sessionId, fromSeq, maxSeq: head.maxSeq })
+    }
+
+    if (stale.length > 0) {
+        const scan = db.prepare(`
+            SELECT seq, content
+            FROM messages
+            WHERE session_id = ? AND seq > ?
+            ORDER BY seq
+        `)
+        for (const entry of stale) {
+            const rows = scan.all(entry.sessionId, entry.fromSeq) as Array<{ seq: number; content: string | Uint8Array }>
+            const base = entry.fromSeq > 0
+                ? (sessionEventCache.get(entry.sessionId)?.events ?? [])
+                : []
+            const events = base.slice()
+            for (const row of rows) {
+                for (const event of extractUsageEvents(row.content)) {
+                    events.push(event)
+                }
+            }
+            sessionEventCache.set(entry.sessionId, { maxSeq: entry.maxSeq, events })
+            result.set(entry.sessionId, events)
+        }
+    }
+
+    return result
+}
+
 export function aggregateUsageForSessions(
     db: Database,
     sessionIds: string[],
@@ -83,47 +240,7 @@ export function aggregateUsageForSessions(
         return []
     }
 
-    const params: string[] = [...sessionIds]
-    let timeClause = ''
-    if (opts?.sinceIso) {
-        timeClause += ` AND json_extract(content, '$.content.data.timestamp') >= ?`
-        params.push(opts.sinceIso)
-    }
-    if (opts?.untilIso) {
-        timeClause += ` AND json_extract(content, '$.content.data.timestamp') < ?`
-        params.push(opts.untilIso)
-    }
-
-    const placeholders = sessionIds.map(() => '?').join(',')
-    const rows = db.prepare(`
-        SELECT
-            model,
-            COUNT(*) AS requestCount,
-            COALESCE(SUM(inputTokens), 0) AS inputTokens,
-            COALESCE(SUM(outputTokens), 0) AS outputTokens,
-            COALESCE(SUM(cacheCreationInputTokens), 0) AS cacheCreationInputTokens,
-            COALESCE(SUM(cacheReadInputTokens), 0) AS cacheReadInputTokens
-        FROM (
-            SELECT DISTINCT
-                json_extract(content, '$.content.data.message.id') AS messageId,
-                json_extract(content, '$.content.data.message.model') AS model,
-                COALESCE(json_extract(content, '$.content.data.message.usage.input_tokens'), 0) AS inputTokens,
-                COALESCE(json_extract(content, '$.content.data.message.usage.output_tokens'), 0) AS outputTokens,
-                COALESCE(json_extract(content, '$.content.data.message.usage.cache_creation_input_tokens'), 0) AS cacheCreationInputTokens,
-                COALESCE(json_extract(content, '$.content.data.message.usage.cache_read_input_tokens'), 0) AS cacheReadInputTokens
-            FROM messages
-            WHERE session_id IN (${placeholders})
-              AND content LIKE '%"usage"%'
-              AND json_extract(content, '$.role') = 'agent'
-              AND json_extract(content, '$.content.type') = 'output'
-              AND json_extract(content, '$.content.data.type') = 'assistant'
-              AND json_extract(content, '$.content.data.message.id') IS NOT NULL
-              AND json_extract(content, '$.content.data.message.model') IS NOT NULL
-              AND json_extract(content, '$.content.data.message.model') != '<synthetic>'
-              ${timeClause}
-        )
-        GROUP BY model
-    `).all(...params) as UsageAggregateRow[]
+    const eventsBySession = loadSessionEvents(db, sessionIds)
 
     return mergeUsageReportFallback(rows, queryUsageReportTotals(db, sessionIds, opts))
 }
@@ -173,7 +290,6 @@ function queryUsageReportTotals(
     //    同一批 API 轮，跨会话取 max 会把无关流量混在一起（见 settleSessionUsage）。
     const seenTurn = new Set<string>()
     const assistantBySession = new Map<string, Map<string, UsageAggregateRow>>()
-    // —— usage_report 帧：先按 (session, model) 全程算差值，再按时间窗过滤 ——
     type FrameNums = { inputTokens: number; outputTokens: number; cacheCreationInputTokens: number; cacheReadInputTokens: number }
     const prevFrame = new Map<string, FrameNums>()
     const frameBySession = new Map<string, Map<string, FrameNums>>()
@@ -183,81 +299,60 @@ function queryUsageReportTotals(
         return inner
     }
 
-    for (const row of rows) {
-        let content: unknown
-        try {
-            content = decodeMessageContent(row.content as never)
-        } catch {
-            continue
-        }
-        if (!content || typeof content !== 'object') continue
-        const record = content as Record<string, unknown>
-        if (record.role !== 'agent') continue
-        const outer = record.content as Record<string, unknown> | undefined
-        if (!outer || outer.type !== 'output') continue
-        const data = outer.data as Record<string, unknown> | undefined
-        if (!data) continue
-
-        if (data.type === 'assistant') {
-            const message = data.message as Record<string, unknown> | undefined
-            const messageId = message?.id
-            const model = message?.model
-            if (typeof messageId !== 'string' || typeof model !== 'string' || model === '<synthetic>') continue
-            const usage = message?.usage as Record<string, unknown> | undefined
-            if (!usage) continue
-            if (!inWindow(data.timestamp)) continue
-            // Claude Code 同一 API 轮写多行、usage 逐行重复（实测 150,180 行только
-            // 69,935 个 distinct message.id），必须按轮去重否则整体虚高 ~2.15x。
-            const turnKey = `${messageId}::${model}`
-            if (seenTurn.has(turnKey)) continue
-            seenTurn.add(turnKey)
-            const perSession = bucket(assistantBySession, row.sessionId)
-            const agg = perSession.get(model) ?? {
-                model, requestCount: 0, inputTokens: 0, outputTokens: 0,
-                cacheCreationInputTokens: 0, cacheReadInputTokens: 0
-            }
-            agg.requestCount += 1
-            agg.inputTokens += Number(usage.input_tokens) || 0
-            agg.outputTokens += Number(usage.output_tokens) || 0
-            agg.cacheCreationInputTokens += Number(usage.cache_creation_input_tokens) || 0
-            agg.cacheReadInputTokens += Number(usage.cache_read_input_tokens) || 0
-            perSession.set(model, agg)
-            continue
-        }
-
-        if (data.type === 'usage_report') {
-            const modelUsage = data.modelUsage as Record<string, unknown> | undefined
-            if (!modelUsage) continue
-            for (const [model, entryRaw] of Object.entries(modelUsage)) {
-                const entry = (entryRaw ?? {}) as Record<string, unknown>
-                const nums: FrameNums = {
-                    inputTokens: Number(entry.inputTokens) || 0,
-                    outputTokens: Number(entry.outputTokens) || 0,
-                    cacheCreationInputTokens: Number(entry.cacheCreationInputTokens) || 0,
-                    cacheReadInputTokens: Number(entry.cacheReadInputTokens) || 0
+    // seenTurn 是**跨会话**去重（键不含 sessionId），所以遍历顺序会影响归属：
+    // 按 sessionId 升序、会话内按 seq 升序，复刻原来 `ORDER BY session_id, seq`
+    // 的单次扫描顺序。
+    for (const sessionId of [...eventsBySession.keys()].sort()) {
+        for (const event of eventsBySession.get(sessionId)!) {
+            if (event.kind === 'assistant') {
+                // 窗口过滤在去重之前：窗外的行不该占用 turnKey，否则窗内同轮的行会被吞。
+                if (!inWindow(event.ts)) continue
+                // Claude Code 同一 API 轮写多行、usage 逐行重复（实测 150,180 行只
+                // 有 69,935 个 distinct message.id），必须按轮去重否则整体虚高 ~2.15x。
+                const turnKey = `${event.messageId}::${event.model}`
+                if (seenTurn.has(turnKey)) continue
+                seenTurn.add(turnKey)
+                const perSession = bucket(assistantBySession, sessionId)
+                const agg = perSession.get(event.model) ?? {
+                    model: event.model, requestCount: 0, inputTokens: 0, outputTokens: 0,
+                    cacheCreationInputTokens: 0, cacheReadInputTokens: 0
                 }
-                const key = `${row.sessionId}::${model}`
-                const prev = prevFrame.get(key)
-                prevFrame.set(key, nums)
-                // modelUsage 是常驻进程运行总计：帧对前一帧取差值；回落=进程重启按全额。
-                const delta: FrameNums = prev ? {
-                    inputTokens: nums.inputTokens < prev.inputTokens ? nums.inputTokens : nums.inputTokens - prev.inputTokens,
-                    outputTokens: nums.outputTokens < prev.outputTokens ? nums.outputTokens : nums.outputTokens - prev.outputTokens,
-                    cacheCreationInputTokens: nums.cacheCreationInputTokens < prev.cacheCreationInputTokens ? nums.cacheCreationInputTokens : nums.cacheCreationInputTokens - prev.cacheCreationInputTokens,
-                    cacheReadInputTokens: nums.cacheReadInputTokens < prev.cacheReadInputTokens ? nums.cacheReadInputTokens : nums.cacheReadInputTokens - prev.cacheReadInputTokens
-                } : nums
-                // 时间窗在差值之后过滤：先窗后差会让窗内首帧把整段运行总计算进来。
-                if (!inWindow(data.timestamp)) continue
-                const perSession = bucket(frameBySession, row.sessionId)
-                const agg = perSession.get(model) ?? {
-                    inputTokens: 0, outputTokens: 0, cacheCreationInputTokens: 0, cacheReadInputTokens: 0
-                }
-                agg.inputTokens += delta.inputTokens
-                agg.outputTokens += delta.outputTokens
-                agg.cacheCreationInputTokens += delta.cacheCreationInputTokens
-                agg.cacheReadInputTokens += delta.cacheReadInputTokens
-                perSession.set(model, agg)
+                agg.requestCount += 1
+                agg.inputTokens += event.inputTokens
+                agg.outputTokens += event.outputTokens
+                agg.cacheCreationInputTokens += event.cacheCreationInputTokens
+                agg.cacheReadInputTokens += event.cacheReadInputTokens
+                perSession.set(event.model, agg)
+                continue
             }
+
+            const nums: FrameNums = {
+                inputTokens: event.inputTokens,
+                outputTokens: event.outputTokens,
+                cacheCreationInputTokens: event.cacheCreationInputTokens,
+                cacheReadInputTokens: event.cacheReadInputTokens
+            }
+            const key = `${sessionId}::${event.model}`
+            const prev = prevFrame.get(key)
+            prevFrame.set(key, nums)
+            // modelUsage 是常驻进程运行总计：帧对前一帧取差值；回落=进程重启按全额。
+            const delta: FrameNums = prev ? {
+                inputTokens: nums.inputTokens < prev.inputTokens ? nums.inputTokens : nums.inputTokens - prev.inputTokens,
+                outputTokens: nums.outputTokens < prev.outputTokens ? nums.outputTokens : nums.outputTokens - prev.outputTokens,
+                cacheCreationInputTokens: nums.cacheCreationInputTokens < prev.cacheCreationInputTokens ? nums.cacheCreationInputTokens : nums.cacheCreationInputTokens - prev.cacheCreationInputTokens,
+                cacheReadInputTokens: nums.cacheReadInputTokens < prev.cacheReadInputTokens ? nums.cacheReadInputTokens : nums.cacheReadInputTokens - prev.cacheReadInputTokens
+            } : nums
+            // 时间窗在差值之后过滤：先窗后差会让窗内首帧把整段运行总计算进来。
+            if (!inWindow(event.ts)) continue
+            const perSession = bucket(frameBySession, sessionId)
+            const agg = perSession.get(event.model) ?? {
+                inputTokens: 0, outputTokens: 0, cacheCreationInputTokens: 0, cacheReadInputTokens: 0
+            }
+            agg.inputTokens += delta.inputTokens
+            agg.outputTokens += delta.outputTokens
+            agg.cacheCreationInputTokens += delta.cacheCreationInputTokens
+            agg.cacheReadInputTokens += delta.cacheReadInputTokens
+            perSession.set(event.model, agg)
         }
     }
 
