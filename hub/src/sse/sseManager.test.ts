@@ -118,6 +118,58 @@ describe('SSEManager namespace filtering', () => {
         expect(received).toHaveLength(1)
         expect(received[0]?.id).toBe('visible')
     })
+
+    it('applies the canDeliver predicate to toasts, not just broadcasts', async () => {
+        // 多用户网关下同一个 namespace 住着多个账号，namespace + visible 两个条件
+        // 拦不住跨账号：提醒必须和 broadcast 走同一条谓词。
+        const manager = new SSEManager(0, new VisibilityTracker())
+        const received: string[] = []
+
+        for (const id of ['allowed', 'denied']) {
+            manager.subscribe({
+                id,
+                namespace: 'alpha',
+                all: true,
+                visibility: 'visible',
+                canDeliver: (event) => id === 'allowed'
+                    || (event.type === 'toast' && event.data.sessionId !== 'session-1'),
+                send: () => { received.push(id) },
+                sendHeartbeat: () => {}
+            })
+        }
+
+        const delivered = await manager.sendToast('alpha', {
+            type: 'toast',
+            data: { title: 'Ready for input', body: 'x', sessionId: 'session-1', url: '/sessions/session-1' }
+        })
+
+        expect(delivered).toBe(1)
+        expect(received).toEqual(['allowed'])
+    })
+
+    it('hands the predicate the delivery namespace even though toast events carry none', async () => {
+        // toast 事件的 schema 里 namespace 是可选的，pushNotificationChannel 也不填。
+        // 谓词靠 namespace 判「未绑定资源的短暂放行窗口」，收不到就会误拦。
+        const manager = new SSEManager(0, new VisibilityTracker())
+        const seen: Array<string | undefined> = []
+
+        manager.subscribe({
+            id: 'conn',
+            namespace: 'alpha',
+            all: true,
+            visibility: 'visible',
+            canDeliver: (event) => { seen.push(event.namespace); return true },
+            send: () => {},
+            sendHeartbeat: () => {}
+        })
+
+        await manager.sendToast('alpha', {
+            type: 'toast',
+            data: { title: 'Ready for input', body: 'x', sessionId: 'session-1', url: '/sessions/session-1' }
+        })
+
+        expect(seen).toEqual(['alpha'])
+    })
 })
 
 describe('SSEManager reconnect replay', () => {

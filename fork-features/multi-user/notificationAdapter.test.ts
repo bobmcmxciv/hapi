@@ -1,8 +1,13 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import type { NotificationChannel } from '../../hub/src/notifications/notificationTypes'
+import { PushNotificationChannel } from '../../hub/src/push/pushNotificationChannel'
+import type { PushService } from '../../hub/src/push/pushService'
+import { SSEManager } from '../../hub/src/sse/sseManager'
 import { Store } from '../../hub/src/store'
 import type { Session } from '../../hub/src/sync/syncEngine'
+import { VisibilityTracker } from '../../hub/src/visibility/visibilityTracker'
 import { MultiUserGatewayStore } from './gatewayStore'
+import { createSseEventFilterFactory } from './sseVisibility'
 import {
     createPushNotificationRouting,
     createTelegramNotificationNamespaceResolver,
@@ -92,6 +97,59 @@ describe('MultiUserNotificationAdapter', () => {
         await adapter.sendReady({ ...session, metadata: { path: '/tmp', host: 'vircs', machineId: 'vircs' } } as Session)
 
         expect(ready.sort()).toEqual(['owner-ns'])
+    })
+
+    it('整条提醒链路：admin 会话完成时，同 namespace 的 mnmn66 收不到弹窗', async () => {
+        // 复现 2026-08-08 的跨用户提醒回归。走的是生产真实装配：
+        // MultiUserNotificationAdapter → PushNotificationChannel → SSEManager.sendToast，
+        // 四个账号共享 core namespace `default`（历史账号都是这个）。
+        const store = new MultiUserGatewayStore(':memory:')
+        stores.push(store)
+        const admin = store.createAccount('admin', 'admin', 'default')
+        const owner = store.createAccount('bob', 'user', 'default')
+        const grantee = store.createAccount('peter', 'user', 'default')
+        const stranger = store.createAccount('mnmn66', 'user', 'default')
+        store.bindResource({ resourceType: 'session', resourceId: 's1', ownerAccountId: owner.id, coreNamespace: 'default' })
+        store.grant('session', 's1', grantee.id, 'viewer')
+
+        const visibilityTracker = new VisibilityTracker()
+        const sseManager = new SSEManager(0, visibilityTracker)
+        const filterFor = createSseEventFilterFactory(store)
+        const toasted: string[] = []
+        for (const [name, accountId] of [['admin', admin.id], ['bob', owner.id], ['peter', grantee.id], ['mnmn66', stranger.id]] as const) {
+            sseManager.subscribe({
+                id: `conn-${name}`,
+                namespace: 'default',
+                all: true,
+                visibility: 'visible',
+                canDeliver: filterFor(accountId) ?? undefined,
+                send: () => { toasted.push(name) },
+                sendHeartbeat: () => {}
+            })
+        }
+
+        const pushed: string[][] = []
+        const pushService = {
+            sendToNamespace: async (_ns: string, _payload: unknown, endpoints?: ReadonlySet<string>) => {
+                pushed.push(Array.from(endpoints ?? []))
+            }
+        } as unknown as PushService
+        const coreStore = new Store(':memory:')
+        coreStores.push(coreStore)
+        const routing = createPushNotificationRouting(store, coreStore)
+        const channel = new PushNotificationChannel(
+            pushService, sseManager, visibilityTracker, 'https://hub.test', routing.endpointsForAudience
+        )
+        const adapter = new MultiUserNotificationAdapter(store, channel, routing.namespacesForAccount)
+
+        await adapter.sendTaskNotification(
+            { id: 's1', namespace: 'default', active: true, metadata: { path: '/tmp/repo' } } as Session,
+            { summary: 'refactor done' }
+        )
+
+        expect(toasted.sort()).toEqual(['admin', 'bob', 'peter'])
+        // 有连接收到弹窗就不再退回 web push
+        expect(pushed).toEqual([])
     })
 
     it('routes migrated Telegram and Push destinations through their account bindings', () => {

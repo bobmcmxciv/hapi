@@ -3,6 +3,27 @@ import type { MultiUserGatewayStore } from './gatewayStore'
 import { sessionAccessLevel, type SessionMachineResolver } from './machineInheritance'
 
 /**
+ * 事件携带的会话 id。**toast 把 sessionId 放在 `data` 里，顶层没有**
+ * （shared/src/schemas.ts 的 SyncEventSchema）——只认顶层的话，谓词对每条 toast 都恒真，
+ * 「任务完成 / 等待输入」提醒照旧发给整个 namespace 的所有账号，正是本模块要堵的洞。
+ */
+function eventSessionId(event: SyncEvent): string | null {
+    if (event.type === 'toast') return event.data.sessionId || null
+    const value = 'sessionId' in event ? (event as { sessionId?: unknown }).sessionId : undefined
+    return typeof value === 'string' && value ? value : null
+}
+
+function eventMachineId(event: SyncEvent): string | null {
+    const value = 'machineId' in event ? (event as { machineId?: unknown }).machineId : undefined
+    return typeof value === 'string' && value ? value : null
+}
+
+/** 真正与任何资源无关的事件（心跳、connection-changed 等）才无条件放行。 */
+function carriesResourceId(event: SyncEvent): boolean {
+    return eventSessionId(event) !== null || eventMachineId(event) !== null
+}
+
+/**
  * SSE 事件的账号级可见性过滤。
  *
  * 修的缺口：`/api/events?all=true` 此前按 core namespace 广播，而多用户网关下
@@ -10,6 +31,10 @@ import { sessionAccessLevel, type SessionMachineResolver } from './machineInheri
  * session-updated 等事件推给别的账号，前端据此弹完成提醒（点进去才 403）。
  * Web Push 一侧早有 audience 过滤（notificationAdapter.endpointsForAudience），
  * SSE 这一侧一直是裸的。
+ *
+ * 谓词同时管两条投递路径，缺一条洞就还在：`SSEManager.broadcast`（同步事件流）
+ * 与 `SSEManager.sendToast`（提醒弹窗）。toast 只按 namespace 投给所有 visible
+ * 连接，2026-08-08 前它压根不问谓词——这正是「mnmn66 看到别人会话动态」的那条路。
  *
  * 可见性判定与 GET /api/sessions / /api/usage/summary 同构（executionMount）：
  * admin 全可见；owner / grantee 可见；会话还继承所在机器上的授权
@@ -50,20 +75,16 @@ export function createSseEventFilterFactory(
         if (!account || account.disabledAt !== null) {
             // 账号已禁用/不存在：不给任何资源事件（连接本身会被 auth 层挡，
             // 这里是纵深防御）。
-            return (event) => !('sessionId' in event) && !('machineId' in event)
+            return (event) => !carriesResourceId(event)
         }
         if (account.role === 'admin') return null
 
         return (event) => {
             const ownNamespace = event.namespace === account.defaultNamespace
-            const sessionId = 'sessionId' in event ? (event as { sessionId?: unknown }).sessionId : undefined
-            if (typeof sessionId === 'string' && sessionId) {
-                return canReadSession(accountId, sessionId, ownNamespace)
-            }
-            const machineId = 'machineId' in event ? (event as { machineId?: unknown }).machineId : undefined
-            if (typeof machineId === 'string' && machineId) {
-                return canReadMachine(accountId, machineId, ownNamespace)
-            }
+            const sessionId = eventSessionId(event)
+            if (sessionId) return canReadSession(accountId, sessionId, ownNamespace)
+            const machineId = eventMachineId(event)
+            if (machineId) return canReadMachine(accountId, machineId, ownNamespace)
             return true
         }
     }
@@ -85,7 +106,7 @@ export function createSseRequestFilterFactory(
     return async (request) => {
         const accountId = await resolveAccountId(request)
         // 解析不出账号身份时不放行任何带资源 id 的事件（fail-closed）。
-        if (accountId === null) return (event) => !('sessionId' in event) && !('machineId' in event)
+        if (accountId === null) return (event) => !carriesResourceId(event)
         return byAccount(accountId)
     }
 }
