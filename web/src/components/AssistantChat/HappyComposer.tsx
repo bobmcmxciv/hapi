@@ -39,6 +39,8 @@ import { supportsEffort, supportsModelChange, PI_THINKING_LEVEL_LABELS } from '@
 import type { PiThinkingLevel } from '@hapi/protocol'
 import { markSkillUsed } from '@/lib/recent-skills'
 import { useComposerDraft } from '@/hooks/useComposerDraft'
+import type { AttachmentDraftInput } from '@/lib/composer-attachment-drafts'
+import { persistInactiveComposerAttachments, setComposerDraftSnapshot, updateComposerDraftTextSnapshot, attachmentDraftRevision, resetInactiveComposerAttachmentVisibility } from '@/lib/composer-draft-transfer'
 import { useComposerEnterBehavior } from '@/hooks/useComposerEnterBehavior'
 import { FloatingOverlay } from '@/components/ChatInput/FloatingOverlay'
 import { Autocomplete } from '@/components/ChatInput/Autocomplete'
@@ -280,6 +282,8 @@ export function ModelEffortSettingsSection(props: {
 
 export function HappyComposer(props: {
     sessionId?: string
+    onUploadDraftSnapshot?: (text: string, attachments: AttachmentDraftInput[]) => void
+    canRestoreAttachments?: boolean
     disabled?: boolean
     permissionMode?: PermissionMode
     collaborationMode?: CodexCollaborationMode
@@ -376,6 +380,11 @@ export function HappyComposer(props: {
     sendAcceptance?: { attemptId: string | null } | null
     /** Terminal result for a chat mutation, including attachment-bearing failures. */
     sendSettlement?: { attemptId: string; status: 'success' | 'error' } | null
+    /**
+     * Resume/handoff path for inactive drafts that only exist in IndexedDB
+     * (no visible text/attachments for assistant-ui to append).
+     */
+    onResumeStoredDraft?: () => void | Promise<void>
     /**
      * One-shot intent bridge consumed by useHappyRuntime's onNew callback.
      * SessionChat owns this ref so the composer never retains an explicit
@@ -524,7 +533,6 @@ export function HappyComposer(props: {
         const path = (attachment as { path?: string }).path
         return typeof path === 'string' && path.length > 0
     })
-    const canSend = (hasText || hasAttachments) && attachmentsReady && !controlsDisabled
 
     const [inputState, setInputState] = useState<TextInputState>({
         text: '',
@@ -628,22 +636,76 @@ export function HappyComposer(props: {
 
     const attachmentDrafts = attachments.flatMap((attachment) => {
         if (!attachment.file) return []
-        const upload = attachment as typeof attachment & { path?: string; previewUrl?: string }
+        const upload = attachment as typeof attachment & { path?: string; previewUrl?: string; uploadSessionId?: string }
         return [{
             id: attachment.id,
             file: attachment.file,
             path: upload.path,
             previewUrl: upload.previewUrl,
+            uploadSessionId: upload.uploadSessionId,
         }]
     })
+    const attachmentRevision = attachmentDraftRevision(attachmentDrafts)
+    const latestComposerTextRef = useRef(composerText)
+    latestComposerTextRef.current = composerText
+    const attachmentDraftsRef = useRef(attachmentDrafts)
+    attachmentDraftsRef.current = attachmentDrafts
     const draftHydration = useComposerDraft(
         sessionId,
         composerText,
         attachmentDrafts,
-        active,
+        props.canRestoreAttachments ?? active,
         (text) => api.composer().setText(text),
         (file) => api.composer().addAttachment(file),
     )
+    const canHydrateAttachments = props.canRestoreAttachments ?? active
+    const hiddenAttachmentStatePending =
+        !canHydrateAttachments
+        && (draftHydration.sessionId !== sessionId || !draftHydration.complete)
+    const hasHiddenAttachments =
+        !canHydrateAttachments && draftHydration.hasStoredAttachments
+    const hasAnyAttachments = hasAttachments || hasHiddenAttachments
+    const blocksScheduling =
+        hasAttachments || hasHiddenAttachments || hiddenAttachmentStatePending
+    const canSend = (hasText || hasAnyAttachments) && attachmentsReady && !controlsDisabled
+
+    useEffect(() => {
+        if (!sessionId) return
+        const canHydrateAttachments = props.canRestoreAttachments ?? active
+        if (canHydrateAttachments) return
+        // A remount starts with an empty visible list by design; do not treat
+        // previously persisted failed-resume picks as operator removals.
+        resetInactiveComposerAttachmentVisibility(sessionId)
+    }, [active, props.canRestoreAttachments, sessionId])
+
+    useEffect(() => {
+        if (draftHydration.sessionId !== sessionId || !draftHydration.complete || !sessionId) return
+        // Inactive sessions do not restore stored attachments into the adapter.
+        // Keep IndexedDB intact when nothing new is visible; when the user did
+        // pick files (even if resume failed), merge them into storage so reopen
+        // does not drop them.
+        const canHydrateAttachments = props.canRestoreAttachments ?? active
+        if (canHydrateAttachments) {
+            setComposerDraftSnapshot(sessionId, composerText, attachmentDraftsRef.current)
+            props.onUploadDraftSnapshot?.(composerText, attachmentDraftsRef.current)
+            return
+        }
+        // Text is cheap (sessionStorage); do not queue a blob merge per keystroke.
+        updateComposerDraftTextSnapshot(sessionId, composerText)
+    }, [active, attachmentRevision, composerText, draftHydration.complete, draftHydration.sessionId, props.canRestoreAttachments, props.onUploadDraftSnapshot, sessionId])
+
+    useEffect(() => {
+        if (draftHydration.sessionId !== sessionId || !draftHydration.complete || !sessionId) return
+        const canHydrateAttachments = props.canRestoreAttachments ?? active
+        if (canHydrateAttachments) return
+        void persistInactiveComposerAttachments(
+            sessionId,
+            latestComposerTextRef.current,
+            attachmentDraftsRef.current,
+        ).catch((error) => {
+            console.warn('[composer-draft] inactive persistence failed', error)
+        })
+    }, [active, attachmentRevision, draftHydration.complete, draftHydration.sessionId, props.canRestoreAttachments, sessionId])
 
     // assistant-ui clears `composer.text` synchronously the moment a send is
     // invoked AND `SessionChat.handleSend` clears `pendingSchedule` after the
@@ -1128,6 +1190,10 @@ export function HappyComposer(props: {
         // explicit queue intent to SessionChat.
         const effectiveIntent = pendingSchedule == null ? restoredIntent : 'default'
         try {
+            if (!hasText && !hasAttachments && draftHydration.hasStoredAttachments) {
+                await props.onResumeStoredDraft?.()
+                return
+            }
             // Must be adjacent to send(): useHappyRuntime consumes and resets
             // this ref synchronously from assistant-ui's onNew callback.
             if (pendingSendIntentRef) pendingSendIntentRef.current = effectiveIntent
@@ -1150,9 +1216,13 @@ export function HappyComposer(props: {
         api,
         attachments,
         canSend,
+        draftHydration.hasStoredAttachments,
+        hasAttachments,
+        hasText,
         onSuppressSendErrorRestore,
         pendingSchedule,
         props.onParkScratchlist,
+        props.onResumeStoredDraft,
         props.scratchlistMode,
         richMentionsEnabled,
         sendError,
@@ -2441,7 +2511,7 @@ export function HappyComposer(props: {
                             pendingSchedule={pendingSchedule}
                             onSchedule={handleUserSchedule}
                             onClearSchedule={onUserClearSchedule}
-                            hasAttachments={hasAttachments}
+                            hasAttachments={blocksScheduling}
                             piModelLabel={piModelLabel}
                             piModelDisabled={controlsDisabled || !piHasModels}
                             piModelOpen={showPiModelPanel}
