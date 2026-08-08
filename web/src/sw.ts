@@ -9,6 +9,7 @@ import {
     putShareTransfer,
 } from './lib/shareTransfer'
 import { shareTargetPathname } from './lib/sharePath'
+import { buildNavigationAllowlist } from './lib/swNavigationScope'
 
 const sharePath = shareTargetPathname()
 
@@ -32,15 +33,20 @@ type PushPayload = {
 cleanupOutdatedCaches()
 precacheAndRoute(self.__WB_MANIFEST)
 
-// 导航请求一律回精缓存里的 index.html：保证 html 与 chunk 永远来自同一个
+// 本应用的导航请求回精缓存里的 index.html：保证 html 与 chunk 永远来自同一个
 // SW 版本的 precache，堵住「网络上的新 html + 缓存里的旧 chunk」（或反向）
 // 的错配白屏——生产 hub 每次换芯资产 hash 全变、旧资产即刻消失，此前深链
-// 导航走网络就会踩中。denylist 放行必须由 hub 直接应答的路径（API、CLI
-// 通道、文件下载、健康检查）。dev 模式的 SW 不预缓存 index.html，此时跳过。
+// 导航走网络就会踩中。dev 模式的 SW 不预缓存 index.html，此时跳过。
+//
+// 用 allowlist 而不是 denylist：`/sw.js` 的作用域是 `/`，能看到**整个域名**的
+// 导航。denylist 版本只排除了 hub 自己的后端路径，于是同域下用 nginx 反代的
+// 其他站点，导航一律被喂了 HAPI 的 index.html，表现为「全都 not found」；
+// 而且 SW 注册后会一直生效，撤掉页面也不会自动解除。改成只认领自己的路由后，
+// 不属于 HAPI 的路径直接落回网络交给 nginx。详见 swNavigationScope.ts。
 const precachedIndexUrl = ['index.html', '/index.html'].find((url) => getCacheKeyForURL(url))
 if (precachedIndexUrl) {
     registerRoute(new NavigationRoute(createHandlerBoundToURL(precachedIndexUrl), {
-        denylist: [/^\/api\//, /^\/cli\//, /^\/download\//, /^\/health$/]
+        allowlist: buildNavigationAllowlist(import.meta.env.BASE_URL)
     }))
 }
 

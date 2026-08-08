@@ -470,7 +470,9 @@ web/src/routes/sessions/file.test.tsx	trunk-patch	#179	origin-only delta; fork c
 web/src/routes/sessions/file.tsx	trunk-patch	#177	origin-only delta; fork commits bfa252da,7a5232bf,e737b4b3,d3199037
 web/src/routes/settings/display.tsx	upstream-sync	#180	merge-base 87f5c78a; changed only on upstream/main
 web/src/routes/settings/index.test.tsx	upstream-sync	#180	merge-base 87f5c78a; changed only on upstream/main
-web/src/sw.ts	trunk-patch	web-stability	cleanupOutdatedCaches + NavigationRoute 精缓存 index.html（denylist api/cli/download/health）
+web/src/sw.ts	trunk-patch	web-stability	cleanupOutdatedCaches + NavigationRoute 精缓存 index.html；sw-scope: 导航匹配由 denylist 改为 allowlist（只认领 HAPI 自己的路由），同域下其他服务不再被喂 index.html
+web/src/lib/swNavigationScope.ts	fork-owned	sw-scope	SW 导航 allowlist 构造（尊重 Vite base）+ APP_TOP_LEVEL_SEGMENTS 单一事实源
+web/src/lib/swNavigationScope.test.ts	fork-owned	sw-scope	钉死同域他站不被劫持、深链仍归本应用、子路径部署；含读取 router.tsx 的漂移守卫
 web/src/types/api.ts	upstream-sync	#180	merge-base 87f5c78a; changed only on upstream/main
 web/src/types/global.d.ts	trunk-patch	#179	origin-only delta; fork commits 4a0c5f0b; disposition fork-specific #179: fork PWA changelog feature
 web/vite.config.ts	trunk-patch	#179	origin-only delta; fork commits 4a0c5f0b,69c5250d; disposition fork-specific #179: fork PWA changelog feature; fork release/build metadata
