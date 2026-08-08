@@ -13,6 +13,46 @@ import { getHapiBlobsDir } from "@/constants/uploadPaths";
 import { getDefaultClaudeCodePath } from "./sdk/utils";
 import { filterCatalogAffectingClaudeArgs } from "./sdk/metadataExtractor";
 
+/**
+ * Build the user-facing note for a turn that ended without any assistant
+ * output. Exported for tests.
+ *
+ * Claude Code already retries an empty turn once by injecting a synthetic
+ * "[Your previous response had no visible output...]" user message; when that
+ * also comes back empty the SDK still reports success. Reporting the context
+ * numbers is what makes this actionable, because the observed trigger was a
+ * transcript that had grown far past the model's context window.
+ */
+export function describeEmptyTurn(result: unknown): string {
+    const r = (result ?? {}) as Record<string, unknown>
+    const parts: string[] = []
+
+    const stopReason = typeof r.stop_reason === 'string' ? r.stop_reason : null
+    if (stopReason) parts.push(`stop_reason=${stopReason}`)
+    if (typeof r.num_turns === 'number') parts.push(`num_turns=${r.num_turns}`)
+
+    // modelUsage is keyed by model id; surface the worst offender's context math.
+    const usage = r.modelUsage
+    if (usage && typeof usage === 'object') {
+        for (const [model, raw] of Object.entries(usage as Record<string, unknown>)) {
+            const u = (raw ?? {}) as Record<string, unknown>
+            const input = typeof u.inputTokens === 'number' ? u.inputTokens : null
+            const window = typeof u.contextWindow === 'number' ? u.contextWindow : null
+            if (input !== null && window !== null && window > 0) {
+                parts.push(`${model}: ${input.toLocaleString('en-US')} input tokens vs ${window.toLocaleString('en-US')} context window`)
+            } else if (input !== null) {
+                parts.push(`${model}: ${input.toLocaleString('en-US')} input tokens`)
+            }
+            break
+        }
+    }
+
+    const suffix = parts.length > 0 ? ` (${parts.join(', ')})` : ''
+    return 'The model returned an empty turn — no visible output was produced, '
+        + `even after Claude Code's automatic retry${suffix}. `
+        + 'The conversation may be too long for the context window; try /compact or start a new session.'
+}
+
 export async function claudeRemote(opts: {
 
     // Fixed parameters
@@ -244,6 +284,17 @@ export async function claudeRemote(opts: {
         options: sdkOptions,
     });
 
+    // Assistant messages seen since the last `result`. A turn that ends with
+    // this at zero produced nothing the user can see -- observed on two
+    // DESKTOP-HT3P09U sessions whose transcripts had grown past the model's
+    // context window: Claude returned an empty turn, Claude Code injected its
+    // own synthetic "[Your previous response had no visible output...]" retry,
+    // that came back empty too, and the SDK reported
+    // `result{ is_error:false, num_turns:2, stop_reason:'end_turn' }`.
+    // hapi then emitted `ready` and showed the user nothing at all, so an
+    // expensive dead end was indistinguishable from an idle session.
+    let assistantMessagesSinceResult = 0;
+
     let nextMessageFetchInFlight = false;
     let inputEnded = false;
     let nextMessageFetchSeq = 0;
@@ -311,6 +362,13 @@ export async function claudeRemote(opts: {
             // Handle messages
             opts.onMessage(message);
 
+            // Count assistant turns so a `result` that carried no visible
+            // output can be reported instead of silently looking like nothing
+            // happened. See the empty-turn check on the result branch below.
+            if (message.type === 'assistant') {
+                assistantMessagesSinceResult += 1;
+            }
+
             // Handle special system messages
             if (message.type === 'system' && message.subtype === 'init') {
                 // Start thinking when session initializes
@@ -360,6 +418,11 @@ export async function claudeRemote(opts: {
             if (message.type === 'result') {
                 resultSeq += 1;
                 updateThinking(false);
+                // Captured before the /compact branch below clears the flag:
+                // a compaction turn legitimately produces no assistant message
+                // and already reports its own outcome, so it must not also be
+                // reported as an empty turn.
+                const wasCompactTurn = isCompactCommand;
                 logger.debug(
                     `${debugPrefix} result #${resultSeq} received; scheduling next user message ` +
                     `(nextInFlight=${nextMessageFetchInFlight}, inputEnded=${inputEnded})`
@@ -381,6 +444,20 @@ export async function claudeRemote(opts: {
                     isCompactCommand = false;
                     compactFailure = null;
                 }
+
+                // A turn that produced no assistant message is a dead end the
+                // user would otherwise experience as pure silence: they send a
+                // prompt, the session goes back to `ready`, and nothing ever
+                // appears. Say so, and include the numbers that explain it --
+                // on the sessions where this was found the transcript had far
+                // outgrown the context window (73.9M input tokens against a
+                // 1M window on one of them), which is the actionable part.
+                if (assistantMessagesSinceResult === 0 && !wasCompactTurn) {
+                    const detail = describeEmptyTurn(message);
+                    logger.debug(`[claudeRemote] Empty turn on result #${resultSeq}: ${detail}`);
+                    opts.onCompletionEvent?.(detail);
+                }
+                assistantMessagesSinceResult = 0;
 
                 // Send ready event
                 opts.onReady();
