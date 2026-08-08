@@ -208,6 +208,86 @@ describe('aggregateUsageForSessions', () => {
         })
     })
 
+    it('代理会话的帧按底层 Claude 名上报时，归到会话自己的模型行，不挂到 Claude 行', () => {
+        const store = makeStore()
+        const session = makeSession(store, 'proxy-rehome')
+        // cx2cc 形态：assistant 行写代理别名，result.modelUsage 却按真正在服务的
+        // Claude 模型记账（含 haiku 子代理）。两边模型名毫无交集。
+        store.messages.addMessage(session.id, assistantEnvelope({
+            messageId: 'msg_p1', model: 'gpt-5.6-sol', timestamp: '2026-08-08T10:00:00.000Z'
+        }))
+        store.messages.addMessage(session.id, usageReportEnvelope({
+            timestamp: '2026-08-08T10:00:30.000Z',
+            modelUsage: {
+                'claude-opus-4-8[1m]': { inputTokens: 900, outputTokens: 90 },
+                'claude-haiku-4-5': { inputTokens: 10, outputTokens: 1 }
+            }
+        }))
+
+        const rows = store.messages.aggregateUsageForSessions([session.id])
+        expect(rows).toHaveLength(1)
+        // 子代理 haiku 也并入：用户从没单独选过它，它花的是这个代理会话的预算
+        expect(rows[0]).toMatchObject({
+            model: 'gpt-5.6-sol', requestCount: 1, inputTokens: 910, outputTokens: 91
+        })
+        expect(rows.some(r => r.model.startsWith('claude-'))).toBe(false)
+    })
+
+    it('直连会话的帧不被改挂：Task 子代理仍单独成行', () => {
+        const store = makeStore()
+        const session = makeSession(store, 'direct-subagent')
+        store.messages.addMessage(session.id, assistantEnvelope({
+            messageId: 'msg_d1', model: 'claude-opus-4-8', timestamp: '2026-08-08T10:00:00.000Z',
+            usage: { input: 5, output: 2 }
+        }))
+        store.messages.addMessage(session.id, usageReportEnvelope({
+            timestamp: '2026-08-08T10:00:30.000Z',
+            modelUsage: {
+                'claude-opus-4-8[1m]': { inputTokens: 900, outputTokens: 90 },
+                'claude-haiku-4-5': { inputTokens: 10, outputTokens: 1 }
+            }
+        }))
+
+        const rows = store.messages.aggregateUsageForSessions([session.id])
+        const byModel = Object.fromEntries(rows.map(r => [r.model, r]))
+        expect(Object.keys(byModel).sort()).toEqual(['claude-haiku-4-5', 'claude-opus-4-8'])
+        expect(byModel['claude-opus-4-8']).toMatchObject({ inputTokens: 900, requestCount: 1 })
+        expect(byModel['claude-haiku-4-5']).toMatchObject({ inputTokens: 10, requestCount: 0 })
+    })
+
+    it('直连会话的大数字不再吃掉另一个代理会话的同名帧（线上 opus-4-8 丢 7.09 亿的形态）', () => {
+        const store = makeStore()
+        const direct = makeSession(store, 'mix-direct')
+        const proxy = makeSession(store, 'mix-proxy')
+        // 直连会话：assistant 侧就有真数，帧与之等值（同一批轮的两个视图）
+        store.messages.addMessage(direct.id, assistantEnvelope({
+            messageId: 'msg_dd', model: 'claude-opus-4-8', timestamp: '2026-08-08T10:00:00.000Z',
+            usage: { input: 10000 }
+        }))
+        store.messages.addMessage(direct.id, usageReportEnvelope({
+            timestamp: '2026-08-08T10:00:30.000Z',
+            modelUsage: { 'claude-opus-4-8[1m]': { inputTokens: 10000 } }
+        }))
+        // 代理会话：assistant 侧只有涓流，帧按 Claude 名记
+        store.messages.addMessage(proxy.id, assistantEnvelope({
+            messageId: 'msg_pp', model: 'gpt-5.6-sol', timestamp: '2026-08-08T10:10:00.000Z',
+            usage: { input: 7 }
+        }))
+        store.messages.addMessage(proxy.id, usageReportEnvelope({
+            timestamp: '2026-08-08T10:10:30.000Z',
+            modelUsage: { 'claude-opus-4-8[1m]': { inputTokens: 3000 } }
+        }))
+
+        const rows = store.messages.aggregateUsageForSessions([direct.id, proxy.id])
+        const byModel = Object.fromEntries(rows.map(r => [r.model, r]))
+        // 旧的全局 max 会得到 opus-4-8=13000（两会话帧相加后胜出）或丢掉 3000；
+        // 逐会话结算后：直连的 10000 归 opus-4-8，代理的 3000 归别名，一分不丢也不混。
+        expect(byModel['claude-opus-4-8']).toMatchObject({ inputTokens: 10000, requestCount: 1 })
+        expect(byModel['gpt-5.6-sol']).toMatchObject({ inputTokens: 3000, requestCount: 1 })
+        const grandTotal = rows.reduce((sum, r) => sum + r.inputTokens, 0)
+        expect(grandTotal).toBe(13000)
+    })
+
     it('帧比 assistant 小（帧只覆盖窗口一部分）时保留 assistant 数字', () => {
         const store = makeStore()
         const session = makeSession(store, 'frames-smaller')
