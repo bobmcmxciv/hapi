@@ -253,6 +253,214 @@ describe('列表可见性：admin 看整个 namespace，普通用户看自己的
     })
 })
 
+describe('机器授权向下继承：被授权机器上新建的会话自动出现', () => {
+    const jwtSecret = new TextEncoder().encode('test-secret-test-secret-test-secret')
+    const sign = (accountId: number) => new SignJWT({ gaid: accountId }).setProtectedHeader({ alg: 'HS256' }).sign(jwtSecret)
+
+    /**
+     * 复现生产现象（2026-08-08）：FA608_INDEX 授权给了 mnmn66，admin 在这台机器上
+     * 新建会话后 mnmn66 看不到——会话是独立资源，owner=admin 且没有会话级 grant。
+     * grantee 的 namespace 故意与机器/会话的 namespace 不同，这样 bind-on-view
+     * 的自有 namespace 那一支扫不到它，跑通的只可能是机器继承那一支。
+     */
+    function seed(options?: { bindNewSession?: boolean }) {
+        const store = new MultiUserGatewayStore(':memory:')
+        const admin = store.createAccount('admin', 'admin', 'default', null)
+        const grantee = store.createAccount('mnmn66', 'user', 'account-mnmn66', null)
+        store.bindResource({ resourceType: 'machine', resourceId: 'fa608', ownerAccountId: admin.id, coreNamespace: 'default' })
+        store.bindResource({ resourceType: 'machine', resourceId: 'vircs', ownerAccountId: admin.id, coreNamespace: 'default' })
+        store.grant('machine', 'fa608', grantee.id, 'viewer')
+
+        const specs = [
+            { id: 's-new-on-fa608', machineId: 'fa608', host: 'FA608_INDEX' },
+            { id: 's-on-vircs', machineId: 'vircs', host: 'WIN-GVHSJ7B378A' }
+        ]
+        if (options?.bindNewSession !== false) {
+            for (const spec of specs) {
+                store.bindResource({ resourceType: 'session', resourceId: spec.id, ownerAccountId: admin.id, coreNamespace: 'default' })
+            }
+        }
+        const records = new Map(specs.map(spec => [spec.id, {
+            id: spec.id,
+            namespace: 'default',
+            metadata: { path: '/tmp', host: spec.host, machineId: spec.machineId },
+            agentState: null, active: false, createdAt: 1, updatedAt: 1, seq: 0
+        }]))
+        const engine = {
+            getSessionsByNamespace: (namespace: string) => namespace === 'default' ? [...records.values()] : [],
+            getSession: (id: string) => records.get(id),
+            getOnlineMachinesByNamespace: () => [],
+            getMachine: (id: string) => ({ id, namespace: 'default' })
+        } as unknown as SyncEngine
+
+        const app = new Hono<WebAppEnv>()
+        mountExecutionRoutes(app, { store, jwtSecret, getSyncEngine: () => engine, getSseManager: () => null, getStore: () => null })
+        return { store, app, admin, grantee, engine }
+    }
+
+    const idsOf = async (response: Response) =>
+        ((await response.json()) as { sessions: Array<{ id: string }> }).sessions.map(s => s.id).sort()
+
+    it('GET /api/sessions 列出被授权机器上的新会话，且不带出别的机器', async () => {
+        const { store, app, grantee } = seed()
+        const response = await app.request('/api/sessions', { headers: { authorization: `Bearer ${await sign(grantee.id)}` } })
+        expect(response.status).toBe(200)
+        expect(await idsOf(response)).toEqual(['s-new-on-fa608'])
+        store.close()
+    })
+
+    it('机器上尚未绑定的会话按机器主人落绑定，不会被查看者认领', async () => {
+        const { store, app, grantee, admin } = seed({ bindNewSession: false })
+        const response = await app.request('/api/sessions', { headers: { authorization: `Bearer ${await sign(grantee.id)}` } })
+        expect(await idsOf(response)).toEqual(['s-new-on-fa608'])
+        expect(store.getResource('session', 's-new-on-fa608')).toMatchObject({
+            ownerAccountId: admin.id,
+            coreNamespace: 'default'
+        })
+        expect(store.getResource('session', 's-on-vircs')).toBeNull()
+        store.close()
+    })
+
+    it('单条会话的读权限同样继承（此前 403）', async () => {
+        const { store, grantee, engine } = seed()
+        const app = new Hono<WebAppEnv>()
+        app.use('*', createExecutionMiddleware({ store, jwtSecret, getSyncEngine: () => engine }))
+        app.get('/api/sessions/:id', c => c.json({ ok: true, namespace: c.get('namespace') }))
+
+        const granted = await app.request('/api/sessions/s-new-on-fa608', { headers: { authorization: `Bearer ${await sign(grantee.id)}` } })
+        expect(granted.status).toBe(200)
+        expect(await granted.json()).toEqual({ ok: true, namespace: 'default' })
+
+        const denied = await app.request('/api/sessions/s-on-vircs', { headers: { authorization: `Bearer ${await sign(grantee.id)}` } })
+        expect(denied.status).toBe(403)
+        store.close()
+    })
+
+    it('SSE：机器上新建会话的 session-added 事件直达被授权人（不必再逐条授权）', async () => {
+        const { store, grantee, engine } = seed()
+        const sseManager = new SSEManager(0, new VisibilityTracker())
+        const app = new Hono<WebAppEnv>()
+        mountExecutionRoutes(app, {
+            store, jwtSecret,
+            getSyncEngine: () => engine,
+            getSseManager: () => sseManager,
+            getStore: () => null
+        })
+        const controller = new AbortController()
+        const response = await app.request('/api/events', {
+            headers: { authorization: `Bearer ${await sign(grantee.id)}` },
+            signal: controller.signal
+        })
+        const reader = response.body!.getReader()
+        expect(new TextDecoder().decode((await reader.read()).value)).toContain('"status":"connected"')
+
+        sseManager.broadcast({ type: 'session-added', sessionId: 's-on-vircs', namespace: 'default' } as never)
+        sseManager.broadcast({ type: 'session-added', sessionId: 's-new-on-fa608', namespace: 'default' } as never)
+        const body = new TextDecoder().decode((await reader.read()).value)
+        expect(body).toContain('"sessionId":"s-new-on-fa608"')
+        expect(body).not.toContain('s-on-vircs')
+
+        controller.abort()
+        await reader.cancel()
+        sseManager.stop()
+        store.close()
+    })
+})
+
+describe('/api/events 的订阅铺法与心跳', () => {
+    const jwtSecret = new TextEncoder().encode('test-secret-test-secret-test-secret')
+    const sign = (accountId: number) => new SignJWT({ gaid: accountId }).setProtectedHeader({ alg: 'HS256' }).sign(jwtSecret)
+
+    /** 记录型 SSEManager 替身：只为数清一次连接到底开了几条订阅、分别落在哪个 namespace。 */
+    function recordingManager() {
+        const opened: Array<{ id: string; namespace: string; all: boolean }> = []
+        const closed: string[] = []
+        return {
+            opened,
+            closed,
+            manager: {
+                subscribe: (input: { id: string; namespace: string; all?: boolean }) => {
+                    opened.push({ id: input.id, namespace: input.namespace, all: Boolean(input.all) })
+                },
+                unsubscribe: (id: string) => { closed.push(id) }
+            } as unknown as SSEManager
+        }
+    }
+
+    /** grantCount 条会话授权 + 1 条机器授权，全部落在同一个外部 namespace。 */
+    function seedGrants(grantCount: number) {
+        const store = new MultiUserGatewayStore(':memory:')
+        const owner = store.createAccount('owner', 'user', 'default', null)
+        const grantee = store.createAccount('mnmn66', 'user', 'account-mnmn66', null)
+        for (let i = 0; i < grantCount; i += 1) {
+            store.bindResource({ resourceType: 'session', resourceId: `s${i}`, ownerAccountId: owner.id, coreNamespace: 'default' })
+            store.grant('session', `s${i}`, grantee.id, 'viewer')
+        }
+        store.bindResource({ resourceType: 'machine', resourceId: 'fa608', ownerAccountId: owner.id, coreNamespace: 'default' })
+        store.grant('machine', 'fa608', grantee.id, 'viewer')
+        return { store, grantee }
+    }
+
+    it('订阅数只随 namespace 数增长，不随授权条数增长', async () => {
+        const { store, grantee } = seedGrants(50)
+        const { opened, manager } = recordingManager()
+        const app = new Hono<WebAppEnv>()
+        mountExecutionRoutes(app, {
+            store, jwtSecret,
+            getSyncEngine: () => null,
+            getSseManager: () => manager,
+            getStore: () => null
+        })
+        const controller = new AbortController()
+        const response = await app.request('/api/events', {
+            headers: { authorization: `Bearer ${await sign(grantee.id)}` },
+            signal: controller.signal
+        })
+        const reader = response.body!.getReader()
+        await reader.read()
+
+        // 50 条 session grant + 1 条 machine grant，全落在 'default'；
+        // 加上账号自己的 'account-mnmn66'，一共只该开 2 条订阅（此前是 1+51=52 条）。
+        expect(opened).toHaveLength(2)
+        expect(opened.map(s => s.namespace)).toEqual(['account-mnmn66', 'default'])
+        expect(opened.every(s => s.all)).toBe(true)
+
+        controller.abort()
+        await reader.cancel()
+        store.close()
+    })
+
+    it('多条订阅下心跳仍然发得出来（此前 ids.length===1 在心跳时求值，>1 条就全停）', async () => {
+        const { store, grantee } = seedGrants(3)
+        // heartbeatMs 调到 30ms，真跑 SSEManager 自己的定时器，不做时间替身。
+        const sseManager = new SSEManager(30, new VisibilityTracker())
+        const app = new Hono<WebAppEnv>()
+        mountExecutionRoutes(app, {
+            store, jwtSecret,
+            getSyncEngine: () => null,
+            getSseManager: () => sseManager,
+            getStore: () => null
+        })
+        const controller = new AbortController()
+        const response = await app.request('/api/events', {
+            headers: { authorization: `Bearer ${await sign(grantee.id)}` },
+            signal: controller.signal
+        })
+        const reader = response.body!.getReader()
+        expect(new TextDecoder().decode((await reader.read()).value)).toContain('"status":"connected"')
+
+        // 下一帧必须是心跳，而且只来一份（只有 index 0 那条订阅发）
+        const frame = new TextDecoder().decode((await reader.read()).value)
+        expect(frame).toContain('"type":"heartbeat"')
+        expect(frame.match(/"type":"heartbeat"/g)).toHaveLength(1)
+
+        controller.abort()
+        await reader.cancel()
+        sseManager.stop()
+        store.close()
+    })
+})
+
 describe('/api/usage/summary：可见性与会话列表同构，聚合走真实 hub Store', () => {
     const jwtSecret = new TextEncoder().encode('test-secret-test-secret-test-secret')
     const sign = (accountId: number) => new SignJWT({ gaid: accountId }).setProtectedHeader({ alg: 'HS256' }).sign(jwtSecret)
@@ -295,7 +503,7 @@ describe('/api/usage/summary：可见性与会话列表同构，聚合走真实 
         }
 
         const records = new Map(specs.map(spec => [spec.id, {
-            id: spec.id, namespace: 'default', metadata: { path: `/tmp/${spec.id}`, host: spec.host }, agentState: null, active: false, createdAt: 1, updatedAt: 1, seq: 0
+            id: spec.id, namespace: 'default', metadata: { path: `/tmp/${spec.id}`, host: spec.host, machineId: `${spec.host}-machine` }, agentState: null, active: false, createdAt: 1, updatedAt: 1, seq: 0
         }]))
         const engine = {
             getSessionsByNamespace: () => [...records.values()],
@@ -329,6 +537,18 @@ describe('/api/usage/summary：可见性与会话列表同构，聚合走真实 
         const body = await response.json() as UsageResponse
         expect(body.totals).toMatchObject({ requestCount: 2, inputTokens: 20 })
         expect(body.hosts).toEqual(['peter-mac'])
+        gateway.close()
+    })
+
+    it('被授权机器的用户能统计到该机器上的会话用量（继承与列表同构）', async () => {
+        const { gateway, app, admin, other } = seedUsage()
+        gateway.bindResource({ resourceType: 'machine', resourceId: 'vircs-machine', ownerAccountId: admin.id, coreNamespace: 'default' })
+        gateway.grant('machine', 'vircs-machine', other.id, 'viewer')
+        const response = await app.request('/api/usage/summary', { headers: { authorization: `Bearer ${await sign(other.id)}` } })
+        const body = await response.json() as UsageResponse
+        // s-admin 跑在 vircs-machine 上：100 tokens；peter 的两条不在这台机器上
+        expect(body.totals).toMatchObject({ requestCount: 1, inputTokens: 100 })
+        expect(body.hosts).toEqual(['vircs'])
         gateway.close()
     })
 

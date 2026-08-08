@@ -515,3 +515,31 @@ host FA608_INDEX 的会话在上下文 167,410 tokens 时触发 Claude Code 自�
 | `web/src/lib/usageReportBackfill.ts` | — （fork 自有） | 回填改为**合并**而非整体替换 usage：帧里没有 `context_window`/`service_tier`/`cost_usd`，整体替换会连带抹掉分母 | 帧 delta → 合并进 message_start usage → 状态栏 | 单测钉死非计数字段保留 |
 
 上游若给出 provider 感知的窗口注册表或在会话级下发窗口，改用它并移除本回退。
+
+## 机器授权向下继承到会话 (2026-08-08)
+
+把一台机器授权给某个账号后，该机器上**新建**的会话对他仍然不可见：会话是独立的
+`gateway_resources` 行，owner 是创建者（通常 admin），没有任何 grant 指向被授权人。
+生产库实测（2026-08-08，FA608_INDEX = `ede96a43…` 授权给 mnmn66）：最近 400 条会话
+里有 62 条跑在这台机器上，全部靠**逐条补 session grant** 才看得见——机器授权在
+「新会话」这一维上形同虚设。
+
+判定收敛到 fork 自有的 `fork-features/multi-user/machineInheritance.ts`：
+`sessionAccessLevel = max(会话自身授权, 所在机器授权)`，机器归属**现查** core 侧
+`session.metadata.machineId`（CLI 建会话时必填），网关库不冗余存一份——存一份就会
+漂移，且存量会话补不上。三个消费点共用它：ExecutionDispatcher（单会话读/写）、
+sseVisibility（事件投递谓词）、executionMount 的 `collectVisibleSessions`
+（`/api/sessions` 与 `/api/usage/summary` 的可见集）。
+
+同批修掉两处相邻缺陷：
+- `/api/events` 的订阅从「逐资源」改成「逐 namespace + 谓词」。逐条订阅只能覆盖
+  连接建立那一刻已存在的资源，机器上后来新建的会话事件永远进不来；顺带把
+  mnmn66 这类账号的订阅数从 50+ 降到 1。
+- 未绑定资源的放行窗口收紧到**账号自己的 namespace**。订阅按 namespace 铺开后，
+  无条件放行等于把别人 namespace 里尚未绑定的会话全抄送过去。
+
+| Files | Missing upstream seam | Why it cannot move out | Runtime path | Sync verification |
+|---|---|---|---|---|
+| `hub/src/web/server.ts` | `createExecutionMiddleware` / `createSseRequestFilterFactory` 的 deps 内联装配 | 继承判定要按 sessionId 反查 `metadata.machineId`，只有 `getSyncEngine` 拿得到；两处各加一个 dep | hub 启动 → 执行中间件 / SSE 谓词 → 机器继承 | 冷启 hub，用被授权机器（非会话）的账号 JWT 打 `GET /api/sessions` 与 `GET /api/events` |
+
+上游若出现原生的资源层级/继承授权模型，先比形态再决定去留。

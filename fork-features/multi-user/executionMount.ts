@@ -1,14 +1,15 @@
 import type { Hono, MiddlewareHandler } from 'hono'
 import { jwtVerify } from 'jose'
 import { toSessionSummary } from '../../shared/src/sessionSummary'
-import type { SyncEngine } from '../../hub/src/sync/syncEngine'
+import type { Session, SyncEngine } from '../../hub/src/sync/syncEngine'
 import type { SSEManager } from '../../hub/src/sse/sseManager'
 import type { Store } from '../../hub/src/store'
 import type { WebAppEnv } from '../../hub/src/web/middleware/auth'
 import type { MultiUserGatewayStore } from './gatewayStore'
 import { ExecutionDispatcher } from './executionDispatcher'
-import type { Capability, ResourceType } from './domain'
+import type { Account, Capability, ResourceType } from './domain'
 import { buildUsageSummaryResponse, parseIsoParam } from '../usage/usageAggregate'
+import { createSessionMachineResolver } from './machineInheritance'
 import { createSseEventFilterFactory } from './sseVisibility'
 import { streamSSE } from 'hono/streaming'
 import { randomUUID } from 'node:crypto'
@@ -37,8 +38,13 @@ const capabilityFor = (method: string): Capability => method === 'GET' ? 'read' 
 export function createExecutionMiddleware(deps: {
     store: MultiUserGatewayStore
     jwtSecret: Uint8Array
+    getSyncEngine?: () => SyncEngine | null
 }): MiddlewareHandler<WebAppEnv> {
-    const dispatcher = new ExecutionDispatcher(deps.store)
+    // 会话继承所在机器的授权：被授权某台机器的人不必再对每个新会话单独授权一次。
+    const dispatcher = new ExecutionDispatcher(
+        deps.store,
+        deps.getSyncEngine ? createSessionMachineResolver(deps.getSyncEngine) : undefined
+    )
     return async (c, next) => {
         const resource = resourceFromPath(c.req.path)
         if (!resource) { await next(); return }
@@ -77,6 +83,64 @@ export function createExecutionMiddleware(deps: {
 
 const CLIENT_ERROR_WINDOW_MS = 10 * 60 * 1000
 const CLIENT_ERROR_MAX_PER_WINDOW = 30
+
+/**
+ * 一个账号可见的会话集合，`GET /api/sessions` 与 `/api/usage/summary` 共用。
+ *
+ * 三个来源：
+ *   1. 自己 namespace 里尚未绑定的会话（bind-on-view 认领，`claimUnbound` 时）
+ *   2. gateway_resources 里拥有 + 被授权的会话
+ *   3. **被授权机器上的会话** —— 机器授权向下继承（machineInheritance）。
+ *      这一支是修「机器授权了但机器上新建的会话看不见」的关键：新会话的
+ *      owner 是创建者，不会自动带上被授权人的 grant。
+ *
+ * 第 3 支扫到的未绑定会话按**机器主人**落绑定，不是当前查看者 —— 被授权者
+ * 刷一下列表不该把别人机器上的会话变成自己的。
+ */
+function collectVisibleSessions(
+    store: MultiUserGatewayStore,
+    engine: SyncEngine,
+    account: Account,
+    options: { claimUnbound: boolean }
+): Session[] {
+    if (options.claimUnbound) {
+        for (const session of engine.getSessionsByNamespace(account.defaultNamespace)) {
+            if (!store.getResource('session', session.id)) {
+                store.bindResource({
+                    resourceType: 'session',
+                    resourceId: session.id,
+                    ownerAccountId: account.id,
+                    coreNamespace: account.defaultNamespace
+                })
+            }
+        }
+    }
+
+    const visible = new Map<string, Session>()
+    for (const binding of store.listAccessibleResources('session', account.id)) {
+        const session = engine.getSession(binding.resourceId)
+        if (session) visible.set(session.id, session)
+    }
+
+    const machineBindings = store.listAccessibleResources('machine', account.id)
+    const machineOwners = new Map(machineBindings.map(binding => [binding.resourceId, binding.ownerAccountId]))
+    for (const namespace of new Set(machineBindings.map(binding => binding.coreNamespace))) {
+        for (const session of engine.getSessionsByNamespace(namespace)) {
+            const machineId = session.metadata?.machineId
+            if (!machineId || !machineOwners.has(machineId) || visible.has(session.id)) continue
+            if (options.claimUnbound && !store.getResource('session', session.id)) {
+                store.bindResource({
+                    resourceType: 'session',
+                    resourceId: session.id,
+                    ownerAccountId: machineOwners.get(machineId)!,
+                    coreNamespace: session.namespace
+                })
+            }
+            visible.set(session.id, session)
+        }
+    }
+    return [...visible.values()]
+}
 
 export function mountExecutionRoutes(app: Hono<WebAppEnv>, deps: {
     store: MultiUserGatewayStore
@@ -127,43 +191,46 @@ export function mountExecutionRoutes(app: Hono<WebAppEnv>, deps: {
         const manager = deps.getSseManager()
         if (!account || !manager) return c.json({ error: 'Not connected' }, account ? 503 : 401)
         const groupId = randomUUID()
-        const bindings = [
-            ...deps.store.listAccessibleResources('session', account.id),
-            ...deps.store.listAccessibleResources('machine', account.id)
-        ].filter(binding => binding.ownerAccountId !== account.id)
-        // 账号可读集谓词：`all: true` 的那条订阅覆盖整个 core namespace，而网关下
+        // 订阅按 **namespace** 铺开，不再按资源逐条订阅：机器授权下「哪些会话可见」
+        // 是随时会变的（机器上随时会新建会话），逐条订阅只能覆盖连接建立那一刻
+        // 已存在的资源，新会话的事件永远进不来。改成覆盖所有相关 namespace，
+        // 由 canDeliver 谓词逐事件判权。
+        const reachableNamespaces = new Set([
+            account.defaultNamespace,
+            ...deps.store.listAccessibleResources('session', account.id).map(binding => binding.coreNamespace),
+            ...deps.store.listAccessibleResources('machine', account.id).map(binding => binding.coreNamespace)
+        ])
+        // 账号可读集谓词：`all: true` 的订阅覆盖整个 core namespace，而网关下
         // 多个账号共享同一个 namespace（历史账号都是 `default`），仅靠 namespace
         // 匹配会把未授权会话的事件——包括完成提醒——投给同 namespace 的其他账号。
-        // 明确按 (sessionId|machineId) 绑定的那些订阅本身已是精确目标，谓词对它们
-        // 是恒真，不影响被授权资源的投递。
-        const canDeliver = createSseEventFilterFactory(deps.store)(account.id) ?? undefined
+        const canDeliver = createSseEventFilterFactory(
+            deps.store,
+            createSessionMachineResolver(deps.getSyncEngine)
+        )(account.id) ?? undefined
         return streamSSE(c, async stream => {
             const ids: string[] = []
-            const subscribe = (input: { namespace: string; all?: boolean; sessionId?: string; machineId?: string }) => {
-                const id = `${groupId}:${ids.length}`
+            const subscribe = (namespace: string) => {
+                const index = ids.length
+                const id = `${groupId}:${index}`
                 ids.push(id)
                 manager.subscribe({
                     id,
-                    namespace: input.namespace,
-                    all: input.all,
-                    sessionId: input.sessionId,
-                    machineId: input.machineId,
-                    visibility: ids.length === 1 ? 'visible' : 'hidden',
+                    namespace,
+                    all: true,
+                    // 只有首条（账号自己的 namespace）算 visible：sendToast 只投给
+                    // visible 连接，借此避免把别人 namespace 的 toast 串给本账号。
+                    visibility: index === 0 ? 'visible' : 'hidden',
                     canDeliver,
                     send: event => stream.writeSSE({ data: JSON.stringify(event) }),
-                    sendHeartbeat: () => ids.length === 1
+                    // index 在订阅时定死。此前写的是 `ids.length === 1`，而它在心跳
+                    // 触发时才求值——只要账号有任何跨 namespace 授权（ids.length > 1），
+                    // 所有连接的心跳就一起停摆。
+                    sendHeartbeat: () => index === 0
                         ? stream.writeSSE({ data: JSON.stringify({ type: 'heartbeat', namespace: account.defaultNamespace, data: { timestamp: Date.now() } }) })
                         : Promise.resolve()
                 })
             }
-            subscribe({ namespace: account.defaultNamespace, all: true })
-            for (const binding of bindings) {
-                subscribe({
-                    namespace: binding.coreNamespace,
-                    sessionId: binding.resourceType === 'session' ? binding.resourceId : undefined,
-                    machineId: binding.resourceType === 'machine' ? binding.resourceId : undefined
-                })
-            }
+            for (const namespace of reachableNamespaces) subscribe(namespace)
             await stream.writeSSE({ data: JSON.stringify({ type: 'connection-changed', data: { status: 'connected', subscriptionId: ids[0] } }) })
             await new Promise<void>(resolve => {
                 const done = () => resolve()
@@ -179,13 +246,8 @@ export function mountExecutionRoutes(app: Hono<WebAppEnv>, deps: {
         const account = accountId === null ? null : deps.store.getAccount(accountId)
         const engine = deps.getSyncEngine()
         if (!account || !engine) return c.json({ error: 'Not connected' }, account ? 503 : 401)
-        for (const session of engine.getSessionsByNamespace(account.defaultNamespace)) {
-            if (!deps.store.getResource('session', session.id)) deps.store.bindResource({ resourceType: 'session', resourceId: session.id, ownerAccountId: account.id, coreNamespace: account.defaultNamespace })
-        }
-        const sessions = deps.store.listAccessibleResources('session', account.id)
-            .map(binding => engine.getSession(binding.resourceId))
-            .filter(session => session != null)
-            .map(session => toSessionSummary(session!))
+        const sessions = collectVisibleSessions(deps.store, engine, account, { claimUnbound: true })
+            .map(toSessionSummary)
         return c.json({ sessions })
     })
 
@@ -201,12 +263,9 @@ export function mountExecutionRoutes(app: Hono<WebAppEnv>, deps: {
         const store = deps.getStore()
         if (!account || !engine || !store) return c.json({ error: 'Not connected' }, account ? 503 : 401)
 
-        // listAccessibleResources 对 admin 返回全部绑定，普通用户返回拥有+被授权，
-        // 与 GET /api/sessions 的可见集共用同一条查询。
-        const visible = deps.store.listAccessibleResources('session', account.id)
-            .map(binding => engine.getSession(binding.resourceId))
-            .filter(session => session != null)
-            .map(session => session!)
+        // 与 GET /api/sessions 共用同一个可见集解析器（含机器授权继承的那一支），
+        // 区别只有这里不认领未绑定会话 —— 只读端点不该改写资源归属。
+        const visible = collectVisibleSessions(deps.store, engine, account, { claimUnbound: false })
 
         // 机器下拉列表基于鉴权后的会话集合，不会泄漏用户无权访问的机器。
         const hosts = Array.from(new Set(

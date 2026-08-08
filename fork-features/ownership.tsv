@@ -165,6 +165,8 @@ fork-features/multi-user/gatewayRoutes.test.ts	fork-owned	#171	origin-only delta
 fork-features/multi-user/gatewayRoutes.ts	fork-owned	#171	origin-only delta; fork commits a6f9e3f9
 fork-features/multi-user/gatewayStore.ts	fork-owned	#171	origin-only delta; fork commits a6f9e3f9
 fork-features/multi-user/hubMount.ts	fork-owned	#171	origin-only delta; fork commits a6f9e3f9
+fork-features/multi-user/machineInheritance.test.ts	fork-owned	machine-grant-inheritance	机器授权继承的判定用例（max 取值、不外溢、禁用账号）
+fork-features/multi-user/machineInheritance.ts	fork-owned	machine-grant-inheritance	会话继承所在机器授权；机器归属现查 core metadata.machineId，不冗余存网关库
 fork-features/multi-user/notificationAdapter.test.ts	fork-owned	#171	origin-only delta; fork commits a6f9e3f9
 fork-features/multi-user/notificationAdapter.ts	fork-owned	#171	origin-only delta; fork commits a6f9e3f9
 fork-features/multi-user/password.ts	fork-owned	#171	origin-only delta; fork commits a6f9e3f9

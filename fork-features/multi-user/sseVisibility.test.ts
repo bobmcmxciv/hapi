@@ -117,8 +117,58 @@ describe('executionMount 的 /api/events 才是真实路由（回归钉）', () 
         const source = readFileSync(join(import.meta.dir, 'executionMount.ts'), 'utf8')
         const route = source.slice(source.indexOf("app.get('/api/events'"))
         expect(route).toContain('createSseEventFilterFactory')
-        expect(route.slice(0, route.indexOf('subscribe({ namespace: account.defaultNamespace, all: true })')))
-            .toContain('canDeliver')
+        const subscribeAt = route.indexOf('manager.subscribe({')
+        expect(subscribeAt).toBeGreaterThan(0)
+        // 谓词在订阅之前构造好，并且真的传进了每一条订阅。
+        expect(route.slice(0, subscribeAt)).toContain('canDeliver')
+        expect(route.slice(subscribeAt, subscribeAt + 600)).toContain('canDeliver,')
+    })
+})
+
+describe('机器授权向下继承：该机器上新建的会话事件必须投递', () => {
+    /** fa608 授权给 mnmn66；s-new 是 admin 刚在 fa608 上建的会话，owner 不是 mnmn66 也没有会话级 grant。 */
+    function setupMachineGrant() {
+        const store = new MultiUserGatewayStore(':memory:')
+        const ownerId = store.createAccount('admin-user', 'user', 'default', 'x').id
+        const granteeId = store.createAccount('mnmn66', 'user', 'default', 'x').id
+        store.bindResource({ resourceType: 'machine', resourceId: 'fa608', ownerAccountId: ownerId, coreNamespace: 'default' })
+        store.bindResource({ resourceType: 'machine', resourceId: 'vircs', ownerAccountId: ownerId, coreNamespace: 'default' })
+        store.bindResource({ resourceType: 'session', resourceId: 's-new', ownerAccountId: ownerId, coreNamespace: 'default' })
+        store.bindResource({ resourceType: 'session', resourceId: 's-other-machine', ownerAccountId: ownerId, coreNamespace: 'default' })
+        store.grant('machine', 'fa608', granteeId, 'viewer')
+        const machineOf: Record<string, string> = { 's-new': 'fa608', 's-other-machine': 'vircs', 's-unbound': 'fa608' }
+        return { store, granteeId, resolve: (id: string) => machineOf[id] ?? null }
+    }
+
+    it('被授权机器上的新会话事件放行', () => {
+        const { store, granteeId, resolve } = setupMachineGrant()
+        const predicate = createSseEventFilterFactory(store, resolve)(granteeId)!
+        expect(predicate(sessionEvent('s-new'))).toBe(true)
+        store.close()
+    })
+
+    it('未授权机器上的会话事件仍然拦下', () => {
+        const { store, granteeId, resolve } = setupMachineGrant()
+        const predicate = createSseEventFilterFactory(store, resolve)(granteeId)!
+        expect(predicate(sessionEvent('s-other-machine'))).toBe(false)
+        store.close()
+    })
+
+    it('尚未绑定但已在被授权机器上的会话也放行（创建瞬间的窗口）', () => {
+        const { store, granteeId, resolve } = setupMachineGrant()
+        const predicate = createSseEventFilterFactory(store, resolve)(granteeId)!
+        expect(predicate(sessionEvent('s-unbound'))).toBe(true)
+        store.close()
+    })
+
+    it('未绑定会话的放行窗口只限本账号 namespace —— 别人 namespace 里的一律不给', () => {
+        const { store, granteeId, resolve } = setupMachineGrant()
+        const predicate = createSseEventFilterFactory(store, resolve)(granteeId)!
+        const foreign = { type: 'session-updated', namespace: 'someone-else', sessionId: 'nobody-bound-me', data: {} } as unknown as SyncEvent
+        expect(predicate(foreign)).toBe(false)
+        // 同一条会话若落在自己的 namespace 里，窗口仍然保留
+        expect(predicate(sessionEvent('nobody-bound-me'))).toBe(true)
+        store.close()
     })
 })
 

@@ -2,6 +2,8 @@ export type AccountRole = 'admin' | 'user'
 export type GrantRole = 'viewer' | 'operator'
 export type ResourceType = 'session' | 'machine'
 export type Capability = 'read' | 'operate' | 'administer'
+/** 一个账号对某个资源的实际权限档位；`owner` 同时覆盖 administer。 */
+export type AccessLevel = 'none' | GrantRole | 'owner'
 
 export type Account = {
     id: number
