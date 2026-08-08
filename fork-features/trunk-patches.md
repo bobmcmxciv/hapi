@@ -543,3 +543,29 @@ sseVisibility（事件投递谓词）、executionMount 的 `collectVisibleSessio
 | `hub/src/web/server.ts` | `createExecutionMiddleware` / `createSseRequestFilterFactory` 的 deps 内联装配 | 继承判定要按 sessionId 反查 `metadata.machineId`，只有 `getSyncEngine` 拿得到；两处各加一个 dep | hub 启动 → 执行中间件 / SSE 谓词 → 机器继承 | 冷启 hub，用被授权机器（非会话）的账号 JWT 打 `GET /api/sessions` 与 `GET /api/events` |
 
 上游若出现原生的资源层级/继承授权模型，先比形态再决定去留。
+
+## 提醒弹窗也要过账号谓词 (2026-08-08)
+
+2026-08-02 给 SSE 装的账号可见性谓词只挂在 `SSEManager.broadcast`（私有
+`shouldSend`）上，**`sendToast` 这条路一直是裸的**：它只看
+`connection.namespace === namespace` 与 `isVisibleConnection`。多用户网关下历史账号
+（admin/peter/bobmcmxciv/mnmn66）全在 core namespace `default` 里，于是任何一条
+「Ready for input / Task completed」提醒都会发给该 namespace 下所有开着页面的账号。
+这就是「mnmn66 看得到别人会话动态」的那条路——事件流已经拦住了，弹窗没有。
+
+两个细节让它躲过了上一轮修复：
+
+- toast 事件的 `sessionId` 在 `data` 里，顶层没有（`shared/src/schemas.ts` 的
+  `SyncEventSchema`）。谓词只认顶层字段，所以即使挂上去也对每条 toast 恒真。
+- toast 事件不带 `namespace`，`pushNotificationChannel` 也不填。谓词判「未绑定资源的
+  短暂放行窗口」要用它，缺了就会把 owner 自己的首条提醒也拦掉。`sendToast` 现在按
+  调用方声明的 namespace 补齐后再喂谓词，**投出去的仍是原事件**（不改线上载荷）。
+
+`fork-features/multi-user/sseVisibility.ts` 里 fail-closed 的两个分支（账号被禁用、
+JWT 解析不出 `gaid`）同样改用统一的 `carriesResourceId`，否则它们也漏 toast。
+
+| Files | Missing upstream seam | Why it cannot move out | Runtime path | Sync verification |
+|---|---|---|---|---|
+| `hub/src/sse/sseManager.ts` | `sendToast` 无按账号过滤的注册 API（`canDeliver` 此前只在 `broadcast` 用） | 受众判定要逐连接做，而连接只在订阅侧知道自己属于哪个账号 | 通知 → `PushNotificationChannel.deliverWebOrToast` → `sendToast` → 连接谓词 → SSE 帧 | `bun run scripts/dev/sse-toast-leak-e2e.ts`：真 hub + 真 SSE + 真 CLI socket，admin 收到 1 条、旁观账号 0 条 |
+
+上游若给 toast 加上原生的受众/订阅过滤，先比语义再决定去留。

@@ -217,7 +217,7 @@ hub/src/socket/server.ts	trunk-patch	#171	origin-only delta; fork commits a6f9e3
 hub/src/socket/socketLimits.test.ts	trunk-patch	#176	origin-only delta; fork commits 3edb7db8
 hub/src/socket/socketLimits.ts	trunk-patch	#176	origin-only delta; fork commits 3edb7db8
 hub/src/socket/socketTypes.ts	trunk-patch	#171	origin-only delta; fork commits a6f9e3f9
-hub/src/sse/sseManager.ts	trunk-patch	sse-isolation	订阅新增可选 canDeliver 谓词；SSE 层无按账号过滤的注册 API
+hub/src/sse/sseManager.ts	trunk-patch	sse-isolation	订阅新增可选 canDeliver 谓词，broadcast 与 sendToast 都要过；SSE 层无按账号过滤的注册 API
 hub/src/startHub.ts	trunk-patch	#171	origin-only delta; fork commits a6f9e3f9
 hub/src/store/index.ts	trunk-patch	#174	#170 removed unused helper; remaining persisted-session hook closed by #174
 hub/src/store/messageStore.ts	trunk-patch	usage-page	origin-only delta; single seam exposing db to fork-features/usage aggregation (2026-07-28)
@@ -244,6 +244,7 @@ hub/src/web/routes/sessions.ts	trunk-patch	#173	both refs changed; fork commits 
 hub/src/web/server.ts	trunk-patch	#171	origin-only delta; fork commits a6f9e3f9,f3c58338
 hub/tsconfig.json	trunk-patch	#171	origin-only delta; fork commits a6f9e3f9,f3c58338
 package.json	trunk-patch	#171	origin-only delta; fork commits a6f9e3f9
+scripts/dev/sse-toast-leak-e2e.ts	fork-owned	sse-isolation	真 hub 进程复现跨账号提醒泄漏，改 SSE 可见性后前后各跑一次
 shared/package.json	trunk-patch	#176	origin-only delta; fork commits 3edb7db8
 shared/src/apiTypes.ts	trunk-patch	#173	both refs changed; fork commits 8d828436,51929072,92e8a6e1,3994ee9a,fc7d7b4a,b4c31e88,a8815d47,bfa252da,c853bcbf,413e76cc
 shared/src/flavors.test.ts	trunk-patch	#172	origin-only delta; fork commits 3686370a

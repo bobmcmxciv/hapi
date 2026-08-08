@@ -76,9 +76,18 @@ export class SSEManager {
     }
 
     async sendToast(namespace: string, event: Extract<SyncEvent, { type: 'toast' }>): Promise<number> {
+        // fork(multi-user)：toast 走的是和 broadcast 同一条账号可见性谓词。
+        // toast 事件不带 namespace 字段、sessionId 又藏在 data 里，谓词判不了权 ——
+        // 这里按调用方声明的 namespace 补齐后再喂给谓词，投出去的仍是原事件。
+        const scoped: Extract<SyncEvent, { type: 'toast' }> = event.namespace
+            ? event
+            : { ...event, namespace }
         const deliveries: Array<Promise<{ id: string; ok: boolean }>> = []
         for (const connection of this.connections.values()) {
             if (connection.namespace !== namespace) {
+                continue
+            }
+            if (connection.canDeliver && !connection.canDeliver(scoped)) {
                 continue
             }
             if (!this.visibilityTracker.isVisibleConnection(connection.id)) {

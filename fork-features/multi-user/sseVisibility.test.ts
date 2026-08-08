@@ -172,6 +172,86 @@ describe('机器授权向下继承：该机器上新建的会话事件必须投�
     })
 })
 
+describe('toast（提醒弹窗）同样要过谓词', () => {
+    function toast(sessionId: string, namespace?: string): SyncEvent {
+        return {
+            type: 'toast',
+            ...(namespace ? { namespace } : {}),
+            data: {
+                title: 'Task completed',
+                body: 'Claude · session-owned · done',
+                sessionId,
+                url: `/sessions/${sessionId}`
+            }
+        } as unknown as SyncEvent
+    }
+
+    it('别人会话的提醒拦下，owner/grantee 的放行', () => {
+        // toast 的 sessionId 藏在 data 里；只看顶层字段的谓词对它恒真，
+        // 于是「完成提醒」照旧串给同 namespace 的所有账号。
+        const { store, ownerId, strangerId, granteeId } = setupStore()
+        const factory = createSseEventFilterFactory(store)
+        expect(factory(ownerId)!(toast('session-owned'))).toBe(true)
+        expect(factory(granteeId)!(toast('session-owned'))).toBe(true)
+        expect(factory(strangerId)!(toast('session-owned'))).toBe(false)
+    })
+
+    it('被授权机器上的会话，提醒随继承一起放行', () => {
+        const store = new MultiUserGatewayStore(':memory:')
+        const ownerId = store.createAccount('admin-user', 'user', 'default', 'x').id
+        const granteeId = store.createAccount('mnmn66', 'user', 'default', 'x').id
+        store.bindResource({ resourceType: 'machine', resourceId: 'fa608', ownerAccountId: ownerId, coreNamespace: 'default' })
+        store.bindResource({ resourceType: 'machine', resourceId: 'vircs', ownerAccountId: ownerId, coreNamespace: 'default' })
+        store.bindResource({ resourceType: 'session', resourceId: 's-fa608', ownerAccountId: ownerId, coreNamespace: 'default' })
+        store.bindResource({ resourceType: 'session', resourceId: 's-vircs', ownerAccountId: ownerId, coreNamespace: 'default' })
+        store.grant('machine', 'fa608', granteeId, 'viewer')
+        const resolve = (id: string) => (id === 's-fa608' ? 'fa608' : 'vircs')
+        const predicate = createSseEventFilterFactory(store, resolve)(granteeId)!
+        expect(predicate(toast('s-fa608'))).toBe(true)
+        expect(predicate(toast('s-vircs'))).toBe(false)
+        store.close()
+    })
+
+    it('未绑定会话的短暂窗口对 toast 一样生效（sendToast 会补上 namespace）', () => {
+        const { store, strangerId } = setupStore()
+        const predicate = createSseEventFilterFactory(store)(strangerId)!
+        expect(predicate(toast('session-unbound', 'default'))).toBe(true)
+        expect(predicate(toast('session-unbound', 'someone-else'))).toBe(false)
+    })
+
+    it('经 SSEManager.sendToast 投递：提醒只到达 owner/grantee/admin 的连接', async () => {
+        // 2026-08-08 回归：谓词只挂在 broadcast 上，sendToast 只看 namespace + visible，
+        // 于是 mnmn66 照旧收到别人会话的完成提醒（点进去 403）。
+        const { store, adminId, ownerId, strangerId, granteeId } = setupStore()
+        const factory = createSseEventFilterFactory(store)
+        const manager = new SSEManager(0, new VisibilityTracker())
+        const received: string[] = []
+        for (const [name, accountId] of [['admin', adminId], ['bob', ownerId], ['mnmn66', strangerId], ['peter', granteeId]] as const) {
+            manager.subscribe({
+                id: `conn-${name}`,
+                namespace: 'default',
+                all: true,
+                visibility: 'visible',
+                canDeliver: factory(accountId) ?? undefined,
+                send: () => { received.push(name) },
+                sendHeartbeat: () => undefined
+            })
+        }
+
+        const delivered = await manager.sendToast('default', toast('session-owned') as Extract<SyncEvent, { type: 'toast' }>)
+
+        expect(delivered).toBe(3)
+        expect(received.sort()).toEqual(['admin', 'bob', 'peter'])
+    })
+
+    it('身份解析不出来时，toast 也 fail-closed', async () => {
+        const { store } = setupStore()
+        const filter = createSseRequestFilterFactory(store, async () => null)
+        const predicate = await filter(new Request('https://hub/api/events?all=true'))
+        expect(predicate!(toast('session-owned'))).toBe(false)
+    })
+})
+
 describe('owner 自己的资源：谓词必须放行（否则 all 订阅拦下、bindings 又不订阅）', () => {
     it('owner 能收到自己拥有的会话事件', () => {
         const { store, ownerId } = setupStore()
