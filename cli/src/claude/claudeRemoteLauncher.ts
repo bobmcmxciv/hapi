@@ -356,6 +356,27 @@ class ClaudeRemoteLauncher extends RemoteLauncherBase {
                 // this attempt" (e.g. the livelock-prone park-then-return-null
                 // case). See the success-path reset below.
                 let deliveredMessageThisAttempt = false;
+                // True once this attempt parked an incoming message into
+                // `pending` because its mode hash differed from the running
+                // process's. Parking makes nextMessage() return null, which
+                // ends the SDK input stream on purpose so the next attempt can
+                // respawn Claude under the new mode. Claude commonly exits
+                // non-zero once its stdin closes mid-session, so the throw that
+                // follows is our own teardown -- not a failure the user can act
+                // on. Observed on four fleet machines: switching model in the
+                // web UI produced "Process exited unexpectedly: Claude Code
+                // process exited with code 1" on an otherwise healthy session.
+                //
+                // Scope note: a park can only happen on a nextMessage() issued
+                // from claudeRemote's post-result scheduleNextMessage(), which
+                // runs strictly after opts.onReady() (claudeRemote.ts:328 vs
+                // :334); the initial nextMessage() cannot park because modeHash
+                // is still null. So reachedReadyThisAttempt is always true here
+                // and the immediate-failure streak would have been reset anyway
+                // -- skipping the counter and the backoff below is consistency,
+                // not a behavior change. Suppressing the bogus user-facing
+                // event is the actual fix.
+                let parkedForModeChange = false;
                 // Tracks the most recent message batch handed to the SDK via
                 // nextMessage() that has not yet been confirmed complete by a
                 // following onReady(). If claudeRemote() throws while a
@@ -440,6 +461,7 @@ class ClaudeRemoteLauncher extends RemoteLauncherBase {
                                     // delivering it twice.
                                     logger.debug('[remote]: mode has changed, pending message');
                                     pending = msg;
+                                    parkedForModeChange = true;
                                     return null;
                                 }
                                 modeHash = msg.hash;
@@ -566,6 +588,26 @@ class ClaudeRemoteLauncher extends RemoteLauncherBase {
                         }
                         inFlightMessage = null;
                     };
+
+                    if (!this.exitReason && parkedForModeChange) {
+                        // We closed the input stream ourselves to force a
+                        // respawn under the new mode; the non-zero exit that
+                        // followed is that teardown. Respawn immediately -- the
+                        // parked batch is held in `pending` (declared outside
+                        // the loop) and is delivered by the next attempt's first
+                        // nextMessage(). A genuinely broken respawn still fails
+                        // on the next attempt, which has no park of its own and
+                        // therefore takes the normal reporting/streak path.
+                        logger.debug('[remote]: process exited after input stream closed for mode-change respawn', e);
+                        // The parked batch lives in `pending`, but an *earlier*
+                        // turn from this same attempt may still be in flight
+                        // (delivered to the SDK, no onReady yet) when the switch
+                        // arrives. Restore it exactly as the failure path does,
+                        // otherwise switching models mid-turn silently discards
+                        // the turn that was already running.
+                        restoreInFlightMessage();
+                        continue;
+                    }
 
                     if (!this.exitReason) {
                         const detail = e instanceof Error ? e.message : String(e);

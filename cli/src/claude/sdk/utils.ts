@@ -28,6 +28,15 @@ function resolveWindowsNpmShimExecutable(shimPath: string): string | null {
     return null
 }
 
+/**
+ * True for the Windows batch shims that `spawn(..., { shell: false })` cannot
+ * execute at all on Node >= 20.12 / 21.7 (CVE-2024-27980 hardening).
+ */
+export function isWindowsShimPath(candidate: string): boolean {
+    const extension = windowsPath.extname(candidate).toLowerCase()
+    return extension === '.cmd' || extension === '.bat'
+}
+
 function resolveWindowsClaudePathCandidate(candidate: string): string | null {
     if (!existsSync(candidate)) {
         return null
@@ -153,6 +162,31 @@ export function getDefaultClaudeCodePath(): string {
             if (resolved) {
                 logger.debug(`[Claude SDK] Using resolved HAPI_CLAUDE_PATH: ${resolved}`)
                 return resolved
+            }
+
+            // Shim resolution only knows the npm-global layout
+            // (<dir>/node_modules/@anthropic-ai/claude-code/bin/claude.exe).
+            // For any other layout this used to fall straight through and hand
+            // a `.cmd`/`.bat` to spawn(shell:false), which modern Node refuses
+            // outright (`spawn EINVAL`, CVE-2024-27980 hardening). That is a
+            // deterministic launch failure: it never reaches onReady, so three
+            // in a row trip MAX_IMMEDIATE_RESPAWN_FAILURES and the user's queued
+            // message is dropped. Try normal discovery, which prefers a real
+            // .exe, before accepting an unspawnable shim.
+            if (isWindowsShimPath(configuredPath)) {
+                const discovered = findWindowsClaudePath()
+                if (discovered) {
+                    logger.debug(
+                        `[Claude SDK] HAPI_CLAUDE_PATH ${configuredPath} is a shim that could not be resolved; ` +
+                        `using discovered executable instead: ${discovered}`
+                    )
+                    return discovered
+                }
+                logger.warn(
+                    `[Claude SDK] HAPI_CLAUDE_PATH points at ${configuredPath}, and no real claude.exe could be ` +
+                    `found. Windows cannot spawn a .cmd/.bat without a shell, so launching Claude will fail. ` +
+                    `Set HAPI_CLAUDE_PATH to the claude.exe path instead.`
+                )
             }
         }
         logger.debug(`[Claude SDK] Using HAPI_CLAUDE_PATH: ${configuredPath}`)

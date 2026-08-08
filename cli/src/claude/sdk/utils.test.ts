@@ -91,6 +91,51 @@ describe('getDefaultClaudeCodePath', () => {
         expect(execFileSyncMock).not.toHaveBeenCalled()
     })
 
+    it('falls back to discovery when HAPI_CLAUDE_PATH is an unresolvable .cmd shim', async () => {
+        // spawn(..., { shell: false }) cannot execute a .cmd/.bat on modern
+        // Node (`spawn EINVAL`). Returning the shim verbatim produced a
+        // deterministic launch failure that never reaches onReady, so three in
+        // a row tripped the immediate-failure cap and dropped the user's
+        // queued message. Prefer any real .exe we can discover.
+        setPlatform('win32')
+        const shim = 'C:\\some\\custom\\layout\\claude.cmd'
+        const discovered = 'C:\\Users\\junes\\AppData\\Local\\Microsoft\\WinGet\\Links\\claude.exe'
+        process.env.HAPI_CLAUDE_PATH = shim
+        // Note: no sibling node_modules/@anthropic-ai/... exe, so the npm-shim
+        // resolver returns null and the fallback has to do the work.
+        existsSyncMock.mockImplementation((candidate: string) => candidate === shim || candidate === discovered)
+        execFileSyncMock.mockImplementation((command: string, args: string[]) => {
+            if (command === 'where.exe' && args[0] === 'claude.exe') {
+                return `${discovered}\r\n`
+            }
+            throw new Error('not found')
+        })
+
+        const { getDefaultClaudeCodePath } = await import('./utils')
+
+        expect(getDefaultClaudeCodePath()).toBe(discovered)
+    })
+
+    it('returns the shim unchanged when nothing better exists, after warning', async () => {
+        // Last resort: keep prior behavior rather than hard-failing, but make
+        // the reason visible instead of surfacing a bare EINVAL later.
+        setPlatform('win32')
+        const shim = 'C:\\some\\custom\\layout\\claude.cmd'
+        process.env.HAPI_CLAUDE_PATH = shim
+        existsSyncMock.mockImplementation((candidate: string) => candidate === shim)
+
+        const { getDefaultClaudeCodePath } = await import('./utils')
+        const { logger } = await import('@/ui/logger')
+        const warnSpy = vi.spyOn(logger, 'warn').mockImplementation(() => {})
+
+        try {
+            expect(getDefaultClaudeCodePath()).toBe(shim)
+            expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('cannot spawn a .cmd/.bat'))
+        } finally {
+            warnSpy.mockRestore()
+        }
+    })
+
     it('resolves Windows npm claude.cmd shim to the real Claude Code exe', async () => {
         setPlatform('win32')
         const shim = 'C:\\nvm4w\\nodejs\\claude.cmd'

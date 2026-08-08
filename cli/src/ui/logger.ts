@@ -44,6 +44,52 @@ function getSessionLogPath(): string {
   return join(configuration.logsDir, filename)
 }
 
+/**
+ * JSON.stringify() is the wrong serializer for the two argument shapes that
+ * matter most in a crash log:
+ *
+ *   - `Error`: `message`/`stack` are non-enumerable, so `JSON.stringify(err)`
+ *     is literally `"{}"`. Every `logger.debug('...', err)` in the CLI used to
+ *     land in the log as a bare `{}` -- e.g. `[remote]: launch error {}` --
+ *     discarding the one line that said what actually broke.
+ *   - circular objects: `JSON.stringify` *throws*, and this runs before
+ *     logToFile's try/catch, so a circular arg turned a log call into an
+ *     exception in the caller.
+ */
+export function formatLogArg(arg: unknown): string {
+  if (typeof arg === 'string') return arg
+  if (arg === undefined) return 'undefined'
+  if (arg instanceof Error) {
+    // `stack` already starts with "Name: message". Fall back to that pair
+    // when a thrown value has no stack (e.g. a cross-realm Error).
+    const base = arg.stack ?? `${arg.name}: ${arg.message}`
+    // Preserve operationally useful extras that live as own enumerable
+    // properties (e.g. node's `code`/`errno`, fetch's `cause`).
+    const extras = { ...arg } as Record<string, unknown>
+    return Object.keys(extras).length > 0 ? `${base} ${safeStringify(extras)}` : base
+  }
+  return safeStringify(arg)
+}
+
+function safeStringify(value: unknown): string {
+  const seen = new WeakSet<object>()
+  try {
+    return JSON.stringify(value, (_key, val) => {
+      if (val instanceof Error) {
+        return { name: val.name, message: val.message, stack: val.stack }
+      }
+      if (typeof val === 'bigint') return val.toString()
+      if (typeof val === 'object' && val !== null) {
+        if (seen.has(val)) return '[Circular]'
+        seen.add(val)
+      }
+      return val
+    }) ?? String(value)
+  } catch (error) {
+    return `[unserializable: ${error instanceof Error ? error.message : String(error)}]`
+  }
+}
+
 class Logger {
   private dangerouslyUnencryptedServerLoggingUrl: string | undefined
 
@@ -200,9 +246,7 @@ class Logger {
   }
 
   private logToFile(prefix: string, message: string, ...args: unknown[]): void {
-    const logLine = `${prefix} ${message} ${args.map(arg => 
-      typeof arg === 'string' ? arg : JSON.stringify(arg)
-    ).join(' ')}\n`
+    const logLine = `${prefix} ${message} ${args.map(arg => formatLogArg(arg)).join(' ')}\n`
     
     // Send to remote server if configured
     if (this.dangerouslyUnencryptedServerLoggingUrl) {
