@@ -33,6 +33,33 @@ import { appendMcpConfigArg } from '../utils/mcpConfig'
 const DEFAULT_PROMPT_FAILURE_CLEANUP_TIMEOUT_MS = 3_000
 
 /**
+ * Upper bound on the retained stderr tail. Claude Code's stderr is the only
+ * channel that explains a spawn/auth/flag/resume failure, but a long-running
+ * session must not accumulate it without limit -- keep the most recent bytes,
+ * which is where the fatal message lands.
+ */
+export const STDERR_TAIL_LIMIT = 8192
+
+/** Append `chunk` to `tail`, retaining at most `limit` trailing characters. */
+export function appendStderrTail(tail: string, chunk: string, limit: number = STDERR_TAIL_LIMIT): string {
+    return (tail + chunk).slice(-limit)
+}
+
+/**
+ * Build the error message for a non-zero Claude Code exit.
+ *
+ * The exit code alone is not actionable -- "exited with code 1" was reaching
+ * users verbatim as `Process exited unexpectedly: ...` with the cause dropped
+ * on the floor. Attach whatever the child said on stderr.
+ */
+export function formatClaudeExitMessage(code: number | null, stderrTail: string): string {
+    const tail = stderrTail.trim()
+    return tail.length > 0
+        ? `Claude Code process exited with code ${code}: ${tail}`
+        : `Claude Code process exited with code ${code}`
+}
+
+/**
  * Query class manages Claude Code process interaction
  */
 export class Query implements AsyncIterableIterator<SDKMessage> {
@@ -417,12 +444,32 @@ export function query(config: {
         childStdin = child.stdin
     }
 
-    // Handle stderr in debug mode
-    if (process.env.DEBUG) {
-        child.stderr.on('data', (data) => {
-            console.error('Claude Code stderr:', data.toString())
-        })
-    }
+    // Claude Code's stderr is the only place a spawn/auth/flag/resume failure
+    // explains itself, and it must be drained unconditionally:
+    //
+    //   - Diagnosability: this listener used to be installed only under DEBUG,
+    //     so every production failure reached the user as a bare "Claude Code
+    //     process exited with code 1" with the cause thrown away. Those events
+    //     are user-visible ("Process exited unexpectedly: ...") and, after
+    //     three in a row, cost the user their queued message.
+    //   - Liveness: `stdio` pipes stderr unconditionally (see spawn above). An
+    //     un-drained pipe fills at the OS buffer limit (~64KB) and then blocks
+    //     the child's next stderr write forever -- a hung session rather than a
+    //     failed one.
+    //
+    // Only a bounded tail is retained so a chatty child cannot grow this
+    // buffer without limit over a long-running session.
+    let stderrTail = ''
+    child.stderr.on('data', (data) => {
+        const chunk = data.toString()
+        if (process.env.DEBUG) {
+            console.error('Claude Code stderr:', chunk)
+        }
+        stderrTail = appendStderrTail(stderrTail, chunk)
+    })
+    // A destroyed/errored stderr stream must not take the CLI down with an
+    // unhandled 'error' event -- losing the tail is acceptable, crashing is not.
+    child.stderr.on('error', () => {})
 
     // Setup cleanup
     let cleanupPromise: Promise<void> | null = null
@@ -477,7 +524,7 @@ export function query(config: {
             query.setError(err)
             rejectExit(err)
         } else if (code !== 0) {
-            const err = new Error(`Claude Code process exited with code ${code}`)
+            const err = new Error(formatClaudeExitMessage(code, stderrTail))
             query.setError(err)
             rejectExit(err)
         } else {
