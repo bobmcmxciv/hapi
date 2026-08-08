@@ -25,6 +25,29 @@ export const CLAUDE_MODEL_ID_LABELS = {
 export type ClaudeModelId = keyof typeof CLAUDE_MODEL_ID_LABELS
 export const CLAUDE_MODEL_IDS = Object.keys(CLAUDE_MODEL_ID_LABELS) as ClaudeModelId[]
 
+/**
+ * Model ids served by an Anthropic-compatible proxy in front of Claude Code
+ * (this fork's operator runs cx2cc, which fronts a GPT model on the Anthropic
+ * `/v1/messages` wire). Claude Code passes an unrecognised `--model` straight
+ * through and still honours the `[1m]` suffix, so these are legal launch values
+ * — verified live against cx2cc: `--model gpt-5.6-sol[1m]` returns
+ * `system/init.model = "gpt-5.6-sol[1m]"` and
+ * `result.modelUsage["gpt-5.6-sol[1m]"].contextWindow = 1_000_000`.
+ *
+ * Labels are the raw ids on purpose: the point of picking one of these is to
+ * see the model that actually runs, so prettifying would defeat it. Note the
+ * proxy reports the bare alias (`gpt-5.6-sol`) on assistant frames while the
+ * `[1m]` suffix only survives on system/init and result.modelUsage — both
+ * spellings are listed so either can be selected and recognised.
+ */
+export const CLAUDE_PROXY_MODEL_LABELS = {
+    'gpt-5.6-sol': 'gpt-5.6-sol',
+    'gpt-5.6-sol[1m]': 'gpt-5.6-sol[1m]'
+} as const
+
+export type ClaudeProxyModelId = keyof typeof CLAUDE_PROXY_MODEL_LABELS
+export const CLAUDE_PROXY_MODEL_IDS = Object.keys(CLAUDE_PROXY_MODEL_LABELS) as ClaudeProxyModelId[]
+
 export const GEMINI_MODEL_LABELS = {
     'gemini-3.1-pro-preview': 'Gemini 3.1 Pro Preview',
     'gemini-3-flash-preview': 'Gemini 3 Flash Preview',
@@ -49,5 +72,6 @@ export function getClaudeModelLabel(model: string): string | null {
 
     return CLAUDE_MODEL_LABELS[trimmedModel as ClaudeModelPreset]
         ?? CLAUDE_MODEL_ID_LABELS[trimmedModel as ClaudeModelId]
+        ?? CLAUDE_PROXY_MODEL_LABELS[trimmedModel as ClaudeProxyModelId]
         ?? null
 }

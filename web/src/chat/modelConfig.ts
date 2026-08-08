@@ -74,6 +74,16 @@ export function getContextBudgetTokens(model: string | null | undefined, flavor?
         if (!trimmedModel) {
             return DEFAULT_CLAUDE_CONTEXT_WINDOW_TOKENS
         }
+        // The "[1m]" suffix is a launch-time declaration, not a family marker:
+        // Claude Code honours it on any model id it does not recognise, proxy
+        // aliases included. Verified live against cx2cc — `--model
+        // gpt-5.6-sol[1m]` comes back with
+        // `result.modelUsage["gpt-5.6-sol[1m]"].contextWindow = 1_000_000`.
+        // So the suffix outranks the family check below; without this, picking
+        // a proxy id's 1M variant would still be metered against 200k.
+        if (trimmedModel.endsWith('[1m]')) {
+            return LARGE_CLAUDE_CONTEXT_WINDOW_TOKENS
+        }
         if (isClaudeModelPreset(trimmedModel) || trimmedModel.startsWith('claude-')) {
             // Fable ships with a 1M window even under its bare id: the SDK
             // result message reports modelUsage["claude-fable-5"].contextWindow
@@ -81,9 +91,8 @@ export function getContextBudgetTokens(model: string | null | undefined, flavor?
             // local-mode sessions (their transcript usage carries no
             // context_window and falls through to this heuristic).
             const isFable = trimmedModel === 'fable'
-                || trimmedModel === 'fable[1m]'
                 || trimmedModel.startsWith('claude-fable')
-            return trimmedModel.endsWith('[1m]') || isFable
+            return isFable
                 ? LARGE_CLAUDE_CONTEXT_WINDOW_TOKENS
                 : DEFAULT_CLAUDE_CONTEXT_WINDOW_TOKENS
         }

@@ -1,4 +1,4 @@
-import { CLAUDE_MODEL_IDS, CLAUDE_MODEL_PRESETS, getClaudeModelLabel } from '@hapi/protocol'
+import { CLAUDE_MODEL_IDS, CLAUDE_MODEL_PRESETS, CLAUDE_PROXY_MODEL_IDS, getClaudeModelLabel } from '@hapi/protocol'
 import { describe, expect, it } from 'vitest'
 import { CLAUDE_EFFORT_OPTIONS, GROK_EFFORT_OPTIONS, MODEL_OPTIONS } from './types'
 
@@ -6,10 +6,20 @@ describe('Claude model options', () => {
     it('derives options from shared Claude model presets and specific ids', () => {
         expect(MODEL_OPTIONS.claude).toEqual([
             { value: 'auto', label: 'Default' },
-            ...[...CLAUDE_MODEL_PRESETS, ...CLAUDE_MODEL_IDS].map((model) => ({
+            ...[...CLAUDE_MODEL_PRESETS, ...CLAUDE_MODEL_IDS, ...CLAUDE_PROXY_MODEL_IDS].map((model) => ({
                 value: model,
                 label: getClaudeModelLabel(model) ?? model
             }))
+        ])
+    })
+
+    // 这几台机器（DESKTOP-HT3P09U / FA608_INDEX / TXFA608INDEX / DESKTOP-4SQALMG）
+    // 的 Claude Code 指向 cx2cc，实际跑的是 gpt-5.6-sol。以前只能挑 sonnet[1m]
+    // 之类的占位名，界面上显示的就是占位名；现在能直接选到真名和它的 1M 变体。
+    it('offers the proxy-served ids after the built-in Claude models', () => {
+        expect(MODEL_OPTIONS.claude.slice(-2)).toEqual([
+            { value: 'gpt-5.6-sol', label: 'gpt-5.6-sol' },
+            { value: 'gpt-5.6-sol[1m]', label: 'gpt-5.6-sol[1m]' },
         ])
     })
 

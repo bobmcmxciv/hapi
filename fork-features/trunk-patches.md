@@ -516,6 +516,38 @@ host FA608_INDEX 的会话在上下文 167,410 tokens 时触发 Claude Code 自�
 
 上游若给出 provider 感知的窗口注册表或在会话级下发窗口，改用它并移除本回退。
 
+## 代理直供模型可直选 (2026-08-08)
+
+operator 的四台机器（DESKTOP-HT3P09U / FA608_INDEX / TXFA608INDEX /
+DESKTOP-4SQALMG）的 Claude Code 指向 cx2cc，真正在跑的是 `gpt-5.6-sol`。
+上游模型清单只有 Anthropic 自家 preset 与 id，于是这些机器只能随手挑一个
+`sonnet[1m]` 之类的占位名——**界面显示的模型从此是假的**，用量与窗口也跟着
+歪。`CLAUDE_PROXY_MODEL_LABELS` 补上代理直供的 id，label 故意等于 id 本身
+（选它的目的就是看见真名）。
+
+三条实测依据（vircs 本机直连 cx2cc `http://100.97.242.41:8901`，
+`claude --model 'gpt-5.6-sol[1m]'`，exit 0）：
+
+| 观测点 | 值 | 意味着 |
+|---|---|---|
+| `system/init.model` | `gpt-5.6-sol[1m]` | Claude Code 原样接受未知 model id 并保留后缀 |
+| `assistant.message.model` | `gpt-5.6-sol` | 代理只报裸名（`CX2CC_REPORT_UPSTREAM_MODEL=true`），`usage` 里无 `context_window` |
+| `result.modelUsage['gpt-5.6-sol[1m]'].contextWindow` | `1000000` | `[1m]` 对任意 model id 都生效，不是 Claude 族专属 |
+
+第二行是全部麻烦的来源：观测名恒为裸名，只有启动声明带 `[1m]`。所以
+`getContextBudgetTokens` 把后缀判定提到族判定之前，`StatusBar` 在
+`contextModel`（观测）与 `model`（声明）冲突时保留带后缀的那个。
+
+| Files | Missing upstream seam | Why it cannot move out | Runtime path | Sync verification |
+|---|---|---|---|---|
+| `shared/src/models.ts` | 模型清单是写死的常量，无 provider 注册入口 | 三处消费方（新建会话、会话内切换、label 解析）都直接读这两个常量 | 选模型 → session.model → `--model` 透传 → 代理 | 新建会话的模型下拉末尾能看到 `gpt-5.6-sol` / `gpt-5.6-sol[1m]` |
+| `web/src/components/NewSession/types.ts`、`web/src/components/AssistantChat/claudeModelOptions.ts` | 选项表由常量直接拼装，无扩展点 | 追加一段数组即可，旁路模块反而要复制整表 | 同上 | 单测钉死顺序与 listed（非 custom）语义 |
+| `web/src/components/AssistantChat/StatusBar.tsx` | 启发式模型只有「观测优先」一条固定规则 | 判据在 `contextHeuristicModel` 单行，无注入点 | 无显式 context_window 时 → 启发式 → 分母 | 经代理的 1M 会话状态栏分母须是 990k 而非 190k |
+
+上游若把模型清单改成可注册的 provider 目录，把这两个常量迁进去并删掉本节。
+`gpt-5.6-sol` 这个名字来自 `cx2cc/.env` 的 `CX2CC_UPSTREAM_MODEL`；operator
+换上游模型时这里要同步改。
+
 ## 机器授权向下继承到会话 (2026-08-08)
 
 把一台机器授权给某个账号后，该机器上**新建**的会话对他仍然不可见：会话是独立的

@@ -1,11 +1,17 @@
-import { CLAUDE_MODEL_IDS, CLAUDE_MODEL_PRESETS, getClaudeModelLabel } from '@hapi/protocol'
+import { CLAUDE_MODEL_IDS, CLAUDE_MODEL_PRESETS, CLAUDE_PROXY_MODEL_IDS, getClaudeModelLabel } from '@hapi/protocol'
 
 export type ClaudeComposerModelOption = {
     value: string | null
     label: string
 }
 
-const CLAUDE_SELECTABLE_MODELS: readonly string[] = [...CLAUDE_MODEL_PRESETS, ...CLAUDE_MODEL_IDS]
+const CLAUDE_SELECTABLE_MODELS: readonly string[] = [
+    ...CLAUDE_MODEL_PRESETS,
+    ...CLAUDE_MODEL_IDS,
+    // Listed (not "custom") so a session already running on a proxy id keeps
+    // the picker selection instead of falling into the custom-id radio.
+    ...CLAUDE_PROXY_MODEL_IDS
+]
 
 export function isListedClaudeModel(model?: string | null): boolean {
     const normalizedModel = normalizeClaudeComposerModel(model)

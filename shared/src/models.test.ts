@@ -4,6 +4,8 @@ import {
     CLAUDE_MODEL_IDS,
     CLAUDE_MODEL_PRESETS,
     CLAUDE_MODEL_LABELS,
+    CLAUDE_PROXY_MODEL_IDS,
+    CLAUDE_PROXY_MODEL_LABELS,
     DEFAULT_GEMINI_MODEL,
     GEMINI_MODEL_LABELS,
     GEMINI_MODEL_PRESETS,
@@ -50,6 +52,12 @@ describe('getClaudeModelLabel', () => {
         expect(getClaudeModelLabel('claude-fable-5')).toBe('Fable 5')
     })
 
+    // 代理别名的 label 故意等于 id 本身：选它的目的就是让界面显示真正在跑的模型。
+    test('returns the raw id as the label for proxy-served models', () => {
+        expect(getClaudeModelLabel('gpt-5.6-sol')).toBe('gpt-5.6-sol')
+        expect(getClaudeModelLabel('gpt-5.6-sol[1m]')).toBe('gpt-5.6-sol[1m]')
+    })
+
     test('returns null for empty/whitespace-only string', () => {
         expect(getClaudeModelLabel('')).toBeNull()
         expect(getClaudeModelLabel('   ')).toBeNull()
@@ -73,6 +81,14 @@ describe('model constants consistency', () => {
         for (const id of CLAUDE_MODEL_IDS) {
             expect(CLAUDE_MODEL_ID_LABELS[id]).toBeDefined()
             expect(isClaudeModelPreset(id)).toBe(false)
+        }
+    })
+
+    test('proxy model ids stay out of the built-in preset namespace', () => {
+        for (const id of CLAUDE_PROXY_MODEL_IDS) {
+            expect(CLAUDE_PROXY_MODEL_LABELS[id]).toBe(id)
+            expect(isClaudeModelPreset(id)).toBe(false)
+            expect(CLAUDE_MODEL_IDS).not.toContain(id)
         }
     })
 
