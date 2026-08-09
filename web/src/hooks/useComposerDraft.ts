@@ -85,7 +85,9 @@ export function useComposerDraft(
                 if (forkedFrom) clearDraft(sessionId)
                 // Mark before the external composer store gets its render so a
                 // consumer never mistakes this persisted replacement for empty.
-                setHydration({ sessionId, complete: !canRestoreAttachments, restoredAny: true })
+                // hasStoredAttachments 此刻未知，先 false；下方 getDraftAttachments
+                // 的异步回调会带真值再 set 一次（files.length > 0）。
+                setHydration({ sessionId, complete: !canRestoreAttachments, restoredAny: true, hasStoredAttachments: false })
                 setText(restoredText!)
             }
             draftReadyRef.current = true
