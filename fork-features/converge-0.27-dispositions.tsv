@@ -1,0 +1,59 @@
+path	disposition	feature	rationale
+CLAUDE.md	unique	misc	fork 工作纪律，upstream 无对应物
+bunfig.toml	unique	misc	hoisted linker，fork-features/ 非 workspace 时的解析前提
+cli/src/claude/claudeRemote.emptyTurn.test.ts	unique	cli-observability	空回合可见化，upstream grep emptyTurn = 0
+cli/src/claude/claudeRemoteLauncher.modeChangeRespawn.test.ts	unique	cli-observability	换模式重启，upstream grep = 0
+cli/src/claude/sdk/query.stderr.test.ts	unique	cli-observability	被吞 stderr 可见化，upstream grep stderrIntegration = 0
+cli/src/claude/sdk/query.stderrIntegration.test.ts	unique	cli-observability	被吞 stderr 可见化，upstream grep stderrIntegration = 0
+cli/src/ui/logger.formatLogArg.test.ts	unique	cli-observability	日志参数格式化，upstream grep formatLogArg = 0
+docs/evidence/110-usage-gpt-zero-tokens/DEPLOY-REPORT-usage-fix.md	unique	evidence	本 fork 自己的取证材料
+docs/evidence/110-usage-gpt-zero-tokens/HANDOFF-usage-fix.md	unique	evidence	本 fork 自己的取证材料
+docs/evidence/110-usage-gpt-zero-tokens/usage-baseline/after-3turns.json	unique	evidence	本 fork 自己的取证材料
+docs/evidence/110-usage-gpt-zero-tokens/usage-baseline/after-aggfix-frozen.json	unique	evidence	本 fork 自己的取证材料
+docs/evidence/110-usage-gpt-zero-tokens/usage-baseline/after-aggfix-window.json	unique	evidence	本 fork 自己的取证材料
+docs/evidence/110-usage-gpt-zero-tokens/usage-baseline/after-fix-window.json	unique	evidence	本 fork 自己的取证材料
+docs/evidence/110-usage-gpt-zero-tokens/usage-baseline/after-hub.json	unique	evidence	本 fork 自己的取证材料
+docs/evidence/110-usage-gpt-zero-tokens/usage-baseline/after-modelkey-frozen.json	unique	evidence	本 fork 自己的取证材料
+docs/evidence/110-usage-gpt-zero-tokens/usage-baseline/after-modelkey.json	unique	evidence	本 fork 自己的取证材料
+docs/evidence/110-usage-gpt-zero-tokens/usage-baseline/before-hub.json	unique	evidence	本 fork 自己的取证材料
+docs/evidence/110-usage-gpt-zero-tokens/usage-baseline/diag.json	unique	evidence	本 fork 自己的取证材料
+docs/evidence/110-usage-gpt-zero-tokens/usage-baseline/final-frozen.json	unique	evidence	本 fork 自己的取证材料
+docs/evidence/110-usage-gpt-zero-tokens/usage-baseline/final-machines.json	unique	evidence	本 fork 自己的取证材料
+docs/evidence/110-usage-gpt-zero-tokens/usage-baseline/machines.json	unique	evidence	本 fork 自己的取证材料
+docs/evidence/110-usage-gpt-zero-tokens/usage-baseline/spawn-body.json	unique	evidence	本 fork 自己的取证材料
+docs/evidence/110-usage-gpt-zero-tokens/usage-baseline/spawn.json	unique	evidence	本 fork 自己的取证材料
+docs/guide/cursor.md	superseded	docs	upstream docs/guide/agents.md 已含 Cursor 支持矩阵与专章（b7503d93 docs 重构）；不要重新落回
+docs/guide/grok.md	superseded	docs	upstream docs/guide/agents.md 已含 Grok Build 支持矩阵与专章；不要重新落回
+docs/tooling/mermaid-lightbox-dogfood.md	unique	docs	upstream 无 docs/tooling 目录
+e2e/desktop-document-scroll.spec.ts	unique	misc	桌面文档级滚动 e2e，upstream e2e/ 无对应；upstream 仅有未合并分支 agent/122
+fork-features/multi-user/machineInheritance.test.ts	unique	multi-user	机器授权向下继承到会话，upstream 完全没有
+fork-features/multi-user/machineInheritance.ts	unique	multi-user	机器授权向下继承到会话，upstream 完全没有
+fork-features/multi-user/sseVisibility.test.ts	unique	multi-user	SSE 按账号可读集过滤，upstream 完全没有
+fork-features/multi-user/sseVisibility.ts	unique	multi-user	SSE 按账号可读集过滤，upstream 完全没有
+fork-features/usage/usageAgentFrames.test.ts	unique	usage-page	upstream 有自己的 usage 引擎但只读 assistant+token_count，不读 usage_report、不认 gateway namespace；口径必须重新落回（存储层在 converge 后再采上游 usage_events）
+fork-features/usage/usageAggregate.test.ts	unique	usage-page	upstream 有自己的 usage 引擎但只读 assistant+token_count，不读 usage_report、不认 gateway namespace；口径必须重新落回（存储层在 converge 后再采上游 usage_events）
+fork-features/usage/usageAggregate.ts	unique	usage-page	upstream 有自己的 usage 引擎但只读 assistant+token_count，不读 usage_report、不认 gateway namespace；口径必须重新落回（存储层在 converge 后再采上游 usage_events）
+fork-features/usage/usageAggregateCache.test.ts	unique	usage-page	upstream 有自己的 usage 引擎但只读 assistant+token_count，不读 usage_report、不认 gateway namespace；口径必须重新落回（存储层在 converge 后再采上游 usage_events）
+hub/scripts/seed-usage-e2e.ts	unique	usage-page	usage 页 e2e 种子，fork 工具
+hub/src/web/downloadRoute.test.ts	unique	misc	令牌保护 /download，upstream server.ts 无该路由
+scripts/dev/recompute-usage-prod.ts	unique	usage-page	生产库副本复算 + 信封形状直方图，fork 工具
+scripts/dev/sse-toast-leak-e2e.ts	unique	misc	SSE 跨账号泄漏 e2e，fork 工具
+shared/src/machineLaunchDefaults.test.ts	unique	misc	机器可声明启动默认值，upstream 无
+shared/src/machineLaunchDefaults.ts	unique	misc	机器可声明启动默认值，upstream 无
+web/e2e-fixtures/document-scroll-fixture.html	unique	misc	同上的 fixture
+web/src/components/AppErrorBoundary.test.tsx	unique	web-stability	根级 ErrorBoundary，upstream 无
+web/src/components/AppErrorBoundary.tsx	unique	web-stability	根级 ErrorBoundary，upstream 无
+web/src/components/AssistantChat/messages/EventNotice.test.tsx	unique	misc	心跳/控制帧折叠，upstream 无
+web/src/components/AssistantChat/messages/EventNotice.tsx	unique	misc	心跳/控制帧折叠，upstream 无
+web/src/fork-features/usage/UsagePage.test.tsx	unique	usage-page	同上：上游 settings/usage.tsx 是单用户口径，无 host 筛选与 namespace 可见集
+web/src/fork-features/usage/UsagePage.tsx	unique	usage-page	同上：上游 settings/usage.tsx 是单用户口径，无 host 筛选与 namespace 可见集
+web/src/hooks/useNotificationSound.test.ts	unique	completion-chime	完成提示音挂载，upstream 无
+web/src/hooks/useNotificationSound.ts	unique	completion-chime	完成提示音挂载，upstream 无
+web/src/lib/crashGuard.test.ts	unique	web-stability	崩溃捕获 + chunk 错配自愈，upstream 无 ErrorBoundary（三 ref grep 命中 0）
+web/src/lib/crashGuard.ts	unique	web-stability	崩溃捕获 + chunk 错配自愈，upstream 无 ErrorBoundary（三 ref grep 命中 0）
+web/src/lib/notificationChime.test.ts	unique	completion-chime	完成提示音，upstream 无
+web/src/lib/notificationChime.ts	unique	completion-chime	完成提示音，upstream 无
+web/src/lib/swNavigationScope.test.ts	unique	web-stability	SW 导航作用域收窄，upstream 无
+web/src/lib/swNavigationScope.ts	unique	web-stability	SW 导航作用域收窄，upstream 无
+web/src/lib/usageReportBackfill.test.ts	unique	usage-page	逐条页脚 token 由 usage_report 回填，upstream 无
+web/src/lib/usageReportBackfill.ts	unique	usage-page	逐条页脚 token 由 usage_report 回填，upstream 无
