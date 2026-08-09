@@ -180,7 +180,36 @@ cherry-pick：`3da9f778`（会话置顶）、`b7f52f58`（音频/文件展示）
 
 ---
 
-## Phase 4 —— 上线（合并 ≠ 上线）
+## Phase 4 —— 上线（2026-08-10 已完成）
+
+### 实际执行记录
+
+| 步骤 | 实测 |
+|---|---|
+| 构建 | vircs 交叉编译 `--target bun-linux-x64-baseline --with-web-assets`；web 资产 230 行/110 个（非 stub）；产物 146,077,824 B，sha256 `47ba6e11…4809` ≠ 旧 `4c36c7ce…` |
+| 传输 | gzip 68MB → split 6×12MB → 并行 scp（ECS 唯一进货通道）；逐块 md5 全对。**新坑**：`tr -d '*'` 后本地清单是一个空格、远端 `md5sum` 文本模式两个空格，`comm` 整行比对永不相等 → 判收脚本假报全缺 12 轮（块其实第一轮就齐了）。下次比对先 `awk '{print $1,$NF}'` 归一 |
+| 迁移干跑 | 生产库副本 + 新二进制 + `HAPI_HOME`/`HAPI_LISTEN_PORT` 隔离：16→20、`usage_events`/`usage_scan_state` 建表、常驻 40s 无错 |
+| 换芯 | 在线 `.backup` 两库 → stop → `mv` 换芯 → start，**宕机约 6 秒**（03:42:12 stop → 03:42:18 listening） |
+| 版本/schema | `hapi version: 0.27.0`；生产库 `user_version=20` |
+| runner 回连 | 6 分钟内 5 台回连（vircs/HT3P09U/4SQALMG/TXFA608/FA608）；**本次部署会话本身经 vircs runner 存活穿越了重启** = 0.25.x CLI × 0.27 hub 协议实弹兼容（PROTOCOL_VERSION 双边=1） |
+| fork 口径 | `/api/usage/summary` 返回 fork 形状（24 模型行 + hosts 全清单）；gateway_grants=85 与迁移前基线一致 |
+| Release | tag `v0.27.0-fork.0`（b56c1445）；6 平台产物 + checksums 已发布。**坑**：`git push --tags` 多 tag 同推会漏发 tag 事件，Release 没触发；删掉单推才触发 |
+| 守卫 | `/root/.hapi/DEPLOYED.txt` 已写（tag/commit/sha256/回滚坐标） |
+
+### 回滚坐标（本次）
+
+- 二进制 `/root/hapi.bin.pre-v0.27.0-fork.0-20260810-034012`
+- 主库 `/root/.hapi/hapi.db.pre-v0.27.0-fork.0-20260810-034012`（1.63GB，停机前在线 .backup）
+- gateway `/root/.hapi/multi-user-gateway.sqlite.pre-v0.27.0-fork.0-20260810-034012`
+- **注意**：schema 已 20，回滚旧二进制必须同时还原主库备份
+
+### 待观察（非阻塞）
+
+- WudeMacBook-Air（peter-mac）：换芯前 18 分钟仍活跃，换芯后未回连；反向隧道同断 → 整机离网（凌晨睡眠形态），非 hub 兼容问题。醒来应经 launchd 看门狗自动回连，若未回连按 `hapi-runner-claude-path-bug` 记忆排查
+- Mac173Index / BIG79TP：active_at 陈值早于换芯数小时~半天，判为本来不在线（该列不可信已知）
+- CI 的 `claudeRemoteLauncher.launchFailure` 单测在 Linux 上时序敏感（本地与 18:40 的 CI 都绿，加了 2 个测试文件后调度位移变红），重触发验证中；与部署无关（该文件测的是 CLI 侧，部署物是 hub）
+
+## Phase 4 原计划（留档）—— 上线（合并 ≠ 上线）
 
 按 `.claude/rules/hapi-fork-cd-release.rule.md`：问 CD → 打 tag `v0.27.0-fork.0`
 → 等 Release CI 全绿 → 取 `hapi-linux-x64-baseline.tar.gz` 的 URL + sha256 →
