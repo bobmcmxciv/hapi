@@ -439,6 +439,62 @@ filter).
 Remove the seams if upstream ever ships its own usage analytics or a route/nav
 registration API; compare shapes before keeping both.
 
+### Disposition vs upstream's usage dashboard (2026-08-09)
+
+Upstream **has** shipped its own usage analytics (tiann #1338 `cache-aware token
+usage dashboard`, refined by #1359 / #1390 / `5122a3fc`; carried on
+`upstream/main` as `hub/src/store/usage.ts` + `usageStore.ts` +
+`hub/src/sync/usageService.ts` + `hub/src/web/routes/usage.ts` +
+`web/src/routes/settings/usage.tsx`). Per the line above, the two were compared
+before keeping either. **Neither supersedes the other — the split is by frame
+source**, verified by enumerating what each CLI backend actually emits:
+
+| Frame | Emitted by | fork read it? | upstream read it? |
+|---|---|---|---|
+| `assistant` (`message.usage`) | Claude SDK only | yes | yes |
+| `usage_report` (`result.modelUsage`) | Claude only (`sdkToLogConverter.ts`) | yes | **no** |
+| `token_count` / `usage` | Codex, Kimi, and every ACP backend (cursor / grok / copilot / opencode) via `cli/src/agent/messageConverter.ts` | **no** | yes |
+
+So upstream reported zero for proxied Claude sessions (cx2cc: the assistant
+frame carries the alias with 0 tokens, real numbers only reach `usage_report`),
+and the fork reported zero for **every non-Claude flavor**.
+
+**Decision: keep the fork engine, port upstream's `token_count` branch into it.**
+The fork side additionally owns namespace-scoped visibility, host filtering,
+proxy-model canonicalisation/re-homing and `<synthetic>` exclusion — none of
+which exist upstream — and its aggregation constants are backed by live-hub
+measurements. Adopting upstream's `usage_events` table would have meant
+re-deriving all of that on top of a storage layer that cannot be validated
+against production from a dev box, plus a SCHEMA_VERSION 16→20 bump that would
+block rollback to the deployed binary.
+
+**信封形状必须拿真库确认，不能读 CLI 源码推。** 首版移植按 `content.type ===
+'output'` + `data.timestamp` 写，两个假设都错，结果 `token_count` 整支被静默
+丢光，而照同样假设写的单测**一条都测不出来**。生产库副本（12 个非 Claude
+会话 / 2,211 条消息）实测：
+
+| 事实 | 数字 |
+|---|---|
+| `content.type` 为 `'codex'` | 2,117 条（`'output'` 仅 1 条，且是 `summary`） |
+| 缺 `data.timestamp` | 2,123 条（**全部**） |
+| 真实 `token_count` 帧 | **0 条** —— 这 11 个 codex 会话全是导入历史 |
+
+所以时间窗对这些 flavor 只能落回 `messages.created_at`。复算脚本
+`scripts/dev/recompute-usage-prod.ts --shapes` 就是为这件事留的。
+
+**当前证据状态（诚实记录）：** 上述修复的**数值正确性未被生产数据验证**——
+生产库里根本没有活跃 Codex/ACP 会话的用量帧可比对，复算结果修复前后同为 0。
+已验证的只有：信封解析不再被错误 gate 挡死（单测 11 条，旧引擎下 10 条红）、
+以及不回归既有 Claude 口径（31 条既有单测全绿）。**真实数值要等一个活跃的
+Codex/Cursor 会话跑完再对。**
+
+**Still owed at converge time:** upstream's persisted `usage_events` +
+`usage_scan_state` projection is architecturally better than the fork's
+process-local `sessionEventCache` (it survives hub restarts, so the first
+dashboard load after a restart does not re-scan). Migrations v17→v19 are purely
+additive table creation, so adopting them is cheap **once the fork is actually
+on that baseline**. Do it as part of the converge, not as a hand-port.
+
 ## Verification record
 
 | Date | Operation | Result |

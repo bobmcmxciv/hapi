@@ -204,6 +204,7 @@ fork-features/session-fork/rpcPayloads.test.ts	fork-owned	#170	origin-only delta
 fork-features/session-fork/rpcPayloads.ts	fork-owned	#170	origin-only delta; fork commits 92fa6ad3,e009becc,fc377386,837647b2,9e867c21,7dca6478,aee648ee,165ae59d
 fork-features/trunk-patches.md	fork-owned	#171	fork trunk-patch registry; updated by boundary children
 fork-features/upstream-fix-dispositions.tsv	fork-owned	#179	#179 upstream-fix disposition ledger
+fork-features/usage/usageAgentFrames.test.ts	fork-owned	usage-page	origin-only delta; token_count 帧（Codex/Kimi/ACP）用量口径单测 (2026-08-09)
 fork-features/usage/usageAggregate.test.ts	fork-owned	usage-page	origin-only delta; token usage stats (2026-07-28)
 fork-features/usage/usageAggregate.ts	fork-owned	usage-page	origin-only delta; token usage stats SQL + response assembly (2026-07-28)
 hub/src/cursor/cursorLegacyMigrator.ts	upstream-fix	win-sqlite-gc	删源库吃 Windows EBUSY：sqlite3_close_v2 句柄挂 GC，win32 下 GC 后重试一次
@@ -244,6 +245,7 @@ hub/src/web/routes/sessions.ts	trunk-patch	#173	both refs changed; fork commits 
 hub/src/web/server.ts	trunk-patch	#171	origin-only delta; fork commits a6f9e3f9,f3c58338
 hub/tsconfig.json	trunk-patch	#171	origin-only delta; fork commits a6f9e3f9,f3c58338
 package.json	trunk-patch	#171	origin-only delta; fork commits a6f9e3f9
+scripts/dev/recompute-usage-prod.ts	fork-owned	usage-page	origin-only delta; 生产库副本离线复算 + 信封形状直方图 (2026-08-09)
 scripts/dev/sse-toast-leak-e2e.ts	fork-owned	sse-isolation	真 hub 进程复现跨账号提醒泄漏，改 SSE 可见性后前后各跑一次
 shared/package.json	trunk-patch	#176	origin-only delta; fork commits 3edb7db8
 shared/src/apiTypes.ts	trunk-patch	#173	both refs changed; fork commits 8d828436,51929072,92e8a6e1,3994ee9a,fc7d7b4a,b4c31e88,a8815d47,bfa252da,c853bcbf,413e76cc
