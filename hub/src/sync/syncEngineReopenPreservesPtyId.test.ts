@@ -51,6 +51,9 @@ describe('SyncEngine reopen/resume PTY session id preservation', () => {
     function installFakeRunner(): void {
         const cache = (engine as unknown as { sessionCache: import('./sessionCache').SessionCache }).sessionCache
         ;(engine as unknown as { machineCache: unknown }).machineCache = {
+            // CI 慢机上 syncEngine 的 5s inactivity tick 会在测试中开火，
+            // 残缺 mock 缺 expireInactive 直接 TypeError（上游 flake，非本地可见）。
+            expireInactive: () => {},
             getOnlineMachinesByNamespace: () => [
                 { id: 'machine-x', metadata: { host: 'localhost' } }
             ]
@@ -236,6 +239,9 @@ describe('SyncEngine reopen/resume PTY session id preservation', () => {
 
         const restarted = new SyncEngine(store, {} as never, new RpcRegistry(), { broadcast() {} } as never)
         ;(restarted as any).machineCache = {
+            // CI 慢机上 syncEngine 的 5s inactivity tick 会在测试中开火，
+            // 残缺 mock 缺 expireInactive 直接 TypeError（上游 flake，非本地可见）。
+            expireInactive: () => {},
             getOnlineMachinesByNamespace: () => [{ id: 'machine-x', metadata: { host: 'localhost' } }]
         }
         ;(restarted as any).rpcGateway.stopRunnerSession = async () => 'still_alive'
@@ -261,6 +267,9 @@ describe('SyncEngine reopen/resume PTY session id preservation', () => {
 
         const restarted = new SyncEngine(store, {} as never, new RpcRegistry(), { broadcast() {} } as never)
         ;(restarted as any).machineCache = {
+            // CI 慢机上 syncEngine 的 5s inactivity tick 会在测试中开火，
+            // 残缺 mock 缺 expireInactive 直接 TypeError（上游 flake，非本地可见）。
+            expireInactive: () => {},
             getOnlineMachinesByNamespace: () => [{ id: 'machine-x', metadata: { host: 'localhost' } }]
         }
         ;(restarted as any).rpcGateway.stopRunnerSession = async () => 'already_gone'
