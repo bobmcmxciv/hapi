@@ -867,6 +867,7 @@ function SessionChatInner(props: SessionChatProps) {
     const codexCollaborationModeSupported = agentFlavor === 'codex' && !controlledByUser
     const codexModelsState = useCodexModels({
         api: props.api,
+        sessionId: props.session.id,
         machineId: props.session.metadata?.machineId ?? null,
         enabled: agentFlavor === 'codex'
             && props.session.active
