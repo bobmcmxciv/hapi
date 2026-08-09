@@ -20,7 +20,6 @@ import { createMessagesRoutes } from './routes/messages'
 import { createPermissionsRoutes } from './routes/permissions'
 import { createMachinesRoutes } from './routes/machines'
 import { createStorageRoutes } from './routes/storage'
-import { createUsageRoutes } from './routes/usage'
 import { createGitRoutes } from './routes/git'
 import { createCliRoutes } from './routes/cli'
 import { createCodexDesktopRoutes } from './routes/codexDesktop'
@@ -325,7 +324,12 @@ function createWebApp(options: {
     app.route('/api', createMachinesRoutes(options.getSyncEngine))
     app.route('/api', createStorageRoutes(configuration.dbPath))
     app.route('/api', createImportableSessionsRoutes(options.getSyncEngine))
-    app.route('/api', createUsageRoutes(options.store))
+    // fork(usage)：不挂上游的 /api/usage/summary。它按 namespace 全量统计，网关下
+    // 所有账号共享同一 core namespace，等于把全部账号的用量泄给任何人；此前它只是
+    // 碰巧被 executionMount 先注册的同路径 fork 端点（账号可见集口径）遮蔽——与
+    // /api/events 双路由陷阱同型，这里改为显式不挂载，不再依赖注册顺序。
+    // 副作用：上游 usageService 的 usage_events 投影不再被喂数（fork 引擎直读
+    // messages），usage_events/usage_scan_state 两表保持为空，见 trunk-patches.md。
     app.route('/api', createGitRoutes(options.getSyncEngine))
     // 中文注释：这里提供两类 Codex 辅助能力：扫描本地 transcript 以导入到 Hapi，以及按需重启 Codex Desktop 客户端。
     app.route('/api', createCodexDesktopRoutes({

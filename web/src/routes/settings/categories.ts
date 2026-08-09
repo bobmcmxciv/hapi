@@ -8,7 +8,8 @@ export const settingsCategories = [
     { id: 'account', path: '/settings/account', titleKey: 'settings.fork.account.title' },
     { id: 'users', path: '/settings/users', titleKey: 'settings.fork.users.title' },
     { id: 'fork', path: '/settings/fork', titleKey: 'settings.fork.title' },
-    { id: 'usage', path: '/settings/usage', titleKey: 'settings.usage.title' },
+    // fork(usage)：上游 /settings/usage 页不挂载（namespace 全量口径在网关下跨账号泄漏），
+    // 分类入口一并移除；用量入口是会话列表头部的 fork /usage 页。
     { id: 'about', path: '/settings/about', titleKey: 'settings.about.title' },
 ] as const
 

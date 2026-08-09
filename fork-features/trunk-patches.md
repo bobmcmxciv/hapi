@@ -432,6 +432,29 @@ Every upstream sync must re-check for native CLI command registration,
 authenticated route mounting, and a public runner stop adapter. Remove each
 trunk hook as soon as an equivalent seam exists.
 
+### 0.27 converge：上游 usage 面收敛（2026-08-10）
+
+converge 到 0.27 基线后，上游的 usage dashboard 与 fork 端点发生**同路径撞车**：
+`executionMount` 的 `/api/usage/summary`（账号可见集口径）与上游
+`createUsageRoutes` 的同名路由（namespace 全量口径）都注册在 `/api` 下，
+fork 先注册先生效——与 `/api/events` 双路由陷阱同型。按「显式化，不靠注册
+顺序」处理：
+
+| File | Patch | Why |
+|---|---|---|
+| `hub/src/web/server.ts` | 移除 `createUsageRoutes` 挂载 | namespace 全量口径在网关下跨账号泄漏；且其响应形状（daily/byAgent/byModel）已与 web 侧实际打到的 fork 端点（models/totals/hosts）不符 |
+| `web/src/router.tsx` | 不挂 `/settings/usage` 路由；恢复被 0.27 头部重构冲掉的 fork `/usage` 入口（BarChartIcon） | 上游页面打 fork 端点必然渲染失败；fork 页是唯一用量入口 |
+| `web/src/routes/settings/categories.ts` | 移除 `usage` 分类项 | 指向已不挂载的路由 |
+
+`hub/src/web/routes/usage.ts`、`web/src/routes/settings/usage.tsx`、
+`hub/src/sync/usageService.ts` 保持上游原样（不路由、不喂数），
+`usage_events` / `usage_scan_state` 两表保持为空；`sessionCache` 里的
+`store.usage.transferSession` 保留（空表 no-op）。**持久化投影的采纳仍是
+backlog**（见下节末尾），采纳时先把 fork 口径写进投影再换读路径。
+
+Sync verification: 网关 JWT 打 `GET /api/usage/summary` 应返回 fork 形状
+（含 `hosts`）；`/settings/usage` 应 404；会话列表头部柱状图图标可达 `/usage`。
+
 ### Disposition vs upstream's usage dashboard (2026-08-09)
 
 Upstream **has** shipped its own usage analytics (tiann #1338 `cache-aware token

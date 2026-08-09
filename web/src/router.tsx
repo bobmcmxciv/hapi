@@ -69,7 +69,6 @@ import SettingsStoragePage from '@/routes/settings/storage'
 import ForkSettingsPage from '@/fork-features/settings/ForkSettingsPage'
 import UsagePage from '@/fork-features/usage/UsagePage'
 import { ResourceGrantsSettingsPage } from '@/fork-features/multi-user/ResourceGrantsSettingsSection'
-import SettingsUsagePage from '@/routes/settings/usage'
 import SharePage from '@/routes/share'
 import { setSharePendingTransfer } from '@/lib/sharePendingState'
 import { deleteShareTransfer } from '@/lib/shareTransfer'
@@ -156,6 +155,8 @@ function SettingsIcon(props: { className?: string }) {
     )
 }
 
+
+
 // fork-features/usage：头部“Token 用量统计”入口的柱状图图标。
 function BarChartIcon(props: { className?: string }) {
     return (
@@ -177,7 +178,6 @@ function BarChartIcon(props: { className?: string }) {
         </svg>
     )
 }
-
 
 function SessionsPage() {
     const { api, baseUrl } = useAppContext()
@@ -299,6 +299,15 @@ function SessionsPage() {
                                         <FolderOpenIcon className="h-5 w-5" />
                                     </button>
                                 )}
+                                <button
+                                    type="button"
+                                    onClick={() => navigate({ to: '/usage' })}
+                                    className="p-1.5 rounded-full text-[var(--app-hint)] hover:text-[var(--app-fg)] hover:bg-[var(--app-subtle-bg)] transition-colors"
+                                    title={t('usage.nav')}
+                                    aria-label={t('usage.nav')}
+                                >
+                                    <BarChartIcon className="h-5 w-5" />
+                                </button>
                                 <button
                                     type="button"
                                     onClick={() => navigate({ to: '/settings' })}
@@ -1236,11 +1245,10 @@ const settingsStorageRoute = createRoute({
     const settingsUsersRoute = createRoute({ getParentRoute: () => settingsRoute, path: 'users', component: UsersSettingsPage })
     const settingsUserRoute = createRoute({ getParentRoute: () => settingsRoute, path: 'users/$accountId', component: UserSettingsPage })
 
-    const settingsUsageRoute = createRoute({
-        getParentRoute: () => settingsRoute,
-        path: 'usage',
-        component: SettingsUsagePage,
-    })
+    // fork(usage)：上游 0.27 的 /settings/usage 页不挂载。它按 namespace 全量统计，
+    // 网关下所有账号共享同一 core namespace，挂上等于把全部账号的用量泄给任何人；
+    // 且它期望的 /api/usage/summary 响应形状（daily/byAgent/byModel）已被 fork 的
+    // 账号可见集端点（models/totals/hosts）取代。fork 自己的 /usage 页是唯一入口。
 
 // fork-features/usage：Token 用量统计页。
 const usageRoute = createRoute({
@@ -1290,7 +1298,6 @@ export const routeTree = rootRoute.addChildren([
         settingsVoiceAdvancedRoute,
         settingsMachinesRoute,
         settingsStorageRoute,
-        settingsUsageRoute,
         settingsAboutRoute,
         settingsForkRoute,
         settingsForkGrantsRoute,
