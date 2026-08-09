@@ -69,7 +69,8 @@ function getConnectionStatus(
 
     if (!active) {
         return {
-            text: 'offline',
+            // fork(i18n #50)：连接标签走词典（0.27 重构退回过硬编码，这里恢复）。
+            text: t('misc.offline'),
             color: 'text-[#999]',
             dotColor: 'bg-[#999]',
             isPulsing: false
@@ -105,7 +106,7 @@ function getConnectionStatus(
     }
 
     return {
-            text: 'online',
+            text: t('misc.online'),
         color: 'text-[#34C759]',
         dotColor: 'bg-[#34C759]',
         isPulsing: false

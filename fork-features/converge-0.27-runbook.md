@@ -81,7 +81,7 @@ git checkout -b feat/converge-0.27 upstream/main
 | hub | 10~37 fail（波动） | **1002 pass / 0 fail / 6 skip**，连跑 2 次稳定 |
 | shared | — | 231 pass / 0 fail |
 | web（vitest） | — | 2307 pass / 0 fail（267 文件） |
-| cli（vitest） | **0 个测试能跑** | 2340 pass / 6 fail |
+| cli（vitest） | **0 个测试能跑** | 2340 pass / 6 fail；批次 D-I 后 2372 pass / **5 fail**（76a99ac3 消掉 apiMachine 短名一条，余 5 条为已登记的环境失败） |
 | typecheck（cli+web+hub） | — | exit 0 |
 
 `fa8389ac` 是**承重的**：不带它时上游 globalSetup 在 Windows 上
@@ -127,7 +127,31 @@ git checkout -b feat/converge-0.27 upstream/main
 
 ---
 
-## Phase 2 —— 重放 48 条独有提交
+## Phase 2 —— 重放 48 条独有提交（2026-08-10 已完成）
+
+**全部 48+1 条处置完毕**：45 条落回（含 54294b10），4 条有理跳过——
+
+| 跳过 | 理由 |
+|---|---|
+| `0ead9244` | 意图已被更新的 `collectVisibleSessions`（cdce3ff6）覆盖，cherry-pick 为空 |
+| `e290f489` | 两处编译错修复均已按 0.27 语境手工重做（`EMPTY_ACTIVITY_DATES` 那份还补了 0.27 新必填的 `onClear`） |
+| `d22eb8eb` | 对未重放提交（.cmd 兜底）的 revert，add+revert 净效应为零 |
+| `ce4ae061`（非 Bob 提交） | assistant-ui 0.14 迁移已被上游实质吸收（两边 package.json 逐项一致） |
+
+**上游决策获胜的两处**（fork hunk 不落回，已在代码注释登记）：
+- `d6628444` 的内联复制按钮：mouriya `e836851f` 有意移除（MessageActions 已带 copyText，属重复入口）；其常驻可见的本体（CSS 去 hover 门控）已落回。
+- `42e2cbf7` 的占位符条件：上游 `domIsEmpty` 按真实 DOM 判空且组合期也更新，严格优于 value+composing 标志；fork 测试改写为驱动真实 DOM 的等价场景。
+
+**语义合成的三处**（两侧都活）：
+- `9592daae` × 上游 `preserveHubOwnedMetadata`：先 fork 清洗、再上游保留，顺序不能反。
+- `e18a3c50` × 上游 SSE replay：吞错保页面，但**失败时不推进重放游标**（提前 return），at-least-once 与崩溃防线同时成立。
+- `9218afbf` × 上游 `composingRef`：带标志（isComposing/229）的组合键转发给 composer 吞，仅 composingRef 的静默吞掉不转发——转发无标志事件会被 composer 误当真 Enter。
+
+**测试抓出的存量回退一处**：0.27 的 StatusBar 重构把 fork i18n（#50）的连接
+标签退回硬编码 `'online'`，按提交枚举的重放清单漏掉这类「上游后来退掉的
+存量差异」，靠 76a99ac3 带回的 fork 语义测试抓出，已恢复 `t('misc.online')`。
+
+原计划的批次表（留档）：
 
 每批一个 PR、独立跑测。顺序按依赖与冲突面：
 

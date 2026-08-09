@@ -999,13 +999,19 @@ export const RichComposerInput = forwardRef<RichComposerInputHandle, Props>(func
     // in-editor moves. Native CE drop + plaintext-only / paste path is enough for #1215.
 
     const handleKeyDown = useCallback((e: ReactKeyboardEvent<HTMLDivElement>) => {
-        // 三条件并集：isComposing 覆盖多数浏览器；composingRef 是上游 0.27 的
-        // 组合期跟踪（compositionstart/end 维护）；keyCode 229 兜住 Windows IME
-        // 在 compositionend 之后才送达的候选确认 keydown（此时前两个都是 false）。
-        // 命中后转发给 composer 的 handler 由它决定吞不吞（它会 preventDefault
-        // 确认 Enter，避免同一击键又插入一个换行）。
-        if (e.nativeEvent.isComposing || composingRef.current || e.keyCode === 229) {
+        // 组合期按键分两层处理：
+        // 1) 事件自带组合标志（isComposing，或 Windows IME 在 compositionend 之后
+        //    才送达确认 keydown 时的 keyCode 229）→ **转发**给 composer，由它
+        //    preventDefault 确认 Enter，避免同一击键又插入一个换行（fork 修复）。
+        //    composer 靠同样的标志识别并吞掉，不会误当真 Enter 发送。
+        // 2) 只有 composingRef（上游 0.27 的 compositionstart/end 跟踪）而事件
+        //    不带任何标志 → **静默吞掉不转发**：composer 无从识别它是组合键，
+        //    转发出去反而可能被当成真 Enter 触发发送（上游语义保留）。
+        if (e.nativeEvent.isComposing || e.keyCode === 229) {
             onKeyDown?.(e)
+            return
+        }
+        if (composingRef.current) {
             return
         }
         if (e.key === 'Backspace' && !e.metaKey && !e.ctrlKey && !e.altKey) {

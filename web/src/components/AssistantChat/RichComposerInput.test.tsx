@@ -261,12 +261,18 @@ describe('IME 组合期间的占位符', () => {
         return screen.getByTestId('rich-composer-input')
     }
 
-    it('组合开始后隐藏占位符，避免与输入法组合中的文字叠印', () => {
+    it('组合中的文字进入编辑器后隐藏占位符，避免叠印', () => {
         const editor = renderEmpty()
         expect(screen.queryByText('给 HAPI 发消息')).toBeTruthy()
 
-        // 输入法开始组合：value 仍是空串（尚未提交），占位符必须让位。
+        // 输入法组合中：value 仍是空串（尚未提交），但组合文字已经在
+        // contenteditable DOM 里——0.27 的 domIsEmpty 按真实 DOM 判空，
+        // 组合期的 input 事件也会更新它（旧实现按 value+composing 标志判，
+        // 裸 compositionStart 就隐藏；新机制在文字真正出现时隐藏，语义等价
+        // 且额外覆盖了「value 空但有 chip」的场景）。
         fireEvent.compositionStart(editor)
+        editor.textContent = '拼音'
+        fireEvent.input(editor)
         expect(screen.queryByText('给 HAPI 发消息')).toBeNull()
     })
 
