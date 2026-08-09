@@ -1,0 +1,5 @@
+# fork 需要 hoisted 布局：根级 fork-features/ 不是 workspace，
+# 其 zod/vitest/hono 导入依赖根 node_modules 提升解析（cli/hub tsconfig rootDir=".."）。
+# bun 1.3 对新 lockfile 默认 isolated，会把这些包收进 .bun store 导致 TS2307。
+[install]
+linker = "hoisted"
