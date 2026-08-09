@@ -7,6 +7,9 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { CalendarIcon, SessionDateRangePicker } from '@/components/SessionList'
 
+/** 用量页不按会话活跃日高亮，固定空集避免每次渲染新建 Set。 */
+const EMPTY_ACTIVITY_DATES: ReadonlySet<string> = new Set<string>()
+
 // fork-features/usage：Token 用量统计页。数据来自 hub 侧
 // /api/usage/summary（fork-features/multi-user/executionMount.ts 挂载，
 // 可见性与会话列表同构），页面自带取数逻辑，不侵入 ApiClient。
@@ -261,11 +264,19 @@ export default function UsagePage() {
                                     <SessionDateRangePicker
                                         start={customStart}
                                         end={customEnd}
+                                        // 0.27 起日历新增两个必填 prop。用量页没有「会话活跃日」
+                                        // 这一维数据（它统计的是 token 不是会话），给空集即不高亮任何日期。
+                                        sessionActivityDates={EMPTY_ACTIVITY_DATES}
                                         onChange={(start, end) => {
                                             setCustomStart(start)
                                             setCustomEnd(end)
                                             if (start && end) setRange('custom')
                                             else if (!start && !end) setRange('all')
+                                        }}
+                                        onClear={() => {
+                                            setCustomStart('')
+                                            setCustomEnd('')
+                                            setRange('all')
                                         }}
                                         onClose={() => setDatePickerOpen(false)}
                                     />

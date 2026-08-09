@@ -73,7 +73,10 @@ export function isClaudeChatVisibleSystemSubtype(subtype: unknown): subtype is s
 }
 
 export function isClaudeChatVisibleMessage(message: { type: unknown; subtype?: unknown }): boolean {
-    if (message.type === 'rate_limit_event') {
+    // 走黑名单集合而不是逐个硬编码：上游只挡 rate_limit_event / tool_progress，
+    // fork 还要挡 control_* / log / usage_report（见 NON_CHAT_CLAUDE_MESSAGE_TYPES）。
+    // 集合是这两条硬编码的严格超集。
+    if (isNonChatClaudeMessageType(message.type)) {
         return false
     }
 

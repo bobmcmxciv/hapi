@@ -1,4 +1,5 @@
 import type { Database } from 'bun:sqlite'
+import { decodeMessageContent } from '../../hub/src/store/contentCodec'
 
 export type UsageAggregateRow = {
     model: string
@@ -414,48 +415,13 @@ export function aggregateUsageForSessions(
     const contexts = loadSessionContexts(db, sessionIds)
     const eventsBySession = loadSessionEvents(db, sessionIds, contexts)
 
-    return mergeUsageReportFallback(rows, queryUsageReportTotals(db, sessionIds, opts))
-}
-
-/** Per-model token totals recovered from `usage_report` frames.
- *
- *  These come from the SDK `result` message (see sdkToLogConverter), which is the
- *  only place token counts appear for an upstream that cannot populate
- *  `message_start` — an OpenAI-compatible proxy learns the counts only when the
- *  upstream stream ends, so its `assistant` messages all carry usage 0.
- *
- *  **`modelUsage` is a running total, not a per-turn figure.** The SDK session is
- *  one long-lived agent process, and its `result` message reports everything that
- *  process has spent so far. Measured on a live 3-turn gpt-5.6-sol session:
- *
- *      seq=4  input=55931   output=5
- *      seq=8  input=111945  output=10
- *      seq=12 input=168046  output=15
- *
- *  Summing frames would report 335,922 for a session that actually consumed
- *  168,046 — an (n+1)/2 inflation that grows with turn count. So each frame
- *  contributes only its *delta* over the previous frame of the same session and
- *  model. A frame lower than its predecessor means the counter restarted (the
- *  session was resumed into a fresh process), so it contributes its full value.
- *
- *  Deltas are computed across every frame of the session and only then filtered
- *  by time: windowing the frames first would make the earliest surviving frame
- *  contribute its whole running total, re-inflating any window that starts
- *  mid-session. */
-function queryUsageReportTotals(
-    db: Database,
-    sessionIds: string[],
-    opts?: { sinceIso?: string | null; untilIso?: string | null }
-): Map<string, Omit<UsageAggregateRow, 'model' | 'requestCount'>> {
-    const params: string[] = [...sessionIds]
-    let timeClause = ''
-    if (opts?.sinceIso) {
-        timeClause += ` AND ts >= ?`
-        params.push(opts.sinceIso)
-    }
-    if (opts?.untilIso) {
-        timeClause += ` AND ts < ?`
-        params.push(opts.untilIso)
+    const sinceIso = opts?.sinceIso ?? null
+    const untilIso = opts?.untilIso ?? null
+    const inWindow = (ts: unknown): boolean => {
+        if (typeof ts !== 'string' || !ts) return false
+        if (sinceIso && ts < sinceIso) return false
+        if (untilIso && ts >= untilIso) return false
+        return true
     }
 
     // —— 两侧都按会话分桶后再结算：帧与 assistant 行只有在同一会话内才描述
