@@ -103,10 +103,44 @@ type UsageEvent =
         cacheCreationInputTokens: number
         cacheReadInputTokens: number
     }
+    /** Codex / Kimi / 一切 ACP 后端（cursor、grok、copilot、opencode）唯一的
+     *  用量来源。它们从不发 `assistant`，也从不发 `usage_report`，只发
+     *  `token_count`（Kimi 的 wire scanner、Codex 的 app-server、以及
+     *  `cli/src/agent/messageConverter.ts` 的通用 ACP 转换器各发一路），所以在
+     *  补上这一支之前，本页对这些 flavor 的会话恒报 0。上游
+     *  `hub/src/sync/usageService.ts` 一直读这一支——这条分支是把它的口径搬过来。 */
+    | {
+        kind: 'agentUsage'
+        ts: string | null
+        /** 同一条累计流的标识：累计值要对前一帧取差值，只有同流可比。 */
+        streamKey: string
+        /** 累计流里同一轮的重复快照要去重（会话导入会重放同一批帧）。 */
+        turnId: string
+        /** 帧自带的模型名；缺失时留 null，聚合阶段用会话 model 兜底。
+         *  **不在这里回填**：兜底值来自会话行，而事件是按会话缓存的，
+         *  烧进缓存会让会话改模型后旧事件永远挂在旧名字上。 */
+        model: string | null
+        /** Codex 报的是线程累计值；ACP 后端把每次请求的用量包在 `total` 里发，
+         *  是增量。只有累计流才做差值。 */
+        cumulative: boolean
+        /** `inputTokens` 语义随 flavor 变：Claude 的 input 不含缓存，Codex/Kimi
+         *  的 input **已经含**缓存读。归一在聚合阶段做，这里保持原样。 */
+        inputTokens: number
+        outputTokens: number
+        cacheCreationInputTokens: number
+        cacheReadInputTokens: number
+        /** 累计流回落（进程重启/换线程）时的兜底：上游 `last_*` 那组。 */
+        lastInputTokens: number | null
+        lastOutputTokens: number | null
+        lastCacheCreationInputTokens: number | null
+        lastCacheReadInputTokens: number | null
+    }
 
 type SessionUsageEvents = {
     /** 已覆盖到的最大 seq；库里该会话 max(seq) 与之相等即可直接复用。 */
     maxSeq: number
+    /** 解码时用的会话 flavor。它变了就必须整段重扫（见 loadSessionEvents）。 */
+    agent: string
     events: UsageEvent[]
 }
 
@@ -121,9 +155,52 @@ export function __resetUsageEventCacheForTests(): void {
     sessionEventCache.clear()
 }
 
+const asRecord = (value: unknown): Record<string, unknown> | null =>
+    value !== null && typeof value === 'object' && !Array.isArray(value)
+        ? value as Record<string, unknown>
+        : null
+
+/** 第一个能取到数字的键。各后端字段名不统一（camelCase / snake_case 混用），
+ *  上游 `usageService.firstCount` 同款。 */
+function firstCount(record: Record<string, unknown>, ...keys: string[]): number {
+    for (const key of keys) {
+        const value = record[key]
+        if (typeof value === 'number' && Number.isFinite(value)) return value
+    }
+    return 0
+}
+
+const readNums = (record: Record<string, unknown>): UsageNums => ({
+    inputTokens: firstCount(record, 'inputTokens', 'input_tokens'),
+    outputTokens: firstCount(record, 'outputTokens', 'output_tokens'),
+    cacheCreationInputTokens: firstCount(
+        record, 'cacheWriteInputTokens', 'cache_write_input_tokens',
+        'cacheCreationTokens', 'cache_creation_input_tokens'
+    ),
+    cacheReadInputTokens: firstCount(
+        record, 'cachedInputTokens', 'cached_input_tokens',
+        'cacheReadTokens', 'cache_read_input_tokens'
+    )
+})
+
 /** 把一行 messages.content 解码成 0..n 条用量事件。
- *  过滤条件与聚合口径必须和原实现逐条一致。 */
-function extractUsageEvents(rawContent: string | Uint8Array): UsageEvent[] {
+ *  过滤条件与聚合口径必须和原实现逐条一致。
+ *
+ *  `seq` 只用来给增量帧造一个会话内稳定的去重键（seq 在会话内唯一且不改写）。
+ *  `agent` 是会话 flavor，决定 `token_count` 走累计还是增量口径。
+ *  `createdAt` 是库里 messages.created_at，给没有 `data.timestamp` 的信封兜底。
+ *
+ *  **信封的 `content.type` 随 flavor 变，不能统一按 `output` 卡。** Claude 走
+ *  `content.type === 'output'`，Codex 走 `content.type === 'codex'`（生产库
+ *  实测：2,123 条 codex 消息全部是 `codex`，没有一条 `output`）。上游
+ *  `usageService.parseUsageEvent` 也只对 assistant 分支要求 `output`，
+ *  `token_count` 分支只看 `data.type`。 */
+function extractUsageEvents(
+    rawContent: string | Uint8Array,
+    seq: number,
+    agent: string,
+    createdAt: number
+): UsageEvent[] {
     let content: unknown
     try {
         content = decodeMessageContent(rawContent as never)
@@ -134,12 +211,13 @@ function extractUsageEvents(rawContent: string | Uint8Array): UsageEvent[] {
     const record = content as Record<string, unknown>
     if (record.role !== 'agent') return []
     const outer = record.content as Record<string, unknown> | undefined
-    if (!outer || outer.type !== 'output') return []
+    if (!outer) return []
     const data = outer.data as Record<string, unknown> | undefined
     if (!data) return []
     const ts = typeof data.timestamp === 'string' ? data.timestamp : null
 
-    if (data.type === 'assistant') {
+    // Claude 专有的两支仍然只认 output 信封。
+    if (outer.type === 'output' && data.type === 'assistant') {
         const message = data.message as Record<string, unknown> | undefined
         const messageId = message?.id
         const model = message?.model
@@ -158,7 +236,7 @@ function extractUsageEvents(rawContent: string | Uint8Array): UsageEvent[] {
         }]
     }
 
-    if (data.type === 'usage_report') {
+    if (outer.type === 'output' && data.type === 'usage_report') {
         const modelUsage = data.modelUsage as Record<string, unknown> | undefined
         if (!modelUsage) return []
         const events: UsageEvent[] = []
@@ -177,11 +255,100 @@ function extractUsageEvents(rawContent: string | Uint8Array): UsageEvent[] {
         return events
     }
 
+    // —— Codex / Kimi / ACP 后端唯一的用量来源。口径搬自上游
+    //    hub/src/sync/usageService.ts 的 parseUsageEvent。
+    if (data.type === 'token_count' || data.type === 'usage') {
+        // 导入的历史记录不是本机真实消耗，计进去会把同一批 token 记两遍。
+        if (data.hapiUsageScope === 'imported-history') return []
+        const info = asRecord(data.info) ?? data
+        const explicitThreadId = typeof data.threadId === 'string'
+            ? data.threadId
+            : typeof data.thread_id === 'string' ? data.thread_id : null
+
+        // 只有 Codex 报的是**线程累计值**；其余 ACP 后端把每次请求的用量
+        // 包在 `total` 里发，那是增量，按累计做差会把每一轮都抹成 0。
+        const cumulativeTotal = agent === 'codex'
+            ? asRecord(info.total) ?? asRecord(info.total_token_usage) ?? asRecord(info.totalTokenUsage)
+            : null
+        const last = asRecord(info.last)
+            ?? asRecord(info.last_token_usage)
+            ?? asRecord(info.lastTokenUsage)
+            ?? (data.type === 'usage' ? info : null)
+        const total = cumulativeTotal ?? (agent === 'codex' ? last : asRecord(info.total) ?? info)
+        if (!total) return []
+
+        const nums = readNums(total)
+        if (usageTotal(nums) <= 0) return []
+
+        const isCumulative = cumulativeTotal !== null
+        const scope = typeof data.scopeRole === 'string'
+            ? data.scopeRole
+            : typeof data.scope_role === 'string' ? data.scope_role : 'parent'
+        const turnId = typeof data.turnId === 'string'
+            ? data.turnId
+            : typeof data.turn_id === 'string' ? data.turn_id : ''
+        const lastNums = last ? readNums(last) : null
+
+        return [{
+            kind: 'agentUsage',
+            // Codex/ACP 的信封没有 data.timestamp（生产库实测 2,123 条全部没有），
+            // 落回库里的 created_at。时间窗对这些 flavor 只能按入库时刻判定；
+            // 拿不到 ts 就等于永远落在窗外，整支会被静默丢掉。
+            ts: ts ?? new Date(createdAt).toISOString(),
+            // 累计流按 线程+scope 分组做差；增量帧用 seq 当会话内去重键。
+            streamKey: isCumulative
+                ? `cumulative|${explicitThreadId ?? ''}|${scope}`
+                : `delta|${seq}`,
+            turnId,
+            model: typeof data.model === 'string' && data.model.trim() ? data.model.trim() : null,
+            cumulative: isCumulative,
+            ...nums,
+            lastInputTokens: lastNums?.inputTokens ?? null,
+            lastOutputTokens: lastNums?.outputTokens ?? null,
+            lastCacheCreationInputTokens: lastNums?.cacheCreationInputTokens ?? null,
+            lastCacheReadInputTokens: lastNums?.cacheReadInputTokens ?? null
+        }]
+    }
+
     return []
 }
 
+/** 会话的 flavor 与模型名。flavor 决定 `token_count` 的累计/增量口径，
+ *  model 给缺模型名的帧兜底。 */
+export type SessionUsageContext = { agent: string; model: string | null }
+
+/** 读这批会话的 flavor / model。flavor 存在 metadata JSON 里（ROUTING_FIELDS），
+ *  取不到时按 'unknown' 处理——与上游 `sessionAgent()` 一致。 */
+function loadSessionContexts(db: Database, sessionIds: string[]): Map<string, SessionUsageContext> {
+    const placeholders = sessionIds.map(() => '?').join(',')
+    const rows = db.prepare(`
+        SELECT id, metadata, model
+        FROM sessions
+        WHERE id IN (${placeholders})
+    `).all(...sessionIds) as Array<{ id: string; metadata: string | null; model: string | null }>
+
+    const out = new Map<string, SessionUsageContext>()
+    for (const row of rows) {
+        let agent = 'unknown'
+        if (row.metadata) {
+            try {
+                const flavor = asRecord(JSON.parse(row.metadata))?.flavor
+                if (typeof flavor === 'string' && flavor.trim()) agent = flavor.trim()
+            } catch {
+            }
+        }
+        const model = typeof row.model === 'string' && row.model.trim() ? row.model.trim() : null
+        out.set(row.id, { agent, model })
+    }
+    return out
+}
+
 /** 取回这批会话的用量事件，只对有新消息的会话解码增量。 */
-function loadSessionEvents(db: Database, sessionIds: string[]): Map<string, UsageEvent[]> {
+function loadSessionEvents(
+    db: Database,
+    sessionIds: string[],
+    contexts: Map<string, SessionUsageContext>
+): Map<string, UsageEvent[]> {
     const placeholders = sessionIds.map(() => '?').join(',')
     // 走 idx_messages_session(session_id, seq)，只读索引不碰 content。
     const heads = db.prepare(`
@@ -194,36 +361,40 @@ function loadSessionEvents(db: Database, sessionIds: string[]): Map<string, Usag
     const result = new Map<string, UsageEvent[]>()
     const stale: Array<{ sessionId: string; fromSeq: number; maxSeq: number }> = []
     for (const head of heads) {
+        const agent = contexts.get(head.sessionId)?.agent ?? 'unknown'
         const cached = sessionEventCache.get(head.sessionId)
-        if (cached && cached.maxSeq === head.maxSeq) {
+        // flavor 变了要整段重扫：它决定 token_count 走累计还是增量，
+        // 旧 flavor 下解出来的事件在新口径里是错的。
+        if (cached && cached.agent === agent && cached.maxSeq === head.maxSeq) {
             result.set(head.sessionId, cached.events)
             continue
         }
         // 缓存落后就只补 seq 之后的部分；没有缓存则全量。消息只追加不改写，
         // 所以前缀事件保持有效；max(seq) 回退（会话被清空/重建）时整段重扫。
-        const fromSeq = cached && cached.maxSeq < head.maxSeq ? cached.maxSeq : 0
-        stale.push({ sessionId: head.sessionId, fromSeq, maxSeq: head.maxSeq })
+        const reusable = cached && cached.agent === agent && cached.maxSeq < head.maxSeq
+        stale.push({ sessionId: head.sessionId, fromSeq: reusable ? cached.maxSeq : 0, maxSeq: head.maxSeq })
     }
 
     if (stale.length > 0) {
         const scan = db.prepare(`
-            SELECT seq, content
+            SELECT seq, content, created_at AS createdAt
             FROM messages
             WHERE session_id = ? AND seq > ?
             ORDER BY seq
         `)
         for (const entry of stale) {
-            const rows = scan.all(entry.sessionId, entry.fromSeq) as Array<{ seq: number; content: string | Uint8Array }>
+            const agent = contexts.get(entry.sessionId)?.agent ?? 'unknown'
+            const rows = scan.all(entry.sessionId, entry.fromSeq) as Array<{ seq: number; content: string | Uint8Array; createdAt: number }>
             const base = entry.fromSeq > 0
                 ? (sessionEventCache.get(entry.sessionId)?.events ?? [])
                 : []
             const events = base.slice()
             for (const row of rows) {
-                for (const event of extractUsageEvents(row.content)) {
+                for (const event of extractUsageEvents(row.content, row.seq, agent, row.createdAt)) {
                     events.push(event)
                 }
             }
-            sessionEventCache.set(entry.sessionId, { maxSeq: entry.maxSeq, events })
+            sessionEventCache.set(entry.sessionId, { maxSeq: entry.maxSeq, agent, events })
             result.set(entry.sessionId, events)
         }
     }
@@ -240,7 +411,8 @@ export function aggregateUsageForSessions(
         return []
     }
 
-    const eventsBySession = loadSessionEvents(db, sessionIds)
+    const contexts = loadSessionContexts(db, sessionIds)
+    const eventsBySession = loadSessionEvents(db, sessionIds, contexts)
 
     return mergeUsageReportFallback(rows, queryUsageReportTotals(db, sessionIds, opts))
 }
@@ -293,6 +465,10 @@ function queryUsageReportTotals(
     type FrameNums = { inputTokens: number; outputTokens: number; cacheCreationInputTokens: number; cacheReadInputTokens: number }
     const prevFrame = new Map<string, FrameNums>()
     const frameBySession = new Map<string, Map<string, FrameNums>>()
+    /** Codex 累计流的前值，按 `sessionId::streamKey` 分组。 */
+    const prevAgentTotal = new Map<string, FrameNums>()
+    /** 同一轮累计快照的指纹，重复投递（导入重放）只计一次。 */
+    const seenAgentTurn = new Set<string>()
     const bucket = <T>(store: Map<string, Map<string, T>>, sessionId: string): Map<string, T> => {
         let inner = store.get(sessionId)
         if (!inner) { inner = new Map<string, T>(); store.set(sessionId, inner) }
@@ -323,6 +499,66 @@ function queryUsageReportTotals(
                 agg.cacheCreationInputTokens += event.cacheCreationInputTokens
                 agg.cacheReadInputTokens += event.cacheReadInputTokens
                 perSession.set(event.model, agg)
+                continue
+            }
+
+            if (event.kind === 'agentUsage') {
+                // 这些会话没有 assistant 行也没有 usage_report 帧，token_count
+                // 是唯一来源，所以直接记进 assistant 侧：settleSessionUsage 见到
+                // 空的帧侧会原样放行，不会与任何东西取 max。
+                let nums: FrameNums = {
+                    inputTokens: event.inputTokens,
+                    outputTokens: event.outputTokens,
+                    cacheCreationInputTokens: event.cacheCreationInputTokens,
+                    cacheReadInputTokens: event.cacheReadInputTokens
+                }
+                if (event.cumulative) {
+                    // 同一轮的重复快照（会话导入会重放整段）只算一次。
+                    if (event.turnId) {
+                        const fingerprint = `${sessionId}|${event.turnId}|${nums.inputTokens}|${nums.outputTokens}|${nums.cacheCreationInputTokens}|${nums.cacheReadInputTokens}`
+                        if (seenAgentTurn.has(fingerprint)) continue
+                        seenAgentTurn.add(fingerprint)
+                    }
+                    const key = `${sessionId}::${event.streamKey}`
+                    const prev = prevAgentTotal.get(key)
+                    prevAgentTotal.set(key, nums)
+                    // 累计值对前值取差；回落（进程重启/换线程）时用帧自带的
+                    // last_* 兜底，没有就按全额——与上游 cumulativeDelta 同款。
+                    const step = (cur: number, before: number | undefined, last: number | null): number => {
+                        if (before === undefined) return last ?? cur
+                        return cur >= before ? cur - before : last ?? cur
+                    }
+                    nums = {
+                        inputTokens: step(nums.inputTokens, prev?.inputTokens, event.lastInputTokens),
+                        outputTokens: step(nums.outputTokens, prev?.outputTokens, event.lastOutputTokens),
+                        cacheCreationInputTokens: step(nums.cacheCreationInputTokens, prev?.cacheCreationInputTokens, event.lastCacheCreationInputTokens),
+                        cacheReadInputTokens: step(nums.cacheReadInputTokens, prev?.cacheReadInputTokens, event.lastCacheReadInputTokens)
+                    }
+                } else if (seenAgentTurn.has(`${sessionId}|${event.streamKey}`)) {
+                    continue
+                } else {
+                    seenAgentTurn.add(`${sessionId}|${event.streamKey}`)
+                }
+
+                // 时间窗在差值之后：先窗后差会让窗内首帧把整段线程累计算进来。
+                if (!inWindow(event.ts)) continue
+                if (usageTotal(nums) <= 0) continue
+
+                // Codex/Kimi 的 inputTokens **已经含**缓存读，而本页把
+                // input / cacheRead 当四段并列相加。不扣掉的话缓存读会被计两遍。
+                const uncachedInput = Math.max(0, nums.inputTokens - nums.cacheReadInputTokens)
+                const model = event.model ?? contexts.get(sessionId)?.model ?? 'unknown'
+                const perSession = bucket(assistantBySession, sessionId)
+                const agg = perSession.get(model) ?? {
+                    model, requestCount: 0, inputTokens: 0, outputTokens: 0,
+                    cacheCreationInputTokens: 0, cacheReadInputTokens: 0
+                }
+                agg.requestCount += 1
+                agg.inputTokens += uncachedInput
+                agg.outputTokens += nums.outputTokens
+                agg.cacheCreationInputTokens += nums.cacheCreationInputTokens
+                agg.cacheReadInputTokens += nums.cacheReadInputTokens
+                perSession.set(model, agg)
                 continue
             }
 
