@@ -19,7 +19,7 @@ import { CLAUDE_EFFORT_LEVELS, type ClaudeEffortLevel } from './effort'
  *
  * Source of truth is the operator-editable `~/.hapi/settings.json`:
  *
- *     { "defaultLaunchModel": "gpt-5.6-sol[1m]", "defaultLaunchEffort": "xhigh" }
+ *     { "defaultLaunchModel": "gpt-5.4[1m]", "defaultLaunchEffort": "xhigh" }
  *
  * Deliberately not auto-detected from `ANTHROPIC_MODEL`: that env var carries
  * the bare alias with no `[1m]` suffix, and the suffix is a launch-time

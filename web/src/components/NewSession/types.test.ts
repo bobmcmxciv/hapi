@@ -14,12 +14,12 @@ describe('Claude model options', () => {
     })
 
     // 这几台机器（DESKTOP-HT3P09U / FA608_INDEX / TXFA608INDEX / DESKTOP-4SQALMG）
-    // 的 Claude Code 指向 cx2cc，实际跑的是 gpt-5.6-sol。以前只能挑 sonnet[1m]
-    // 之类的占位名，界面上显示的就是占位名；现在能直接选到真名和它的 1M 变体。
+    // 的 Claude Code 指向 cx2cc。推荐两项：裸名 sol（服务端契约 272k，诚实）
+    // 与 gpt-5.4[1m]（唯一 max_context_window=1M 的 slug，903k 冷启实测）。
     it('offers the proxy-served ids after the built-in Claude models', () => {
         expect(MODEL_OPTIONS.claude.slice(-2)).toEqual([
             { value: 'gpt-5.6-sol', label: 'gpt-5.6-sol' },
-            { value: 'gpt-5.6-sol[1m]', label: 'gpt-5.6-sol[1m]' },
+            { value: 'gpt-5.4[1m]', label: 'gpt-5.4[1m]' },
         ])
     })
 

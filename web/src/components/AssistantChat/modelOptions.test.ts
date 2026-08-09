@@ -14,7 +14,7 @@ const SPECIFIC_CLAUDE_MODEL_OPTIONS = [
 
 const PROXY_CLAUDE_MODEL_OPTIONS = [
     { value: 'gpt-5.6-sol', label: 'gpt-5.6-sol' },
-    { value: 'gpt-5.6-sol[1m]', label: 'gpt-5.6-sol[1m]' },
+    { value: 'gpt-5.4[1m]', label: 'gpt-5.4[1m]' },
 ]
 
 describe('getModelOptionsForFlavor', () => {

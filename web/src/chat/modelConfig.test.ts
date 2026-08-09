@@ -35,7 +35,7 @@ describe('getContextBudgetTokens', () => {
     // cx2cc：assistant 行的 model 是代理别名，底层仍是 Claude Code SDK。
     // 这类会话此前拿不到分母，状态栏的上下文窗口整个消失。
     it('falls back to the conservative Claude budget for proxy model aliases', () => {
-        expect(getContextBudgetTokens('gpt-5.6-sol', 'claude')).toBe(190_000)
+        expect(getContextBudgetTokens('gpt-5.6-terra', 'claude')).toBe(190_000)
     })
 
     // 带 [1m] 的代理别名不是「无信号」——那是启动时的显式声明，且 Claude Code
@@ -43,6 +43,10 @@ describe('getContextBudgetTokens', () => {
     // 的 result.modelUsage["gpt-5.6-sol[1m]"].contextWindow = 1_000_000）。
     it('honours the [1m] suffix on proxy model aliases', () => {
         expect(getContextBudgetTokens('gpt-5.6-sol[1m]', 'claude')).toBe(990_000)
+    })
+
+    it('cx2cc 裸名 gpt-5.6-sol 按服务端契约 272k 计（272,000 - 10,000 headroom）', () => {
+        expect(getContextBudgetTokens('gpt-5.6-sol', 'claude')).toBe(262_000)
     })
 
     it('keeps the no-model fallback identical to the alias fallback', () => {

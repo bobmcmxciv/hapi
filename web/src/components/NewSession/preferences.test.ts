@@ -141,11 +141,13 @@ describe('NewSession preferences', () => {
         // default the form opened on `auto` and operators picked an Anthropic
         // preset as a placeholder, so the UI showed a model that never ran and
         // the context window was metered against the wrong family.
-        const MACHINE_DEFAULTS = { model: 'gpt-5.6-sol[1m]', effort: 'xhigh' }
+        // 2026-08-10 起机器侧推荐声明真 1M 的 gpt-5.4[1m]（sol 契约 272k，
+        // sol[1m] 已从推荐清单移除；仍声明它的机器会被校验回落到 auto）。
+        const MACHINE_DEFAULTS = { model: 'gpt-5.4[1m]', effort: 'xhigh' }
 
         it('seeds model and effort when this browser has no stored preference', () => {
             expect(resolvePreferredLaunchSettings('claude', null, MACHINE_DEFAULTS)).toEqual({
-                model: 'gpt-5.6-sol[1m]',
+                model: 'gpt-5.4[1m]',
                 cursorSelectedBase: 'auto',
                 effort: 'xhigh',
                 modelReasoningEffort: 'default'

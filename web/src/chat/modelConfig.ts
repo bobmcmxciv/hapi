@@ -13,6 +13,8 @@ import { isClaudeModelPreset } from '@hapi/protocol'
 const CONTEXT_HEADROOM_TOKENS = 10_000
 const DEFAULT_CLAUDE_CONTEXT_WINDOW_TOKENS = 200_000
 const LARGE_CLAUDE_CONTEXT_WINDOW_TOKENS = 1_000_000
+// cx2cc 的 gpt-5.6-sol 服务端契约窗口（Codex 订阅端实时元数据实测值）。
+const CX2CC_SOL_CONTEXT_WINDOW_TOKENS = 272_000
 // Fallback for Codex sessions when the server has not reported an explicit modelContextWindow.
 // The value matches the context window currently reported by Codex App Server token-count events.
 const DEFAULT_CODEX_CONTEXT_WINDOW_TOKENS = 258_400
@@ -95,6 +97,13 @@ export function getContextBudgetTokens(model: string | null | undefined, flavor?
             return isFable
                 ? LARGE_CLAUDE_CONTEXT_WINDOW_TOKENS
                 : DEFAULT_CLAUDE_CONTEXT_WINDOW_TOKENS
+        }
+        // 已实锤契约的代理别名直接给真值：`gpt-5.6-sol` 服务端契约 272k
+        // （/backend-api/codex/models 实时元数据 context_window=max=272000，
+        // 2026-08-10 实测，见记忆 cx2cc-honest-context-window）。terra/luna
+        // 未单独实测，不写进来——宁可落 200k 保守值也不外推。
+        if (trimmedModel === 'gpt-5.6-sol') {
+            return CX2CC_SOL_CONTEXT_WINDOW_TOKENS
         }
         // 模型 id 不是已知的 Claude 形态——典型是经 OpenAI 兼容代理
         // （cx2cc）跑的会话：assistant 行的 model 是代理自己的别名

@@ -25,7 +25,7 @@ const SPECIFIC_MODEL_OPTIONS = [
 
 const PROXY_MODEL_OPTIONS = [
     { value: 'gpt-5.6-sol', label: 'gpt-5.6-sol' },
-    { value: 'gpt-5.6-sol[1m]', label: 'gpt-5.6-sol[1m]' },
+    { value: 'gpt-5.4[1m]', label: 'gpt-5.4[1m]' },
 ]
 
 describe('getClaudeComposerModelOptions', () => {
@@ -77,7 +77,9 @@ describe('isListedClaudeModel', () => {
 
     it('counts the proxy-served ids as listed, not custom', () => {
         expect(isListedClaudeModel('gpt-5.6-sol')).toBe(true)
-        expect(isListedClaudeModel('gpt-5.6-sol[1m]')).toBe(true)
+        expect(isListedClaudeModel('gpt-5.4[1m]')).toBe(true)
+        // sol[1m] 已从推荐移除（272k 契约上谎报 1M）；存量会话走 custom 分支。
+        expect(isListedClaudeModel('gpt-5.6-sol[1m]')).toBe(false)
     })
 })
 
@@ -91,7 +93,7 @@ describe('getNextClaudeComposerModel', () => {
     })
 
     it('cycles from the final option back to Default', () => {
-        expect(getNextClaudeComposerModel('gpt-5.6-sol[1m]')).toBeNull()
+        expect(getNextClaudeComposerModel('gpt-5.4[1m]')).toBeNull()
     })
 })
 

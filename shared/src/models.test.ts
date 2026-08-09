@@ -55,7 +55,10 @@ describe('getClaudeModelLabel', () => {
     // 代理别名的 label 故意等于 id 本身：选它的目的就是让界面显示真正在跑的模型。
     test('returns the raw id as the label for proxy-served models', () => {
         expect(getClaudeModelLabel('gpt-5.6-sol')).toBe('gpt-5.6-sol')
-        expect(getClaudeModelLabel('gpt-5.6-sol[1m]')).toBe('gpt-5.6-sol[1m]')
+        expect(getClaudeModelLabel('gpt-5.4[1m]')).toBe('gpt-5.4[1m]')
+        // sol[1m] 已从推荐 map 移除（272k 契约上谎报 1M）：label 查不到返回 null，
+        // 存量会话由调用方直显原始 id，文案不变。
+        expect(getClaudeModelLabel('gpt-5.6-sol[1m]')).toBeNull()
     })
 
     test('returns null for empty/whitespace-only string', () => {

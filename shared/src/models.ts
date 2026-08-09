@@ -35,14 +35,19 @@ export const CLAUDE_MODEL_IDS = Object.keys(CLAUDE_MODEL_ID_LABELS) as ClaudeMod
  * `result.modelUsage["gpt-5.6-sol[1m]"].contextWindow = 1_000_000`.
  *
  * Labels are the raw ids on purpose: the point of picking one of these is to
- * see the model that actually runs, so prettifying would defeat it. Note the
- * proxy reports the bare alias (`gpt-5.6-sol`) on assistant frames while the
- * `[1m]` suffix only survives on system/init and result.modelUsage — both
- * spellings are listed so either can be selected and recognised.
+ * see the model that actually runs, so prettifying would defeat it.
+ *
+ * 2026-08-10 窗口治理（详见记忆 cx2cc-honest-context-window）：
+ * `gpt-5.6-sol` 的**服务端契约是 272k**（/backend-api/codex/models 实时元数据
+ * context_window=max=272000），`[1m]` 只是 CC 侧声明——挂在 sol 上等于对 272k
+ * 后端谎报 1M，超出部分是弹性未定义行为（正是 codex-bridge ctx 拒绝的来源）。
+ * `gpt-5.4` 是唯一 max_context_window=1M 的 slug（903k 冷启实测接纳）。
+ * 因此推荐项收敛为：裸名 sol（272k 诚实）+ gpt-5.4[1m]（真 1M）。
+ * `gpt-5.6-sol[1m]` 从推荐移除；存量会话的该 id 仍按原始字符串直显，不受影响。
  */
 export const CLAUDE_PROXY_MODEL_LABELS = {
     'gpt-5.6-sol': 'gpt-5.6-sol',
-    'gpt-5.6-sol[1m]': 'gpt-5.6-sol[1m]'
+    'gpt-5.4[1m]': 'gpt-5.4[1m]'
 } as const
 
 export type ClaudeProxyModelId = keyof typeof CLAUDE_PROXY_MODEL_LABELS

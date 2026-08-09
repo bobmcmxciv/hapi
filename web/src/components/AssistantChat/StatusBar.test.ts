@@ -50,8 +50,9 @@ describe('context usage labels', () => {
         const contextSize = 84_722 + 82_688
         const budget = getContextBudgetTokens('gpt-5.6-sol', 'claude')
 
-        expect(budget).toBe(190_000)
-        expect(formatContextUsageLabel(contextSize, budget)).toBe('88% · 167k / 190k')
+        // 2026-08-10 起裸名 sol 按服务端契约 272k 计（见 modelConfig 常量注释）。
+        expect(budget).toBe(262_000)
+        expect(formatContextUsageLabel(contextSize, budget)).toBe('64% · 167k / 262k')
         expect(formatContextUsageLabel(contextSize, budget)).not.toContain('used')
     })
 })
