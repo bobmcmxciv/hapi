@@ -220,6 +220,7 @@ stop / 备份 / `mv` 换芯 / start。
 | 项 | 转给谁 | 怎么验 |
 |---|---|---|
 | `cli/src/runner/runner.integration.test.ts` | CI（Linux、干净环境） | 本机跑会挂死 75 分钟零输出并泄漏 6 个 bun 孤儿进程（§2.6 已记）；且本机同时有 13 条真实会话，环境是脏的，给不出可信结论。Release 流水线必须跑到它全绿 |
+| **已知 CI-flaky 的 CLI 时序测试**（上游 test 用真实 setTimeout）：`claudeRemoteLauncher.launchFailure.test.ts`、`claudeRemote.test.ts > reports the initial normal message once` | CI rerun | 都在本机稳定通过（连跑 3 次），仅在 CI 慢 runner 上偶发单条超时。上游 test 代码、非 converge 回归；**不改上游 test 时序**（改了必在下轮 sync 冲突，且 fake-timer 化本身易引入新 flake）。红了先 `gh run rerun --failed`，重跑绿即视为通过 |
 | cli 那 6 条 Windows 短名/引用失败 | CI（Linux）+ 本机后续批次 | Linux 上无 8.3 短名问题，CI 应直接全绿；若要本机也绿，另开一批做路径断言归一（参照 fork 已有的 `76a99ac3` win 路径断言修法） |
 | Codex/ACP 用量数值正确性 | ECS 换芯后 | 跑一个真实 Codex 会话，对 `/usage` 与 Codex 自报 token。**本机无法验**：生产库 11 个 codex 会话全是导入历史，0 条真实用量帧 |
 | 18 条 resource_grants 迁移后可读 | ECS | peter 账号登录列会话，数量 = 迁移前基线 |
