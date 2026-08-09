@@ -246,9 +246,31 @@ export function mountExecutionRoutes(app: Hono<WebAppEnv>, deps: {
         const account = accountId === null ? null : deps.store.getAccount(accountId)
         const engine = deps.getSyncEngine()
         if (!account || !engine) return c.json({ error: 'Not connected' }, account ? 503 : 401)
-        const sessions = collectVisibleSessions(deps.store, engine, account, { claimUnbound: true })
-            .map(toSessionSummary)
-        return c.json({ sessions })
+
+        // peer 发现（list_peers / ping-peer --list，upstream #1372）带 ?order=updatedAt
+        // 和 ?limit=N 拉一个只读短名单。这两个参数一出现就判为**发现模式**：
+        //   - claimUnbound: false —— 只读发现不该有 bind-on-view 副作用，不把
+        //     未绑定会话认领到调用者账号（与 /api/usage/summary 只读端点同理）；
+        //   - 服务端按 updatedAt 排序 + 截断，避免为 30 行短名单回传整个账号会话集。
+        // Web 会话列表两个参数都不带 → 完全走原路径（claimUnbound、不排序不截断），
+        // 字节不变。无论哪种模式，可见集始终是账号维度（collectVisibleSessions 按
+        // gaid 解析 owned+granted+机器继承），绝不返回裸 namespace。
+        const order = c.req.query('order')
+        const limitRaw = c.req.query('limit')
+        const parsedLimit = limitRaw === undefined ? null : Number(limitRaw)
+        const limit = parsedLimit !== null && Number.isFinite(parsedLimit)
+            ? Math.min(500, Math.max(1, Math.floor(parsedLimit)))
+            : null
+        const discovery = order === 'updatedAt' || limit !== null
+
+        let visible = collectVisibleSessions(deps.store, engine, account, { claimUnbound: !discovery })
+        if (order === 'updatedAt') {
+            visible = [...visible].sort((a, b) => b.updatedAt - a.updatedAt)
+        }
+        if (limit !== null) {
+            visible = visible.slice(0, limit)
+        }
+        return c.json({ sessions: visible.map(toSessionSummary) })
     })
 
     // fork-features/usage：token 用量统计。数据本就随实时同步/导入写进了

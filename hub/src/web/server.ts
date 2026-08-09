@@ -319,6 +319,15 @@ function createWebApp(options: {
             createSessionMachineResolver(options.getSyncEngine)
         )
     ))
+    // ⚠️ 顺序是承重的（fork multi-user 隔离）：createSessionsRoutes 里的
+    // `GET /sessions` 用 `getSessionsByNamespace(c.get('namespace'))` 列会话，而
+    // 网关下所有账号共享同一 core namespace（default），这一句会返回**全部账号**
+    // 的会话。它之所以不泄漏，仅仅因为上面 mountExecutionRoutes（line ~297）先
+    // 注册了同路径的账号维度 `GET /api/sessions` 并 terminate Hono 链，把这个裸
+    // namespace 版彻底遮蔽（与 /api/events、/api/usage/summary 同型的 dual-route
+    // 陷阱，见 hapi-sse-dual-route-trap 记忆）。**这两行的先后一旦颠倒，会话列表
+    // 立即变成跨账号泄漏。** usage 那条已改为显式不挂载；sessions 有 29 个 /:id
+    // 资源路由要保留、无法整体不挂，故以此为准并靠本注释钉死顺序依赖。
     app.route('/api', createSessionsRoutes(options.getSyncEngine))
     app.route('/api', createMessagesRoutes(options.getSyncEngine))
     app.route('/api', createPermissionsRoutes(options.getSyncEngine))

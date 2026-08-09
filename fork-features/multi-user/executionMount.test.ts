@@ -251,6 +251,43 @@ describe('列表可见性：admin 看整个 namespace，普通用户看自己的
         expect(await idsOf(response, 'sessions')).toEqual(['s-peter-1'])
         store.close()
     })
+
+    // peer 发现（upstream #1372 list_peers）带 ?order=updatedAt&limit=N。安全不变量：
+    // 发现模式仍是账号维度，绝不因为带了 limit/order 就退回裸 namespace 泄漏别人的会话。
+    it('peer 发现（?order=updatedAt&limit）仍按账号可见集，不泄漏他人会话', async () => {
+        const { store, app, peter } = seed()
+        const response = await app.request('/api/sessions?order=updatedAt&limit=32', {
+            headers: { authorization: `Bearer ${await sign(peter.id)}` }
+        })
+        expect(response.status).toBe(200)
+        // peter 只应看到自己的两条，绝不含 admin 的 s-admin。
+        expect(await idsOf(response, 'sessions')).toEqual(['s-peter-1', 's-peter-2'])
+        store.close()
+    })
+
+    it('发现模式只读 vs 列表模式认领：带 limit 不认领未绑定会话，不带则认领', async () => {
+        // 引擎里放一条未绑定的孤儿会话（default namespace，无 resource binding）。
+        const store = new MultiUserGatewayStore(':memory:')
+        const admin = store.createAccount('admin', 'admin', 'default', null)
+        const orphan = { id: 's-orphan', namespace: 'default', metadata: null, agentState: null, active: false, createdAt: 1, updatedAt: 5, seq: 0 }
+        const engine = {
+            getSessionsByNamespace: () => [orphan],
+            getSession: (id: string) => (id === 's-orphan' ? orphan : null),
+            getOnlineMachinesByNamespace: () => [],
+            getMachine: () => null
+        } as unknown as SyncEngine
+        const app = new Hono<WebAppEnv>()
+        mountExecutionRoutes(app, { store, jwtSecret, getSyncEngine: () => engine, getSseManager: () => null, getStore: () => null })
+
+        // 发现模式（带 order/limit）：只读，孤儿会话不被认领。
+        await app.request('/api/sessions?order=updatedAt&limit=30', { headers: { authorization: `Bearer ${await sign(admin.id)}` } })
+        expect(store.getResource('session', 's-orphan')).toBeNull()
+
+        // 列表模式（web，无参）：bind-on-view 认领孤儿到 admin（既有契约不变）。
+        await app.request('/api/sessions', { headers: { authorization: `Bearer ${await sign(admin.id)}` } })
+        expect(store.getResource('session', 's-orphan')?.ownerAccountId).toBe(admin.id)
+        store.close()
+    })
 })
 
 describe('机器授权向下继承：被授权机器上新建的会话自动出现', () => {
