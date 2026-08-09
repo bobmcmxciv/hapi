@@ -139,6 +139,9 @@ const COMPACT_DIRECT_INPUTS: Record<DirectKeyPage, QuickInput[]> = {
         { label: 'Ctrl+D', sequence: '\u0004', description: 'End of input' },
         { label: 'Ctrl+Z', sequence: '\u001a', description: 'Suspend process' },
         { label: 'Ctrl+L', sequence: '\u000c', description: 'Clear screen' },
+        // Dedicated: sticky Ctrl + softkey is flaky on mobile IME (Jed save = C-x C-s).
+        { label: 'Ctrl+X', sequence: '\u0018', description: 'Cancel / prefix (C-x)' },
+        { label: 'Ctrl+S', sequence: '\u0013', description: 'XOFF / search / save (C-s)' },
     ],
     navigation: [
         { label: '←', sequence: '\u001b[D', description: 'Arrow left' },

@@ -315,6 +315,19 @@ describe('TerminalPage compact command input', () => {
         expect(writeMock).toHaveBeenNthCalledWith(3, '\u001b[6~')
         expect(writeMock).toHaveBeenNthCalledWith(4, '|')
     })
+
+    it('sends dedicated Ctrl+X and Ctrl+S C0 sequences from the Control pad', () => {
+        renderWithProviders()
+
+        fireEvent.click(screen.getByRole('button', { name: 'Direct' }))
+        fireEvent.click(screen.getByRole('button', { name: 'Cancel / prefix (C-x)' }))
+        fireEvent.click(screen.getByRole('button', { name: 'XOFF / search / save (C-s)' }))
+
+        expect(writeMock).toHaveBeenNthCalledWith(1, '\u0018')
+        expect(writeMock).toHaveBeenNthCalledWith(2, '\u0013')
+        // Keep Ctrl+L; density still fits a 4-col grid with the two Jed chords.
+        expect(screen.getByRole('button', { name: 'Clear screen' })).toBeInTheDocument()
+    })
 })
 
 describe('buildTerminalCommandSequence', () => {
