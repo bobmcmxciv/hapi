@@ -65,13 +65,46 @@ gateway namespace / host 筛选。口径必须重新落回；**存储层**（ups
 
 ---
 
-## Phase 1 —— 建立 0.27 基线
+## Phase 1 —— 建立 0.27 基线（2026-08-09 已完成）
 
 ```bash
 git checkout -b feat/converge-0.27 upstream/main
 ```
 
-退出标准：
+### 实测结果
+
+**上游 0.27 基线在 Windows 上本来就不绿**，且不稳定（同一份代码两次跑分别报
+37 fail 和 10 fail）。批次 A 三条 cherry-pick 后：
+
+| 套件 | 批次 A 前 | 批次 A 后 |
+|---|---|---|
+| hub | 10~37 fail（波动） | **1002 pass / 0 fail / 6 skip**，连跑 2 次稳定 |
+| shared | — | 231 pass / 0 fail |
+| web（vitest） | — | 2307 pass / 0 fail（267 文件） |
+| cli（vitest） | **0 个测试能跑** | 2340 pass / 6 fail |
+| typecheck（cli+web+hub） | — | exit 0 |
+
+`fa8389ac` 是**承重的**：不带它时上游 globalSetup 在 Windows 上
+`spawn C:\Users\Administrator\AppData\Roaming\npm\bun ENOENT`（npm shim 没有
+`.exe`/`.cmd` 后缀），整个 CLI 套件一个测试都跑不起来。
+
+### cli 剩余 6 条失败：**全部是本机 Windows 环境产物，不是 converge 回归**
+
+判据（不是推测）：
+
+1. **4/6 在 fork 从未有过的文件里** —— `src/agy/utils/agyHookCarrier.test.ts`（3 条，
+   Antigravity 是 0.27 才引入）与 `src/modules/common/shellQuote.test.ts`（1 条），
+   两者在 `pre-converge-0.27` 上都不存在。
+2. **根因同一个**：本机用户名 `Administrator` 超过 8 字符，`os.tmpdir()` /
+   `HAPI_HOME` 返回 8.3 短名 `C:\Users\ADMINI~1\...`，被测代码解析成长名
+   `C:\Users\Administrator\...`，断言逐条对不上。剩下那条 `shellQuote` 是
+   `cmd /c` 下带空格路径的引用问题。
+3. `src/runner/validateWorkspaceDirectory.test.ts` 与旧分支**字节相同**（0 diff），
+   失败同样是 `ADMINI~1` 短名断言。
+
+这批不在本轮修（是上游自己的测试在特定环境下的断言问题），转为继承验证义务。
+
+### 退出标准（原始）：
 
 | # | Dimension | Check | Command | Env | Expect |
 |---|-----------|-------|---------|-----|--------|
@@ -133,6 +166,8 @@ stop / 备份 / `mv` 换芯 / start。
 
 | 项 | 转给谁 | 怎么验 |
 |---|---|---|
+| `cli/src/runner/runner.integration.test.ts` | CI（Linux、干净环境） | 本机跑会挂死 75 分钟零输出并泄漏 6 个 bun 孤儿进程（§2.6 已记）；且本机同时有 13 条真实会话，环境是脏的，给不出可信结论。Release 流水线必须跑到它全绿 |
+| cli 那 6 条 Windows 短名/引用失败 | CI（Linux）+ 本机后续批次 | Linux 上无 8.3 短名问题，CI 应直接全绿；若要本机也绿，另开一批做路径断言归一（参照 fork 已有的 `76a99ac3` win 路径断言修法） |
 | Codex/ACP 用量数值正确性 | ECS 换芯后 | 跑一个真实 Codex 会话，对 `/usage` 与 Codex 自报 token。**本机无法验**：生产库 11 个 codex 会话全是导入历史，0 条真实用量帧 |
 | 18 条 resource_grants 迁移后可读 | ECS | peter 账号登录列会话，数量 = 迁移前基线 |
 | schema 16→20 在真实生产库上 | 换芯前 | 拿库副本干跑，不许直接升生产库 |
