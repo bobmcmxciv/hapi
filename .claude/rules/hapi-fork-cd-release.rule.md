@@ -1,60 +1,72 @@
-# hapi fork 的发布→部署编排：合并后先问 CD，再打 tag→等产物→开 IaC 任务
+# hapi fork 的发布→部署编排：合并后先问 CD，再构建→scp 推送→ECS 换芯
 
-本仓库是 `tiann/hapi` 的 rebase-style fork（origin=`mouriya-s-lab/hapi`，upstream=`tiann/hapi`）。homelab 上的 hapi 部署跑的是**钉死版本的预编译 fork 二进制**，不是 main HEAD。所以**代码合并进 main ≠ 已上线**——中间隔着「发 Release → 改 compose pin → IaC apply」三道关。
+本仓库是 `mouriya-s-lab/hapi` 的 fork（**origin=`bobmcmxciv/hapi`**，upstream=`mouriya-s-lab/hapi`，tiann=`tiann/hapi` 原始上游）。生产部署是 **operator 自己的阿里云 ECS**（`bob.18852271093.top` = 101.133.153.229，systemd 单元 `hapi-hub`），跑的是**钉死版本的预编译 fork 二进制**，不是分支 HEAD。所以**代码进分支/main ≠ 已上线**——中间隔着「构建 → 传输 → 换芯」三道关。
 
-这条 rule 只编排本仓库特有的「代码已在 main → 怎么把它送上 homelab 部署」这一段出口流程，并在每一步**路由到既有 skill/rule**。它**不复制**那些 skill/rule 的内容（见末尾「与其他规则/skill 的边界」）。
+> ⚠️ 历史坑：本文件的旧版继承自 mouriya-s-lab 的仓库，描述的是**他们的** homelab 部署宇宙（`hapi.237575.xyz`、`mouriya-s-lab/homelab-tf` IaC、launchd `xyz.237575.hapi-runner-macos`）。那些坐标与本 fork 无关；`hapi.237575.xyz` 解析到 Cloudflare，是 mouriya 的入口。**本 fork 的主入口只有 `bob.18852271093.top`**。已因此误标过一次部署报告（2026-08-10）。
 
 ## 触发时机
 
-当本仓库有 PR 合并进 `main`、或 `main` 上积累了**尚未部署**的 runtime 改动时，适用本 rule。
+分支上积累了**尚未部署**的 runtime 改动（会进编译二进制/影响 hub·cli·web·shared 运行行为）时适用。只动 `.github/`、docs、README 等不进二进制的改动不触发。
 
-- **runtime 改动** = 会进编译二进制 / 影响 hub·cli·web·shared 运行行为的改动 → 适用。
-- **非 runtime 改动** = 只动 `.github/`、`docs/`、`website/`、README 等不进二进制的东西 → 不触发 CD 询问，跳过本 rule。
+## 流程
 
-## 流程（每步只指方向，细节归既有 skill）
+### 1. 合并/积累后必须主动问一次「是否现在 CD」
 
-### 1. 合并后必须主动问一次「是否现在 CD」
+不要默认「已生效」。有 runtime 改动后主动问 operator 是否现在换芯到 `bob.18852271093.top`。这是少数值得问的决策（部署有 blast radius，时机由 operator 定）。
 
-PR 合并不要默认「已生效」，也不要默认「自动部署」。有 runtime 改动落到 main 后，**主动问 operator**：这批改动是否现在部署到 hapi 主入口（`hapi.237575.xyz` / homelab `hapi` 栈）。
+### 2. 要 CD → vircs 本机构建（ECS 拉不了任何外网产物）
 
-- 这是少数**值得问**的决策（部署有 blast radius，时机由 operator 定），不违反 `no-pointless-questions`。
-- 问法走正文自然语言（`no-ask-user-question-tool`）。
+ECS 出网锁死（GitHub/npm 全 `http=000`），**Release 产物下载在 ECS 上不可用**，唯一进货通道是 scp 推送（入站 22）。所以构建在 vircs 做：
 
-### 2. 要 CD → 打 tag 触发 Release（不手 build）
+```bash
+bun run build:web && (cd hub && bun run generate:embedded-web-assets)   # 先生成真 web 资产（防 stub 覆写）
+cd cli && bun run scripts/build-executable.ts --target bun-linux-x64-baseline --with-web-assets
+```
 
-- 版本约定：`vX.Y.Z-fork.N`。`X.Y.Z` = 当前 `cli/package.json` 的 `version`；`N` = 该 base 上的第几次 fork 发布，从 `0` 起递增。
-- tag 打在要发布的 `main` commit 上，push 到 `origin` 触发 `.github/workflows/release.yml`（`on: push: tags: v*`，跑 `bun run build:single-exe:all`）。
-- 账号保持 RiriAgent（`gh-account-routing`）。
+构建后**必须**：查 exit code + 比对新旧 sha256 确认真变了（失败时 dist-exe 里留着旧货）。逐条坑见 `CLAUDE.md` §2.6。
 
-### 3. 等编译产物 + 取 pin（产物没出/CI 没绿前不许进下一步）
+### 3. 传输：gzip → split 12m → scp（并行 ≤3）→ 逐块 md5 判收
 
-- 等 Release CI 全绿后，从该 Release 取 homelab 部署需要的 `hapi-linux-x64-baseline.tar.gz`：**下载 URL** + 它在 `checksums.txt` 里的 **sha256**。
-- 这两个值是下一步 IaC issue 的 compose pin。**没有产物就去开 iac:deploy = 开了张空头支票**，部署 agent 拿不到可钉的 URL/sha256。
+判收**只认逐块 md5，不看大小**。比对前两边都归一化（`md5sum` 的 `*` 前缀与空格数不一致都踩过）：`md5sum part-* | awk '{gsub(/\*/,"",$NF); print $1, $NF}'`。长传输必须 `run_in_background`，串联命令显式捕获每段 `$?`。
 
-### 4. 用既有 skill 开 IaC 部署任务
+### 4. 换芯（若 schema 变更，先拿生产库副本干跑迁移）
 
-- 用 `iac-auto-deploy-issue` skill，在 **`mouriya-s-lab/homelab-tf`** 开 `iac:deploy` issue（注意：实际 owner 是 `mouriya-s-lab`，不是部分 skill/inventory 里写的 `Mouriya-Emma`）。
-- 把第 3 步的 URL + sha256 写成执行契约里的 compose pin。默认部署形态 = **版本更新 / 原地换芯**：改 `komodo/roles/komodo-stacks/templates/hapi/compose.yaml.j2` 的下载 pin，**保持卷 / 端口 / connector·token / tunnel / DNS 不变**。
-- hapi 是 tunnel·session 单例：issue 的验收标准里**必须**含 stop-before-start、以及切换前备份 `hapi-data` 的检查项（怎么写归 iac-auto-deploy-issue skill，这里只提醒别漏）。
+- schema 有变：`.backup` 出副本 → `HAPI_HOME=<副本目录> HAPI_LISTEN_PORT=<空闲端口> <新二进制> hub` 干跑，确认 `user_version` 迁移成功再动真库。**迁移方向不可逆**——旧二进制拒启新 schema，回滚必须连库备份一起还原。
+- 正式换芯（stop→start 窗口实测约 6 秒）：
 
-### 5. 收尾（不属于 IaC issue 的部分）
+```bash
+sqlite3 /root/.hapi/hapi.db ".backup /root/.hapi/hapi.db.pre-<tag>-<ts>"
+sqlite3 /root/.hapi/multi-user-gateway.sqlite ".backup /root/.hapi/multi-user-gateway.sqlite.pre-<tag>-<ts>"
+systemctl stop hapi-hub
+mv <旧二进制> /root/hapi.bin.pre-<tag>-<ts>          # mv 换芯，覆写会 Text file busy
+mv <新二进制> $BIN && chmod 755 $BIN
+systemctl start hapi-hub
+```
 
-- 若这次 CD 改变了 hapi 主入口背后的 hub，本机 Mac runner（launchd `xyz.237575.hapi-runner-macos`）可能要重启以重连新 hub —— 这步**在本机做**，不写进 homelab-tf issue。是否需要由「这次部署是否动了主入口 hub」决定。
+真换芯目标（**不是** `/usr/bin/hapi` 那个软链）：
+`/usr/lib/node_modules/@twsxtd/hapi/node_modules/@twsxtd/hapi-linux-x64/bin/hapi`
+
+### 5. 换芯后验证（runtime-verification-required 的最小集）
+
+- `systemctl is-active` + journal 无 schema/fatal；`PRAGMA user_version` 符合预期
+- `POST /api/auth` 换 JWT 读 `/api/machines` **内存态**（DB 的 `machines.active` 是旧值不可信）；runner 靠各机看门狗 ≤5 分钟自愈回连（换芯前先比对双边 `PROTOCOL_VERSION`，不同则要全 fleet 升级，爆炸半径完全不同）
+- `GET /api/usage/summary` 返回 fork 形状（含 `hosts`）；公网 `https://bob.18852271093.top` 200
+- 更新 `/root/.hapi/DEPLOYED.txt`（tag/commit/sha256/回滚坐标）
+
+### 6. 发布记档：tag `vX.Y.Z-fork.N` 单推 origin
+
+`X.Y.Z` = `cli/package.json` 版本，`N` 递增。**单推该 tag**（`git push origin <tag>`）——`--tags` 多 tag 同推会漏发 tag 事件，Release workflow 不触发（2026-08-10 踩过）。Release 产物（6 平台 + checksums）用于追溯与将来他处部署，**不是 ECS 的进货来源**。
 
 ## 本规则禁止
 
-- 把「PR 合并了」当成「已上线」而不问 CD（hapi 部署钉死在预编译二进制版本上，main 合并不会自动生效）。
-- 跳过 Release、手 build 二进制塞给部署。
-- 在产物未发布 / CI 未绿时就去开 `iac:deploy` issue（无可钉 pin）。
-- 把 IaC issue 开到 `Mouriya-Emma/homelab-tf`（旧 owner）。
+- 把「代码推上分支」当成「已上线」而不问 CD
+- 在 ECS 上尝试从 GitHub/npm 拉产物（出网锁死，白等）
+- 只看传输字节数/大小判传完；后台串联命令不捕获分段退出码
+- schema 变更不经副本干跑直接升生产库
+- 覆写运行中的二进制（必须 mv）
 
-## 与其他规则/skill 的边界（明确不重复谁）
+## 与其他规则/文档的边界
 
-- `fork-upstream-sync`：管**入口**（从 upstream 拉代码进 fork）；本 rule 管**出口**（把 fork 代码送上部署）。互补，不重叠。
-- `iac-auto-deploy-issue` / `iac-issue-routing` / `iac-projects` / `internal-services`：issue 怎么写、IaC 边界、owning repo、服务清单归它们；本 rule 只负责「**什么时候、带着什么产物**去触发它们」。
-- `runtime-verification-required`：部署完成的验证标准归它和 IaC issue 的验收表；本 rule 不另立验证标准。
-- `github-issue-pr-routing` / `writing-pr` / `writing-issue`：PR/issue 语义与正文规范归它们。
-
-## 为什么单独存在
-
-本仓库的特殊性是「**合并 ≠ 上线**」，且发布物是钉死的预编译 fork 二进制。没有这条编排，最常见两种错：(a) 合并后以为生效了，实际 `hapi.237575.xyz` 还跑旧版本；(b) 直接去开 `iac:deploy` 却没有对应 Release 产物，部署 agent 没有可钉的 URL/sha256。这条 rule 把「**先问是否 CD → 出产物 → 再开 IaC 任务**」的顺序钉死，并把每一步引到已存在的 skill/rule，而不重写它们。
+- 部署链路的**逐条坑**归 `CLAUDE.md` §2.6（本文件只编排顺序）
+- 验证标准归 `runtime-verification-required` 与上面第 5 节最小集
+- **mouriya 的 homelab/IaC 流程**（compose pin、`iac:deploy` issue）只在给 mouriya-s-lab 送 PR 且他们要部署时才相关——那是他们的宇宙，见其仓库内同名 rule 的原版
