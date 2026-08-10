@@ -93,7 +93,9 @@ describe('aggregateUsageForSessions', () => {
         expect(rows[0]).toMatchObject({
             model: 'gpt-5.6-sol',
             requestCount: 2,            // 仍按 assistant 的 API 轮次计数
-            inputTokens: 49929,         // 末帧即会话总量，不是 24958+49929
+            // 末帧即会话总量（不是 24958+49929），再扣掉含在里面的缓存读：
+            // 中转上游的 inputTokens 是整段 prompt，49929 - 22272 = 27657 才是未命中量
+            inputTokens: 27657,
             outputTokens: 10,
             cacheReadInputTokens: 22272
         })
@@ -202,7 +204,7 @@ describe('aggregateUsageForSessions', () => {
         expect(rows[0]).toMatchObject({
             model: 'gpt-5.6-sol',
             requestCount: 2,
-            inputTokens: 17753347,
+            inputTokens: 1892611,       // 17753347 - 15860736，缓存读不再被计两遍
             outputTokens: 26271,
             cacheReadInputTokens: 15860736
         })
@@ -365,7 +367,7 @@ describe('aggregateUsageForSessions', () => {
         expect(rows[0]).toMatchObject({
             model: 'gpt-5.6-sol',
             requestCount: 1,
-            inputTokens: 193152,
+            inputTokens: 97664,         // 193152 - 95488
             outputTokens: 2269,
             cacheReadInputTokens: 95488
         })
@@ -403,6 +405,126 @@ describe('aggregateUsageForSessions', () => {
         const rows = store.messages.aggregateUsageForSessions([session.id])
         expect(rows).toHaveLength(1)
         expect(rows[0]).toMatchObject({ model: 'claude-opus-5', requestCount: 0, inputTokens: 4242 })
+    })
+
+    // —— input 含缓存读的中转上游：缓存读不能被计两遍 ——
+    // 生产库 2026-08-10 实证：cx2cc 会话 a00487b4 的帧差值合计 input=76,788,086，
+    // 而同会话 assistant 行 input+cacheRead=76,784,812（差 0.004%）——帧的 input
+    // 就是「未命中 + 命中」的整段 prompt。不扣的话命中率被摊薄近一半（47% vs 87%）。
+    describe('inclusive-input 归一', () => {
+        it('帧的 input 含缓存读时扣掉，命中率不再被摊薄', () => {
+            const store = makeStore()
+            const session = makeSession(store, 'inclusive-frame')
+            store.messages.addMessage(session.id, assistantEnvelope({
+                messageId: 'msg_i1', model: 'gpt-5.6-sol', timestamp: '2026-08-09T10:00:00.000Z'
+            }))
+            store.messages.addMessage(session.id, usageReportEnvelope({
+                timestamp: '2026-08-09T10:00:30.000Z',
+                modelUsage: {
+                    'gpt-5.6-sol': {
+                        inputTokens: 56277494, outputTokens: 430199,
+                        cacheReadInputTokens: 50156350, cacheCreationInputTokens: 0
+                    }
+                }
+            }))
+
+            const [row] = store.messages.aggregateUsageForSessions([session.id])
+            expect(row).toMatchObject({
+                model: 'gpt-5.6-sol',
+                inputTokens: 56277494 - 50156350,
+                cacheReadInputTokens: 50156350,
+                cacheCreationInputTokens: 0
+            })
+            const hit = row.cacheReadInputTokens
+                / (row.inputTokens + row.cacheReadInputTokens + row.cacheCreationInputTokens)
+            expect(hit).toBeGreaterThan(0.88)
+        })
+
+        it('直连 Anthropic 一位不动：cacheCreation 非 0 就不是中转口径', () => {
+            const store = makeStore()
+            const session = makeSession(store, 'direct-anthropic')
+            // vircs 直连实测形态：input 只是未缓存的尾巴，cacheCreation 恒有值
+            store.messages.addMessage(session.id, assistantEnvelope({
+                messageId: 'msg_d1', model: 'claude-opus-5', timestamp: '2026-08-09T11:00:00.000Z',
+                usage: { input: 68, output: 13159, cacheRead: 20750361, cacheCreation: 614500 }
+            }))
+
+            const [row] = store.messages.aggregateUsageForSessions([session.id])
+            expect(row).toMatchObject({
+                model: 'claude-opus-5',
+                inputTokens: 68,
+                cacheReadInputTokens: 20750361,
+                cacheCreationInputTokens: 614500
+            })
+        })
+
+        it('cacheRead > input 时不扣：那是 Anthropic 的「未缓存尾巴」口径，减了会算成负数', () => {
+            const store = makeStore()
+            const session = makeSession(store, 'read-exceeds-input')
+            // cacheCreation 为 0 但 cacheRead 远大于 input——续用上一轮缓存、本轮没写入
+            store.messages.addMessage(session.id, assistantEnvelope({
+                messageId: 'msg_r1', model: 'claude-sonnet-5', timestamp: '2026-08-09T12:00:00.000Z',
+                usage: { input: 194, output: 59777, cacheRead: 61831508 }
+            }))
+
+            const [row] = store.messages.aggregateUsageForSessions([session.id])
+            expect(row).toMatchObject({ inputTokens: 194, cacheReadInputTokens: 61831508 })
+        })
+
+        it('按桶判而非按行判：同一会话里有过缓存写入，就整桶按直连处理', () => {
+            const store = makeStore()
+            const session = makeSession(store, 'bucket-level')
+            // 第一轮写缓存（cacheRead=0），第二轮只读不写且 input 恰好大于 cacheRead。
+            // 逐行判会把第二轮误判成中转口径并扣掉 3000；按桶判则因整桶 cacheCreation
+            // 非 0 而放行。
+            store.messages.addMessage(session.id, assistantEnvelope({
+                messageId: 'msg_b1', model: 'claude-opus-5', timestamp: '2026-08-09T13:00:00.000Z',
+                usage: { input: 500, output: 10, cacheCreation: 40000 }
+            }))
+            store.messages.addMessage(session.id, assistantEnvelope({
+                messageId: 'msg_b2', model: 'claude-opus-5', timestamp: '2026-08-09T13:01:00.000Z',
+                usage: { input: 9000, output: 20, cacheRead: 3000 }
+            }))
+
+            const [row] = store.messages.aggregateUsageForSessions([session.id])
+            expect(row).toMatchObject({
+                inputTokens: 9500,
+                cacheReadInputTokens: 3000,
+                cacheCreationInputTokens: 40000
+            })
+        })
+
+        it('token_count 那支已逐帧扣过，不会被再扣一遍', () => {
+            const store = makeStore()
+            const session = store.sessions.getOrCreateSession(
+                'agent-usage-no-double',
+                { path: '/tmp/agent-usage-no-double', flavor: 'kimi' },
+                null,
+                'default'
+            )
+            // ACP 后端：input 含缓存读（12000 里有 4000 是命中），命中率低于 50%，
+            // 所以扣完之后 input(8000) > cacheRead(4000) 且 cacheCreation=0——
+            // 正是 normalizeInclusiveInput 的判据形状，必须靠 agentUsageBuckets 挡住。
+            store.messages.addMessage(session.id, {
+                role: 'agent',
+                content: {
+                    type: 'output',
+                    data: {
+                        type: 'token_count',
+                        timestamp: '2026-08-09T14:00:00.000Z',
+                        model: 'kimi-for-coding',
+                        info: { total: { inputTokens: 12000, outputTokens: 300, cachedInputTokens: 4000 } }
+                    }
+                }
+            })
+
+            const [row] = store.messages.aggregateUsageForSessions([session.id])
+            expect(row).toMatchObject({
+                model: 'kimi-for-coding',
+                inputTokens: 8000,          // 12000 - 4000，只扣一次
+                cacheReadInputTokens: 4000
+            })
+        })
     })
 
     it('token 全为 0 的 usage_report-only 模型不产出幽灵行', () => {

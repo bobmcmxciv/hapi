@@ -435,6 +435,9 @@ export function aggregateUsageForSessions(
     const prevAgentTotal = new Map<string, FrameNums>()
     /** 同一轮累计快照的指纹，重复投递（导入重放）只计一次。 */
     const seenAgentTurn = new Set<string>()
+    /** `sessionId::model`：这一桶的 input 已经在 agentUsage 分支逐帧扣过缓存读，
+     *  不能再被 normalizeInclusiveInput 扣第二遍。 */
+    const agentUsageBuckets = new Set<string>()
     const bucket = <T>(store: Map<string, Map<string, T>>, sessionId: string): Map<string, T> => {
         let inner = store.get(sessionId)
         if (!inner) { inner = new Map<string, T>(); store.set(sessionId, inner) }
@@ -525,6 +528,7 @@ export function aggregateUsageForSessions(
                 agg.cacheCreationInputTokens += nums.cacheCreationInputTokens
                 agg.cacheReadInputTokens += nums.cacheReadInputTokens
                 perSession.set(model, agg)
+                agentUsageBuckets.add(`${sessionId}::${model}`)
                 continue
             }
 
@@ -558,6 +562,19 @@ export function aggregateUsageForSessions(
         }
     }
 
+    // —— 结算前把两侧统一到「input 不含缓存读」的口径 ——
+    // assistant 行与 usage_report 帧都可能来自 OpenAI 兼容中转，那边的 input 是**含**
+    // 缓存读的整段 prompt。逐桶归一（而不是逐行）：判据只有在整段累计上才可靠。
+    for (const [sessionId, perModel] of assistantBySession) {
+        for (const [model, agg] of perModel) {
+            if (agentUsageBuckets.has(`${sessionId}::${model}`)) continue
+            normalizeInclusiveInput(agg)
+        }
+    }
+    for (const perModel of frameBySession.values()) {
+        for (const agg of perModel.values()) normalizeInclusiveInput(agg)
+    }
+
     const settled: UsageAggregateRow[][] = []
     for (const sessionId of new Set([...assistantBySession.keys(), ...frameBySession.keys()])) {
         settled.push(settleSessionUsage(
@@ -583,6 +600,39 @@ function canonicalModelName(model: string): string {
 }
 
 type UsageNums = Omit<UsageAggregateRow, 'model' | 'requestCount'>
+
+/** 就地把「input 含缓存读」的一桶用量改成「input 不含缓存读」。
+ *
+ *  **本页把 input / output / cacheCreation / cacheRead 当四段并列相加**，所以任何
+ *  把缓存读算进 input 的来源都会让缓存读被计两遍：总量虚高，命中率被摊薄近一半。
+ *  `token_count` 那支早就在逐帧扣（Codex/Kimi 的 input 恒含缓存读），但 Claude 形态的
+ *  两支——`assistant` 行与 `usage_report` 帧——一直没扣，而它们在**经 OpenAI 兼容中转
+ *  的会话里同样是含缓存读的**。
+ *
+ *  生产库实证（2026-08-10，`hapi.db.pre-v0.27.1-fork.0`）：
+ *  - 一条 cx2cc 会话（`a00487b4`，gpt-5.6-sol）的 `usage_report` 帧差值合计
+ *    input=76,788,086，而同会话 assistant 行的 input+cacheRead=76,784,812
+ *    ——两者相差 0.004%，即帧的 input **就是**「未命中 + 命中」的整段 prompt。
+ *  - 对照组 vircs 直连 Anthropic：帧是 `input=194, cacheRead=61,831,508,
+ *    cacheCreation=680,785`，input 只是未缓存的尾巴，两侧逐会话 1:1 吻合。
+ *
+ *  判据要求三条同时成立，缺一不扣：
+ *  1. `cacheRead > 0` —— 没有缓存读就没有可能被重复计的量；
+ *  2. `cacheCreation === 0` —— Anthropic 只要读过缓存，同一累计窗口里必然也写过缓存
+ *     （Claude Code 每轮都重设 cache_control 断点），中转则从不报写入；
+ *  3. `cacheRead <= input` —— 缓存读是 input 的子集才谈得上「含在里面」。直连的
+ *     input 是未缓存尾巴，几乎恒小于缓存读，所以这条把直连挡在外面。
+ *
+ *  **按桶判而不是按行判**：判据依赖「整段累计里出现过缓存写入」，逐行看会把直连
+ *  会话中「读了缓存但本轮没写」的正常轮误判成中转。全库实测按桶判时直连各行
+ *  （claude-sonnet-5 / claude-opus-5）数字一位不变。 */
+function normalizeInclusiveInput(nums: UsageNums): void {
+    if (nums.cacheReadInputTokens > 0
+        && nums.cacheCreationInputTokens === 0
+        && nums.cacheReadInputTokens <= nums.inputTokens) {
+        nums.inputTokens -= nums.cacheReadInputTokens
+    }
+}
 
 const usageTotal = (n: UsageNums): number =>
     n.inputTokens + n.outputTokens + n.cacheCreationInputTokens + n.cacheReadInputTokens
