@@ -1261,4 +1261,7 @@ export default {
   'usage.table.model': 'Model',
   'usage.table.requests': 'Requests',
   'usage.table.total': 'Total',
+  'usage.table.hitRate': 'Hit rate',
+  'usage.cacheHitRate': 'Cache hit rate',
+  'usage.cacheHitRateHint': 'Cache read ÷ total input (input + cache creation + cache read)',
 } as const

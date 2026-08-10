@@ -1260,4 +1260,7 @@ export default {
   'usage.table.model': '模型',
   'usage.table.requests': '请求数',
   'usage.table.total': '合计',
+  'usage.table.hitRate': '命中率',
+  'usage.cacheHitRate': '缓存命中率',
+  'usage.cacheHitRateHint': '缓存读取 ÷ 总输入（输入 + 缓存写入 + 缓存读取）',
 } as const

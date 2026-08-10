@@ -2,7 +2,7 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { I18nProvider } from '@/lib/i18n-context'
-import UsagePage, { formatTokens, localDayEndExclusiveIso, localDayStartIso } from './UsagePage'
+import UsagePage, { cacheHitRate, formatHitRate, formatTokens, localDayEndExclusiveIso, localDayStartIso } from './UsagePage'
 
 vi.mock('@/lib/app-context', () => ({ useAppContext: () => ({ baseUrl: 'http://hub', token: 'jwt', user: { id: 1 } }) }))
 vi.mock('@tanstack/react-router', () => ({ useNavigate: () => vi.fn() }))
@@ -76,6 +76,21 @@ describe('本地日期换算', () => {
     it('非法输入返回 null', () => {
         expect(localDayStartIso('')).toBeNull()
         expect(localDayStartIso('not-a-day')).toBeNull()
+    })
+})
+
+describe('cacheHitRate', () => {
+    it('分母是总输入，不含 output', () => {
+        // 1_500_000 / (1000 + 500 + 1_500_000)——把 output 算进分母会得到 99.77%
+        expect(formatHitRate(cacheHitRate(summaryBody.totals))).toBe('99.9%')
+    })
+
+    it('没有输入侧数据时不画百分比', () => {
+        expect(cacheHitRate({
+            requestCount: 3, inputTokens: 0, outputTokens: 900,
+            cacheCreationInputTokens: 0, cacheReadInputTokens: 0
+        })).toBeNull()
+        expect(formatHitRate(null)).toBe('—')
     })
 })
 

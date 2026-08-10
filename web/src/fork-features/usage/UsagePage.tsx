@@ -69,6 +69,21 @@ function modelTotal(m: Omit<UsageModelSummary, 'model'>): number {
     return m.inputTokens + m.outputTokens + m.cacheCreationInputTokens + m.cacheReadInputTokens
 }
 
+/** 缓存命中率 = 缓存读取 ÷ 总输入。分母**不含 output**：命中率讲的是「送进去的
+ *  prompt 有多少是从缓存里拿的」，把生成出来的 token 塞进分母会无谓地压低它。
+ *
+ *  这三段是不重叠的——聚合端 `normalizeInclusiveInput` 已经把经 OpenAI 兼容中转的
+ *  `input`（那边的 input 是含缓存读的整段 prompt）扣成了未命中量，所以这里直接相加
+ *  就是真实的总输入。返回 null 表示这一行没有输入侧数据，不画百分比。 */
+export function cacheHitRate(m: Omit<UsageModelSummary, 'model'>): number | null {
+    const promptTokens = m.inputTokens + m.cacheCreationInputTokens + m.cacheReadInputTokens
+    return promptTokens > 0 ? m.cacheReadInputTokens / promptTokens : null
+}
+
+export function formatHitRate(rate: number | null): string {
+    return rate === null ? '—' : `${(rate * 100).toFixed(1)}%`
+}
+
 // 固定色板，和现有 UI 对齐不引入图表库，只用 CSS 横向堆叠条。
 const SEGMENT_COLORS = {
     input: '#60a5fa',
@@ -148,6 +163,7 @@ function ModelTable(props: { models: UsageModelSummary[] }) {
                         <th className="py-1.5 pr-3 text-right font-normal">{t('usage.legend.output')}</th>
                         <th className="py-1.5 pr-3 text-right font-normal">{t('usage.legend.cacheCreation')}</th>
                         <th className="py-1.5 pr-3 text-right font-normal">{t('usage.legend.cacheRead')}</th>
+                        <th className="py-1.5 pr-3 text-right font-normal">{t('usage.table.hitRate')}</th>
                         <th className="py-1.5 text-right font-normal">{t('usage.table.total')}</th>
                     </tr>
                 </thead>
@@ -160,6 +176,7 @@ function ModelTable(props: { models: UsageModelSummary[] }) {
                             <td className="py-1.5 pr-3 text-right">{formatTokens(m.outputTokens)}</td>
                             <td className="py-1.5 pr-3 text-right">{formatTokens(m.cacheCreationInputTokens)}</td>
                             <td className="py-1.5 pr-3 text-right">{formatTokens(m.cacheReadInputTokens)}</td>
+                            <td className="py-1.5 pr-3 text-right tabular-nums">{formatHitRate(cacheHitRate(m))}</td>
                             <td className="py-1.5 text-right font-medium">{formatTokens(modelTotal(m))}</td>
                         </tr>
                     ))}
@@ -340,6 +357,15 @@ export default function UsagePage() {
                                 </CardDescription>
                             </CardHeader>
                             <CardContent className="space-y-4">
+                                <div
+                                    className="flex items-baseline gap-2 rounded-lg bg-[var(--app-subtle-bg)] px-3 py-2"
+                                    title={t('usage.cacheHitRateHint')}
+                                >
+                                    <span className="text-xs text-[var(--app-hint)]">{t('usage.cacheHitRate')}</span>
+                                    <span className="text-xl font-semibold tabular-nums">
+                                        {formatHitRate(cacheHitRate(totals))}
+                                    </span>
+                                </div>
                                 <Legend />
                                 {models.map((m) => (
                                     <UsageBar key={m.model} model={m} maxTotal={maxTotal} />
