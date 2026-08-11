@@ -8,6 +8,16 @@ import { HoverTooltip } from '@/components/HoverTooltip'
 import { CheckIcon } from '@/components/icons'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Button } from '@/components/ui/button'
+import {
+    MachineOsIcon,
+    MachineOwnerHeading,
+    groupMachinesByOwner,
+    machineChipContentClass,
+    machineChipGridClass,
+    machineChipIdleClass,
+    machineChipSelectedClass,
+    machineChipShellClass
+} from '@/components/machinePresentation'
 import { cn } from '@/lib/utils'
 import { useTranslation } from '@/lib/use-translation'
 
@@ -28,85 +38,15 @@ export type MachineFilterItem = {
     canRename: boolean
 }
 
-const chipSelectedClass = 'border-[var(--app-link)] bg-[var(--app-subtle-bg)] text-[var(--app-link)] font-medium'
-const chipIdleClass = 'border-[var(--app-border)] text-[var(--app-hint)] hover:bg-[var(--app-subtle-bg)] hover:text-[var(--app-fg)]'
-// 对齐网格：auto-fill 定列宽下限，窄侧栏两列、宽屏三列上下——各要素纵向对齐，
-// 又不像固定列数那样在宽屏拉出大空隙。
-const chipGridClass = 'grid grid-cols-[repeat(auto-fill,minmax(9.5rem,1fr))] gap-1.5'
-const chipShellClass = 'h-7 min-w-0 rounded-lg border transition-colors'
-const chipContentClass = 'flex h-full w-full min-w-0 items-center gap-1.5 px-2 text-xs'
+// 图标 / 分组 / 网格类名已抽到 machinePresentation，供本条筛选条、用量页机器榜、
+// 新建会话机器选择器共用——同一批机器在三处曾长得完全不一样。
+const chipSelectedClass = machineChipSelectedClass
+const chipIdleClass = machineChipIdleClass
+const chipGridClass = machineChipGridClass
+const chipShellClass = machineChipShellClass
+const chipContentClass = machineChipContentClass
 
-/** 各归属人一节；不足两个归属人时不分组（单用户 hub 退化成原来的平铺）。 */
-export function groupMachinesByOwner(machines: MachineFilterItem[]): {
-    grouped: boolean
-    sections: { owner: string | null; machines: MachineFilterItem[] }[]
-} {
-    const owners = new Set<string>()
-    for (const machine of machines) {
-        if (machine.owner) owners.add(machine.owner)
-    }
-    if (owners.size < 2) {
-        return { grouped: false, sections: [{ owner: null, machines }] }
-    }
-    const byOwner = new Map<string | null, MachineFilterItem[]>()
-    for (const machine of machines) {
-        const list = byOwner.get(machine.owner)
-        if (list) list.push(machine)
-        else byOwner.set(machine.owner, [machine])
-    }
-    // 机器序已按活跃度排过：节序取各归属人首台机器的次序，无归属的挂尾。
-    const sections = [...byOwner.entries()].map(([owner, ms]) => ({ owner, machines: ms }))
-    sections.sort((a, b) => Number(a.owner === null) - Number(b.owner === null))
-    return { grouped: true, sections }
-}
-
-function AppleLogoIcon(props: { className?: string }) {
-    return (
-        <svg viewBox="0 0 24 24" fill="currentColor" className={props.className}>
-            <path d="M12.152 6.896c-.948 0-2.415-1.078-3.96-1.04-2.04.027-3.91 1.183-4.961 3.014-2.117 3.675-.546 9.103 1.519 12.09 1.013 1.454 2.208 3.09 3.792 3.031 1.52-.065 2.09-.987 3.935-.987 1.831 0 2.35.987 3.96.948 1.637-.026 2.676-1.48 3.676-2.948 1.156-1.688 1.636-3.325 1.662-3.415-.039-.013-3.182-1.221-3.22-4.857-.026-3.04 2.48-4.494 2.597-4.559-1.429-2.09-3.623-2.324-4.39-2.376-2-.156-3.675 1.09-4.61 1.09zM15.53 3.83c.843-1.012 1.4-2.427 1.245-3.83-1.207.052-2.662.805-3.532 1.818-.78.896-1.454 2.338-1.273 3.714 1.338.104 2.715-.688 3.56-1.702" />
-        </svg>
-    )
-}
-
-function WindowsLogoIcon(props: { className?: string }) {
-    return (
-        <svg viewBox="0 0 24 24" fill="currentColor" className={props.className}>
-            <path d="M0 3.449 9.75 2.1v9.451H0m10.949-9.602L24 0v11.4H10.949M0 12.6h9.75v9.451L0 20.699M10.949 12.6H24V24l-13.051-1.801" />
-        </svg>
-    )
-}
-
-function LinuxTerminalIcon(props: { className?: string }) {
-    return (
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={props.className}>
-            <rect x="3" y="4" width="18" height="16" rx="2" />
-            <path d="m7 9 3 3-3 3M13 15h4" />
-        </svg>
-    )
-}
-
-function UnknownMachineIcon(props: { className?: string }) {
-    return (
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={props.className}>
-            <rect x="3" y="4" width="18" height="12" rx="2" />
-            <path d="M8 20h8M12 16v4" />
-        </svg>
-    )
-}
-
-/** OS 图标：win32/darwin/linux 各一个剪影，未知平台给通用显示器。`data-os` 供测试定位。 */
-function MachineOsIcon(props: { platform: string | null }) {
-    const iconClass = 'h-3.5 w-3.5'
-    const icon = props.platform === 'darwin' ? <AppleLogoIcon className={iconClass} />
-        : props.platform === 'win32' ? <WindowsLogoIcon className={iconClass} />
-        : props.platform === 'linux' ? <LinuxTerminalIcon className={iconClass} />
-        : <UnknownMachineIcon className={iconClass} />
-    return (
-        <span aria-hidden="true" data-os={props.platform ?? 'unknown'} className="flex shrink-0 items-center opacity-60">
-            {icon}
-        </span>
-    )
-}
+export { groupMachinesByOwner }
 
 function FilterIcon(props: { className?: string }) {
     return (
@@ -352,9 +292,10 @@ export function MachineFilterBar(props: {
                     {renderGrid([], allChip)}
                     {sections.map((section) => (
                         <div key={section.owner ?? '__unknown__'}>
-                            <div data-testid="machine-owner-heading" className="px-0.5 pb-1 pt-0.5 text-[10px] font-medium uppercase tracking-wider text-[var(--app-hint)]">
-                                {section.owner ?? t('sessions.machineFilter.unknownOwner')}
-                            </div>
+                            <MachineOwnerHeading
+                                owner={section.owner}
+                                unknownLabel={t('sessions.machineFilter.unknownOwner')}
+                            />
                             {renderGrid(section.machines)}
                         </div>
                     ))}
