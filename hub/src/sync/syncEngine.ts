@@ -8,7 +8,7 @@
  */
 
 import { isKnownFlavor, type LocalResumeTarget, type ResumableSession, type SessionEndReason } from '@hapi/protocol'
-import type { CursorChatStoreStatus, CursorMigrateOutcome, CursorMigrateToAcpRequest, ImportableSessionProvider, ImportProviderSessionResponse, ListCcSwitchProvidersResponse, ListImportableSessionsResponse, MessageDeliveryMode, MessagesResponse, QueuedStateResponse, SlashCommandsResponse } from '@hapi/protocol/apiTypes'
+import type { CursorChatStoreStatus, CursorMigrateOutcome, CursorMigrateToAcpRequest, GeneratedBlobChunkRequest, ImportableSessionProvider, ImportProviderSessionResponse, ListCcSwitchProvidersResponse, ListImportableSessionsResponse, MessageDeliveryMode, MessagesResponse, QueuedStateResponse, SlashCommandsResponse } from '@hapi/protocol/apiTypes'
 import type { AgentFlavor, ClaudeLaunch, CodexCollaborationMode, CopilotAgentMode, DecryptedMessage, PermissionMode, Session, SyncEvent } from '@hapi/protocol/types'
 import { unwrapRoleWrappedRecordEnvelope } from '@hapi/protocol/messages'
 import type { Server } from 'socket.io'
@@ -30,6 +30,7 @@ import {
     type RpcCodexModel,
     type RpcCommandResponse,
     type RpcDeleteUploadResponse,
+    type RpcGeneratedBlobChunkResponse,
     type RpcGeneratedFileResponse,
     type RpcGeneratedImageResponse,
     type RpcListDirectoryResponse,
@@ -70,6 +71,7 @@ export type {
     RpcCodexModel,
     RpcCommandResponse,
     RpcDeleteUploadResponse,
+    RpcGeneratedBlobChunkResponse,
     RpcGeneratedFileResponse,
     RpcGeneratedImageResponse,
     RpcListDirectoryResponse,
@@ -3852,6 +3854,13 @@ async uploadScratchlistAttachment(
 
     async readGeneratedFile(sessionId: string, fileId: string): Promise<RpcGeneratedFileResponse> {
         return await this.rpcGateway.readGeneratedFile(sessionId, fileId)
+    }
+
+    async readGeneratedBlobChunk(
+        sessionId: string,
+        request: GeneratedBlobChunkRequest
+    ): Promise<RpcGeneratedBlobChunkResponse> {
+        return await this.rpcGateway.readGeneratedBlobChunk(sessionId, request)
     }
 
     async listDirectory(sessionId: string, path: string): Promise<RpcListDirectoryResponse> {

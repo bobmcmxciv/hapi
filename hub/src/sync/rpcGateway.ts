@@ -20,6 +20,8 @@ import type {
     DirectoryEntry,
     FileReadResponse,
     FileWriteResponse,
+    GeneratedBlobChunkRequest,
+    GeneratedBlobChunkResponse,
     GeneratedFileResponse,
     GeneratedImageResponse,
     CopilotModelsResponse,
@@ -54,6 +56,15 @@ import type { RpcRegistry } from '../socket/rpcRegistry'
 
 const DEFAULT_RPC_TIMEOUT_MS = 30_000
 const MODEL_LIST_RPC_TIMEOUT_MS = 120_000
+/**
+ * Budget for one blob read (a single chunk, or a whole blob on the legacy path).
+ *
+ * The default 30 s is what turned slow downloads into phantom 404s: 52 requests
+ * between 2026-08-01 and 08-12 died at exactly `30s`, and successful ones were
+ * already reaching 21–22 s. A chunk needs only ~35 KB/s to clear 90 s, and the
+ * legacy whole-blob fallback gets the same headroom instead of the old cliff.
+ */
+const GENERATED_BLOB_RPC_TIMEOUT_MS = 90_000
 const HISTORY_IMPORT_RPC_TIMEOUT_MS = 10 * 60_000
 
 /**
@@ -82,6 +93,7 @@ export type RpcReadFileResponse = FileReadResponse
 export type RpcWriteFileResponse = FileWriteResponse
 export type RpcGeneratedImageResponse = GeneratedImageResponse
 export type RpcGeneratedFileResponse = GeneratedFileResponse
+export type RpcGeneratedBlobChunkResponse = GeneratedBlobChunkResponse
 export type RpcUploadFileResponse = UploadFileResponse
 export type RpcDeleteUploadResponse = DeleteUploadResponse
 export type RpcDirectoryEntry = DirectoryEntry
@@ -354,11 +366,26 @@ export class RpcGateway {
     }
 
     async readGeneratedImage(sessionId: string, imageId: string): Promise<RpcGeneratedImageResponse> {
-        return await this.sessionRpc(sessionId, RPC_METHODS.ReadGeneratedImage, { id: imageId }) as RpcGeneratedImageResponse
+        return await this.sessionRpc(sessionId, RPC_METHODS.ReadGeneratedImage, { id: imageId }, GENERATED_BLOB_RPC_TIMEOUT_MS) as RpcGeneratedImageResponse
     }
 
     async readGeneratedFile(sessionId: string, fileId: string): Promise<RpcGeneratedFileResponse> {
-        return await this.sessionRpc(sessionId, RPC_METHODS.ReadGeneratedFile, { id: fileId }) as RpcGeneratedFileResponse
+        return await this.sessionRpc(sessionId, RPC_METHODS.ReadGeneratedFile, { id: fileId }, GENERATED_BLOB_RPC_TIMEOUT_MS) as RpcGeneratedFileResponse
+    }
+
+    /** One slice of a sent file or generated image. Throws `RpcTargetMissingError`
+     *  with `handler-not-registered` on CLIs predating the method — the caller
+     *  uses that to fall back to the whole-blob read. */
+    async readGeneratedBlobChunk(
+        sessionId: string,
+        request: GeneratedBlobChunkRequest
+    ): Promise<RpcGeneratedBlobChunkResponse> {
+        return await this.sessionRpc(
+            sessionId,
+            RPC_METHODS.ReadGeneratedBlobChunk,
+            request,
+            GENERATED_BLOB_RPC_TIMEOUT_MS
+        ) as RpcGeneratedBlobChunkResponse
     }
 
     async listDirectory(sessionId: string, path: string): Promise<RpcListDirectoryResponse> {

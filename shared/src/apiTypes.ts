@@ -655,6 +655,31 @@ export type GeneratedFileResponse = {
     error?: string
 }
 
+/** Which registry a chunked read addresses: sent files (disk snapshots) or
+ *  generated images/videos (in-memory buffers). */
+export type GeneratedBlobKind = 'file' | 'image'
+
+export type GeneratedBlobChunkRequest = {
+    kind: GeneratedBlobKind
+    id: string
+    offset: number
+    length: number
+}
+
+export type GeneratedBlobChunkResponse = {
+    success: boolean
+    /** base64 of **this slice only** — not the whole blob. */
+    content?: string
+    /** Byte offset the slice starts at, echoed so the hub can detect a stale reply. */
+    offset?: number
+    /** Total byte length of the whole blob, so the hub can size the response and
+     *  plan the remaining slices from the very first round-trip. */
+    size?: number
+    mimeType?: string
+    fileName?: string
+    error?: string
+}
+
 export type UploadFileResponse = {
     success: boolean
     path?: string

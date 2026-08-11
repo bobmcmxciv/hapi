@@ -1,5 +1,5 @@
 import { basename, extname, join } from 'path'
-import { copyFile, lstat, mkdir, open, rm } from 'fs/promises'
+import { copyFile, lstat, mkdir, open, readdir, readFile, rename, rm, writeFile } from 'fs/promises'
 import { rmSync } from 'node:fs'
 import { tmpdir } from 'os'
 import { MAX_SOCKET_RPC_BINARY_BYTES } from '@hapi/protocol/socketLimits'
@@ -22,10 +22,16 @@ const MAX_GENERATED_FILE_TOTAL_BYTES = 500 * 1024 * 1024
 const MAX_GENERATED_FILE_COUNT = 100
 
 const SENT_FILES_DIR_NAME = 'hapi-sent-files'
+// Bumped from the old per-PID layout: snapshots now live in one machine-wide
+// store keyed only by file id, so they outlive the process that sent them.
+const SENT_FILES_STORE_VERSION = 'store-v2'
+// Snapshots are reclaimed by age rather than at process exit. A week comfortably
+// covers "scroll back up and re-download what the agent sent me", which is the
+// case the old exit-time cleanup broke.
+const GENERATED_FILE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000
 
 const generatedFiles = new Map<string, GeneratedFileMetadata>()
 let generatedFileBytes = 0
-let cleanupRegistered = false
 
 const MIME_BY_EXTENSION: Record<string, string> = {
     '.pdf': 'application/pdf',
@@ -140,8 +146,118 @@ async function readFileHeader(path: string, size: number): Promise<Buffer> {
     }
 }
 
+/**
+ * One store per machine, **not per process**.
+ *
+ * The snapshot directory used to be `<tmp>/hapi-sent-files/<pid>` with an
+ * `exit` hook that deleted it. That made every previously sent file card 404
+ * the moment the session process went away — a CLI upgrade, a runner restart,
+ * or a crash silently invalidated the entire scrollback, even when the session
+ * itself was auto-resumed and looked alive. Keying by id alone lets the
+ * *replacement* process keep serving snapshots the *previous* one wrote.
+ */
 function getSentFilesDir(): string {
-    return join(tmpdir(), SENT_FILES_DIR_NAME, `${process.pid}`)
+    return join(tmpdir(), SENT_FILES_DIR_NAME, SENT_FILES_STORE_VERSION)
+}
+
+/** Snapshot ids reach the filesystem, so refuse anything that is not an opaque
+ *  token (uuids in practice) rather than trusting the caller. */
+function isSafeId(id: string): boolean {
+    return /^[A-Za-z0-9._-]{1,128}$/.test(id) && !id.includes('..')
+}
+
+function getSidecarPath(id: string): string {
+    return join(getSentFilesDir(), `${id}.meta.json`)
+}
+
+type PersistedMetadata = Omit<GeneratedFileMetadata, 'snapshotPath'> & { snapshotFileName: string }
+
+/** Write the sidecar via temp+rename so a concurrent reader never observes a
+ *  half-written record (several session processes share this directory). */
+async function writeSidecar(metadata: GeneratedFileMetadata): Promise<void> {
+    const persisted: PersistedMetadata = {
+        id: metadata.id,
+        fileName: metadata.fileName,
+        snapshotFileName: basename(metadata.snapshotPath),
+        mimeType: metadata.mimeType,
+        size: metadata.size,
+        createdAt: metadata.createdAt
+    }
+    const target = getSidecarPath(metadata.id)
+    const temp = `${target}.${process.pid}.tmp`
+    await writeFile(temp, JSON.stringify(persisted), 'utf8')
+    await rename(temp, target)
+}
+
+async function readSidecar(id: string): Promise<GeneratedFileMetadata | null> {
+    try {
+        const parsed = JSON.parse(await readFile(getSidecarPath(id), 'utf8')) as PersistedMetadata
+        if (!parsed || typeof parsed.snapshotFileName !== 'string' || typeof parsed.size !== 'number') {
+            return null
+        }
+        return {
+            id: parsed.id,
+            fileName: parsed.fileName,
+            snapshotPath: join(getSentFilesDir(), parsed.snapshotFileName),
+            mimeType: parsed.mimeType,
+            size: parsed.size,
+            createdAt: parsed.createdAt
+        }
+    } catch {
+        return null
+    }
+}
+
+async function removePersisted(metadata: GeneratedFileMetadata): Promise<void> {
+    await rm(metadata.snapshotPath, { force: true }).catch(() => {})
+    await rm(getSidecarPath(metadata.id), { force: true }).catch(() => {})
+}
+
+/**
+ * Reclaim the shared store: drop anything past the age limit, then trim oldest
+ * first until the count and byte caps hold. Runs after each registration rather
+ * than at exit, because exit-time cleanup is exactly what used to destroy
+ * still-referenced snapshots.
+ */
+async function pruneStore(): Promise<void> {
+    let entries: string[]
+    try {
+        entries = await readdir(getSentFilesDir())
+    } catch {
+        return
+    }
+
+    const records: GeneratedFileMetadata[] = []
+    for (const entry of entries) {
+        if (!entry.endsWith('.meta.json')) continue
+        const id = entry.slice(0, -'.meta.json'.length)
+        const metadata = await readSidecar(id)
+        if (metadata) records.push(metadata)
+    }
+
+    const now = Date.now()
+    const survivors: GeneratedFileMetadata[] = []
+    for (const record of records) {
+        if (now - record.createdAt > GENERATED_FILE_MAX_AGE_MS) {
+            await removePersisted(record)
+            generatedFiles.delete(record.id)
+        } else {
+            survivors.push(record)
+        }
+    }
+
+    survivors.sort((a, b) => a.createdAt - b.createdAt)
+    let totalBytes = survivors.reduce((sum, record) => sum + record.size, 0)
+    let index = 0
+    while (index < survivors.length
+        && (survivors.length - index > MAX_GENERATED_FILE_COUNT || totalBytes > MAX_GENERATED_FILE_TOTAL_BYTES)) {
+        const victim = survivors[index++]
+        totalBytes -= victim.size
+        await removePersisted(victim)
+        generatedFiles.delete(victim.id)
+    }
+
+    generatedFileBytes = totalBytes
 }
 
 function sanitizeFileName(fileName: string): string {
@@ -153,6 +269,8 @@ function sanitizeFileName(fileName: string): string {
     return sanitized || 'file'
 }
 
+/** Wipe the whole shared store. Deliberately **not** wired to process exit any
+ *  more — that hook is what used to invalidate every sent file on restart. */
 function cleanupSentFilesSync(): void {
     generatedFiles.clear()
     generatedFileBytes = 0
@@ -171,10 +289,8 @@ export async function registerGeneratedFile(args: { id: string; path: string; fi
     if (info.size > MAX_GENERATED_FILE_BYTES) {
         throw new Error(`File is too large to send (max ${MAX_GENERATED_FILE_BYTES} bytes)`)
     }
-
-    if (!cleanupRegistered) {
-        cleanupRegistered = true
-        process.once('exit', cleanupSentFilesSync)
+    if (!isSafeId(args.id)) {
+        throw new Error('Invalid generated file id')
     }
 
     const baseName = basename(args.path) || args.id
@@ -209,7 +325,10 @@ export async function registerGeneratedFile(args: { id: string; path: string; fi
         generatedFiles.set(args.id, metadata)
         generatedFileBytes += snapshotInfo.size
 
-        evictOldGeneratedFiles()
+        // Sidecar first, then prune: the record must be discoverable from disk
+        // before anything else in the store is reclaimed.
+        await writeSidecar(metadata)
+        await pruneStore()
 
         return metadata
     } catch (error) {
@@ -218,35 +337,82 @@ export async function registerGeneratedFile(args: { id: string; path: string; fi
     }
 }
 
-function evictOldGeneratedFiles(): void {
-    while (generatedFiles.size > MAX_GENERATED_FILE_COUNT || generatedFileBytes > MAX_GENERATED_FILE_TOTAL_BYTES) {
-        const oldestId = generatedFiles.keys().next().value
-        if (!oldestId) break
-        const oldest = generatedFiles.get(oldestId)
-        if (oldest) {
-            generatedFileBytes -= oldest.size
-            try {
-                rmSync(oldest.snapshotPath, { force: true })
-            } catch {
-                // best effort
-            }
-        }
-        generatedFiles.delete(oldestId)
-    }
-}
-
+/** Synchronous, in-memory-only lookup — the sending process's own view. */
 export function getGeneratedFile(id: string): GeneratedFileMetadata | null {
     return generatedFiles.get(id) ?? null
 }
 
-export async function unregisterGeneratedFile(id: string): Promise<void> {
-    const file = generatedFiles.get(id)
-    if (!file) return
-    generatedFiles.delete(id)
-    generatedFileBytes -= file.size
-    await rm(file.snapshotPath, { force: true })
+/**
+ * Resolve a snapshot from this process's memory **or** from the shared on-disk
+ * store. The disk path is what lets a restarted session keep serving files an
+ * earlier process sent; without it every card sent before the restart 404s.
+ */
+export async function loadGeneratedFile(id: string): Promise<GeneratedFileMetadata | null> {
+    const cached = generatedFiles.get(id)
+    if (cached) return cached
+    if (!isSafeId(id)) return null
+
+    const persisted = await readSidecar(id)
+    if (!persisted) return null
+    // The sidecar can outlive its snapshot (interrupted prune, tmp reaper).
+    // Verify the bytes are actually there before promising them to the hub.
+    try {
+        const info = await lstat(persisted.snapshotPath)
+        if (!info.isFile()) return null
+        if (info.size !== persisted.size) return null
+    } catch {
+        return null
+    }
+    generatedFiles.set(id, persisted)
+    return persisted
 }
 
+export async function unregisterGeneratedFile(id: string): Promise<void> {
+    const file = generatedFiles.get(id) ?? await readSidecar(id)
+    if (!file) return
+    if (generatedFiles.delete(id)) {
+        generatedFileBytes -= file.size
+    }
+    await removePersisted(file)
+}
+
+/**
+ * Read one slice of a snapshot. Chunking is what makes large transfers
+ * survivable: each slice gets its own RPC budget and can be retried on its own,
+ * instead of one 14 MB frame having to clear a 30 s deadline or be lost.
+ */
+export async function readGeneratedFileChunk(
+    id: string,
+    offset: number,
+    length: number
+): Promise<{ metadata: GeneratedFileMetadata; bytes: Buffer } | null> {
+    const metadata = await loadGeneratedFile(id)
+    if (!metadata) return null
+
+    const start = Math.max(0, Math.min(Math.floor(offset), metadata.size))
+    const count = Math.max(0, Math.min(Math.floor(length), metadata.size - start))
+    if (count === 0) {
+        return { metadata, bytes: Buffer.alloc(0) }
+    }
+
+    const handle = await open(metadata.snapshotPath, 'r')
+    try {
+        const buffer = Buffer.alloc(count)
+        const { bytesRead } = await handle.read(buffer, 0, count, start)
+        return { metadata, bytes: buffer.subarray(0, bytesRead) }
+    } finally {
+        await handle.close()
+    }
+}
+
+/** Test-only: drop both the in-memory registry and the on-disk store. */
 export function clearGeneratedFiles(): void {
     cleanupSentFilesSync()
+}
+
+/** Test-only: forget this process's cache while leaving the on-disk store
+ *  intact — i.e. exactly what a session process restart looks like. */
+export function __forgetGeneratedFilesInMemoryForTests(): void {
+    generatedFiles.clear()
+    generatedFileBytes = 0
 }

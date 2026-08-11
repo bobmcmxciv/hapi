@@ -19,6 +19,9 @@ export const RPC_METHODS = {
     ReadFile: 'readFile',
     ReadGeneratedImage: 'readGeneratedImage',
     ReadGeneratedFile: 'readGeneratedFile',
+    // Ranged counterpart of the two above. Hub prefers it and falls back to the
+    // whole-blob methods when a CLI predating it has not registered a handler.
+    ReadGeneratedBlobChunk: 'readGeneratedBlobChunk',
     WriteFile: 'writeFile',
     ListDirectory: 'listDirectory',
     StatFiles: 'statFiles',

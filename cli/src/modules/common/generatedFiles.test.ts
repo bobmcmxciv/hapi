@@ -5,7 +5,17 @@ import { join } from 'path'
 import { tmpdir } from 'os'
 import { RpcHandlerManager } from '../../api/rpc/RpcHandlerManager'
 import { registerFileHandlers } from './handlers/files'
-import { clearGeneratedFiles, detectFileMimeType, getGeneratedFile, MAX_GENERATED_FILE_BYTES, registerGeneratedFile, unregisterGeneratedFile } from './generatedFiles'
+import {
+    __forgetGeneratedFilesInMemoryForTests,
+    clearGeneratedFiles,
+    detectFileMimeType,
+    getGeneratedFile,
+    loadGeneratedFile,
+    MAX_GENERATED_FILE_BYTES,
+    readGeneratedFileChunk,
+    registerGeneratedFile,
+    unregisterGeneratedFile
+} from './generatedFiles'
 
 async function createTempDir(prefix: string): Promise<string> {
     const path = join(tmpdir(), `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`)
@@ -153,6 +163,99 @@ describe('generated files registry', () => {
 
         expect(getGeneratedFile('file-5')).toBeNull()
         expect(existsSync(file.snapshotPath)).toBe(false)
+    })
+
+    // The old store lived under `<tmp>/hapi-sent-files/<pid>` and was deleted by
+    // an `exit` hook, so every file card sent before a CLI upgrade / runner
+    // restart / crash answered 404 afterwards. These pin the replacement.
+    it('still resolves a snapshot after the sending process is gone', async () => {
+        const sourcePath = join(sourceDir, 'survives.txt')
+        await writeFile(sourcePath, 'still here')
+        await registerGeneratedFile({ id: 'file-restart', path: sourcePath })
+
+        __forgetGeneratedFilesInMemoryForTests()
+        expect(getGeneratedFile('file-restart')).toBeNull()
+
+        const reloaded = await loadGeneratedFile('file-restart')
+        expect(reloaded?.fileName).toBe('survives.txt')
+        expect(reloaded?.size).toBe(Buffer.byteLength('still here'))
+    })
+
+    it('serves a restarted-process snapshot over RPC instead of reporting it missing', async () => {
+        const sourcePath = join(sourceDir, 'after-restart.json')
+        await writeFile(sourcePath, '{"kept":true}')
+        await registerGeneratedFile({ id: 'file-restart-rpc', path: sourcePath })
+        __forgetGeneratedFilesInMemoryForTests()
+
+        const rpc = new RpcHandlerManager({ scopePrefix: 'session-test' })
+        registerFileHandlers(rpc, sourceDir)
+        const response = await rpc.handleRequest({
+            method: 'session-test:readGeneratedFile',
+            params: JSON.stringify({ id: 'file-restart-rpc' })
+        })
+        const parsed = JSON.parse(response) as { success: boolean; content?: string }
+
+        expect(parsed.success).toBe(true)
+        expect(Buffer.from(parsed.content ?? '', 'base64').toString('utf8')).toBe('{"kept":true}')
+    })
+
+    it('does not resolve a sidecar whose snapshot bytes went missing', async () => {
+        const sourcePath = join(sourceDir, 'orphan.txt')
+        await writeFile(sourcePath, 'gone soon')
+        const file = await registerGeneratedFile({ id: 'file-orphan', path: sourcePath })
+
+        __forgetGeneratedFilesInMemoryForTests()
+        await rm(file.snapshotPath, { force: true })
+
+        expect(await loadGeneratedFile('file-orphan')).toBeNull()
+    })
+
+    it('reads back arbitrary byte ranges so a transfer can be chunked and resumed', async () => {
+        const payload = Buffer.from('0123456789abcdef')
+        const sourcePath = join(sourceDir, 'ranged.bin')
+        await writeFile(sourcePath, payload)
+        await registerGeneratedFile({ id: 'file-range', path: sourcePath })
+
+        const head = await readGeneratedFileChunk('file-range', 0, 4)
+        const middle = await readGeneratedFileChunk('file-range', 4, 6)
+        const tail = await readGeneratedFileChunk('file-range', 10, 999)
+
+        expect(head?.bytes.toString()).toBe('0123')
+        expect(middle?.bytes.toString()).toBe('456789')
+        expect(tail?.bytes.toString()).toBe('abcdef')
+        // Total size travels with every slice so the hub can plan the transfer
+        // from the very first round-trip.
+        expect(head?.metadata.size).toBe(payload.length)
+        // Reading past the end yields nothing rather than throwing.
+        expect((await readGeneratedFileChunk('file-range', payload.length, 16))?.bytes.length).toBe(0)
+        expect(await readGeneratedFileChunk('missing-id', 0, 16)).toBeNull()
+    })
+
+    it('serves byte ranges over the chunk RPC for both files and unknown ids', async () => {
+        const sourcePath = join(sourceDir, 'chunked.txt')
+        await writeFile(sourcePath, 'chunk me please')
+        await registerGeneratedFile({ id: 'file-chunk-rpc', path: sourcePath })
+
+        const rpc = new RpcHandlerManager({ scopePrefix: 'session-test' })
+        registerFileHandlers(rpc, sourceDir)
+
+        const ok = JSON.parse(await rpc.handleRequest({
+            method: 'session-test:readGeneratedBlobChunk',
+            params: JSON.stringify({ kind: 'file', id: 'file-chunk-rpc', offset: 6, length: 2 })
+        })) as { success: boolean; content?: string; offset?: number; size?: number; fileName?: string }
+
+        expect(ok.success).toBe(true)
+        expect(Buffer.from(ok.content ?? '', 'base64').toString('utf8')).toBe('me')
+        expect(ok.offset).toBe(6)
+        expect(ok.size).toBe(Buffer.byteLength('chunk me please'))
+        expect(ok.fileName).toBe('chunked.txt')
+
+        const missing = JSON.parse(await rpc.handleRequest({
+            method: 'session-test:readGeneratedBlobChunk',
+            params: JSON.stringify({ kind: 'file', id: 'nope', offset: 0, length: 16 })
+        })) as { success: boolean; error?: string }
+        expect(missing.success).toBe(false)
+        expect(missing.error).toContain('not found')
     })
 
     it('unregisters one snapshot without disturbing the registry lifecycle', async () => {

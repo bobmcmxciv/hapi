@@ -2,9 +2,10 @@ import { describe, expect, it } from 'bun:test'
 import { Hono } from 'hono'
 import { SignJWT } from 'jose'
 import type { Session, SyncEngine } from '../../sync/syncEngine'
+import { RpcTargetMissingError } from '../../sync/rpcGateway'
 import type { WebAppEnv } from '../middleware/auth'
 import { createAuthMiddleware } from '../middleware/auth'
-import { createGitRoutes } from './git'
+import { createGitRoutes, parseSingleByteRange } from './git'
 
 const JWT_SECRET = new TextEncoder().encode('generated-media-route-test')
 
@@ -243,6 +244,229 @@ describe('generated files route', () => {
         const response = await buildApp(engine).request('/api/sessions/session-1/generated-files/file-1')
 
         expect(response.status).toBe(404)
+    })
+})
+
+// A 14 MB file used to have to clear a single 30 s RPC budget or be reported as
+// missing: 52 downloads on the production hub returned `404` after exactly
+// `30s` between 2026-08-01 and 08-12. These pin the chunked replacement.
+describe('chunked generated blob transfer', () => {
+    const session = { id: 'session-1', namespace: 'default', active: true } as unknown as Session
+
+    /** Engine backed by real bytes, served through the chunk RPC. */
+    function chunkEngine(payload: Buffer, options: { chunkCalls?: number[]; failAt?: number; failWith?: Error } = {}) {
+        return {
+            resolveSessionAccess: () => ({ ok: true as const, sessionId: 'session-1', session }),
+            readGeneratedFile: async () => ({ success: false, error: 'legacy path must not be used' }),
+            readGeneratedBlobChunk: async (_sessionId: string, request: { offset: number; length: number }) => {
+                options.chunkCalls?.push(request.offset)
+                if (options.failAt !== undefined && request.offset === options.failAt) {
+                    throw options.failWith ?? new Error('operation has timed out')
+                }
+                const slice = payload.subarray(request.offset, request.offset + request.length)
+                return {
+                    success: true,
+                    content: slice.toString('base64'),
+                    offset: request.offset,
+                    size: payload.byteLength,
+                    mimeType: 'application/pdf',
+                    fileName: 'report.pdf'
+                }
+            }
+        } as unknown as Partial<SyncEngine>
+    }
+
+    it('streams a blob larger than one chunk back in full', async () => {
+        // 5 MiB against a 2 MiB chunk size: three slices, one of them partial.
+        const payload = Buffer.alloc(5 * 1024 * 1024)
+        for (let i = 0; i < payload.length; i++) payload[i] = i % 251
+        const chunkCalls: number[] = []
+
+        const response = await buildApp(chunkEngine(payload, { chunkCalls }))
+            .request('/api/sessions/session-1/generated-files/file-1')
+
+        expect(response.status).toBe(200)
+        expect(response.headers.get('content-length')).toBe(String(payload.byteLength))
+        expect(response.headers.get('accept-ranges')).toBe('bytes')
+        const received = Buffer.from(await response.arrayBuffer())
+        expect(received.byteLength).toBe(payload.byteLength)
+        expect(received.equals(payload)).toBe(true)
+        // The probe read is reused, so the transfer costs ceil(size/chunk) calls, not one more.
+        expect(chunkCalls).toEqual([0, 2 * 1024 * 1024, 4 * 1024 * 1024])
+    })
+
+    it('retries a stalled chunk instead of failing the whole download', async () => {
+        const payload = Buffer.alloc(3 * 1024 * 1024, 7)
+        const chunkCalls: number[] = []
+        let thrown = 0
+        const engine = {
+            resolveSessionAccess: () => ({ ok: true as const, sessionId: 'session-1', session }),
+            readGeneratedBlobChunk: async (_sessionId: string, request: { offset: number; length: number }) => {
+                chunkCalls.push(request.offset)
+                // The second slice times out once, exactly like the tail of the
+                // latency distribution that used to void the entire transfer.
+                if (request.offset === 2 * 1024 * 1024 && thrown++ === 0) {
+                    throw new Error('operation has timed out')
+                }
+                const slice = payload.subarray(request.offset, request.offset + request.length)
+                return {
+                    success: true,
+                    content: slice.toString('base64'),
+                    offset: request.offset,
+                    size: payload.byteLength,
+                    mimeType: 'application/pdf',
+                    fileName: 'report.pdf'
+                }
+            }
+        } as unknown as Partial<SyncEngine>
+
+        const response = await buildApp(engine).request('/api/sessions/session-1/generated-files/file-1')
+
+        expect(response.status).toBe(200)
+        const received = Buffer.from(await response.arrayBuffer())
+        expect(received.byteLength).toBe(payload.byteLength)
+        expect(received.equals(payload)).toBe(true)
+        expect(chunkCalls.filter((offset) => offset === 2 * 1024 * 1024)).toHaveLength(2)
+    })
+
+    it('answers a Range request with 206 and only the requested bytes', async () => {
+        const payload = Buffer.from('0123456789abcdef')
+
+        const response = await buildApp(chunkEngine(payload)).request(
+            '/api/sessions/session-1/generated-files/file-1',
+            { headers: { range: 'bytes=4-9' } }
+        )
+
+        expect(response.status).toBe(206)
+        expect(response.headers.get('content-range')).toBe('bytes 4-9/16')
+        expect(response.headers.get('content-length')).toBe('6')
+        expect(Buffer.from(await response.arrayBuffer()).toString()).toBe('456789')
+    })
+
+    it('rejects an unsatisfiable Range with 416 rather than a wrong body', async () => {
+        const payload = Buffer.from('short')
+
+        const response = await buildApp(chunkEngine(payload)).request(
+            '/api/sessions/session-1/generated-files/file-1',
+            { headers: { range: 'bytes=99-200' } }
+        )
+
+        expect(response.status).toBe(416)
+        expect(response.headers.get('content-range')).toBe('bytes */5')
+    })
+
+    // The heart of the bug: a transport failure was indistinguishable from a
+    // deleted file, so the UI and the logs both said "not found" for what was
+    // really an unreachable machine or an exhausted deadline.
+    it('reports a timed-out transfer as 504, not as a missing file', async () => {
+        const engine = {
+            resolveSessionAccess: () => ({ ok: true as const, sessionId: 'session-1', session }),
+            readGeneratedBlobChunk: async () => { throw new Error('operation has timed out') }
+        } as unknown as Partial<SyncEngine>
+
+        const response = await buildApp(engine).request('/api/sessions/session-1/generated-files/file-1')
+
+        expect(response.status).toBe(504)
+        expect(await response.json()).toMatchObject({ reason: 'timeout', retryable: true })
+    })
+
+    it('reports a disconnected CLI as 503, not as a missing file', async () => {
+        const engine = {
+            resolveSessionAccess: () => ({ ok: true as const, sessionId: 'session-1', session }),
+            readGeneratedBlobChunk: async () => {
+                throw new RpcTargetMissingError('readGeneratedBlobChunk', 'socket-disconnected')
+            }
+        } as unknown as Partial<SyncEngine>
+
+        const response = await buildApp(engine).request('/api/sessions/session-1/generated-files/file-1')
+
+        expect(response.status).toBe(503)
+        expect(await response.json()).toMatchObject({ reason: 'session-offline', retryable: true })
+    })
+
+    it('still reports a genuinely deleted snapshot as 404', async () => {
+        const engine = {
+            resolveSessionAccess: () => ({ ok: true as const, sessionId: 'session-1', session }),
+            readGeneratedBlobChunk: async () => ({ success: false, error: 'Sent file not found' })
+        } as unknown as Partial<SyncEngine>
+
+        const response = await buildApp(engine).request('/api/sessions/session-1/generated-files/file-1')
+
+        expect(response.status).toBe(404)
+        expect(await response.json()).toMatchObject({ reason: 'not-found', retryable: false })
+    })
+
+    it('falls back to the whole-blob read when the CLI predates chunked transfer', async () => {
+        const payload = Buffer.from('legacy bytes')
+        let legacyCalls = 0
+        const engine = {
+            resolveSessionAccess: () => ({ ok: true as const, sessionId: 'session-1', session }),
+            readGeneratedBlobChunk: async () => {
+                throw new RpcTargetMissingError('readGeneratedBlobChunk', 'handler-not-registered')
+            },
+            readGeneratedFile: async () => {
+                legacyCalls += 1
+                return {
+                    success: true,
+                    content: payload.toString('base64'),
+                    mimeType: 'application/pdf',
+                    fileName: 'report.pdf',
+                    size: payload.byteLength
+                }
+            }
+        } as unknown as Partial<SyncEngine>
+
+        const response = await buildApp(engine).request('/api/sessions/session-1/generated-files/file-1')
+
+        expect(response.status).toBe(200)
+        expect(legacyCalls).toBe(1)
+        expect(Buffer.from(await response.arrayBuffer()).toString()).toBe('legacy bytes')
+    })
+
+    it('serves generated images over the same chunked path', async () => {
+        const payload = Buffer.alloc(3 * 1024 * 1024, 0x42)
+        const engine = {
+            resolveSessionAccess: () => ({ ok: true as const, sessionId: 'session-1', session }),
+            readGeneratedBlobChunk: async (_sessionId: string, request: { kind: string; offset: number; length: number }) => {
+                expect(request.kind).toBe('image')
+                const slice = payload.subarray(request.offset, request.offset + request.length)
+                return {
+                    success: true,
+                    content: slice.toString('base64'),
+                    offset: request.offset,
+                    size: payload.byteLength,
+                    mimeType: 'image/png',
+                    fileName: 'shot.png'
+                }
+            }
+        } as unknown as Partial<SyncEngine>
+
+        const response = await buildApp(engine).request('/api/sessions/session-1/generated-images/img-1')
+
+        expect(response.status).toBe(200)
+        expect(response.headers.get('content-type')).toBe('image/png')
+        expect(response.headers.get('content-disposition') ?? '').toContain('inline')
+        expect(Buffer.from(await response.arrayBuffer()).byteLength).toBe(payload.byteLength)
+    })
+})
+
+describe('parseSingleByteRange', () => {
+    it('parses closed, open and suffix ranges', () => {
+        expect(parseSingleByteRange('bytes=0-9', 100)).toEqual({ start: 0, end: 9 })
+        expect(parseSingleByteRange('bytes=90-', 100)).toEqual({ start: 90, end: 99 })
+        expect(parseSingleByteRange('bytes=-10', 100)).toEqual({ start: 90, end: 99 })
+        // An end past EOF is clamped rather than rejected (RFC 9110 §14.1.2).
+        expect(parseSingleByteRange('bytes=95-500', 100)).toEqual({ start: 95, end: 99 })
+    })
+
+    it('ignores headers it cannot honour and flags impossible ones', () => {
+        expect(parseSingleByteRange(undefined, 100)).toBeNull()
+        expect(parseSingleByteRange('items=0-9', 100)).toBeNull()
+        // Multi-range is not supported, so it is treated as no range at all.
+        expect(parseSingleByteRange('bytes=0-9,20-29', 100)).toBeNull()
+        expect(parseSingleByteRange('bytes=-', 100)).toBeNull()
+        expect(parseSingleByteRange('bytes=100-200', 100)).toBe('unsatisfiable')
+        expect(parseSingleByteRange('bytes=9-4', 100)).toBe('unsatisfiable')
     })
 })
 

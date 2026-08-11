@@ -103,6 +103,20 @@ export class ApiError extends Error {
     }
 }
 
+// Generated blobs are pulled from the CLI machine on demand, so a download can
+// fail for reasons that have nothing to do with the file: the machine dropped
+// off, or a slice ran out of budget. The hub now says which is which — 503
+// session-offline and 504 timeout are retryable, 404 is not — so retry those
+// two instead of surfacing a dead end the user can only fix by clicking again.
+const BLOB_FETCH_RETRIES = 2
+const BLOB_FETCH_RETRY_DELAY_MS = 800
+
+export function isRetryableBlobStatus(status: number): boolean {
+    return status === 503 || status === 504
+}
+
+const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
+
 export class ApiClient {
     private token: string
     private readonly baseUrl: string | null
@@ -420,6 +434,10 @@ export class ApiClient {
                 return await this.getGeneratedImageBlob(sessionId, imageId, attempt + 1, refreshed)
             }
         }
+        if (isRetryableBlobStatus(res.status) && attempt < BLOB_FETCH_RETRIES) {
+            await delay(BLOB_FETCH_RETRY_DELAY_MS * (attempt + 1))
+            return await this.getGeneratedImageBlob(sessionId, imageId, attempt + 1, overrideToken)
+        }
         if (!res.ok) {
             throw new ApiError(`HTTP ${res.status}`, res.status, undefined, await res.text().catch(() => undefined))
         }
@@ -435,15 +453,23 @@ export class ApiClient {
         if (authToken) {
             headers.set('authorization', `Bearer ${authToken}`)
         }
-        const res = await fetch(this.buildUrl(`/api/sessions/${encodeURIComponent(sessionId)}/generated-files/${encodeURIComponent(fileId)}`), {
-            headers
-        })
+        const url = this.buildUrl(`/api/sessions/${encodeURIComponent(sessionId)}/generated-files/${encodeURIComponent(fileId)}`)
+        let res = await fetch(url, { headers })
+        // 304 mirrors the image path: the hub answers a revalidation without
+        // bytes, so re-read them from the HTTP cache.
+        if (res.status === 304) {
+            res = await fetch(url, { headers, cache: 'force-cache' })
+        }
         if (res.status === 401 && attempt === 0 && this.onUnauthorized) {
             const refreshed = await this.onUnauthorized()
             if (refreshed) {
                 this.token = refreshed
                 return await this.getGeneratedFileBlob(sessionId, fileId, attempt + 1, refreshed)
             }
+        }
+        if (isRetryableBlobStatus(res.status) && attempt < BLOB_FETCH_RETRIES) {
+            await delay(BLOB_FETCH_RETRY_DELAY_MS * (attempt + 1))
+            return await this.getGeneratedFileBlob(sessionId, fileId, attempt + 1, overrideToken)
         }
         if (!res.ok) {
             throw new ApiError(`HTTP ${res.status}`, res.status, undefined, await res.text().catch(() => undefined))
