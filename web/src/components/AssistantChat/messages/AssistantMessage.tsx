@@ -64,9 +64,13 @@ export function HappyAssistantMessage() {
         && ctx.onForkConversation
     )
 
+    // 裁剪必须用 overflow-x-clip，不能用 overflow-x-hidden：hidden 会让 overflow-y
+    // 计算成 auto，把本消息根变成滚动容器，reasoning 折叠手柄的 `sticky top-0` 就会
+    // 吸在这个矮盒子上、而不是聊天视口，长推理滚动时按钮跟着划走（回归于 afe0e8b8）。
+    // clip 同样裁掉横向溢出但不建立滚动上下文，与 User/Tool 消息层一致。
     const rootClass = toolOnly
-        ? 'py-1 min-w-0 max-w-full overflow-x-hidden'
-        : 'px-1 min-w-0 max-w-full overflow-x-hidden'
+        ? 'py-1 min-w-0 max-w-full overflow-x-clip'
+        : 'px-1 min-w-0 max-w-full overflow-x-clip'
 
     return (
         <MessagePrimitive.Root
