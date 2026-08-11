@@ -13,6 +13,7 @@ import { RpcTargetMissingError } from '../../sync/rpcGateway'
 import type { WebAppEnv } from '../middleware/auth'
 import { requireMachine } from './guards'
 import { registerOmpMachineRoutes } from '../../fork-features/omp-host-integration/routes'
+import { pathWithinScope } from '../../../../fork-features/multi-user/machineInheritance'
 
 export function createMachinesRoutes(getSyncEngine: () => SyncEngine | null): Hono<WebAppEnv> {
     const app = new Hono<WebAppEnv>()
@@ -186,14 +187,23 @@ export function createMachinesRoutes(getSyncEngine: () => SyncEngine | null): Ho
             return c.json({ error: 'Invalid body' }, 400)
         }
 
-        const uniquePaths = Array.from(new Set(parsed.data.paths.map((path) => path.trim()).filter(Boolean)))
-        if (uniquePaths.length === 0) {
-            return c.json({ exists: {} })
+        const requestedPaths = Array.from(new Set(parsed.data.paths.map((path) => path.trim()).filter(Boolean)))
+        // fork(multi-user)：目录限定的机器授权下，越界路径**过滤成「不存在」**而不是整批
+        // 403。这是纯存在性探测，答 false 与「真的没有」不可区分，泄漏不了信息；而整批拒
+        // 会被一条陈旧的越界路径带崩——前端最近目录列表是批量探的，一崩就整列消失
+        // （2026-08-11 生产实测：被限定的账号在 vircs 上最近目录候选全没了）。
+        const scope = c.get('machinePathScope')
+        const allowedPaths = scope ? requestedPaths.filter((path) => pathWithinScope(path, scope)) : requestedPaths
+        const outOfScope = Object.fromEntries(
+            requestedPaths.filter((path) => !allowedPaths.includes(path)).map((path) => [path, false])
+        )
+        if (allowedPaths.length === 0) {
+            return c.json({ exists: outOfScope })
         }
 
         try {
-            const exists = await engine.checkPathsExist(machineId, uniquePaths)
-            return c.json({ exists })
+            const exists = await engine.checkPathsExist(machineId, allowedPaths)
+            return c.json({ exists: { ...outOfScope, ...exists } })
         } catch (error) {
             return c.json({ error: error instanceof Error ? error.message : 'Failed to check paths' }, 500)
         }

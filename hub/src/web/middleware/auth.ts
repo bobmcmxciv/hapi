@@ -7,6 +7,11 @@ export type WebAppEnv = {
         userId: number
         namespace: string
         deliveryMetadata?: Record<string, unknown>
+        /**
+         * fork(multi-user)：本次请求者对该机器的目录限定（`gateway_grants.path_prefix`）。
+         * 由 createExecutionMiddleware 写入；未限定 / 非机器路由时为 undefined。
+         */
+        machinePathScope?: string | null
     }
 }
 

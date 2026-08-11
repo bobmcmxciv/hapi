@@ -52,6 +52,99 @@ describe('machines routes', () => {
         expect(await (await app.request('/api/machines/machine-1/cc-switch/providers')).json())
             .toEqual({ success: true, available: true, providers: [] })
     })
+    // fork(multi-user)：目录限定的机器授权下，paths/exists 把越界项过滤成「不存在」，
+    // 不整批 403 —— 前端最近目录列表是批量探的，整批拒会被一条陈旧路径带崩整列。
+    it('paths/exists 在目录限定下只探限定内的路径，越界项直接答 false', async () => {
+        const machine = createMachine()
+        const probed: string[][] = []
+        const engine = {
+            getMachine: () => machine,
+            getMachineByNamespace: () => machine,
+            checkPathsExist: async (_machineId: string, paths: string[]) => {
+                probed.push(paths)
+                return Object.fromEntries(paths.map((path) => [path, true]))
+            }
+        } as Partial<SyncEngine>
+        const app = new Hono<WebAppEnv>()
+        app.use('*', async (c, next) => {
+            c.set('namespace', 'default')
+            c.set('machinePathScope', 'C:\\Users\\Administrator\\peter')
+            await next()
+        })
+        app.route('/api', createMachinesRoutes(() => engine as SyncEngine))
+
+        const response = await app.request('/api/machines/machine-1/paths/exists', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({
+                paths: [
+                    'C:\\Users\\Administrator\\peter\\mac',
+                    'C:\\Users\\Administrator\\hapi',
+                    'C:\\Users\\Administrator\\peter'
+                ]
+            })
+        })
+
+        expect(response.status).toBe(200)
+        expect(await response.json()).toEqual({
+            exists: {
+                'C:\\Users\\Administrator\\peter\\mac': true,
+                'C:\\Users\\Administrator\\peter': true,
+                'C:\\Users\\Administrator\\hapi': false
+            }
+        })
+        // 越界路径绝不能被真正探测——答 false 是过滤出来的，不是机器答的
+        expect(probed).toEqual([['C:\\Users\\Administrator\\peter\\mac', 'C:\\Users\\Administrator\\peter']])
+    })
+
+    it('paths/exists 全部越界时不打机器，直接全 false', async () => {
+        const machine = createMachine()
+        let called = false
+        const engine = {
+            getMachine: () => machine,
+            getMachineByNamespace: () => machine,
+            checkPathsExist: async () => { called = true; return {} }
+        } as Partial<SyncEngine>
+        const app = new Hono<WebAppEnv>()
+        app.use('*', async (c, next) => {
+            c.set('namespace', 'default')
+            c.set('machinePathScope', 'C:\\Users\\Administrator\\peter')
+            await next()
+        })
+        app.route('/api', createMachinesRoutes(() => engine as SyncEngine))
+
+        const response = await app.request('/api/machines/machine-1/paths/exists', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ paths: ['C:\\Users\\Administrator\\hapi', 'D:\\elsewhere'] })
+        })
+        expect(response.status).toBe(200)
+        expect(await response.json()).toEqual({
+            exists: { 'C:\\Users\\Administrator\\hapi': false, 'D:\\elsewhere': false }
+        })
+        expect(called).toBe(false)
+    })
+
+    it('paths/exists 未限定时原样全探（不受本改动影响）', async () => {
+        const machine = createMachine()
+        const engine = {
+            getMachine: () => machine,
+            getMachineByNamespace: () => machine,
+            checkPathsExist: async (_machineId: string, paths: string[]) =>
+                Object.fromEntries(paths.map((path) => [path, true]))
+        } as Partial<SyncEngine>
+        const app = new Hono<WebAppEnv>()
+        app.use('*', async (c, next) => { c.set('namespace', 'default'); await next() })
+        app.route('/api', createMachinesRoutes(() => engine as SyncEngine))
+
+        const response = await app.request('/api/machines/machine-1/paths/exists', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ paths: ['C:\\anywhere', 'D:\\else'] })
+        })
+        expect(await response.json()).toEqual({ exists: { 'C:\\anywhere': true, 'D:\\else': true } })
+    })
+
     it('forwards create-directory requests to the selected machine', async () => {
         const machine = createMachine()
         const calls: Array<{ machineId: string; parentPath: string; name: string }> = []

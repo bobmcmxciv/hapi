@@ -755,7 +755,9 @@ describe('目录限定的机器授权：只放行限定目录内的机器写操�
         })
         app.post('/api/machines/:id/list-directory', c => c.json({ ok: true }))
         app.post('/api/machines/:id/create-directory', c => c.json({ ok: true }))
-        app.post('/api/machines/:id/paths/exists', c => c.json({ ok: true }))
+        // 真实路由按 c.get('machinePathScope') 过滤越界项（见 machines.test.ts），
+        // 这里只回显中间件交下来的限定值，验证交接这一环。
+        app.post('/api/machines/:id/paths/exists', c => c.json({ scope: c.get('machinePathScope') ?? null }))
         app.patch('/api/machines/:id', c => c.json({ ok: true }))
         return { store, app, admin, owner, peter }
     }
@@ -794,13 +796,24 @@ describe('目录限定的机器授权：只放行限定目录内的机器写操�
         store.close()
     })
 
-    it('paths/exists 只要有一条越界就整体拒绝', async () => {
+    // paths/exists 不整批拒：中间件只把 scope 交给路由，由路由把越界项过滤成
+    // 「不存在」。整批 403 会被一条陈旧的越界路径带崩前端整列最近目录。
+    it('paths/exists 不被整批拒，且把限定值交给路由', async () => {
         const { store, app, peter } = seedScoped()
         const token = await sign(peter.id)
-        expect((await send(app, '/api/machines/m-vircs/paths/exists', token,
-            { paths: [SCOPE, 'C:\\Users\\Administrator\\peter\\win'] })).status).toBe(200)
-        expect((await send(app, '/api/machines/m-vircs/paths/exists', token,
-            { paths: [SCOPE, 'C:\\Users\\Administrator\\cx2cc'] })).status).toBe(403)
+        const mixed = await send(app, '/api/machines/m-vircs/paths/exists', token,
+            { paths: [SCOPE, 'C:\\Users\\Administrator\\cx2cc'] })
+        expect(mixed.status).toBe(200)
+        expect(await mixed.json()).toEqual({ scope: SCOPE })
+        store.close()
+    })
+
+    it('未限定的机器授权下路由拿到的 scope 是空的', async () => {
+        const { store, app, peter } = seedScoped(null)
+        const response = await send(app, '/api/machines/m-vircs/paths/exists', await sign(peter.id),
+            { paths: ['C:\\Users\\Administrator\\cx2cc'] })
+        expect(response.status).toBe(200)
+        expect(await response.json()).toEqual({ scope: null })
         store.close()
     })
 

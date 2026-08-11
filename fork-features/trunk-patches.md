@@ -744,9 +744,20 @@ grant 无需回填）。判定收敛到一个纯函数 `pathWithinScope`：分�
 | 机器级写路由 | 白名单逐条校验请求里的路径，**白名单外默认拒** |
 
 机器写路由的白名单：`spawn`→`directory`、`list-directory`→`path`、
-`create-directory`→`parentPath`、`paths/exists`→`paths[]`（有一条越界即整体拒）。
+`create-directory`→`parentPath`。
 `PATCH /machines/:id`（改机器名）这类拿不到路径的写操作，对限定授权一律 403 ——
 宁可把新增机器路由挡在限定之外，也不默认放行一条没人想过的写路径。
+
+**`paths/exists` 是唯一的例外：过滤，不整批拒。** 它是纯存在性探测，对越界路径答
+`false` 与「真的不存在」不可区分，泄漏不了信息；而整批 403 会被**一条陈旧的越界
+路径**带崩。中间件把限定值经 `c.set('machinePathScope')` 交给路由，路由过滤后只探
+限定内的路径（越界项绝不下发到机器），再把 `false` 合并回结果。
+
+这条是 2026-08-11 生产实测倒逼出来的：收口当天日志里出现 5 条**不是我发的**
+`paths/exists` 403 —— 有 vircs 机器授权的账号里只有 peter 带限定，只可能是他。
+前端 `useMachinePathsExists` 批量探最近目录，`.catch` 后降级成 `{}`，于是
+`NewSession` 的 `existingPaths` 全空，**vircs 上的最近目录候选整列消失**。
+（建会话本身没被挡住：`handleCreate` 只探用户当前填的那一个目录，限定内就是 200。）
 
 中间件为校验路径要先读一次请求体，靠 Hono 的 `bodyCache` 让下游路由仍读得到；
 这条有专门用例钉住（spawn 回显 `directory`），否则线上表现是所有 spawn 变成

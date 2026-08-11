@@ -51,11 +51,6 @@ const requestedMachinePaths = (suffix: string, body: unknown): string[] | null =
         case 'spawn': return one(record.directory)
         case 'list-directory': return one(record.path)
         case 'create-directory': return one(record.parentPath)
-        case 'paths/exists':
-            return Array.isArray(record.paths) && record.paths.length > 0
-                && record.paths.every(entry => typeof entry === 'string' && entry !== '')
-                ? record.paths as string[]
-                : null
         default: return null
     }
 }
@@ -83,10 +78,16 @@ export function createExecutionMiddleware(deps: {
         if (resource.type === 'machine' && c.req.method !== 'GET') {
             const scope = deps.store.machineGrantScope(resource.id, accountId)
             if (scope !== null) {
-                const body = await c.req.json().catch(() => null)
-                const targets = requestedMachinePaths(machineRouteSuffix(c.req.path), body)
-                if (targets === null || !targets.every(target => pathWithinScope(target, scope))) {
-                    return c.json({ error: 'Insufficient permissions' }, 403)
+                c.set('machinePathScope', scope)
+                // `paths/exists` 例外：它是纯存在性探测，由路由按 scope 把越界项过滤成
+                // 「不存在」。整批拒会被一条陈旧的越界路径带崩 —— 前端最近目录列表是
+                // 批量探的，一崩就整列消失（2026-08-11 生产实测撞到）。
+                if (machineRouteSuffix(c.req.path) !== 'paths/exists') {
+                    const body = await c.req.json().catch(() => null)
+                    const targets = requestedMachinePaths(machineRouteSuffix(c.req.path), body)
+                    if (targets === null || !targets.every(target => pathWithinScope(target, scope))) {
+                        return c.json({ error: 'Insufficient permissions' }, 403)
+                    }
                 }
             }
         }
