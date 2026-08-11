@@ -120,19 +120,40 @@ check("限定外 spawn 被拒", status, 403)
 status, body = call("POST", "/api/machines/%s/list-directory" % MACHINE, {"path": OUTSIDE}, tmp_jwt)
 check("限定外 list-directory 被拒", status, 403)
 
+# paths/exists 是纯存在性探测：越界项过滤成「不存在」，不整批拒 —— 整批 403 会被
+# 一条陈旧的越界路径带崩前端整列最近目录（2026-08-11 生产实测）。
 status, body = call("POST", "/api/machines/%s/paths/exists" % MACHINE,
                     {"paths": [SCOPE, OUTSIDE]}, tmp_jwt)
-check("paths/exists 含越界项整体拒", status, 403)
+check("paths/exists 混合批不再整体拒", status, 200)
+exists = body.get("exists", {})
+print("  exists:", exists)
+check("越界项答 false", exists.get(OUTSIDE), False)
+# C:\Users\Administrator\peter 在 vircs 上真实存在 —— 答 true 证明它确实被下发到机器
+# 探测了，而不是跟越界项一样被兜底成 false。
+check("限定内项被真正探测并答 true", exists.get(SCOPE), True)
 
 status, body = call("PATCH", "/api/machines/" + MACHINE, {"displayName": "nope"}, tmp_jwt)
 check("PATCH 改机器名被拒", status, 403)
 
-print("=== 6. 清理 ===")
+print("=== 6. 删账号：名下还有资源时应 409（此前是不可诊断的 500）===")
 if spawned:
     status, _ = call("POST", "/api/sessions/%s/archive" % spawned, {}, tmp_jwt)
     check("归档 spawn 出来的会话", status, 200)
+status, body = call("DELETE", "/api/accounts/%s" % tmp_id, None, admin_jwt)
+check("名下有资源时删账号回 409", status, 409)
+print("  body:", body)
+
+print("=== 7. 清理 ===")
 status, _ = call("DELETE", "/api/grants/machine/%s/%s" % (MACHINE, tmp_id), None, admin_jwt)
 print("  revoke grant ->", status)
+# spawn 出来的会话归 tmp 账号所有，先转给 admin 才删得掉（正是上面 409 说的那件事）
+import sqlite3 as _sqlite3
+if spawned:
+    _db = _sqlite3.connect('/root/.hapi/multi-user-gateway.sqlite')
+    _db.execute("update gateway_resources set owner_account_id=1 where resource_id=?", (spawned,))
+    _db.commit()
+    _db.close()
+    print("  reassigned", spawned, "-> admin")
 status, _ = call("DELETE", "/api/accounts/%s" % tmp_id, None, admin_jwt)
 print("  delete account ->", status)
 status, listing = call("GET", "/api/accounts", None, admin_jwt)
