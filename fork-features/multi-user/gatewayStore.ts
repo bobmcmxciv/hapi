@@ -10,6 +10,7 @@ import type {
     ResourceBinding,
     ResourceType
 } from './domain'
+import { pathWithinScope } from './machineInheritance'
 
 type AccountRow = {
     id: number
@@ -110,6 +111,7 @@ export function applyGatewaySchema(db: Database): void {
             resource_id TEXT NOT NULL,
             grantee_account_id INTEGER NOT NULL REFERENCES gateway_accounts(id) ON DELETE CASCADE,
             role TEXT NOT NULL CHECK(role IN ('viewer', 'operator')),
+            path_prefix TEXT,
             PRIMARY KEY(resource_type, resource_id, grantee_account_id),
             FOREIGN KEY(resource_type, resource_id) REFERENCES gateway_resources(resource_type, resource_id) ON DELETE CASCADE
         );
@@ -149,6 +151,11 @@ export function applyGatewaySchema(db: Database): void {
         })()
     }
     if (!tokenColumns.has('last_used_at')) db.exec('ALTER TABLE gateway_api_tokens ADD COLUMN last_used_at INTEGER')
+
+    // 目录限定的机器授权（2026-08-11）。NULL = 不限定，与加此列之前完全等价，
+    // 所以存量 grant 无需回填。
+    const grantColumns = columnNames(db, 'gateway_grants')
+    if (!grantColumns.has('path_prefix')) db.exec('ALTER TABLE gateway_grants ADD COLUMN path_prefix TEXT')
 }
 
 export class MultiUserGatewayStore {
@@ -364,7 +371,8 @@ export class MultiUserGatewayStore {
         type: ResourceType,
         id: string,
         capability: 'read' | 'operate',
-        machineId?: string | null
+        machineId?: string | null,
+        sessionPath?: string | null
     ): number[] {
         const resource = this.getResource(type, id)
         if (!resource) return []
@@ -378,7 +386,12 @@ export class MultiUserGatewayStore {
         const inherited = machineBinding
             ? [
                 machineBinding.ownerAccountId,
-                ...this.listGrants('machine', machineId!).filter(relevant).map(grant => grant.accountId)
+                // 目录限定的机器授权不该收到范围外会话的提醒 —— 事件流已按
+                // sessionAccessLevel 拦住，通知这条路要同步跟上，否则提醒会漏出去。
+                ...this.listGrants('machine', machineId!)
+                    .filter(relevant)
+                    .filter(grant => pathWithinScope(sessionPath, grant.pathPrefix))
+                    .map(grant => grant.accountId)
             ]
             : []
         return Array.from(new Set([
@@ -389,10 +402,14 @@ export class MultiUserGatewayStore {
         ]))
     }
 
-    grant(type: ResourceType, id: string, accountId: number, role: GrantRole): void {
-        this.db.prepare(`INSERT INTO gateway_grants(resource_type,resource_id,grantee_account_id,role) VALUES(?,?,?,?)
-            ON CONFLICT(resource_type,resource_id,grantee_account_id) DO UPDATE SET role=excluded.role`)
-            .run(type, id, accountId, role)
+    /**
+     * `pathPrefix` 只对 `machine` 授权有意义：被授权者只能碰该机器上落在这个目录
+     * 子树内的会话与路径。传 `null`/省略 = 不限定（整机）。
+     */
+    grant(type: ResourceType, id: string, accountId: number, role: GrantRole, pathPrefix: string | null = null): void {
+        this.db.prepare(`INSERT INTO gateway_grants(resource_type,resource_id,grantee_account_id,role,path_prefix) VALUES(?,?,?,?,?)
+            ON CONFLICT(resource_type,resource_id,grantee_account_id) DO UPDATE SET role=excluded.role, path_prefix=excluded.path_prefix`)
+            .run(type, id, accountId, role, pathPrefix)
     }
 
     getGrant(type: ResourceType, id: string, accountId: number): GrantRole | null {
@@ -401,9 +418,20 @@ export class MultiUserGatewayStore {
         return row?.role ?? null
     }
 
-    listGrants(type: ResourceType, id: string): Array<{ accountId: number; role: GrantRole }> {
-        return this.db.prepare('SELECT grantee_account_id AS accountId, role FROM gateway_grants WHERE resource_type=? AND resource_id=? ORDER BY grantee_account_id')
-            .all(type, id) as Array<{ accountId: number; role: GrantRole }>
+    /**
+     * 某账号对某台机器那条 grant 上的目录限定。`null` = 未限定或压根没有这条
+     * grant（机器主人 / admin 走的是 `owner` 档位，不经这里）。
+     */
+    machineGrantScope(machineId: string, accountId: number): string | null {
+        const row = this.db.prepare(
+            'SELECT path_prefix FROM gateway_grants WHERE resource_type=? AND resource_id=? AND grantee_account_id=?'
+        ).get('machine', machineId, accountId) as { path_prefix: string | null } | undefined
+        return row?.path_prefix ?? null
+    }
+
+    listGrants(type: ResourceType, id: string): Array<{ accountId: number; role: GrantRole; pathPrefix: string | null }> {
+        return this.db.prepare('SELECT grantee_account_id AS accountId, role, path_prefix AS pathPrefix FROM gateway_grants WHERE resource_type=? AND resource_id=? ORDER BY grantee_account_id')
+            .all(type, id) as Array<{ accountId: number; role: GrantRole; pathPrefix: string | null }>
     }
 
     removeGrant(type: ResourceType, id: string, accountId: number): boolean {

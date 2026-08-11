@@ -706,3 +706,151 @@ describe('POST /api/client-errors', () => {
         store.close()
     })
 })
+
+describe('目录限定的机器授权：只放行限定目录内的机器写操作与会话', () => {
+    const jwtSecret = new TextEncoder().encode('test-secret-test-secret-test-secret')
+    const sign = (accountId: number) => new SignJWT({ gaid: accountId }).setProtectedHeader({ alg: 'HS256' }).sign(jwtSecret)
+    const SCOPE = 'C:\\Users\\Administrator\\peter'
+
+    /** vircs（owner 的机器）上两条会话：一条在 peter\ 内，一条在 hapi\ 里。 */
+    function seedScoped(pathPrefix: string | null = SCOPE) {
+        const store = new MultiUserGatewayStore(':memory:')
+        const admin = store.createAccount('admin', 'admin', 'default', null)
+        const owner = store.createAccount('owner', 'user', 'default', null)
+        const peter = store.createAccount('peter', 'user', 'default', null)
+        store.bindResource({ resourceType: 'machine', resourceId: 'm-vircs', ownerAccountId: owner.id, coreNamespace: 'default' })
+        const records = new Map([
+            ['s-in', {
+                id: 's-in', namespace: 'default', active: false, createdAt: 1, updatedAt: 1, seq: 0, agentState: null,
+                metadata: { machineId: 'm-vircs', path: 'C:\\Users\\Administrator\\peter\\mac' }
+            }],
+            ['s-out', {
+                id: 's-out', namespace: 'default', active: false, createdAt: 1, updatedAt: 1, seq: 0, agentState: null,
+                metadata: { machineId: 'm-vircs', path: 'C:\\Users\\Administrator\\hapi' }
+            }]
+        ])
+        for (const id of records.keys()) {
+            store.bindResource({ resourceType: 'session', resourceId: id, ownerAccountId: owner.id, coreNamespace: 'default' })
+        }
+        store.grant('machine', 'm-vircs', peter.id, 'operator', pathPrefix)
+
+        const machines = [{ id: 'm-vircs', namespace: 'default' }]
+        const engine = {
+            getSessionsByNamespace: () => [...records.values()],
+            getSession: (id: string) => records.get(id),
+            getOnlineMachinesByNamespace: () => machines,
+            getMachine: (id: string) => machines.find(m => m.id === id) ?? null
+        } as unknown as SyncEngine
+
+        const app = new Hono<WebAppEnv>()
+        mountExecutionRoutes(app, { store, jwtSecret, getSyncEngine: () => engine, getSseManager: () => null, getStore: () => null })
+        app.use('/api/*', createExecutionMiddleware({ store, jwtSecret, getSyncEngine: () => engine }))
+        // 仿真实机器路由：spawn 回显 body 里的 directory —— 中间件为了校验路径读过一次
+        // body，路由必须仍读得到（Hono 的 bodyCache），否则线上会变成 400 Invalid body。
+        app.post('/api/machines/:id/spawn', async (c) => {
+            const body = await c.req.json().catch(() => null) as { directory?: string } | null
+            return body?.directory
+                ? c.json({ sessionId: 'spawned', echoed: body.directory })
+                : c.json({ error: 'Invalid body' }, 400)
+        })
+        app.post('/api/machines/:id/list-directory', c => c.json({ ok: true }))
+        app.post('/api/machines/:id/create-directory', c => c.json({ ok: true }))
+        app.post('/api/machines/:id/paths/exists', c => c.json({ ok: true }))
+        app.patch('/api/machines/:id', c => c.json({ ok: true }))
+        return { store, app, admin, owner, peter }
+    }
+
+    const send = (app: Hono<WebAppEnv>, path: string, token: string, body: unknown, method = 'POST') =>
+        app.request(path, {
+            method,
+            headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+            body: JSON.stringify(body)
+        })
+
+    it('限定目录内 spawn 放行，且路由仍读得到 body（中间件不能把 body 吃掉）', async () => {
+        const { store, app, peter } = seedScoped()
+        const response = await send(app, '/api/machines/m-vircs/spawn', await sign(peter.id),
+            { directory: 'C:\\Users\\Administrator\\peter\\mac\\_edit' })
+        expect(response.status).toBe(200)
+        expect(await response.json()).toEqual({ sessionId: 'spawned', echoed: 'C:\\Users\\Administrator\\peter\\mac\\_edit' })
+        store.close()
+    })
+
+    it('限定目录外 spawn 拒绝', async () => {
+        const { store, app, peter } = seedScoped()
+        const response = await send(app, '/api/machines/m-vircs/spawn', await sign(peter.id),
+            { directory: 'C:\\Users\\Administrator\\hapi' })
+        expect(response.status).toBe(403)
+        store.close()
+    })
+
+    it('限定目录外的 list-directory / create-directory 拒绝，内的放行', async () => {
+        const { store, app, peter } = seedScoped()
+        const token = await sign(peter.id)
+        expect((await send(app, '/api/machines/m-vircs/list-directory', token, { path: 'C:\\Users\\Administrator' })).status).toBe(403)
+        expect((await send(app, '/api/machines/m-vircs/list-directory', token, { path: SCOPE })).status).toBe(200)
+        expect((await send(app, '/api/machines/m-vircs/create-directory', token,
+            { parentPath: 'C:\\Users\\Administrator\\hapi', name: 'x' })).status).toBe(403)
+        store.close()
+    })
+
+    it('paths/exists 只要有一条越界就整体拒绝', async () => {
+        const { store, app, peter } = seedScoped()
+        const token = await sign(peter.id)
+        expect((await send(app, '/api/machines/m-vircs/paths/exists', token,
+            { paths: [SCOPE, 'C:\\Users\\Administrator\\peter\\win'] })).status).toBe(200)
+        expect((await send(app, '/api/machines/m-vircs/paths/exists', token,
+            { paths: [SCOPE, 'C:\\Users\\Administrator\\cx2cc'] })).status).toBe(403)
+        store.close()
+    })
+
+    it('没有可校验路径的机器写操作（改机器名）一律拒绝 —— 白名单之外默认拒', async () => {
+        const { store, app, peter } = seedScoped()
+        const response = await send(app, '/api/machines/m-vircs', await sign(peter.id), { displayName: 'x' }, 'PATCH')
+        expect(response.status).toBe(403)
+        store.close()
+    })
+
+    it('未限定的机器授权不受影响：整机可写', async () => {
+        const { store, app, peter } = seedScoped(null)
+        const token = await sign(peter.id)
+        expect((await send(app, '/api/machines/m-vircs/spawn', token, { directory: 'C:\\Users\\Administrator\\hapi' })).status).toBe(200)
+        expect((await send(app, '/api/machines/m-vircs', token, { displayName: 'x' }, 'PATCH')).status).toBe(200)
+        store.close()
+    })
+
+    it('机器主人不受限定约束（限定是 grant 的属性）', async () => {
+        const { store, app, owner } = seedScoped()
+        const response = await send(app, '/api/machines/m-vircs/spawn', await sign(owner.id),
+            { directory: 'C:\\Users\\Administrator\\hapi' })
+        expect(response.status).toBe(200)
+        store.close()
+    })
+
+    it('会话列表只含限定目录内的会话 —— 机器授权不再把整机会话铺开', async () => {
+        const { store, app, peter } = seedScoped()
+        const response = await app.request('/api/sessions', { headers: { authorization: `Bearer ${await sign(peter.id)}` } })
+        expect(response.status).toBe(200)
+        const ids = ((await response.json()) as { sessions: Array<{ id: string }> }).sessions.map(s => s.id)
+        expect(ids).toEqual(['s-in'])
+        store.close()
+    })
+
+    it('限定外的会话仍可通过显式 session grant 单独共享', async () => {
+        const { store, app, peter } = seedScoped()
+        store.grant('session', 's-out', peter.id, 'viewer')
+        const response = await app.request('/api/sessions', { headers: { authorization: `Bearer ${await sign(peter.id)}` } })
+        const ids = ((await response.json()) as { sessions: Array<{ id: string }> }).sessions.map(s => s.id).sort()
+        expect(ids).toEqual(['s-in', 's-out'])
+        store.close()
+    })
+
+    it('限定外的会话本身也操作不了（会话路由走 sessionAccessLevel）', async () => {
+        const { store, app, peter } = seedScoped()
+        const token = await sign(peter.id)
+        app.post('/api/sessions/:id/messages', c => c.json({ ok: true }))
+        expect((await send(app, '/api/sessions/s-out/messages', token, {})).status).toBe(403)
+        expect((await send(app, '/api/sessions/s-in/messages', token, {})).status).toBe(200)
+        store.close()
+    })
+})

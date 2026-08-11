@@ -54,7 +54,13 @@ const updateAccountSchema = z.object({
 const updateMemorySchema = z.object({ memory: z.string().max(4000).nullable() })
 const createTokenSchema = z.object({ name: z.string().trim().max(80).nullable().optional() })
 const resourceTypeSchema = z.enum(['session', 'machine'])
-const grantSchema = z.object({ accountId: z.number().int().positive(), role: z.enum(['viewer', 'operator']) })
+const grantSchema = z.object({
+    accountId: z.number().int().positive(),
+    role: z.enum(['viewer', 'operator']),
+    // 目录限定，只对 machine 授权有意义：被授权者只能碰该机器上这个目录子树内的
+    // 会话与路径。省略或传 null = 不限定（整机），与加此字段之前等价。
+    pathPrefix: z.string().min(1).nullish()
+})
 
 function publicAccount(account: Account | null): PublicAccount | null {
     if (!account) return null
@@ -378,7 +384,7 @@ export function createMultiUserGatewayRoutes(deps: {
         const decision = dispatcher.authorize({ accountId: c.get('gatewayAccountId'), capability: 'administer', resource: { type: type.data, id: c.req.param('id') } })
         if (decision.kind === 'deny') return c.json({ error: 'Insufficient permissions' }, 403)
         if (!deps.store.getAccount(body.data.accountId)) return c.json({ error: 'Account not found' }, 404)
-        deps.store.grant(type.data, c.req.param('id'), body.data.accountId, body.data.role)
+        deps.store.grant(type.data, c.req.param('id'), body.data.accountId, body.data.role, body.data.pathPrefix ?? null)
         return c.json({ ok: true }, 201)
     })
 

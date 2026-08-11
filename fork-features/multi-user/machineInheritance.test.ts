@@ -1,7 +1,13 @@
 import { describe, expect, it } from 'bun:test'
 import type { SyncEngine } from '../../hub/src/sync/syncEngine'
 import { MultiUserGatewayStore } from './gatewayStore'
-import { createSessionMachineResolver, sessionAccessLevel } from './machineInheritance'
+import {
+    createSessionMachineResolver,
+    createSessionPathResolver,
+    machineInheritedLevel,
+    pathWithinScope,
+    sessionAccessLevel
+} from './machineInheritance'
 
 function setup() {
     const store = new MultiUserGatewayStore(':memory:')
@@ -77,6 +83,147 @@ describe('sessionAccessLevel：会话继承所在机器的授权', () => {
         store.updateAccount(grantee.id, { disabled: true })
         expect(sessionAccessLevel(store, grantee.id, 's-on-fa608', resolve)).toBe('none')
         store.close()
+    })
+})
+
+describe('pathWithinScope：目录前缀判定', () => {
+    const PREFIX = 'C:\\Users\\Administrator\\peter'
+
+    it('前缀为空 = 未限定，恒真（保持加此列之前的行为）', () => {
+        expect(pathWithinScope('C:\\anything', null)).toBe(true)
+        expect(pathWithinScope('C:\\anything', undefined)).toBe(true)
+        expect(pathWithinScope('C:\\anything', '   ')).toBe(true)
+    })
+
+    it('候选路径取不到 → 假（fail-closed，证明不了在范围内就算越界）', () => {
+        expect(pathWithinScope(null, PREFIX)).toBe(false)
+        expect(pathWithinScope(undefined, PREFIX)).toBe(false)
+        expect(pathWithinScope('', PREFIX)).toBe(false)
+    })
+
+    it('目录自身与子目录为真', () => {
+        expect(pathWithinScope(PREFIX, PREFIX)).toBe(true)
+        expect(pathWithinScope('C:\\Users\\Administrator\\peter\\mac', PREFIX)).toBe(true)
+        expect(pathWithinScope('C:\\Users\\Administrator\\peter\\mac\\_edit\\app', PREFIX)).toBe(true)
+    })
+
+    it('边界按整段比较：…\\peter 不匹配 …\\peterX 或 …\\peter-old', () => {
+        expect(pathWithinScope('C:\\Users\\Administrator\\peterX', PREFIX)).toBe(false)
+        expect(pathWithinScope('C:\\Users\\Administrator\\peter-old\\mac', PREFIX)).toBe(false)
+    })
+
+    it('父目录与旁系目录为假', () => {
+        expect(pathWithinScope('C:\\Users\\Administrator', PREFIX)).toBe(false)
+        expect(pathWithinScope('C:\\Users\\Administrator\\hapi', PREFIX)).toBe(false)
+    })
+
+    it('Windows 路径不区分大小写，分隔符可混用、可重复、可带尾巴', () => {
+        expect(pathWithinScope('c:\\users\\administrator\\PETER\\Mac', PREFIX)).toBe(true)
+        expect(pathWithinScope('C:/Users/Administrator/peter/mac', PREFIX)).toBe(true)
+        expect(pathWithinScope('C:\\Users\\\\Administrator\\peter\\mac\\', PREFIX)).toBe(true)
+        expect(pathWithinScope('C:\\Users\\Administrator\\peter\\mac', 'C:\\Users\\Administrator\\peter\\')).toBe(true)
+    })
+
+    it('POSIX 路径区分大小写', () => {
+        expect(pathWithinScope('/Users/wu/proj', '/Users/wu')).toBe(true)
+        expect(pathWithinScope('/users/WU/proj', '/Users/wu')).toBe(false)
+        expect(pathWithinScope('/Users/wu2', '/Users/wu')).toBe(false)
+    })
+
+    it('含 .. 段一律拒 —— 不碰文件系统就解析不了它', () => {
+        expect(pathWithinScope('C:\\Users\\Administrator\\peter\\..\\hapi', PREFIX)).toBe(false)
+        expect(pathWithinScope('C:\\Users\\Administrator\\peter\\mac\\..', PREFIX)).toBe(false)
+    })
+})
+
+describe('目录限定的机器授权（machineInheritedLevel / sessionAccessLevel）', () => {
+    const SCOPE = 'C:\\Users\\Administrator\\peter'
+
+    function scopedSetup() {
+        const base = setup()
+        const paths: Record<string, string> = {
+            's-on-fa608': 'C:\\Users\\Administrator\\peter\\mac',
+            's-elsewhere': 'C:\\Users\\Administrator\\hapi'
+        }
+        // 同一台机器上再放一条限定外的会话
+        base.store.bindResource({
+            resourceType: 'session', resourceId: 's-outside', ownerAccountId: base.owner.id, coreNamespace: 'default'
+        })
+        paths['s-outside'] = 'C:\\Users\\Administrator\\hapi'
+        const machineOf: Record<string, string> = {
+            's-on-fa608': 'fa608', 's-elsewhere': 'other-machine', 's-outside': 'fa608'
+        }
+        return {
+            ...base,
+            resolve: (id: string) => machineOf[id] ?? null,
+            resolvePath: (id: string) => paths[id] ?? null
+        }
+    }
+
+    it('限定内的会话照常继承', () => {
+        const { store, grantee, resolve, resolvePath } = scopedSetup()
+        store.grant('machine', 'fa608', grantee.id, 'operator', SCOPE)
+        expect(sessionAccessLevel(store, grantee.id, 's-on-fa608', resolve, resolvePath)).toBe('operator')
+        store.close()
+    })
+
+    it('同一台机器上限定外的会话不继承', () => {
+        const { store, grantee, resolve, resolvePath } = scopedSetup()
+        store.grant('machine', 'fa608', grantee.id, 'operator', SCOPE)
+        expect(sessionAccessLevel(store, grantee.id, 's-outside', resolve, resolvePath)).toBe('none')
+        store.close()
+    })
+
+    it('不传 path resolver 时限定授权不继承（fail-closed，不会误放行整机）', () => {
+        const { store, grantee, resolve } = scopedSetup()
+        store.grant('machine', 'fa608', grantee.id, 'operator', SCOPE)
+        expect(sessionAccessLevel(store, grantee.id, 's-on-fa608', resolve)).toBe('none')
+        store.close()
+    })
+
+    it('未限定的 grant 不受影响', () => {
+        const { store, grantee, resolve, resolvePath } = scopedSetup()
+        store.grant('machine', 'fa608', grantee.id, 'operator')
+        expect(sessionAccessLevel(store, grantee.id, 's-outside', resolve, resolvePath)).toBe('operator')
+        store.close()
+    })
+
+    it('会话自身的显式 grant 不被目录限定砍掉（当初有意共享的那几条要保住）', () => {
+        const { store, grantee, resolve, resolvePath } = scopedSetup()
+        store.grant('machine', 'fa608', grantee.id, 'operator', SCOPE)
+        store.grant('session', 's-outside', grantee.id, 'viewer')
+        expect(sessionAccessLevel(store, grantee.id, 's-outside', resolve, resolvePath)).toBe('viewer')
+        store.close()
+    })
+
+    it('机器主人与 admin 不受目录限定约束', () => {
+        const { store, owner, admin, resolve, resolvePath } = scopedSetup()
+        store.grant('machine', 'fa608', owner.id, 'viewer', SCOPE)
+        expect(sessionAccessLevel(store, owner.id, 's-outside', resolve, resolvePath)).toBe('owner')
+        expect(sessionAccessLevel(store, admin.id, 's-outside', resolve, resolvePath)).toBe('owner')
+        expect(machineInheritedLevel(store, 'fa608', admin.id, () => null)).toBe('owner')
+        store.close()
+    })
+
+    it('改授权时 path_prefix 可原地更新与清除', () => {
+        const { store, grantee, resolve, resolvePath } = scopedSetup()
+        store.grant('machine', 'fa608', grantee.id, 'operator', SCOPE)
+        expect(store.machineGrantScope('fa608', grantee.id)).toBe(SCOPE)
+        store.grant('machine', 'fa608', grantee.id, 'operator')
+        expect(store.machineGrantScope('fa608', grantee.id)).toBeNull()
+        expect(sessionAccessLevel(store, grantee.id, 's-outside', resolve, resolvePath)).toBe('operator')
+        store.close()
+    })
+})
+
+describe('createSessionPathResolver：工作目录现查 core 侧 metadata', () => {
+    it('取 session.metadata.path，取不到时返回 null 且不抛', () => {
+        const engine = {
+            getSession: (id: string) => id === 'known' ? { metadata: { path: '/Users/wu' } } : undefined
+        } as unknown as SyncEngine
+        expect(createSessionPathResolver(() => engine)('known')).toBe('/Users/wu')
+        expect(createSessionPathResolver(() => engine)('missing')).toBeNull()
+        expect(createSessionPathResolver(() => null)('any')).toBeNull()
     })
 })
 

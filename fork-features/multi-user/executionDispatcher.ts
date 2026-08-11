@@ -1,6 +1,6 @@
 import type { AccessLevel, Capability, DispatchDecision, ResourceType } from './domain'
 import type { MultiUserGatewayStore } from './gatewayStore'
-import { sessionAccessLevel, type SessionMachineResolver } from './machineInheritance'
+import { sessionAccessLevel, type SessionMachineResolver, type SessionPathResolver } from './machineInheritance'
 
 const permitted = (level: AccessLevel, capability: Capability): boolean => {
     if (capability === 'read') return level !== 'none'
@@ -15,7 +15,8 @@ export class ExecutionDispatcher {
      */
     constructor(
         private readonly store: MultiUserGatewayStore,
-        private readonly resolveSessionMachineId?: SessionMachineResolver
+        private readonly resolveSessionMachineId?: SessionMachineResolver,
+        private readonly resolveSessionPath?: SessionPathResolver
     ) {}
 
     authorize(input: { accountId: number; capability: Capability; resource?: { type: ResourceType; id: string } }): DispatchDecision {
@@ -27,7 +28,7 @@ export class ExecutionDispatcher {
         const resource = this.store.getResource(input.resource.type, input.resource.id)
         if (!resource) return { kind: 'deny', reason: 'resource-not-found' }
         const level = input.resource.type === 'session'
-            ? sessionAccessLevel(this.store, account.id, input.resource.id, this.resolveSessionMachineId)
+            ? sessionAccessLevel(this.store, account.id, input.resource.id, this.resolveSessionMachineId, this.resolveSessionPath)
             : this.store.accessLevel('machine', input.resource.id, account.id)
         if (!permitted(level, input.capability)) return { kind: 'deny', reason: 'insufficient-access' }
         return { kind: 'allow', context: { account, namespace: resource.coreNamespace, capability: input.capability, resource } }

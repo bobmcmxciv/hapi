@@ -46,7 +46,7 @@ import { mountMultiUserGateway, mountMultiUserPostAuth } from '../../../fork-fea
 import { createSseRequestFilterFactory } from '../../../fork-features/multi-user/sseVisibility'
 import type { MultiUserGatewayStore } from '../../../fork-features/multi-user/gatewayStore'
 import { createExecutionMiddleware, gatewayAccountId, mountExecutionRoutes } from '../../../fork-features/multi-user/executionMount'
-import { createSessionMachineResolver } from '../../../fork-features/multi-user/machineInheritance'
+import { createSessionMachineResolver, createSessionPathResolver } from '../../../fork-features/multi-user/machineInheritance'
 import { resolveGatewayCliNamespace } from '../../../fork-features/multi-user/cliAdapter'
 import { mountAgentOrchestrationRoutes } from '../../../fork-features/agent-orchestration/hub'
 
@@ -316,7 +316,8 @@ function createWebApp(options: {
         createSseRequestFilterFactory(
             multiUserStore,
             request => gatewayAccountId(request, options.jwtSecret),
-            createSessionMachineResolver(options.getSyncEngine)
+            createSessionMachineResolver(options.getSyncEngine),
+            createSessionPathResolver(options.getSyncEngine)
         )
     ))
     // ⚠️ 顺序是承重的（fork multi-user 隔离）：createSessionsRoutes 里的

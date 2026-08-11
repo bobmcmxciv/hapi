@@ -9,7 +9,7 @@ import type { MultiUserGatewayStore } from './gatewayStore'
 import { ExecutionDispatcher } from './executionDispatcher'
 import type { Account, Capability, ResourceType } from './domain'
 import { buildUsageSummaryResponse, parseIsoParam } from '../usage/usageAggregate'
-import { createSessionMachineResolver } from './machineInheritance'
+import { createSessionMachineResolver, createSessionPathResolver, pathWithinScope } from './machineInheritance'
 import { createSseEventFilterFactory } from './sseVisibility'
 import { streamSSE } from 'hono/streaming'
 import { randomUUID } from 'node:crypto'
@@ -35,6 +35,31 @@ const resourceFromPath = (path: string): { type: ResourceType; id: string } | nu
 
 const capabilityFor = (method: string): Capability => method === 'GET' ? 'read' : 'operate'
 
+const machineRouteSuffix = (path: string): string => path.match(/^\/api\/machines\/[^/]+\/(.+)$/)?.[1] ?? ''
+
+/**
+ * 机器写操作请求里**待校验的路径**。返回 `null` = 这条路由没有可校验的路径
+ * （改机器名、omp 之类），目录限定下一律拒。
+ *
+ * 只列白名单，新增机器路由默认落到 `null` 分支被拒 —— 宁可把新功能挡在限定授权
+ * 之外，也不要默认放行一条没人想过的写路径。
+ */
+const requestedMachinePaths = (suffix: string, body: unknown): string[] | null => {
+    const record = body !== null && typeof body === 'object' ? body as Record<string, unknown> : {}
+    const one = (value: unknown): string[] | null => typeof value === 'string' && value !== '' ? [value] : null
+    switch (suffix) {
+        case 'spawn': return one(record.directory)
+        case 'list-directory': return one(record.path)
+        case 'create-directory': return one(record.parentPath)
+        case 'paths/exists':
+            return Array.isArray(record.paths) && record.paths.length > 0
+                && record.paths.every(entry => typeof entry === 'string' && entry !== '')
+                ? record.paths as string[]
+                : null
+        default: return null
+    }
+}
+
 export function createExecutionMiddleware(deps: {
     store: MultiUserGatewayStore
     jwtSecret: Uint8Array
@@ -43,7 +68,8 @@ export function createExecutionMiddleware(deps: {
     // 会话继承所在机器的授权：被授权某台机器的人不必再对每个新会话单独授权一次。
     const dispatcher = new ExecutionDispatcher(
         deps.store,
-        deps.getSyncEngine ? createSessionMachineResolver(deps.getSyncEngine) : undefined
+        deps.getSyncEngine ? createSessionMachineResolver(deps.getSyncEngine) : undefined,
+        deps.getSyncEngine ? createSessionPathResolver(deps.getSyncEngine) : undefined
     )
     return async (c, next) => {
         const resource = resourceFromPath(c.req.path)
@@ -52,6 +78,18 @@ export function createExecutionMiddleware(deps: {
         if (accountId === null) return c.json({ error: 'Invalid gateway identity' }, 401)
         const decision = dispatcher.authorize({ accountId, capability: capabilityFor(c.req.method), resource })
         if (decision.kind === 'deny') return c.json({ error: 'Insufficient permissions' }, 403)
+        // 目录限定的机器授权：机器级写操作要逐条校验请求里的路径。会话级路由不走
+        // 这里 —— 它们的限定已经由 sessionAccessLevel 在上面那句 authorize 里判掉。
+        if (resource.type === 'machine' && c.req.method !== 'GET') {
+            const scope = deps.store.machineGrantScope(resource.id, accountId)
+            if (scope !== null) {
+                const body = await c.req.json().catch(() => null)
+                const targets = requestedMachinePaths(machineRouteSuffix(c.req.path), body)
+                if (targets === null || !targets.every(target => pathWithinScope(target, scope))) {
+                    return c.json({ error: 'Insufficient permissions' }, 403)
+                }
+            }
+        }
         c.set('namespace', decision.context.namespace)
         c.set('deliveryMetadata', { gatewayAccountId: accountId })
         c.set('registerCreatedSession' as never, ((sessionId: string) => deps.store.bindResource({
@@ -121,10 +159,17 @@ function collectVisibleSessions(
 
     const machineBindings = store.listAccessibleResources('machine', account.id)
     const machineOwners = new Map(machineBindings.map(binding => [binding.resourceId, binding.ownerAccountId]))
+    // 目录限定只是 grant 的属性：机器主人（以及 admin，压根没有 grant 行）恒为 null，
+    // 照旧看得到整机。逐机器算一次，别在会话循环里逐条查库。
+    const machineScopes = new Map(machineBindings.map(binding => [
+        binding.resourceId,
+        binding.ownerAccountId === account.id ? null : store.machineGrantScope(binding.resourceId, account.id)
+    ]))
     for (const namespace of new Set(machineBindings.map(binding => binding.coreNamespace))) {
         for (const session of engine.getSessionsByNamespace(namespace)) {
             const machineId = session.metadata?.machineId
             if (!machineId || !machineOwners.has(machineId) || visible.has(session.id)) continue
+            if (!pathWithinScope(session.metadata?.path, machineScopes.get(machineId) ?? null)) continue
             if (options.claimUnbound && !store.getResource('session', session.id)) {
                 store.bindResource({
                     resourceType: 'session',
@@ -205,7 +250,8 @@ export function mountExecutionRoutes(app: Hono<WebAppEnv>, deps: {
         // 匹配会把未授权会话的事件——包括完成提醒——投给同 namespace 的其他账号。
         const canDeliver = createSseEventFilterFactory(
             deps.store,
-            createSessionMachineResolver(deps.getSyncEngine)
+            createSessionMachineResolver(deps.getSyncEngine),
+            createSessionPathResolver(deps.getSyncEngine)
         )(account.id) ?? undefined
         return streamSSE(c, async stream => {
             const ids: string[] = []

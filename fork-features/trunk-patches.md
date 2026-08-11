@@ -665,6 +665,103 @@ sseVisibility（事件投递谓词）、executionMount 的 `collectVisibleSessio
 
 上游若出现原生的资源层级/继承授权模型，先比形态再决定去留。
 
+### 遗留缺陷：bind-on-view 认领会跨机器抢归属（未修，2026-08-10 记）
+
+`collectVisibleSessions` 的第 1 支（`executionMount.ts` 的 `claimUnbound` 分支）按
+`account.defaultNamespace` 扫未绑定会话并落 `ownerAccountId = account.id`。**生产库里
+四个账号的 `default_namespace` 全是 `default`**，于是任何机器上新建的会话，只要还没
+落 `gateway_resources` 行，**谁先拉一次 `GET /api/sessions` 就归谁**——与会话跑在谁的
+机器上无关。
+
+第 3 支（机器继承）特意把扫到的未绑定会话按**机器主人**落绑定而不是当前查看者
+（`ownerAccountId: machineOwners.get(machineId)!`），但第 1 支先跑，把这个防护架空了。
+
+生产实测（2026-08-10，`multi-user-gateway.sqlite`）：peter（account 2，自有机器只有
+WudeMacBook-Air + DESKTOP-BIG79TP）名下攒出 **15 条 WIN-GVHSJ7B378A 会话 + 1 条
+DESKTOP-HT3P09U 会话**的 owner 行，全部是这么来的——`gateway_grants` 里对应 0 条授权，
+即**不经任何显式授权就拿到 owner 档位**（比 grant 更高，`accessLevel` 直接返回 `owner`）。
+
+修的方向（未做，需重新构建二进制 + ECS 换芯，本轮只做数据清理）：第 1 支认领前先查
+`session.metadata.machineId`，机器已绑定且主人不是当前账号时跳过认领（回退到第 3 支的
+「按机器主人落绑定」）；或从源头给每个账号分配独立 `default_namespace`。
+
+数据清理记录（2026-08-10，operator 指示，仅改数据不动代码）：
+
+| 动作 | 影响行 |
+|---|---|
+| ht3p09u（`28ac3d22…`）会话 owner 由 peter 改回 admin | 1 |
+| vircs（`b8181939…`）会话 owner 由 peter 改回 admin | 15 |
+| 删除 peter 对 vircs 的 `machine` operator 授权 | 1 |
+| 保留 peter 的 3 条显式 vircs session grant（当初有意共享） | — |
+
+备份：`/root/.hapi/multi-user-gateway.sqlite.pre-revoke-peter-ht3p09u-20260810T060250Z`、
+`…pre-revoke-peter-vircs-20260810T061521Z`。网关库无内存缓存（`MultiUserGatewayStore`
+每次判权现查 SQLite），改完即时生效，无需重启 hub。
+
+#### 回退了上表第 3 行：peter 需要在 vircs 上建会话（2026-08-11，operator 指示）
+
+上面删掉那条 machine 授权的副作用是 **peter 从此在 vircs 上建不了会话**：
+`POST /api/machines/:id/spawn` 在 `executionMount.ts` 走 `capabilityFor('POST')='operate'`，
+判的是 **machine** 资源，没有机器授权就 403，且 vircs 根本不出现在他的 `GET /api/machines` 里。
+会话侧的 18 条 `peter\*` grant 只解决「看得见」，解决不了「建得出」。
+
+已重新插入 `('machine','b8181939…',2,'operator')`，备份
+`/root/.hapi/multi-user-gateway.sqlite.pre-grant-peter-vircs-20260811T151851Z`。
+
+**代价（已向 operator 披露并获授权）**：当前模型 `ResourceType` 只有 `session | machine`
+（`domain.ts:3`），`sessionAccessLevel` 取 `max(会话授权, 机器授权)`（`machineInheritance.ts:47`），
+`collectVisibleSessions` 第 3 支再按机器铺开可见性 —— **只要给了能建会话的 machine operator，
+peter 同时就能看到并操作 vircs 上全部会话**。实测他的可见会话 86 → 244（+158，含
+`hapi` 41 条、`meeting-assistant-maas` 16 条、`cx2cc` 15 条）。
+
+**这是临时态**：目录前缀限定已实现（见下一节），但**线上二进制还没换芯**，所以
+「机器授权 = 整机可见」这条不变量在生产上仍然成立 —— 别按「只开了几个目录」理解这条授权。
+换芯后把 `path_prefix` 置为 `C:\Users\Administrator\peter` 才真正收口。
+
+## 机器授权的目录前缀限定 (2026-08-11)
+
+`ResourceType` 只有 `session | machine`，机器授权是**整机**的：给了它才能建会话
+（`POST /api/machines/:id/spawn` 判机器级 `operate`），但同时整机会话全都继承过去。
+「只让某人在某台机器的某个目录下干活」此前表达不出来，只能在「他建不了会话」与
+「他看得到我全部会话」之间二选一。
+
+`gateway_grants` 加一列 `path_prefix TEXT`（NULL = 不限定，与加列前完全等价，存量
+grant 无需回填）。判定收敛到一个纯函数 `pathWithinScope`：分隔符归一、Windows 盘符
+路径不区分大小写而 POSIX 区分、按**整段**比边界（`…\peter` 不匹配 `…\peterX`）、
+候选路径取不到或含 `..` 一律判越界（fail-closed）。
+
+限定是 **grant 的属性**，不约束机器主人与 admin（两者走 `owner` 档位不经此路），
+也不影响**会话级**的显式 grant —— 当初有意共享的那几条越界会话仍然共享得了。
+
+五个消费点全部收口，漏一处限定就等于没限：
+
+| 消费点 | 收口方式 |
+|---|---|
+| `ExecutionDispatcher.authorize`（会话路由） | `sessionAccessLevel` 多收一个 `SessionPathResolver` |
+| `collectVisibleSessions` 第 3 支（`GET /api/sessions`、usage） | 按机器预算一次 scope，再逐会话比 `metadata.path` |
+| `sseVisibility`（事件流 + toast） | 同一个 `sessionAccessLevel`，透传 path resolver |
+| `listAudienceAccountIds`（Web Push / 通知） | 继承来的受众按 `pathWithinScope` 过滤 |
+| 机器级写路由 | 白名单逐条校验请求里的路径，**白名单外默认拒** |
+
+机器写路由的白名单：`spawn`→`directory`、`list-directory`→`path`、
+`create-directory`→`parentPath`、`paths/exists`→`paths[]`（有一条越界即整体拒）。
+`PATCH /machines/:id`（改机器名）这类拿不到路径的写操作，对限定授权一律 403 ——
+宁可把新增机器路由挡在限定之外，也不默认放行一条没人想过的写路径。
+
+中间件为校验路径要先读一次请求体，靠 Hono 的 `bodyCache` 让下游路由仍读得到；
+这条有专门用例钉住（spawn 回显 `directory`），否则线上表现是所有 spawn 变成
+400 Invalid body。
+
+授权管理 API 同步支持：`POST /api/grants/:type/:id` 收 `pathPrefix`（省略/null = 不限定），
+`GET` 的列表回显该字段。
+
+**回滚安全**：新列可空且旧二进制的 INSERT/SELECT 都按列名写死，不带这列也能跑，
+所以换芯回滚不需要还原网关库。
+
+| Files | Missing upstream seam | Why it cannot move out | Runtime path | Sync verification |
+|---|---|---|---|---|
+| `fork-features/multi-user/{machineInheritance,gatewayStore,executionMount,sseVisibility,notificationAdapter,executionDispatcher,gatewayRoutes}.ts`、`hub/src/web/server.ts` | upstream 无资源层级/路径维度的授权模型 | 判定要同时拿到 grant（网关库）与会话工作目录（core `metadata.path`），两侧都得现查 | 机器写路由 / 会话路由 / SSE 谓词 / 通知受众 | 给被授权账号一条带 `path_prefix` 的机器 grant，真打 spawn：限定内 200、限定外 403；`GET /api/sessions` 只返回限定内的会话 |
+
 ## 提醒弹窗也要过账号谓词 (2026-08-08)
 
 2026-08-02 给 SSE 装的账号可见性谓词只挂在 `SSEManager.broadcast`（私有

@@ -171,6 +171,28 @@ describe('multi-user gateway routes', () => {
         expect((await app.fetch(new Request('http://gateway/grants/machine/m1', { headers: { authorization: `Bearer ${viewerJwt}` } }))).status).toBe(403)
     })
 
+    it('机器授权可带目录限定，且能改回不限定', async () => {
+        const store = new MultiUserGatewayStore(':memory:')
+        stores.push(store)
+        const owner = store.createAccount('owner', 'user', 'owner-ns', hashPassword('password-123'))
+        const grantee = store.createAccount('peter', 'user', 'owner-ns', hashPassword('password-456'))
+        store.bindResource({ resourceType: 'machine', resourceId: 'm1', ownerAccountId: owner.id, coreNamespace: 'runtime' })
+        const app = createMultiUserGatewayRoutes({ store, jwtSecret: new TextEncoder().encode('x'.repeat(32)), coreUserId: 7 })
+        const ownerJwt = (await (await app.fetch(jsonRequest('/auth', { username: 'owner', password: 'password-123' }))).json() as { token: string }).token
+
+        const scoped = await app.fetch(jsonRequest('/grants/machine/m1',
+            { accountId: grantee.id, role: 'operator', pathPrefix: 'C:\\Users\\Administrator\\peter' }, ownerJwt))
+        expect(scoped.status).toBe(201)
+        expect(store.machineGrantScope('m1', grantee.id)).toBe('C:\\Users\\Administrator\\peter')
+
+        const listed = await app.fetch(new Request('http://gateway/grants/machine/m1', { headers: { authorization: `Bearer ${ownerJwt}` } }))
+        expect((await listed.json() as { grants: Array<{ pathPrefix: string | null }> }).grants[0]?.pathPrefix)
+            .toBe('C:\\Users\\Administrator\\peter')
+
+        expect((await app.fetch(jsonRequest('/grants/machine/m1', { accountId: grantee.id, role: 'operator' }, ownerJwt))).status).toBe(201)
+        expect(store.machineGrantScope('m1', grantee.id)).toBeNull()
+    })
+
     it('accepts the browser SSE query-token transport', async () => {
         const store = new MultiUserGatewayStore(':memory:')
         stores.push(store)

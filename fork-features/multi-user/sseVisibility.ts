@@ -1,6 +1,6 @@
 import type { SyncEvent } from '../../hub/src/sync/syncEngine'
 import type { MultiUserGatewayStore } from './gatewayStore'
-import { sessionAccessLevel, type SessionMachineResolver } from './machineInheritance'
+import { sessionAccessLevel, type SessionMachineResolver, type SessionPathResolver } from './machineInheritance'
 
 /**
  * 事件携带的会话 id。**toast 把 sessionId 放在 `data` 里，顶层没有**
@@ -52,7 +52,8 @@ function carriesResourceId(event: SyncEvent): boolean {
  */
 export function createSseEventFilterFactory(
     store: MultiUserGatewayStore,
-    resolveSessionMachineId?: SessionMachineResolver
+    resolveSessionMachineId?: SessionMachineResolver,
+    resolveSessionPath?: SessionPathResolver
 ): (accountId: number) => ((event: SyncEvent) => boolean) | null {
     function canReadMachine(accountId: number, id: string, ownNamespace: boolean): boolean {
         if (store.accessLevel('machine', id, accountId) !== 'none') return true
@@ -60,7 +61,7 @@ export function createSseEventFilterFactory(
     }
 
     function canReadSession(accountId: number, id: string, ownNamespace: boolean): boolean {
-        if (sessionAccessLevel(store, accountId, id, resolveSessionMachineId) !== 'none') return true
+        if (sessionAccessLevel(store, accountId, id, resolveSessionMachineId, resolveSessionPath) !== 'none') return true
         // 已绑定但无权 → 拒。
         if (store.getResource('session', id)) return false
         if (!ownNamespace) return false
@@ -100,9 +101,10 @@ export function createSseEventFilterFactory(
 export function createSseRequestFilterFactory(
     store: MultiUserGatewayStore,
     resolveAccountId: (request: Request) => Promise<number | null>,
-    resolveSessionMachineId?: SessionMachineResolver
+    resolveSessionMachineId?: SessionMachineResolver,
+    resolveSessionPath?: SessionPathResolver
 ): (request: Request) => Promise<((event: SyncEvent) => boolean) | null> {
-    const byAccount = createSseEventFilterFactory(store, resolveSessionMachineId)
+    const byAccount = createSseEventFilterFactory(store, resolveSessionMachineId, resolveSessionPath)
     return async (request) => {
         const accountId = await resolveAccountId(request)
         // 解析不出账号身份时不放行任何带资源 id 的事件（fail-closed）。
