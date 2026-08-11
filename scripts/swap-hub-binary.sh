@@ -42,6 +42,8 @@ if grep -qiE "schema|fatal|assertRequired" "$DRY/dryrun.log"; then
     echo "WARN: 干跑日志里有 schema/fatal 字样，人工确认上面的日志尾再继续"
 fi
 echo "干跑通过"
+# 干跑副本含一份 1.7G 的 hapi.db，先清掉再做备份，避免峰值占用翻倍
+rm -rf "$DRY"
 
 echo "=== 2/5 备份（双库 + 当前真二进制）==="
 sqlite3 "$HOME_DIR/hapi.db" ".backup $HOME_DIR/hapi.db.pre-$TAG-$TS"
@@ -64,5 +66,4 @@ echo "=== 5/5 启动日志（找 schema/fatal）==="
 journalctl -u hapi-hub --since "-2 min" --no-pager -o cat | tail -25
 echo "hapi.db user_version: $(sqlite3 "$HOME_DIR/hapi.db" "PRAGMA user_version;")"
 echo "gateway_grants 列: $(sqlite3 "$HOME_DIR/multi-user-gateway.sqlite" "PRAGMA table_info(gateway_grants);" | awk -F'|' '{print $2}' | tr '\n' ',')"
-rm -rf "$DRY"
 echo "SWAP DONE (rollback: /root/hapi.bin.pre-$TAG-$TS)"

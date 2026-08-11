@@ -14,9 +14,9 @@
 
 不要默认「已生效」。有 runtime 改动后主动问 operator 是否现在换芯到 `bob.18852271093.top`。这是少数值得问的决策（部署有 blast radius，时机由 operator 定）。
 
-### 2. 要 CD → vircs 本机构建（ECS 拉不了任何外网产物）
+### 2. 要 CD → vircs 本机构建（ECS 仍拉不到 Release 产物）
 
-ECS 出网锁死（GitHub/npm 全 `http=000`），**Release 产物下载在 ECS 上不可用**，唯一进货通道是 scp 推送（入站 22）。所以构建在 vircs 做：
+ECS 出网是**部分**可用，别按「全锁死」也别按「全可用」下判断（2026-08-11 实测：`registry.npmjs.org` 200、`api.github.com` 200、`objects.githubusercontent.com` 主机可达、`github.com` **000**、`api.anthropic.com` 403 区域封锁）。**Release 页面直链要过 `github.com`，在 ECS 上仍下不了**，进货默认通道仍是 scp 推送（入站 22）。若某次要试 `api.github.com` 取 asset 直链再从 `objects.githubusercontent.com` 拉，先测吞吐再决定，不要当既定路径。构建仍在 vircs 做：
 
 ```bash
 bun run build:web && (cd hub && bun run generate:embedded-web-assets)   # 先生成真 web 资产（防 stub 覆写）
@@ -60,7 +60,7 @@ systemctl start hapi-hub
 ## 本规则禁止
 
 - 把「代码推上分支」当成「已上线」而不问 CD
-- 在 ECS 上尝试从 GitHub/npm 拉产物（出网锁死，白等）
+- 把 ECS 出网当**全锁死**或**全可用**——两头都错。进货前按上面的实测口径确认（Release 页面直链确实下不了）
 - 只看传输字节数/大小判传完；后台串联命令不捕获分段退出码
 - schema 变更不经副本干跑直接升生产库
 - 覆写运行中的二进制（必须 mv）

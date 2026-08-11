@@ -665,7 +665,15 @@ sseVisibility（事件投递谓词）、executionMount 的 `collectVisibleSessio
 
 上游若出现原生的资源层级/继承授权模型，先比形态再决定去留。
 
-### 遗留缺陷：bind-on-view 认领会跨机器抢归属（未修，2026-08-10 记）
+### 遗留缺陷：bind-on-view 认领会跨机器抢归属（2026-08-10 记，**2026-08-11 已修**）
+
+> 修法即当时写的方向：第 1 支认领前查 `session.metadata.machineId`，机器已绑定且
+> 主人不是当前账号时跳过认领——归属留给机器主人自己的列表（第 1 支）或被授权者
+> 的机器继承（第 3 支，按机器主人落绑定）。机器未注册时保持原行为，真孤儿仍有人认领。
+> 触发修复的观测：目录限定上线当晚，一条跑在 vircs `hapi\` 下的活跃会话在网关里
+> 仍是 UNBOUND——peter 的网页只要做一次完整列表拉取就会把它认领成 owner，**owner
+> 档位直接越过目录限定**，等于限定被这个旧洞架空。5 个用例钉住（不抢/主人认领/
+> admin 列表绑给机器主人/未注册机器保持原行为/限定外不落绑定）。以下为原始记录。
 
 `collectVisibleSessions` 的第 1 支（`executionMount.ts` 的 `claimUnbound` 分支）按
 `account.defaultNamespace` 扫未绑定会话并落 `ownerAccountId = account.id`。**生产库里

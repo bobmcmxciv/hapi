@@ -124,7 +124,8 @@ export function createExecutionMiddleware(deps: {
  * 一个账号可见的会话集合，`GET /api/sessions` 与 `/api/usage/summary` 共用。
  *
  * 三个来源：
- *   1. 自己 namespace 里尚未绑定的会话（bind-on-view 认领，`claimUnbound` 时）
+ *   1. 自己 namespace 里尚未绑定的会话（bind-on-view 认领，`claimUnbound` 时）。
+ *      **不含别人机器上的**——那些留给机器主人或第 3 支落归属
  *   2. gateway_resources 里拥有 + 被授权的会话
  *   3. **被授权机器上的会话** —— 机器授权向下继承（machineInheritance）。
  *      这一支是修「机器授权了但机器上新建的会话看不见」的关键：新会话的
@@ -141,14 +142,24 @@ function collectVisibleSessions(
 ): Session[] {
     if (options.claimUnbound) {
         for (const session of engine.getSessionsByNamespace(account.defaultNamespace)) {
-            if (!store.getResource('session', session.id)) {
-                store.bindResource({
-                    resourceType: 'session',
-                    resourceId: session.id,
-                    ownerAccountId: account.id,
-                    coreNamespace: account.defaultNamespace
-                })
+            if (store.getResource('session', session.id)) continue
+            // 别抢别人机器上的会话。生产库里历史账号的 default_namespace 全是
+            // `default`，无条件认领等于「谁先拉一次列表就归谁」——peter 名下曾这么
+            // 攒出 15 条 vircs 会话（2026-08-10 数据清理记录）。机器已绑定且主人
+            // 不是自己时跳过：主人自己的下一次列表（本分支）或被授权者的机器继承
+            // （第 3 支，按机器主人落绑定）会把归属落对。机器未注册时保持原行为，
+            // 否则真孤儿会话永远没人认领。
+            const machineId = session.metadata?.machineId
+            if (typeof machineId === 'string' && machineId.length > 0) {
+                const machineBinding = store.getResource('machine', machineId)
+                if (machineBinding && machineBinding.ownerAccountId !== account.id) continue
             }
+            store.bindResource({
+                resourceType: 'session',
+                resourceId: session.id,
+                ownerAccountId: account.id,
+                coreNamespace: account.defaultNamespace
+            })
         }
     }
 

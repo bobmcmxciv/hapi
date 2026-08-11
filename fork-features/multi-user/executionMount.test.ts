@@ -876,3 +876,87 @@ describe('目录限定的机器授权：只放行限定目录内的机器写操�
         store.close()
     })
 })
+
+describe('bind-on-view 不抢别人机器上的会话（2026-08-10 生产事故：15 条 vircs 会话被抢归属）', () => {
+    const jwtSecret = new TextEncoder().encode('test-secret-test-secret-test-secret')
+    const sign = (accountId: number) => new SignJWT({ gaid: accountId }).setProtectedHeader({ alg: 'HS256' }).sign(jwtSecret)
+
+    /**
+     * 生产事故形态：历史账号 default_namespace 全是 `default`，admin 的机器 m-vircs
+     * 上有一条**未绑定**会话（CLI 起的，还没人列过表），peter 与 admin 同 namespace。
+     * 另放一条挂在未注册机器上的孤儿会话，钉住旧行为不被误杀。
+     */
+    function seedUnbound() {
+        const store = new MultiUserGatewayStore(':memory:')
+        const admin = store.createAccount('admin', 'admin', 'default', null)
+        const owner = store.createAccount('owner', 'user', 'default', null)
+        const peter = store.createAccount('peter', 'user', 'default', null)
+        store.bindResource({ resourceType: 'machine', resourceId: 'm-vircs', ownerAccountId: owner.id, coreNamespace: 'default' })
+        const records = new Map([
+            ['s-unbound-vircs', {
+                id: 's-unbound-vircs', namespace: 'default', active: true, createdAt: 1, updatedAt: 2, seq: 0, agentState: null,
+                metadata: { machineId: 'm-vircs', path: 'C:\\Users\\Administrator\\hapi' }
+            }],
+            ['s-orphan-unregistered', {
+                id: 's-orphan-unregistered', namespace: 'default', active: false, createdAt: 1, updatedAt: 1, seq: 0, agentState: null,
+                metadata: { machineId: 'm-ghost', path: 'D:\\somewhere' }
+            }]
+        ])
+        const machines = [{ id: 'm-vircs', namespace: 'default' }]
+        const engine = {
+            getSessionsByNamespace: () => [...records.values()],
+            getSession: (id: string) => records.get(id),
+            getOnlineMachinesByNamespace: () => machines,
+            getMachine: (id: string) => machines.find(m => m.id === id) ?? null
+        } as unknown as SyncEngine
+        const app = new Hono<WebAppEnv>()
+        mountExecutionRoutes(app, { store, jwtSecret, getSyncEngine: () => engine, getSseManager: () => null, getStore: () => null })
+        return { store, app, admin, owner, peter }
+    }
+
+    const list = async (app: Hono<WebAppEnv>, accountId: number) =>
+        app.request('/api/sessions', { headers: { authorization: `Bearer ${await sign(accountId)}` } })
+
+    it('同 namespace 的旁观者列表后：别人机器上的未绑定会话不被认领、也不可见', async () => {
+        const { store, app, peter } = seedUnbound()
+        const response = await list(app, peter.id)
+        expect(response.status).toBe(200)
+        const ids = ((await response.json()) as { sessions: Array<{ id: string }> }).sessions.map(s => s.id)
+        expect(ids).not.toContain('s-unbound-vircs')
+        // 关键：不是「这次没显示」，是压根没落 owner 行
+        expect(store.getResource('session', 's-unbound-vircs')).toBeNull()
+        store.close()
+    })
+
+    it('机器主人列表后认领成自己的（原行为保留）', async () => {
+        const { store, app, owner } = seedUnbound()
+        await list(app, owner.id)
+        expect(store.getResource('session', 's-unbound-vircs')?.ownerAccountId).toBe(owner.id)
+        store.close()
+    })
+
+    it('admin 列表后：经机器继承支绑定给机器主人而不是 admin，且 admin 仍看得到', async () => {
+        const { store, app, admin, owner } = seedUnbound()
+        const response = await list(app, admin.id)
+        const ids = ((await response.json()) as { sessions: Array<{ id: string }> }).sessions.map(s => s.id)
+        expect(ids).toContain('s-unbound-vircs')
+        expect(store.getResource('session', 's-unbound-vircs')?.ownerAccountId).toBe(owner.id)
+        store.close()
+    })
+
+    it('未注册机器上的孤儿会话仍按原行为认领给查看者', async () => {
+        const { store, app, peter } = seedUnbound()
+        await list(app, peter.id)
+        expect(store.getResource('session', 's-orphan-unregistered')?.ownerAccountId).toBe(peter.id)
+        store.close()
+    })
+
+    it('带目录限定的被授权者列表：限定内未绑定会话绑给机器主人，限定外不落任何绑定', async () => {
+        const { store, app, owner, peter } = seedUnbound()
+        store.grant('machine', 'm-vircs', peter.id, 'operator', 'C:\\Users\\Administrator\\peter')
+        await list(app, peter.id)
+        // s-unbound-vircs 在 hapi\ 下（限定外）：第 1 支跳过（别人机器）、第 3 支跳过（越界）
+        expect(store.getResource('session', 's-unbound-vircs')).toBeNull()
+        store.close()
+    })
+})
