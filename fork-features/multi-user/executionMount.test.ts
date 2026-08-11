@@ -836,6 +836,15 @@ describe('目录限定的机器授权：只放行限定目录内的机器写操�
         store.close()
     })
 
+    it('机器本身仍出现在机器列表里 —— 否则 UI 里选不到这台机器，限定授权等于白开', async () => {
+        const { store, app, peter } = seedScoped()
+        const response = await app.request('/api/machines', { headers: { authorization: `Bearer ${await sign(peter.id)}` } })
+        expect(response.status).toBe(200)
+        const ids = ((await response.json()) as { machines: Array<{ id: string }> }).machines.map(m => m.id)
+        expect(ids).toEqual(['m-vircs'])
+        store.close()
+    })
+
     it('限定外的会话仍可通过显式 session grant 单独共享', async () => {
         const { store, app, peter } = seedScoped()
         store.grant('session', 's-out', peter.id, 'viewer')
