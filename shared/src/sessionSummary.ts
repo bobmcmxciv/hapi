@@ -39,6 +39,10 @@ export type SessionSummaryMetadata = {
     /** Session-recorded host name. Falls back to displaying an unfriendly-named
      *  machine's `host` when the sidebar has no `machineLabelsById` entry. */
     host?: string
+    /** Session-recorded node platform (win32/darwin/linux). The sidebar machine
+     *  filter's OS icon falls back to it for machines that never appear in
+     *  /api/machines (visible through session grants only). */
+    os?: string
     summary?: { text: string }
     flavor?: string | null
     worktree?: WorktreeMetadata
@@ -202,6 +206,7 @@ export function toSessionSummaryMetadata(metadata: Metadata | null | undefined):
         path: metadata.path,
         machineId: metadata.machineId ?? undefined,
         host: metadata.host,
+        os: metadata.os,
         summary: metadata.summary ? { text: metadata.summary.text } : undefined,
         flavor: metadata.flavor ?? null,
         worktree: metadata.worktree,

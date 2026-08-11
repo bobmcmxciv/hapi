@@ -227,10 +227,15 @@ describe('列表可见性：admin 看整个 namespace，普通用户看自己的
         store.close()
     })
 
-    it('admin 的机器列表同样是整个 namespace', async () => {
+    it('admin 的机器列表同样是整个 namespace，且每台带归属人用户名', async () => {
         const { store, app, admin } = seed()
         const response = await app.request('/api/machines', { headers: { authorization: `Bearer ${await sign(admin.id)}` } })
-        expect(await idsOf(response, 'machines')).toEqual(['m-admin', 'm-peter'])
+        const machines = ((await response.json()) as { machines: Array<{ id: string; ownerUsername?: string }> }).machines
+        expect(machines.map(m => m.id).sort()).toEqual(['m-admin', 'm-peter'])
+        expect(new Map(machines.map(m => [m.id, m.ownerUsername]))).toEqual(new Map([
+            ['m-admin', 'admin'],
+            ['m-peter', 'peter']
+        ]))
         store.close()
     })
 
@@ -239,7 +244,8 @@ describe('列表可见性：admin 看整个 namespace，普通用户看自己的
         const sessions = await app.request('/api/sessions', { headers: { authorization: `Bearer ${await sign(peter.id)}` } })
         expect(await idsOf(sessions, 'sessions')).toEqual(['s-peter-1', 's-peter-2'])
         const machines = await app.request('/api/machines', { headers: { authorization: `Bearer ${await sign(peter.id)}` } })
-        expect(await idsOf(machines, 'machines')).toEqual(['m-peter'])
+        const rows = ((await machines.json()) as { machines: Array<{ id: string; ownerUsername?: string }> }).machines
+        expect(rows.map(m => ({ id: m.id, ownerUsername: m.ownerUsername }))).toEqual([{ id: 'm-peter', ownerUsername: 'peter' }])
         store.close()
     })
 

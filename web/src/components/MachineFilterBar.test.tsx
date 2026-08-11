@@ -1,14 +1,41 @@
-import { fireEvent, render, screen } from '@testing-library/react'
-import { describe, expect, it, vi } from 'vitest'
-import { MachineFilterBar, MachineFilterMenu, getMachineFilterMenuClampStyle } from './MachineFilterBar'
+import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import type { MachineFilterItem } from './MachineFilterBar'
+import { MachineFilterBar, MachineFilterMenu, getMachineFilterMenuClampStyle, groupMachinesByOwner } from './MachineFilterBar'
 import { I18nProvider } from '@/lib/i18n-context'
 
-const defaultMachines: Parameters<typeof MachineFilterBar>[0]['machines'] = [
-    { id: 'machine-1', label: 'Mint', sessionCount: 3, healthPresentation: null },
-    {
+afterEach(() => cleanup())
+
+function machineItem(overrides: Partial<MachineFilterItem> & { id: string; label: string }): MachineFilterItem {
+    return {
+        sessionCount: 1,
+        healthPresentation: null,
+        platform: null,
+        owner: null,
+        displayName: null,
+        host: null,
+        canRename: false,
+        ...overrides,
+    }
+}
+
+const defaultMachines: MachineFilterItem[] = [
+    machineItem({
+        id: 'machine-1',
+        label: 'Mint',
+        sessionCount: 3,
+        platform: 'darwin',
+        host: 'mint.local',
+        canRename: true,
+    }),
+    machineItem({
         id: 'machine-2',
         label: 'Teemo',
         sessionCount: 2,
+        platform: 'win32',
+        host: 'TEEMO-PC',
+        displayName: 'Teemo',
+        canRename: true,
         healthPresentation: {
             metrics: [
                 { id: 'cpu', shortLabel: 'CPU', percent: 12, tone: 'ok' },
@@ -17,7 +44,7 @@ const defaultMachines: Parameters<typeof MachineFilterBar>[0]['machines'] = [
             overallTone: 'warn',
             status: 'elevated',
         },
-    },
+    }),
 ]
 
 function renderBar(props: Partial<Parameters<typeof MachineFilterBar>[0]> = {}) {
@@ -52,33 +79,33 @@ describe('MachineFilterBar', () => {
     it('renders an "All" chip plus one chip per machine with counts', () => {
         renderBar()
 
-        expect(screen.getByRole('button', { name: /All \(5\)/ })).toBeTruthy()
-        expect(screen.getByRole('button', { name: /Mint \(3\)/ })).toBeTruthy()
-        expect(screen.getByRole('button', { name: /Teemo \(2\)/ })).toBeTruthy()
+        expect(screen.getByRole('button', { name: /All 5/ })).toBeTruthy()
+        expect(screen.getByRole('button', { name: /Mint 3/ })).toBeTruthy()
+        expect(screen.getByRole('button', { name: /Teemo 2/ })).toBeTruthy()
     })
 
     it('marks the selected chip as pressed', () => {
         renderBar({ value: 'machine-1' })
 
-        expect(screen.getByRole('button', { name: /Mint \(3\)/ }).getAttribute('aria-pressed')).toBe('true')
-        expect(screen.getByRole('button', { name: /All \(5\)/ }).getAttribute('aria-pressed')).toBe('false')
+        expect(screen.getByRole('button', { name: /Mint 3/ }).getAttribute('aria-pressed')).toBe('true')
+        expect(screen.getByRole('button', { name: /All 5/ }).getAttribute('aria-pressed')).toBe('false')
     })
 
     it('reports machine selection and reset to All', () => {
         const onChange = vi.fn()
         renderBar({ value: 'machine-1', onChange })
 
-        fireEvent.click(screen.getByRole('button', { name: /Teemo \(2\)/ }))
+        fireEvent.click(screen.getByRole('button', { name: /Teemo 2/ }))
         expect(onChange).toHaveBeenCalledWith('machine-2')
 
-        fireEvent.click(screen.getByRole('button', { name: /All \(5\)/ }))
+        fireEvent.click(screen.getByRole('button', { name: /All 5/ }))
         expect(onChange).toHaveBeenCalledWith(null)
     })
 
     it('shows machine health in a hover popup instead of reserving chip width', () => {
         renderBar()
 
-        const chip = screen.getByRole('button', { name: /Teemo \(2\)/ })
+        const chip = screen.getByRole('button', { name: /Teemo 2/ })
         const describedBy = chip.getAttribute('aria-describedby')
         expect(describedBy).toBeTruthy()
 
@@ -95,32 +122,151 @@ describe('MachineFilterBar', () => {
     })
 
     it('keeps the entire visible chip clickable', () => {
-        const onChange = vi.fn()
-        renderBar({ onChange })
+        renderBar()
 
-        // Chip with health popup: the button carries the pill padding, the
-        // bordered wrapper adds no inert padding around it.
-        const teemo = screen.getByRole('button', { name: /Teemo \(2\)/ })
-        expect(teemo.className).toContain('px-2.5')
-        const pill = teemo.parentElement!.parentElement!
-        expect(pill.className).toContain('rounded-full')
-        expect(pill.className).toContain('border')
-        expect(pill.className).not.toContain('px-2.5')
+        // Chip with health popup: the button carries the chip padding, the
+        // bordered wrapper adds no inert padding around it and stretches the
+        // target to the full grid cell so counts stay aligned.
+        const teemo = screen.getByRole('button', { name: /Teemo 2/ })
+        expect(teemo.className).toContain('px-2')
+        expect(teemo.className).toContain('w-full')
+        const shell = teemo.parentElement!.parentElement!
+        expect(shell.className).toContain('rounded-lg')
+        expect(shell.className).toContain('border')
+        expect(shell.className).not.toContain('px-2')
+        expect(shell.className).toContain('[&>span:first-child]:w-full')
 
-        // Chip without health: the button is the pill itself.
-        const mint = screen.getByRole('button', { name: /Mint \(3\)/ })
-        expect(mint.className).toContain('rounded-full')
+        // Chip without health: the button is the chip itself.
+        const mint = screen.getByRole('button', { name: /Mint 3/ })
+        expect(mint.className).toContain('rounded-lg')
         expect(mint.className).toContain('border')
+        expect(mint.className).toContain('w-full')
     })
 
-    it('stays visible at every width so switching machines is one click', () => {
-        // fork：不再按视口断点折叠。会话侧栏是固定宽度（默认 420px），断点看的
-        // 却是视口宽度，桌面用户也会落进折叠分支，切主机退化成两步操作。
+    it('lays chips out in an aligned auto-fill grid and never collapses at any width', () => {
+        // fork：不再按视口断点折叠；布局是 auto-fill 网格，各要素纵向对齐。
         renderBar()
 
         const group = screen.getByRole('group', { name: 'Filter sessions by machine' })
         expect(group.className).not.toContain('max-md:hidden')
-        expect(group.className).toContain('flex-wrap')
+        const grid = group.firstElementChild!
+        expect(grid.className).toContain('grid')
+        expect(grid.className).toContain('auto-fill')
+    })
+
+    it('shows an OS icon matching each machine platform', () => {
+        renderBar({
+            machines: [
+                ...defaultMachines,
+                machineItem({ id: 'machine-3', label: 'Pengu', platform: 'linux' }),
+                machineItem({ id: 'machine-4', label: 'Mystery' }),
+            ],
+        })
+
+        const mint = screen.getByRole('button', { name: /Mint 3/ })
+        expect(mint.querySelector('[data-os="darwin"]')).toBeTruthy()
+        const teemo = screen.getByRole('button', { name: /Teemo 2/ })
+        expect(teemo.querySelector('[data-os="win32"]')).toBeTruthy()
+        expect(screen.getByRole('button', { name: /Pengu 1/ }).querySelector('[data-os="linux"]')).toBeTruthy()
+        expect(screen.getByRole('button', { name: /Mystery 1/ }).querySelector('[data-os="unknown"]')).toBeTruthy()
+    })
+
+    it('groups machines under owner headings once two owners exist, unknown owners last', () => {
+        renderBar({
+            machines: [
+                machineItem({ id: 'm-x', label: 'stray' }),
+                machineItem({ id: 'm-a1', label: 'vircs', owner: 'admin' }),
+                machineItem({ id: 'm-p1', label: 'WudeMac', owner: 'peter' }),
+                machineItem({ id: 'm-a2', label: 'desktop', owner: 'admin' }),
+            ],
+        })
+
+        const headings = screen.getAllByTestId('machine-owner-heading').map((el) => el.textContent)
+        expect(headings).toEqual(['admin', 'peter', 'Unknown owner'])
+        // 同归属人的机器聚在同一节里
+        const adminSection = screen.getAllByTestId('machine-owner-heading')[0]!.parentElement!
+        expect(adminSection.textContent).toContain('vircs')
+        expect(adminSection.textContent).toContain('desktop')
+        expect(adminSection.textContent).not.toContain('WudeMac')
+    })
+
+    it('keeps a flat grid without headings when fewer than two owners exist', () => {
+        renderBar({
+            machines: [
+                machineItem({ id: 'm-a1', label: 'vircs', owner: 'admin' }),
+                machineItem({ id: 'm-x', label: 'stray' }),
+            ],
+        })
+
+        expect(screen.queryAllByTestId('machine-owner-heading')).toHaveLength(0)
+    })
+
+    it('opens the alias dialog from the context menu and submits the new name', async () => {
+        const onRenameMachine = vi.fn().mockResolvedValue(undefined)
+        renderBar({ onRenameMachine })
+
+        fireEvent.contextMenu(screen.getByRole('button', { name: /Mint 3/ }))
+        const input = await screen.findByPlaceholderText('mint.local')
+        fireEvent.change(input, { target: { value: 'vircs' } })
+        fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+
+        await vi.waitFor(() => expect(onRenameMachine).toHaveBeenCalledWith('machine-1', 'vircs'))
+        await vi.waitFor(() => expect(screen.queryByPlaceholderText('mint.local')).toBeNull())
+    })
+
+    it('submitting an empty alias clears the custom name (falls back to hostname)', async () => {
+        const onRenameMachine = vi.fn().mockResolvedValue(undefined)
+        renderBar({ onRenameMachine })
+
+        // Teemo already has displayName 'Teemo'; clearing it is a real change.
+        fireEvent.contextMenu(screen.getByRole('button', { name: /Teemo 2/ }))
+        const input = await screen.findByPlaceholderText('TEEMO-PC')
+        fireEvent.change(input, { target: { value: '' } })
+        fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+
+        await vi.waitFor(() => expect(onRenameMachine).toHaveBeenCalledWith('machine-2', ''))
+    })
+
+    it('does not open the alias dialog without a rename handler', () => {
+        renderBar()
+
+        fireEvent.contextMenu(screen.getByRole('button', { name: /Mint 3/ }))
+        expect(screen.queryByRole('dialog')).toBeNull()
+    })
+
+    it('does not open the alias dialog for machines that cannot be renamed', () => {
+        const onRenameMachine = vi.fn()
+        renderBar({
+            machines: [machineItem({ id: 'm-x', label: 'stray', sessionCount: 4 })],
+            onRenameMachine,
+        })
+
+        fireEvent.contextMenu(screen.getByRole('button', { name: /stray 4/ }))
+        expect(screen.queryByRole('dialog')).toBeNull()
+    })
+})
+
+describe('groupMachinesByOwner', () => {
+    it('preserves machine activity order inside sections and orders sections by first appearance', () => {
+        const grouped = groupMachinesByOwner([
+            machineItem({ id: '1', label: 'p-first', owner: 'peter' }),
+            machineItem({ id: '2', label: 'a-first', owner: 'admin' }),
+            machineItem({ id: '3', label: 'p-second', owner: 'peter' }),
+        ])
+
+        expect(grouped.grouped).toBe(true)
+        expect(grouped.sections.map((s) => s.owner)).toEqual(['peter', 'admin'])
+        expect(grouped.sections[0]!.machines.map((m) => m.label)).toEqual(['p-first', 'p-second'])
+    })
+
+    it('does not group when every machine shares one owner', () => {
+        const grouped = groupMachinesByOwner([
+            machineItem({ id: '1', label: 'a', owner: 'admin' }),
+            machineItem({ id: '2', label: 'b', owner: 'admin' }),
+        ])
+
+        expect(grouped.grouped).toBe(false)
+        expect(grouped.sections).toHaveLength(1)
     })
 })
 

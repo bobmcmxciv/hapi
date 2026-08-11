@@ -107,9 +107,9 @@ describe('SessionList machine filter', () => {
         expect(screen.getByRole('group', { name: 'Filter sessions by machine' })).toBeTruthy()
         // fork：不再有 header 上的漏斗折叠入口——各主机平铺，一次点击即切换。
         expect(screen.queryByRole('button', { name: 'Filter sessions by machine' })).toBeNull()
-        expect(screen.getByRole('button', { name: /All \(2\)/ })).toBeTruthy()
-        expect(screen.getByRole('button', { name: /Mint \(1\)/ })).toBeTruthy()
-        expect(screen.getByRole('button', { name: /Teemo \(1\)/ })).toBeTruthy()
+        expect(screen.getByRole('button', { name: /All 2/ })).toBeTruthy()
+        expect(screen.getByRole('button', { name: /Mint 1/ })).toBeTruthy()
+        expect(screen.getByRole('button', { name: /Teemo 1/ })).toBeTruthy()
         expect(screen.getByText('work/hapi · Mint')).toBeTruthy()
         expect(screen.getByText('work/docs · Teemo')).toBeTruthy()
     })
@@ -117,7 +117,7 @@ describe('SessionList machine filter', () => {
     it('filters directory groups when a machine chip is selected', () => {
         renderSessionList(multiMachineSessions)
 
-        fireEvent.click(screen.getByRole('button', { name: /Teemo \(1\)/ }))
+        fireEvent.click(screen.getByRole('button', { name: /Teemo 1/ }))
 
         expect(screen.queryByTitle('/work/hapi')).toBeNull()
         expect(screen.getByTitle('/work/docs')).toBeTruthy()
@@ -132,7 +132,7 @@ describe('SessionList machine filter', () => {
 
         expect(screen.getByTitle('/work/hapi')).toBeTruthy()
         expect(screen.getByTitle('/work/docs')).toBeTruthy()
-        expect(screen.getByRole('button', { name: /All \(2\)/ }).getAttribute('aria-pressed')).toBe('true')
+        expect(screen.getByRole('button', { name: /All 2/ }).getAttribute('aria-pressed')).toBe('true')
     })
 
     it('shows an empty state when the search only matches sessions on another machine', () => {
@@ -151,7 +151,7 @@ describe('SessionList machine filter', () => {
 
         fireEvent.click(screen.getByRole('button', { name: 'Search sessions' }))
         fireEvent.change(screen.getByPlaceholderText('Search sessions…'), { target: { value: 'alpha' } })
-        fireEvent.click(screen.getByRole('button', { name: /Teemo \(1\)/ }))
+        fireEvent.click(screen.getByRole('button', { name: /Teemo 1/ }))
 
         expect(screen.getByText('No sessions match your filters.')).toBeTruthy()
         expect(screen.queryByTitle('/work/hapi')).toBeNull()

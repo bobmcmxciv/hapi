@@ -25,9 +25,11 @@ import { formatScheduledTooltipDetail } from '@/lib/scheduledTime'
 import { formatReopenError } from '@/lib/reopenError'
 import { getSessionTitle } from '@/lib/sessionTitle'
 import { getWorktreeSessionLabel } from '@/lib/sessionWorktreeLabel'
-import type { Machine } from '@/types/api'
-import { getMachinePlatform, presentMachineHealth } from '@/lib/machineHealth'
+import type { MachineWithOwner } from '@/types/api'
+import { getMachineHost, getMachinePlatform, presentMachineHealth } from '@/lib/machineHealth'
 import { MachineFilterBar } from '@/components/MachineFilterBar'
+import { useQueryClient } from '@tanstack/react-query'
+import { queryKeys } from '@/lib/query-keys'
 import { useSessionListMachineFilter } from '@/hooks/useSessionListMachineFilter'
 import { useCursorChatStoreStatus } from '@/hooks/queries/useCursorChatStoreStatus'
 import { SessionRowSummary } from '@/components/SessionRowSummary'
@@ -1120,7 +1122,7 @@ export function SessionList(props: {
     headerActions?: React.ReactNode
     api: ApiClient | null
     machineLabelsById?: Record<string, string>
-    machinesById?: Record<string, Machine>
+    machinesById?: Record<string, MachineWithOwner>
     selectedSessionId?: string | null
     /** Required binding keeps the real scroll node and pre-navigation selection coupled. */
     scrollStability: SessionListScrollStability
@@ -1143,6 +1145,14 @@ export function SessionList(props: {
     const [showUnreadOnly, setShowUnreadOnly] = useState(false)
     const { pinInProgressSessions } = usePinInProgressSessions()
     const { machineFilter, setMachineFilter } = useSessionListMachineFilter()
+    const queryClient = useQueryClient()
+    // 右键机器 chip 的改名入口：写的是机器全局 displayName（与设置页同一 API），
+    // 保存后刷新 machines 查询，别名立即体现在 chip 与会话行副标题上。
+    const renameMachine = useCallback(async (machineId: string, displayName: string) => {
+        if (!api) throw new Error('API unavailable')
+        await api.renameMachine(machineId, displayName)
+        await queryClient.invalidateQueries({ queryKey: queryKeys.machines })
+    }, [api, queryClient])
     const showDetailedStatus = sessionListStatusMode === 'detailed'
     const [searchQuery, setSearchQuery] = useState('')
     const [searchExpanded, setSearchExpanded] = useState(false)
@@ -1162,6 +1172,19 @@ export function SessionList(props: {
             const mid = s.metadata?.machineId
             const host = s.metadata?.host
             if (mid && host && !m.has(mid)) m.set(mid, host)
+        }
+        return m
+    }, [props.sessions])
+
+    // machineId → OS fallback from session metadata (same node vocabulary:
+    // win32/darwin/linux). Covers machines visible only through session grants,
+    // which never appear in /api/machines.
+    const osByMachineId = useMemo(() => {
+        const m = new Map<string, string>()
+        for (const s of props.sessions) {
+            const mid = s.metadata?.machineId
+            const os = s.metadata?.os
+            if (mid && os && !m.has(mid)) m.set(mid, os)
         }
         return m
     }, [props.sessions])
@@ -1220,10 +1243,17 @@ export function SessionList(props: {
                 healthPresentation: presentMachineHealth(
                     machine?.health,
                     getMachinePlatform(machine)
-                )
+                ),
+                platform: getMachinePlatform(machine)
+                    ?? (mg.machineId ? osByMachineId.get(mg.machineId) ?? null : null),
+                owner: machine?.ownerUsername ?? null,
+                displayName: machine?.metadata?.displayName ?? null,
+                host: getMachineHost(machine)
+                    ?? (mg.machineId ? hostByMachineId.get(mg.machineId) ?? null : null),
+                canRename: machine !== undefined
             }
         }),
-        [machineFilters, machinesById]
+        [machineFilters, machinesById, osByMachineId, hostByMachineId]
     )
     const showMachineFilterBar = machineFilters.length >= 2
     // A persisted filter whose machine no longer has sessions falls back to
@@ -1617,6 +1647,7 @@ export function SessionList(props: {
                     totalCount={allSessions.length}
                     value={activeMachineFilter}
                     onChange={setMachineFilter}
+                    onRenameMachine={api ? renameMachine : undefined}
                 />
             ) : null}
             </div>

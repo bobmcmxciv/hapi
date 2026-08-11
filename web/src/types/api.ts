@@ -35,6 +35,7 @@ export type {
     MachinePathsExistsResponse,
     AuthResponse,
     MachinesResponse,
+    MachineWithOwner,
     MessagesResponse,
     OpencodeModelsResponse,
     OpencodeModelSummary,

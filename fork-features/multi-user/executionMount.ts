@@ -373,8 +373,20 @@ export function mountExecutionRoutes(app: Hono<WebAppEnv>, deps: {
         for (const machine of engine.getOnlineMachinesByNamespace(account.defaultNamespace)) {
             if (!deps.store.getResource('machine', machine.id)) deps.store.bindResource({ resourceType: 'machine', resourceId: machine.id, ownerAccountId: account.id, coreNamespace: account.defaultNamespace })
         }
+        // 归属人随机器下发：生产上所有账号共用一个 namespace，机器对象自带的
+        // namespace 区分不了人，真正的归属在 gateway_resources.owner_account_id。
+        const usernameByAccountId = new Map<number, string | null>()
+        const ownerUsernameOf = (accountId: number): string | undefined => {
+            if (!usernameByAccountId.has(accountId)) {
+                usernameByAccountId.set(accountId, deps.store.getAccount(accountId)?.username ?? null)
+            }
+            return usernameByAccountId.get(accountId) ?? undefined
+        }
         const machines = deps.store.listAccessibleResources('machine', account.id)
-            .map(binding => engine.getMachine(binding.resourceId))
+            .map(binding => {
+                const machine = engine.getMachine(binding.resourceId)
+                return machine ? { ...machine, ownerUsername: ownerUsernameOf(binding.ownerAccountId) } : null
+            })
             .filter(machine => machine !== null)
         return c.json({ machines })
     })

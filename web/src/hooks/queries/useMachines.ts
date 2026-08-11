@@ -1,10 +1,10 @@
 import { useQuery } from '@tanstack/react-query'
 import type { ApiClient } from '@/api/client'
-import type { Machine } from '@/types/api'
+import type { MachineWithOwner } from '@/types/api'
 import { queryKeys } from '@/lib/query-keys'
 
 export function useMachines(api: ApiClient | null, enabled: boolean): {
-    machines: Machine[]
+    machines: MachineWithOwner[]
     isLoading: boolean
     error: string | null
     refetch: () => Promise<unknown>
