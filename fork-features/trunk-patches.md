@@ -762,6 +762,27 @@ grant 无需回填）。判定收敛到一个纯函数 `pathWithinScope`：分�
 |---|---|---|---|---|
 | `fork-features/multi-user/{machineInheritance,gatewayStore,executionMount,sseVisibility,notificationAdapter,executionDispatcher,gatewayRoutes}.ts`、`hub/src/web/server.ts` | upstream 无资源层级/路径维度的授权模型 | 判定要同时拿到 grant（网关库）与会话工作目录（core `metadata.path`），两侧都得现查 | 机器写路由 / 会话路由 / SSE 谓词 / 通知受众 | 给被授权账号一条带 `path_prefix` 的机器 grant，真打 spawn：限定内 200、限定外 403；`GET /api/sessions` 只返回限定内的会话 |
 
+### 回滚语义：库安全，但**权限范围会静默放宽**
+
+2026-08-11 实测（换芯前那个二进制 `2ab02a0c…` 对着带 `path_prefix` 的真库副本跑）：旧二进制
+**启动正常、真登录成功、读 grant 正常、写新 grant 201**（它的 INSERT 不带该列，落 NULL），
+已有限定值原样保留 —— 所以**回滚不需要还原网关库**。
+
+但旧二进制**不认识**这一列：一旦回滚，所有带 `path_prefix` 的机器授权都退化成**整机授权**，
+被授权者会静默拿回整机可见与整机可写。回滚前必须先决定这些 grant 是撤掉还是留着。
+
+### 删账号：名下有资源时回 409，不再 500 (2026-08-11)
+
+`gateway_resources.owner_account_id` 的外键**没有** `ON DELETE CASCADE`（`gateway_grants` /
+`gateway_api_tokens` 都有）。这是对的 —— 会话不该随账号消失，一旦解绑
+`collectVisibleSessions` 的 bind-on-view 就会让它们被别的账号认领。
+
+但 `DELETE /accounts/:id` 此前没接住这个约束冲突，SQLite 抛
+`SQLITE_CONSTRAINT_FOREIGNKEY` 直接冒成 **500**，管理员看不出「该先转移归属」。
+删之前先 `countOwnedResources`，非零就回 **409 + `ownedResources` 计数**。
+生产实测撞到过：临时验证账号 spawn 过一条会话（`registerCreatedSession` 把它绑成该账号
+名下），删号即 500；把那条会话归属转回 admin 后同一个 API 立刻 200。
+
 ## 提醒弹窗也要过账号谓词 (2026-08-08)
 
 2026-08-02 给 SSE 装的账号可见性谓词只挂在 `SSEManager.broadcast`（私有

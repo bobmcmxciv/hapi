@@ -342,6 +342,15 @@ export function createMultiUserGatewayRoutes(deps: {
         if (c.get('gatewayRole') !== 'admin') return c.json({ error: 'Admin required' }, 403)
         const id = Number(c.req.param('id'))
         if (id === c.get('gatewayAccountId')) return c.json({ error: 'Cannot delete current account' }, 409)
+        // 名下还有资源时外键会抛 SQLITE_CONSTRAINT_FOREIGNKEY，此前没人接住 → 500，
+        // 管理员只看到「服务器错误」，看不出该先转移归属（2026-08-11 实测撞到）。
+        const ownedResources = deps.store.countOwnedResources(id)
+        if (ownedResources > 0) {
+            return c.json({
+                error: `Account still owns ${ownedResources} resource(s); reassign them before deleting`,
+                ownedResources
+            }, 409)
+        }
         return deps.store.deleteAccount(id) ? c.json({ ok: true }) : c.json({ error: 'Not found' }, 404)
     })
 

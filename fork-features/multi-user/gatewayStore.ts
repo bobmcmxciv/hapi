@@ -219,6 +219,18 @@ export class MultiUserGatewayStore {
         return this.db.prepare('DELETE FROM gateway_accounts WHERE id=?').run(id).changes > 0
     }
 
+    /**
+     * 该账号名下的资源数。删账号前必须先查：`gateway_resources.owner_account_id`
+     * **没有** ON DELETE CASCADE（会话/机器不该随账号消失——一旦解绑，bind-on-view
+     * 会让它们被别的账号认领），所以直接删会被 SQLite 的外键拦下抛
+     * `SQLITE_CONSTRAINT_FOREIGNKEY`。
+     */
+    countOwnedResources(accountId: number): number {
+        const row = this.db.prepare('SELECT COUNT(*) AS n FROM gateway_resources WHERE owner_account_id=?')
+            .get(accountId) as { n: number }
+        return row.n
+    }
+
     createToken(accountId: number, name: string | null, tokenHash: string, namespace?: string): ApiToken {
         const account = this.getAccount(accountId)
         if (!account) throw new Error(`Account ${accountId} not found`)

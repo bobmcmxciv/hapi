@@ -171,6 +171,30 @@ describe('multi-user gateway routes', () => {
         expect((await app.fetch(new Request('http://gateway/grants/machine/m1', { headers: { authorization: `Bearer ${viewerJwt}` } }))).status).toBe(403)
     })
 
+    it('删账号：名下还有资源时回 409 而不是 500，转移归属后可删', async () => {
+        const store = new MultiUserGatewayStore(':memory:')
+        stores.push(store)
+        store.createAccount('admin', 'admin', 'admin-ns', hashPassword('password-123'))
+        const victim = store.createAccount('victim', 'user', 'victim-ns', hashPassword('password-456'))
+        store.bindResource({ resourceType: 'session', resourceId: 's1', ownerAccountId: victim.id, coreNamespace: 'default' })
+        const app = createMultiUserGatewayRoutes({ store, jwtSecret: new TextEncoder().encode('x'.repeat(32)), coreUserId: 7 })
+        const adminJwt = (await (await app.fetch(jsonRequest('/auth', { username: 'admin', password: 'password-123' }))).json() as { token: string }).token
+
+        const blocked = await app.fetch(new Request(`http://gateway/accounts/${victim.id}`, {
+            method: 'DELETE', headers: { authorization: `Bearer ${adminJwt}` }
+        }))
+        expect(blocked.status).toBe(409)
+        expect((await blocked.json() as { ownedResources: number }).ownedResources).toBe(1)
+        expect(store.getAccount(victim.id)).not.toBeNull()
+
+        store.bindResource({ resourceType: 'session', resourceId: 's1', ownerAccountId: 1, coreNamespace: 'default' })
+        const deleted = await app.fetch(new Request(`http://gateway/accounts/${victim.id}`, {
+            method: 'DELETE', headers: { authorization: `Bearer ${adminJwt}` }
+        }))
+        expect(deleted.status).toBe(200)
+        expect(store.getAccount(victim.id)).toBeNull()
+    })
+
     it('机器授权可带目录限定，且能改回不限定', async () => {
         const store = new MultiUserGatewayStore(':memory:')
         stores.push(store)
