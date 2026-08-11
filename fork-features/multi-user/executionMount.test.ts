@@ -561,7 +561,7 @@ describe('/api/usage/summary：可见性与会话列表同构，聚合走真实 
     type UsageResponse = {
         models: Array<{ model: string; requestCount: number; inputTokens: number }>
         totals: { requestCount: number; inputTokens: number }
-        hosts: string[]
+        hosts: Array<{ host: string; sessionCount: number; totalTokens: number; requestCount: number; owner: string | null; platform: string | null }>
     }
 
     it('admin 统计覆盖整个 namespace（含别人拥有的会话）', async () => {
@@ -570,7 +570,33 @@ describe('/api/usage/summary：可见性与会话列表同构，聚合走真实 
         expect(response.status).toBe(200)
         const body = await response.json() as UsageResponse
         expect(body.totals).toMatchObject({ requestCount: 3, inputTokens: 120 })
-        expect(body.hosts).toEqual(['peter-mac', 'vircs'])
+        expect(body.hosts.map(h => h.host).sort()).toEqual(['peter-mac', 'vircs'])
+        gateway.close()
+    })
+
+    // 机器列表从裸主机名升级成带统计的榜：每台自带会话数、token 合计、请求数
+    // 与归属，用量页据此直接排出「谁在烧」，不必逐台切筛选去比。
+    it('机器榜按用量降序，逐台带上会话数与 token 合计', async () => {
+        const { gateway, app, admin } = seedUsage()
+        const response = await app.request('/api/usage/summary', { headers: { authorization: `Bearer ${await sign(admin.id)}` } })
+        const body = await response.json() as UsageResponse
+
+        expect(body.hosts.map(h => h.host)).toEqual(['vircs', 'peter-mac'])
+        expect(body.hosts[0]).toMatchObject({ host: 'vircs', sessionCount: 1, totalTokens: 100, requestCount: 1 })
+        expect(body.hosts[1]).toMatchObject({ host: 'peter-mac', sessionCount: 2, totalTokens: 20, requestCount: 2 })
+        gateway.close()
+    })
+
+    it('选中某台机器后，机器榜的统计仍是全量——否则筛选态下无从比较', async () => {
+        const { gateway, app, admin } = seedUsage()
+        const response = await app.request('/api/usage/summary?host=vircs', { headers: { authorization: `Bearer ${await sign(admin.id)}` } })
+        const body = await response.json() as UsageResponse
+
+        // 模型表只剩 vircs 那一条…
+        expect(body.totals).toMatchObject({ requestCount: 1, inputTokens: 100 })
+        // …但机器榜两台都在，且 peter-mac 的数字没被筛成 0。
+        expect(body.hosts.map(h => h.host)).toEqual(['vircs', 'peter-mac'])
+        expect(body.hosts[1]).toMatchObject({ host: 'peter-mac', totalTokens: 20 })
         gateway.close()
     })
 
@@ -579,7 +605,7 @@ describe('/api/usage/summary：可见性与会话列表同构，聚合走真实 
         const response = await app.request('/api/usage/summary', { headers: { authorization: `Bearer ${await sign(peter.id)}` } })
         const body = await response.json() as UsageResponse
         expect(body.totals).toMatchObject({ requestCount: 2, inputTokens: 20 })
-        expect(body.hosts).toEqual(['peter-mac'])
+        expect(body.hosts.map(h => h.host)).toEqual(['peter-mac'])
         gateway.close()
     })
 
@@ -591,7 +617,7 @@ describe('/api/usage/summary：可见性与会话列表同构，聚合走真实 
         const body = await response.json() as UsageResponse
         // s-admin 跑在 vircs-machine 上：100 tokens；peter 的两条不在这台机器上
         expect(body.totals).toMatchObject({ requestCount: 1, inputTokens: 100 })
-        expect(body.hosts).toEqual(['vircs'])
+        expect(body.hosts.map(h => h.host)).toEqual(['vircs'])
         gateway.close()
     })
 

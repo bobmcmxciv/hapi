@@ -12,14 +12,77 @@ export type UsageAggregateRow = {
 
 export type UsageModelSummary = UsageAggregateRow
 
+/**
+ * 一台机器在当前时间窗内的用量小结。
+ *
+ * 原来这里只是个 `string[]` 主机名列表，前端拿它渲染一个裸下拉——机器列表在
+ * 用量页上不提供任何量化信息，「哪台机器烧了 token」得逐台切换筛选去比。
+ * 现在每台自带统计与归属，机器列表本身就是一张榜。
+ */
+export type UsageHostSummary = {
+    host: string
+    /** 该机器上的可见会话数（不随时间窗变化）。 */
+    sessionCount: number
+    /** 当前时间窗内四段合计。**不受 host 筛选影响**——否则选中一台之后
+     *  其余机器全归零，就没法比较了。 */
+    totalTokens: number
+    requestCount: number
+    /** 多用户 gateway 标注的归属账号用户名；单用户 hub 或未知为 null。 */
+    owner: string | null
+    /** node 平台词表（win32/darwin/linux），未知为 null。 */
+    platform: string | null
+}
+
 export type UsageSummaryResponse = {
     models: UsageModelSummary[]
     totals: Omit<UsageModelSummary, 'model'>
-    /** 该 namespace 下可筛选的机器 host 列表（用于前端下拉）。 */
-    hosts: string[]
+    /** 该账号可见的机器列表，各自带统计与归属（前端机器榜 + 筛选用）。 */
+    hosts: UsageHostSummary[]
     /** 本次统计实际生效的筛选条件，回显给前端确认。 */
     filter: { since: string | null; until: string | null; host: string | null }
     generatedAt: number
+}
+
+/** 会话投影：按 host 分桶算每台机器的统计。聚合本身由调用方注入，
+ *  这里只管分桶与汇总，好让口径可单测。 */
+export function summarizeUsageHosts(
+    sessions: Array<{ id: string; host: string | null; platform: string | null; owner: string | null }>,
+    aggregate: (sessionIds: string[]) => UsageAggregateRow[]
+): UsageHostSummary[] {
+    const byHost = new Map<string, { ids: string[]; platform: string | null; owner: string | null }>()
+    for (const session of sessions) {
+        if (!session.host) continue
+        const bucket = byHost.get(session.host)
+        if (bucket) {
+            bucket.ids.push(session.id)
+            // 同一 host 的会话可能只有一部分带 os/归属，取第一个非空的。
+            bucket.platform ??= session.platform
+            bucket.owner ??= session.owner
+        } else {
+            byHost.set(session.host, { ids: [session.id], platform: session.platform, owner: session.owner })
+        }
+    }
+
+    return [...byHost.entries()]
+        .map(([host, bucket]) => {
+            const rows = aggregate(bucket.ids)
+            let totalTokens = 0
+            let requestCount = 0
+            for (const row of rows) {
+                totalTokens += modelTotal(row)
+                requestCount += row.requestCount
+            }
+            return {
+                host,
+                sessionCount: bucket.ids.length,
+                totalTokens,
+                requestCount,
+                owner: bucket.owner,
+                platform: bucket.platform
+            }
+        })
+        // 用量降序——机器榜的重点是「谁在烧」；同量时按名字稳定排序。
+        .sort((a, b) => b.totalTokens - a.totalTokens || a.host.localeCompare(b.host))
 }
 
 /** 接受 ISO-8601 字符串或毫秒时间戳，规整成 UTC ISO 串，
@@ -39,7 +102,7 @@ function modelTotal(m: Omit<UsageModelSummary, 'model'>): number {
 
 export function buildUsageSummaryResponse(
     rows: UsageAggregateRow[],
-    hosts: string[],
+    hosts: UsageHostSummary[],
     filter: { since: string | null; until: string | null; host: string | null },
     generatedAt: number
 ): UsageSummaryResponse {

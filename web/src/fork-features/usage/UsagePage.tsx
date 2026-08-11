@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react'
+import type { ReactNode } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { useNavigate } from '@tanstack/react-router'
 import { useAppContext } from '@/lib/app-context'
@@ -6,6 +7,17 @@ import { useTranslation } from '@/lib/use-translation'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { CalendarIcon, SessionDateRangePicker } from '@/components/SessionList'
+import {
+    MachineChip,
+    MachineOwnerHeading,
+    groupMachinesByOwner,
+    machineChipContentClass,
+    machineChipGridClass,
+    machineChipIdleClass,
+    machineChipSelectedClass,
+    machineChipShellClass
+} from '@/components/machinePresentation'
+import { cn } from '@/lib/utils'
 
 /** 用量页不按会话活跃日高亮，固定空集避免每次渲染新建 Set。 */
 const EMPTY_ACTIVITY_DATES: ReadonlySet<string> = new Set<string>()
@@ -23,10 +35,20 @@ export type UsageModelSummary = {
     cacheReadInputTokens: number
 }
 
+/** 一台机器的用量小结（与 hub fork-features/usage/usageAggregate.ts 同构）。 */
+export type UsageHostSummary = {
+    host: string
+    sessionCount: number
+    totalTokens: number
+    requestCount: number
+    owner: string | null
+    platform: string | null
+}
+
 export type UsageSummaryResponse = {
     models: UsageModelSummary[]
     totals: Omit<UsageModelSummary, 'model'>
-    hosts: string[]
+    hosts: UsageHostSummary[]
     filter: { since: string | null; until: string | null; host: string | null }
     generatedAt: number
 }
@@ -91,6 +113,90 @@ const SEGMENT_COLORS = {
     cacheCreation: '#a78bfa',
     cacheRead: '#34d399'
 } as const
+
+/**
+ * 机器用量榜，兼作 host 筛选器。
+ *
+ * 此前这里是个裸 `<select>`：机器列表在用量页上不给任何量化信息，想知道
+ * 「哪台机器烧了 token」只能逐台切筛选去比。现在它与会话侧栏的机器筛选条
+ * 同一套表现（OS 图标、按归属人分节、右对齐统计），右侧数字是该机的 token
+ * 总量，且按用量降序——列表本身就回答了那个问题。
+ *
+ * 统计值不随 host 筛选变化（服务端对全部可见会话算），所以选中一台之后
+ * 其余机器仍可比较。
+ */
+function MachineUsageBoard(props: {
+    hosts: UsageHostSummary[]
+    value: string
+    onChange: (host: string) => void
+    allLabel: string
+    unknownOwnerLabel: string
+    ariaLabel: string
+}) {
+    const entries = useMemo(
+        () => props.hosts.map((entry) => ({ ...entry, id: entry.host })),
+        [props.hosts]
+    )
+    const { grouped, sections } = useMemo(() => groupMachinesByOwner(entries), [entries])
+    const totalTokens = useMemo(
+        () => props.hosts.reduce((sum, entry) => sum + entry.totalTokens, 0),
+        [props.hosts]
+    )
+
+    const renderGrid = (items: typeof entries, leading?: ReactNode) => (
+        <div className={machineChipGridClass}>
+            {leading}
+            {items.map((entry) => (
+                <MachineChip
+                    key={entry.host}
+                    label={entry.host}
+                    platform={entry.platform}
+                    stat={formatTokens(entry.totalTokens)}
+                    selected={props.value === entry.host}
+                    title={[
+                        entry.host,
+                        entry.owner,
+                        `${entry.sessionCount} sessions`,
+                        `${entry.requestCount.toLocaleString()} requests`
+                    ].filter(Boolean).join(' · ')}
+                    onSelect={() => props.onChange(props.value === entry.host ? '' : entry.host)}
+                />
+            ))}
+        </div>
+    )
+
+    const allChip = (
+        <button
+            type="button"
+            onClick={() => props.onChange('')}
+            aria-pressed={props.value === ''}
+            className={cn(
+                machineChipShellClass,
+                machineChipContentClass,
+                props.value === '' ? machineChipSelectedClass : machineChipIdleClass
+            )}
+        >
+            <span className="min-w-0 flex-1 truncate text-left">{props.allLabel}</span>
+            <span className="shrink-0 tabular-nums opacity-70">{formatTokens(totalTokens)}</span>
+        </button>
+    )
+
+    return (
+        <div role="group" aria-label={props.ariaLabel} className="flex flex-col gap-1">
+            {grouped ? (
+                <>
+                    {renderGrid([], allChip)}
+                    {sections.map((section) => (
+                        <div key={section.owner ?? '__unknown__'}>
+                            <MachineOwnerHeading owner={section.owner} unknownLabel={props.unknownOwnerLabel} />
+                            {renderGrid(section.machines)}
+                        </div>
+                    ))}
+                </>
+            ) : renderGrid(sections[0]?.machines ?? [], allChip)}
+        </div>
+    )
+}
 
 function UsageBar(props: { model: UsageModelSummary; maxTotal: number }) {
     const { model, maxTotal } = props
@@ -302,19 +408,19 @@ export default function UsagePage() {
                             ) : null}
                         </div>
                     </div>
-                    <select
-                        className="rounded-lg border border-[var(--app-border)] bg-[var(--app-bg)] px-2.5 py-1.5 text-sm text-[var(--app-fg)] focus:outline-none focus:ring-2 focus:ring-[var(--app-button)]"
-                        value={host}
-                        onChange={(e) => setHost(e.target.value)}
-                        aria-label={t('usage.host.label')}
-                    >
-                        <option value="">{t('usage.host.all')}</option>
-                        {hosts.map((h) => (
-                            <option key={h} value={h}>{h}</option>
-                        ))}
-                    </select>
                     {usageQuery.isFetching && <span className="text-xs text-[var(--app-hint)]">{t('usage.refreshing')}</span>}
                 </div>
+
+                {hosts.length > 0 && (
+                    <MachineUsageBoard
+                        hosts={hosts}
+                        value={host}
+                        onChange={setHost}
+                        allLabel={t('usage.host.all')}
+                        unknownOwnerLabel={t('sessions.machineFilter.unknownOwner')}
+                        ariaLabel={t('usage.host.label')}
+                    />
+                )}
 
                 {usageQuery.isLoading && (
                     <Card><CardContent className="py-6 text-center text-sm text-[var(--app-hint)]">{t('usage.loading')}</CardContent></Card>

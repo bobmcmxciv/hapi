@@ -8,7 +8,7 @@ import type { WebAppEnv } from '../../hub/src/web/middleware/auth'
 import type { MultiUserGatewayStore } from './gatewayStore'
 import { ExecutionDispatcher } from './executionDispatcher'
 import type { Account, Capability, ResourceType } from './domain'
-import { buildUsageSummaryResponse, parseIsoParam } from '../usage/usageAggregate'
+import { buildUsageSummaryResponse, parseIsoParam, summarizeUsageHosts } from '../usage/usageAggregate'
 import { createSessionMachineResolver, createSessionPathResolver, pathWithinScope } from './machineInheritance'
 import { createSseEventFilterFactory } from './sseVisibility'
 import { streamSSE } from 'hono/streaming'
@@ -347,13 +347,6 @@ export function mountExecutionRoutes(app: Hono<WebAppEnv>, deps: {
         // 区别只有这里不认领未绑定会话 —— 只读端点不该改写资源归属。
         const visible = collectVisibleSessions(deps.store, engine, account, { claimUnbound: false })
 
-        // 机器下拉列表基于鉴权后的会话集合，不会泄漏用户无权访问的机器。
-        const hosts = Array.from(new Set(
-            visible
-                .map(session => session.metadata?.host)
-                .filter((host): host is string => typeof host === 'string' && host.length > 0)
-        )).sort()
-
         const hostParam = c.req.query('host')?.trim() || null
         const scoped = hostParam ? visible.filter(session => session.metadata?.host === hostParam) : visible
         const sinceIso = parseIsoParam(c.req.query('since'))
@@ -361,6 +354,31 @@ export function mountExecutionRoutes(app: Hono<WebAppEnv>, deps: {
         const rows = store.messages.aggregateUsageForSessions(
             scoped.map(session => session.id),
             { sinceIso, untilIso }
+        )
+
+        // 机器榜基于鉴权后的会话集合，不会泄漏用户无权访问的机器。归属与
+        // /api/machines 同源（gateway_resources.owner_account_id）——生产上所有
+        // 账号共用一个 namespace，机器对象自带的 namespace 区分不了人。
+        const ownerByMachineId = new Map<string, string | null>()
+        const usernameByAccountId = new Map<number, string | null>()
+        for (const binding of deps.store.listAccessibleResources('machine', account.id)) {
+            if (!usernameByAccountId.has(binding.ownerAccountId)) {
+                usernameByAccountId.set(binding.ownerAccountId, deps.store.getAccount(binding.ownerAccountId)?.username ?? null)
+            }
+            ownerByMachineId.set(binding.resourceId, usernameByAccountId.get(binding.ownerAccountId) ?? null)
+        }
+        // 统计对全部可见会话算，**不套 host 筛选**：选中一台之后其余机器也要
+        // 还能比较，否则这张榜在筛选态下全是零。
+        const hosts = summarizeUsageHosts(
+            visible.map(session => ({
+                id: session.id,
+                host: session.metadata?.host ?? null,
+                platform: session.metadata?.os ?? null,
+                owner: session.metadata?.machineId
+                    ? ownerByMachineId.get(session.metadata.machineId) ?? null
+                    : null
+            })),
+            sessionIds => store.messages.aggregateUsageForSessions(sessionIds, { sinceIso, untilIso })
         )
         return c.json(buildUsageSummaryResponse(rows, hosts, { since: sinceIso, until: untilIso, host: hostParam }, Date.now()))
     })

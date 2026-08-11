@@ -28,19 +28,25 @@ const summaryBody = {
         cacheReadInputTokens: 1_500_000
     }],
     totals: { requestCount: 42, inputTokens: 1000, outputTokens: 2000, cacheCreationInputTokens: 500, cacheReadInputTokens: 1_500_000 },
-    hosts: ['peter-mac', 'vircs'],
+    hosts: [
+        { host: 'vircs', sessionCount: 3, totalTokens: 1_503_500, requestCount: 42, owner: 'admin', platform: 'win32' },
+        { host: 'peter-mac', sessionCount: 1, totalTokens: 2_000, requestCount: 4, owner: 'peter', platform: 'darwin' }
+    ],
     filter: { since: null, until: null, host: null },
     generatedAt: 1
 }
 
 describe('UsagePage', () => {
-    it('渲染按模型聚合的总览与机器下拉', async () => {
+    it('渲染按模型聚合的总览与机器榜', async () => {
         vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(summaryBody), { status: 200 })))
         renderPage()
 
         expect((await screen.findAllByText('claude-fable-5')).length).toBeGreaterThan(0)
-        // hosts 下拉包含服务端返回的机器
-        expect(screen.getByRole('option', { name: 'vircs' })).toBeTruthy()
+        // 机器榜列出服务端返回的机器，并把该机的 token 合计摆在右侧
+        const vircs = screen.getByRole('button', { name: /vircs/ })
+        expect(vircs.textContent).toContain('1.50M')
+        // 归属分节：两个归属人各一节
+        expect(screen.getAllByTestId('machine-owner-heading').map(n => n.textContent)).toEqual(['admin', 'peter'])
         // 预设时间范围与自定义（日历）按钮都在
         expect(screen.getByRole('button', { name: 'All time' })).toBeTruthy()
         expect(screen.getByRole('button', { name: /Custom/ })).toBeTruthy()

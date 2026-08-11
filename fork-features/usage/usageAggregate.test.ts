@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test'
 import { Store } from '../../hub/src/store'
-import { buildUsageSummaryResponse, parseIsoParam } from './usageAggregate'
+import { buildUsageSummaryResponse, parseIsoParam, summarizeUsageHosts } from './usageAggregate'
 
 function makeStore(): Store {
     return new Store(':memory:')
@@ -665,7 +665,8 @@ describe('buildUsageSummaryResponse', () => {
     it('按合计降序排序并汇总 totals', () => {
         const small = { model: 'small', requestCount: 1, inputTokens: 1, outputTokens: 1, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 }
         const large = { model: 'large', requestCount: 2, inputTokens: 100, outputTokens: 100, cacheCreationInputTokens: 100, cacheReadInputTokens: 100 }
-        const response = buildUsageSummaryResponse([small, large], ['vircs'], { since: null, until: null, host: null }, 123)
+        const vircs = { host: 'vircs', sessionCount: 2, totalTokens: 404, requestCount: 3, owner: 'admin', platform: 'win32' }
+        const response = buildUsageSummaryResponse([small, large], [vircs], { since: null, until: null, host: null }, 123)
         expect(response.models.map(m => m.model)).toEqual(['large', 'small'])
         expect(response.totals).toEqual({
             requestCount: 3,
@@ -674,7 +675,56 @@ describe('buildUsageSummaryResponse', () => {
             cacheCreationInputTokens: 100,
             cacheReadInputTokens: 100
         })
-        expect(response.hosts).toEqual(['vircs'])
+        expect(response.hosts).toEqual([vircs])
         expect(response.generatedAt).toBe(123)
+    })
+})
+
+describe('summarizeUsageHosts', () => {
+    const row = (model: string, requestCount: number, inputTokens: number) => ({
+        model, requestCount, inputTokens, outputTokens: 0, cacheCreationInputTokens: 0, cacheReadInputTokens: 0
+    })
+
+    it('按 host 分桶，汇总 token 与请求数，并按用量降序', () => {
+        const sessions = [
+            { id: 'a1', host: 'vircs', platform: 'win32', owner: 'admin' },
+            { id: 'a2', host: 'vircs', platform: 'win32', owner: 'admin' },
+            { id: 'b1', host: 'peter-mac', platform: 'darwin', owner: 'peter' }
+        ]
+        const perSession: Record<string, number> = { a1: 30, a2: 70, b1: 500 }
+        const hosts = summarizeUsageHosts(sessions, ids =>
+            ids.map(id => row('m', 1, perSession[id])))
+
+        expect(hosts.map(h => h.host)).toEqual(['peter-mac', 'vircs'])
+        expect(hosts[0]).toEqual({ host: 'peter-mac', sessionCount: 1, totalTokens: 500, requestCount: 1, owner: 'peter', platform: 'darwin' })
+        expect(hosts[1]).toEqual({ host: 'vircs', sessionCount: 2, totalTokens: 100, requestCount: 2, owner: 'admin', platform: 'win32' })
+    })
+
+    it('同一 host 只有部分会话带 os/归属时，取第一个非空的', () => {
+        const hosts = summarizeUsageHosts([
+            { id: 'a1', host: 'vircs', platform: null, owner: null },
+            { id: 'a2', host: 'vircs', platform: 'win32', owner: 'admin' }
+        ], () => [])
+
+        expect(hosts[0]).toMatchObject({ platform: 'win32', owner: 'admin' })
+    })
+
+    it('丢掉没有 host 的会话，而不是造一台空名机器', () => {
+        const hosts = summarizeUsageHosts([
+            { id: 'a1', host: null, platform: null, owner: null },
+            { id: 'a2', host: 'vircs', platform: 'win32', owner: 'admin' }
+        ], ids => ids.map(() => row('m', 1, 5)))
+
+        expect(hosts.map(h => h.host)).toEqual(['vircs'])
+        expect(hosts[0].sessionCount).toBe(1)
+    })
+
+    it('用量相同时按机器名稳定排序', () => {
+        const hosts = summarizeUsageHosts([
+            { id: 'b', host: 'zeta', platform: null, owner: null },
+            { id: 'a', host: 'alpha', platform: null, owner: null }
+        ], ids => ids.map(() => row('m', 1, 10)))
+
+        expect(hosts.map(h => h.host)).toEqual(['alpha', 'zeta'])
     })
 })

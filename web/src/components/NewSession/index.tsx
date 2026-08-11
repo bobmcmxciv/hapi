@@ -254,6 +254,15 @@ export function NewSession(props: {
         machineId
     ])
 
+    // 每台机器已有多少会话——机器格右侧的统计值，选目标机时最想知道的一个数。
+    const sessionCountByMachineId = useMemo(() => {
+        const counts: Record<string, number> = {}
+        for (const session of sessions) {
+            const id = session.metadata?.machineId
+            if (id) counts[id] = (counts[id] ?? 0) + 1
+        }
+        return counts
+    }, [sessions])
     const selectableMachines = useMemo(
         () => agent === 'omp'
             ? props.machines.filter((machine) => machine.metadata?.capabilities?.omp === true)
@@ -1550,6 +1559,7 @@ export function NewSession(props: {
                 isLoading={props.isLoading}
                 isDisabled={isFormDisabled}
                 onChange={handleMachineChange}
+                sessionCountByMachineId={sessionCountByMachineId}
             />
             {runnerSpawnError ? (
                 <div className="px-3 py-2 text-xs text-red-600">
