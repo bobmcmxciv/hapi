@@ -1123,6 +1123,8 @@ export function SessionList(props: {
     api: ApiClient | null
     machineLabelsById?: Record<string, string>
     machinesById?: Record<string, MachineWithOwner>
+    /** machineId → 归属账号用户名的粘性映射，见 useMachineOwners。 */
+    machineOwnersById?: Record<string, string>
     selectedSessionId?: string | null
     /** Required binding keeps the real scroll node and pre-navigation selection coupled. */
     scrollStability: SessionListScrollStability
@@ -1134,6 +1136,7 @@ export function SessionList(props: {
         selectedSessionId,
         machineLabelsById = {},
         machinesById = {},
+        machineOwnersById = {},
         onNewSessionInDirectory,
         scrollStability,
     } = props
@@ -1246,14 +1249,17 @@ export function SessionList(props: {
                 ),
                 platform: getMachinePlatform(machine)
                     ?? (mg.machineId ? osByMachineId.get(mg.machineId) ?? null : null),
-                owner: machine?.ownerUsername ?? null,
+                // 归属只由 /api/machines 下发，机器暂时缺席那份投影时回落到
+                // 上次已知归属——否则一次刷新时序抖动就能把分组整条打回平铺。
+                owner: machine?.ownerUsername
+                    ?? (mg.machineId ? machineOwnersById[mg.machineId] ?? null : null),
                 displayName: machine?.metadata?.displayName ?? null,
                 host: getMachineHost(machine)
                     ?? (mg.machineId ? hostByMachineId.get(mg.machineId) ?? null : null),
                 canRename: machine !== undefined
             }
         }),
-        [machineFilters, machinesById, osByMachineId, hostByMachineId]
+        [machineFilters, machinesById, machineOwnersById, osByMachineId, hostByMachineId]
     )
     const showMachineFilterBar = machineFilters.length >= 2
     // A persisted filter whose machine no longer has sessions falls back to

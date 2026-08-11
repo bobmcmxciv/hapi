@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { SessionSummary } from '@/types/api'
-import type { Session } from '@/types/api'
+import type { Machine, MachineWithOwner, Session } from '@/types/api'
 import {
     applySessionDetailPatch,
     canApplyVersionedSummaryPatch,
@@ -8,6 +8,7 @@ import {
     isNewerVersionedPatch,
     isRenderIrrelevantPatch,
     isRenderIrrelevantSessionPatch,
+    mergeCachedMachine,
     shouldInvalidateSessionListForEvent
 } from './useSSE'
 
@@ -280,5 +281,62 @@ describe('applySessionDetailPatch (PR #897 review, Copilot keep-alive)', () => {
             activeAt: 11_000,
             copilotAgentMode: 'interactive'
         })).toBeNull()
+    })
+})
+
+describe('mergeCachedMachine (machine filter bar owner-grouping flicker)', () => {
+    const cached: MachineWithOwner = {
+        id: 'm1',
+        namespace: 'default',
+        seq: 1,
+        createdAt: 0,
+        updatedAt: 0,
+        active: true,
+        activeAt: 0,
+        metadata: { host: 'DESKTOP-4SQALMG', platform: 'win32', happyCliVersion: '0.27.0', displayName: '小主机' },
+        metadataVersion: 1,
+        runnerState: null,
+        runnerStateVersion: 0,
+        ownerUsername: 'admin'
+    }
+
+    function event(overrides: Partial<Machine>): Machine {
+        return { ...cached, ownerUsername: undefined, ...overrides } as Machine
+    }
+
+    it('keeps the gateway-assigned owner that the event never carries', () => {
+        // This is the bug: a bare heartbeat used to overwrite the decorated
+        // entry, dropping the owner and flattening the whole filter bar.
+        const merged = mergeCachedMachine(cached, event({ activeAt: 999 }))
+
+        expect(merged.ownerUsername).toBe('admin')
+        expect(merged.activeAt).toBe(999)
+    })
+
+    it('keeps the alias when the event omits metadata entirely', () => {
+        const merged = mergeCachedMachine(cached, event({ metadata: null }))
+
+        expect(merged.metadata?.displayName).toBe('小主机')
+        expect(merged.metadata?.host).toBe('DESKTOP-4SQALMG')
+    })
+
+    it('keeps metadata keys the event does not mention', () => {
+        const merged = mergeCachedMachine(
+            cached,
+            event({ metadata: { host: 'DESKTOP-4SQALMG', platform: 'win32', happyCliVersion: '0.27.1' } })
+        )
+
+        expect(merged.metadata?.happyCliVersion).toBe('0.27.1')
+        expect(merged.metadata?.displayName).toBe('小主机')
+    })
+
+    it('still lets the event win on the fields it does report', () => {
+        const merged = mergeCachedMachine(
+            cached,
+            event({ metadata: { host: 'renamed-host', platform: 'win32', happyCliVersion: '0.27.0', displayName: 'new alias' } })
+        )
+
+        expect(merged.metadata?.displayName).toBe('new alias')
+        expect(merged.metadata?.host).toBe('renamed-host')
     })
 })

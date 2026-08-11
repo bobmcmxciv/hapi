@@ -30,7 +30,7 @@ import { useHideArchivedSessions } from '@/hooks/useHideArchivedSessions'
 import { filterVisibleSessions } from '@/lib/sessionListFilters'
 import { useMessages } from '@/hooks/queries/useMessages'
 import { useMachines } from '@/hooks/queries/useMachines'
-import { useMachineLabels } from '@/hooks/useMachineLabels'
+import { useMachineLabels, useMachineOwners } from '@/hooks/useMachineLabels'
 import { useSession } from '@/hooks/queries/useSession'
 import { useCursorChatStoreStatus } from '@/hooks/queries/useCursorChatStoreStatus'
 import { useSessions } from '@/hooks/queries/useSessions'
@@ -219,6 +219,7 @@ function SessionsPage() {
     }, [addToast, refetch, t])
 
     const machineLabelsById = useMachineLabels(machines)
+    const machineOwnersById = useMachineOwners(machines)
     const machinesById = useMemo(() => {
         const byId: Record<string, typeof machines[number]> = {}
         for (const machine of machines) {
@@ -332,6 +333,7 @@ function SessionsPage() {
                         api={api}
                         machineLabelsById={machineLabelsById}
                         machinesById={machinesById}
+                        machineOwnersById={machineOwnersById}
                     />
                 </div>
             </div>

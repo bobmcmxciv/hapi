@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 import { renderHook } from '@testing-library/react'
-import type { Machine } from '@/types/api'
-import { getMachineTitle, useMachineLabels } from './useMachineLabels'
+import type { Machine, MachineWithOwner } from '@/types/api'
+import { getMachineTitle, useMachineLabels, useMachineOwners } from './useMachineLabels'
 
 function makeMachine(id: string, metadata: Machine['metadata']): Machine {
     return {
@@ -53,5 +53,51 @@ describe('useMachineLabels', () => {
         const { result } = renderHook(() => useMachineLabels(machines))
 
         expect(result.current['machine-1']).toBe('new-name')
+    })
+})
+
+// The machine filter bar only splits into per-owner sections once it can see
+// two or more owners, and ownership rides exclusively on the /api/machines
+// projection. Any gap in that data used to read as "unowned" and collapse the
+// whole bar to a flat list, so the layout visibly flipped back and forth.
+describe('useMachineOwners', () => {
+    beforeEach(() => {
+        window.localStorage.clear()
+    })
+
+    function owned(id: string, ownerUsername?: string): MachineWithOwner {
+        return { ...makeMachine(id, { host: id } as Machine['metadata']), ownerUsername }
+    }
+
+    it('records and caches the owner reported by /api/machines', () => {
+        const { result } = renderHook(() => useMachineOwners([owned('m1', 'admin'), owned('m2', 'peter')]))
+
+        expect(result.current).toEqual({ m1: 'admin', m2: 'peter' })
+        expect(JSON.parse(window.localStorage.getItem('hapi-machine-owners')!)).toEqual({ m1: 'admin', m2: 'peter' })
+    })
+
+    it('keeps the last known owner when a machine arrives without one', () => {
+        window.localStorage.setItem('hapi-machine-owners', JSON.stringify({ m1: 'admin', m2: 'peter' }))
+
+        // An undecorated machine must not erase what we already knew — that is
+        // exactly the transient that used to drop the owner count below two.
+        const { result } = renderHook(() => useMachineOwners([owned('m1'), owned('m2', 'peter')]))
+
+        expect(result.current.m1).toBe('admin')
+        expect(result.current.m2).toBe('peter')
+    })
+
+    it('keeps owners across an empty machines list', () => {
+        window.localStorage.setItem('hapi-machine-owners', JSON.stringify({ m1: 'admin', m2: 'peter' }))
+        const { result } = renderHook(() => useMachineOwners([]))
+
+        expect(result.current).toEqual({ m1: 'admin', m2: 'peter' })
+    })
+
+    it('follows a genuine ownership change', () => {
+        window.localStorage.setItem('hapi-machine-owners', JSON.stringify({ m1: 'admin' }))
+        const { result } = renderHook(() => useMachineOwners([owned('m1', 'peter')]))
+
+        expect(result.current.m1).toBe('peter')
     })
 })

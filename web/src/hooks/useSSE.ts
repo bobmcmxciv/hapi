@@ -13,6 +13,7 @@ import { MachinePatchSchema, MachineSchema, SessionPatchSchema, SessionSchema } 
 import type {
     Machine,
     MachinesResponse,
+    MachineWithOwner,
     Session,
     SessionPatch,
     SessionResponse,
@@ -273,6 +274,33 @@ function getSessionPatch(value: unknown): SessionPatch | null {
 
 function isMachineRecord(value: unknown): value is Machine {
     return MachineSchema.safeParse(value).success
+}
+
+/**
+ * Fold a `machine-updated` payload into the cached machines list.
+ *
+ * Merge, never replace. The event carries the sync engine's bare `Machine`,
+ * while the cached entry is the `/api/machines` projection — which additionally
+ * carries the multi-user gateway's `ownerUsername` and a fully populated
+ * metadata object. Replacing the entry outright stripped the owner off one
+ * machine per heartbeat, and since the filter bar only groups once it sees two
+ * or more owners, the bar collapsed from per-owner sections to a flat list as
+ * soon as enough machines had been overwritten. The next refetch re-decorated
+ * them and it flipped back: the layout visibly oscillated between the two.
+ */
+export function mergeCachedMachine(previous: MachineWithOwner, incoming: Machine): MachineWithOwner {
+    return {
+        ...previous,
+        ...incoming,
+        // Keys the event omits keep their previous value; keys it actually sets
+        // still win. A metadata-less event leaves cached metadata untouched
+        // rather than nulling out the machine's alias and platform.
+        metadata: incoming.metadata
+            ? { ...previous.metadata, ...incoming.metadata }
+            : previous.metadata,
+        // Ownership never travels on the event, so it can only be preserved.
+        ownerUsername: previous.ownerUsername
+    }
 }
 
 function getMachinePatch(value: unknown): { active?: boolean; activeAt?: number; updatedAt?: number } | null {
@@ -697,7 +725,7 @@ export function useSSE(options: {
                 }
 
                 if (index >= 0) {
-                    nextMachines[index] = machine
+                    nextMachines[index] = mergeCachedMachine(nextMachines[index], machine)
                 } else {
                     nextMachines.push(machine)
                 }
