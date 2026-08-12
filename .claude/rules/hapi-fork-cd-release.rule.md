@@ -29,6 +29,40 @@ cd cli && bun run scripts/build-executable.ts --target bun-linux-x64-baseline --
 
 判收**只认逐块 md5，不看大小**。比对前两边都归一化（`md5sum` 的 `*` 前缀与空格数不一致都踩过）：`md5sum part-* | awk '{gsub(/\*/,"",$NF); print $1, $NF}'`。长传输必须 `run_in_background`，串联命令显式捕获每段 `$?`。
 
+### 3.5 ⚠️ ECS 上的 hub 已 docker 化（2026-08-11 起），systemd 单元已 disabled
+
+**以后一律按 docker 方式部署。** 现状：
+
+| 项 | 值 |
+|---|---|
+| compose | `/clouddream/containerized/hapi/docker-compose.yml`（project 名 `hapi`） |
+| 容器 | `hapi-hub`，`node:20-slim`，`network_mode: host`，`restart: always` |
+| 命令 | `node /usr/lib/node_modules/@twsxtd/hapi/bin/hapi.cjs hub` |
+| 挂载 | `/usr/lib/node_modules/@twsxtd/hapi` → 同路径（**ro**）；`/root/.hapi` → 同路径（rw） |
+| 日志 | `docker logs hapi-hub`（json-file，20m×3 轮转）——**不再是 journalctl** |
+| systemd | `hapi-hub.service` 已 `inactive` + `disabled`，**不要再启用**（会与容器抢 13006） |
+
+**关键点：容器 bind-mount 的是宿主上的 npm 包目录，所以换芯动作没变——照旧替换宿主
+那个平台二进制，只是重启方式从 systemd 改成 docker。** 二进制路径仍是
+`/usr/lib/node_modules/@twsxtd/hapi/node_modules/@twsxtd/hapi-linux-x64/bin/hapi`。
+
+```bash
+# 备份照旧（二进制 + 主库 + gateway 库）
+sqlite3 /root/.hapi/hapi.db ".backup /root/.hapi/hapi.db.pre-<tag>-<ts>"
+sqlite3 /root/.hapi/multi-user-gateway.sqlite ".backup /root/.hapi/multi-user-gateway.sqlite.pre-<tag>-<ts>"
+
+BIN=/usr/lib/node_modules/@twsxtd/hapi/node_modules/@twsxtd/hapi-linux-x64/bin/hapi
+docker compose -f /clouddream/containerized/hapi/docker-compose.yml stop hapi-hub
+mv $BIN /root/hapi.bin.pre-<tag>-<ts>          # 仍用 mv，不覆写
+mv <新二进制> $BIN && chmod 755 $BIN
+docker compose -f /clouddream/containerized/hapi/docker-compose.yml start hapi-hub
+```
+
+停容器再换是必须的：mount 跟随宿主路径，但**运行中的进程持有旧 inode**，不重启不会生效。
+
+验收命令也要跟着换：`systemctl is-active hapi-hub` → `docker inspect -f '{{.State.Status}}' hapi-hub`；
+`journalctl -u hapi-hub` → `docker logs hapi-hub --since 10m`。
+
 ### 4. 换芯（若 schema 变更，先拿生产库副本干跑迁移）
 
 - schema 有变：`.backup` 出副本 → `HAPI_HOME=<副本目录> HAPI_LISTEN_PORT=<空闲端口> <新二进制> hub` 干跑，确认 `user_version` 迁移成功再动真库。**迁移方向不可逆**——旧二进制拒启新 schema，回滚必须连库备份一起还原。
