@@ -87,6 +87,37 @@ systemctl start hapi-hub
 - `GET /api/usage/summary` 返回 fork 形状（含 `hosts`）；公网 `https://bob.18852271093.top` 200
 - 更新 `/root/.hapi/DEPLOYED.txt`（tag/commit/sha256/回滚坐标）
 
+### 5.5 会话保全：更新时怎么不把在跑的会话搞离线（2026-08-11 事故复盘固化）
+
+**事故根链条**：机群 CLI 换芯用 `taskkill /F /IM hapi.exe` 杀掉了各机全部会话进程；
+runner 自己回来了，但 **hub 不会自动 resume 被杀的会话**——结果 44 个会话集体离线，
+只能事后手工恢复。而同一天 hub 的两次重启（systemd 换芯 + docker 化迁移）**一个会话
+都没杀**：hub 停启窗口内 CLI 只是断连重试，几秒后自动回连。
+
+由此分两类操作，纪律不同：
+
+**A. hub 更新（docker compose stop → 换宿主二进制 → start）——本来就不杀会话**
+- 停启窗口保持短（实测 ~6s）；CLI 断连自动重试，runner 看门狗 ≤5min 兜底
+- 更新镜像时先 `docker compose pull` 再 stop/start，别把拉镜像时间算进停机窗口
+- **不要 `docker compose down`**（会删容器重建，虽然状态都在 bind mount 里，
+  但 stop/start 足够且窗口更短）；不要动 `network_mode: host`
+- 唯一会波及机群的情形：`PROTOCOL_VERSION` 变了 → 那是机群升级（走 B），先比对两边版本
+
+**B. 机群 CLI 换芯——必然杀会话，所以基线快照 + 事后恢复是换芯动作的一部分**
+1. **换芯前**：把当前 active 会话清单落盘当基线
+   （`python3 resume-offline-sessions.py 0.1` 的思路：记下每台机 active 数与会话 id）
+2. 换芯（swap-cli-windows.ps1 / swap-cli-vircs.ps1）
+3. 等 runner 回连（`/api/machines` 内存态看到该机 active）
+4. **必跑** `resume-offline-sessions.py <窗口h> apply`（在 hub 宿主上跑）——
+   它会对 claude 系会话先置 `resumeWithSessionModel=true` 再 resume，
+   否则存储的模型串（`opus[1m]`/`gpt-5.6-sol`…）会被静默丢掉、落回机器默认模型
+5. 复核：active 数回到基线；抽查恢复会话的 model/effort 与原值逐字一致
+
+**本节禁止**：
+- CLI 换芯后不跑恢复就收工（「runner 回来了」≠「会话回来了」）
+- 恢复 claude 系会话时跳过 resume-model 步骤（模型参数静默丢失，用户下一条消息就换了模型）
+- 把「hub 重启」当成会话离线的原因去排查——先看离线时长是否对齐某台机器的 CLI 换芯时刻
+
 ### 6. 发布记档：tag `vX.Y.Z-fork.N` 单推 origin
 
 `X.Y.Z` = `cli/package.json` 版本，`N` 递增。**单推该 tag**（`git push origin <tag>`）——`--tags` 多 tag 同推会漏发 tag 事件，Release workflow 不触发（2026-08-10 踩过）。Release 产物（6 平台 + checksums）用于追溯与将来他处部署，**不是 ECS 的进货来源**。
