@@ -30,8 +30,12 @@ run "docker compose -f $COMPOSE stop hapi-hub" || exit 1
 echo "=== 4. mv 换芯（覆写会 Text file busy）==="
 run "mv $BIN /root/hapi.bin.pre-${TAG}-${TS} && mv /root/xfer-sub/hapi.new $BIN && chmod 755 $BIN && sha256sum $BIN" || exit 1
 
-echo "=== 5. 起容器 ==="
-run "docker compose -f $COMPOSE start hapi-hub" || exit 1
+echo "=== 5. 起容器（用 up -d 而非 start）==="
+# 本次同时往 .env 加了 HAPI_CX2CC_* 两个变量。env_file 是**创建容器时**读取的，
+# stop/start 复用旧容器、env 不会更新，所以必须 up -d 让 compose 重建容器。
+# 重建是安全的：状态全在 bind mount（/root/.hapi）里，容器本身无状态。
+# 与 CD 规则里「不要 down」不冲突——那条讲的是不必要的删容器；这里是 env 变更的必需动作。
+run "docker compose -f $COMPOSE up -d hapi-hub" || exit 1
 
 echo "=== 6. 等待就绪 ==="
 sleep 8
