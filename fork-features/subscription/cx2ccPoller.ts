@@ -18,6 +18,8 @@ import type { SubscriptionSnapshot, SubscriptionWindow } from './domain'
 export type Cx2ccPollerOptions = {
     /** 完整 URL,一般是 `https://bob.18852271093.top/cx2cc-api/usage`。 */
     url: string
+    /** 账号池 URL。默认把 `url` 末段的 `usage` 换成 `accounts`,一般不用显式给。 */
+    accountsUrl?: string
     /** cx2cc 认证头 `x-api-key` 的值。 */
     apiKey: string
     /** 轮询间隔(ms)。生产建议 5min(300_000)。 */
@@ -33,6 +35,9 @@ export type Cx2ccPollerOptions = {
     fetchImpl?: typeof fetch
     /** 出错时的日志钩子(默认 console.warn)。 */
     log?: (msg: string) => void
+    /** 是否在返回前立刻跑一轮,默认 true(生产要的就是启动即有数据)。
+     *  测试关掉它以便精确计数请求次数。 */
+    eager?: boolean
 }
 
 /**
@@ -115,6 +120,107 @@ export function cx2ccResponseToSnapshot(
     }
 }
 
+// ── 账号池(轮换用的多个 ChatGPT 账号) ──────────────────────────────────
+//
+// `/usage` 只报**当前生效**那个账号,备用账号的余量看不见。cx2cc 另外暴露了
+// `/accounts`(转发自 codex-bridge 的 account pool),一次给出全部账号:
+//   {accounts:[{id, email, plan, priority, active, available, limit_reached,
+//               used_percent, window_reset_at(秒)}], active:"<id>"}
+// 于是改成:用 /accounts 枚举账号(每个一张卡),再用 /usage 给生效账号补上
+// primary/secondary 两个窗口的细节——后者只有生效账号才有。
+
+export type Cx2ccAccount = {
+    id?: string
+    email?: string | null
+    plan?: string | null
+    priority?: number
+    active?: boolean
+    available?: boolean
+    limit_reached?: boolean
+    used_percent?: number
+    window_reset_at?: number
+}
+
+export type Cx2ccAccountsResponse = {
+    accounts?: Cx2ccAccount[]
+    active?: string | null
+}
+
+/**
+ * 一个账号 → 一条快照。
+ *
+ * `detailedWindows` 传非空时(只有当前生效账号有)用它当窗口明细;否则从
+ * `used_percent` + `window_reset_at` 合成单条窗口——备用账号只有这一组数字。
+ */
+export function cx2ccAccountToSnapshot(
+    account: Cx2ccAccount,
+    opts: { machine: string; reportedAt: number; isActive: boolean; detailedWindows: SubscriptionWindow[] | null }
+): SubscriptionSnapshot {
+    const email = typeof account.email === 'string' && account.email ? account.email : null
+    const plan = typeof account.plan === 'string' && account.plan ? account.plan : '?'
+
+    let windows: SubscriptionWindow[]
+    if (opts.detailedWindows && opts.detailedWindows.length > 0) {
+        windows = opts.detailedWindows
+    } else {
+        const percent = typeof account.used_percent === 'number' ? account.used_percent : null
+        windows = percent === null ? [] : [{
+            key: 'account_window',
+            label: '账号窗口',
+            used_percent: percent,
+            reset_at: typeof account.window_reset_at === 'number' ? account.window_reset_at * 1000 : null,
+            severity: percent >= 95 ? 'critical' : percent >= 70 ? 'warning' : 'normal',
+            // 备用账号也标 active —— 这里的 is_active 是「这张卡的主进度条用哪条窗口」,
+            // 跟账号是不是当前轮换到的那个无关(后者写在 plan_name 里)。
+            is_active: true
+        }]
+    }
+
+    // 角色写进 plan_name,让「哪个在烧、哪个是备用」一眼可见。
+    // limit_reached 优先——账号打满了比它是不是主用更要紧。
+    const role = account.limit_reached ? '已限流'
+        : opts.isActive ? '主用'
+        : account.available === false ? '不可用'
+        : '备用'
+
+    return {
+        machine: opts.machine,
+        provider: 'cx2cc',
+        // account_key 用邮箱(跨采集稳定);没有就退回池里的 id。
+        account_key: email ?? account.id ?? 'default',
+        plan_name: `ChatGPT ${plan} · ${role}`,
+        windows,
+        balance: null,
+        error: null,
+        reported_at: opts.reportedAt
+    }
+}
+
+/** 把 /accounts + /usage 合成一组快照(每账号一条)。 */
+export function cx2ccAccountsToSnapshots(
+    accounts: Cx2ccAccountsResponse,
+    usage: Cx2ccRawUsage | null,
+    opts: { machine: string; reportedAt: number }
+): SubscriptionSnapshot[] {
+    const list = accounts.accounts ?? []
+    if (list.length === 0) return []
+
+    // 生效账号的详细窗口来自 /usage。判定优先用顶层 `active` 字段对 id,
+    // 退而求其次看各条目自己的 active 标记。
+    const activeId = typeof accounts.active === 'string' ? accounts.active : null
+    const detailed = usage ? cx2ccResponseToSnapshot(usage, opts).windows : []
+
+    return list.map(account => {
+        const isActive = activeId !== null ? account.id === activeId : account.active === true
+        return cx2ccAccountToSnapshot(account, {
+            machine: opts.machine,
+            reportedAt: opts.reportedAt,
+            isActive,
+            detailedWindows: isActive && detailed.length > 0 ? detailed : null
+        })
+    })
+}
+
 /**
  * 记一条错误快照。error 非空、windows 为空——前端仍能看到"该 provider 采集失败"。
  * 保留旧的 account_key 上下文很难(错误时可能连响应都没),这里退回 'default'——
@@ -150,32 +256,57 @@ export function startCx2ccPoller(opts: Cx2ccPollerOptions): Cx2ccPollerHandle {
     let stopped = false
     let timer: ReturnType<typeof setTimeout> | null = null
 
-    async function pollOnce(): Promise<void> {
+    /** `/usage` 的兄弟路径。opts.url 指向 `.../usage`，把末段换成 `accounts`。 */
+    const accountsUrl = opts.accountsUrl ?? opts.url.replace(/\/usage(\?|$)/, '/accounts$1')
+
+    async function getJson(url: string): Promise<{ ok: true; body: unknown } | { ok: false; message: string }> {
         const controller = new AbortController()
         const cancel = setTimeout(() => controller.abort(), timeoutMs)
-        const reportedAt = now()
         try {
-            const res = await doFetch(opts.url, {
+            const res = await doFetch(url, {
                 method: 'GET',
                 headers: { 'x-api-key': opts.apiKey, 'User-Agent': 'hapi-hub-cx2cc-poller/1.0' },
                 signal: controller.signal
             })
-            if (!res.ok) {
-                opts.subscriptionStore.upsertSnapshots([errorSnapshot({
-                    machine, reportedAt, message: `HTTP ${res.status}`
-                })])
-                log(`HTTP ${res.status}`)
-                return
-            }
-            const body = await res.json() as Cx2ccRawUsage
-            opts.subscriptionStore.upsertSnapshots([cx2ccResponseToSnapshot(body, { machine, reportedAt })])
+            if (!res.ok) return { ok: false, message: `HTTP ${res.status}` }
+            return { ok: true, body: await res.json() }
         } catch (err) {
-            const message = err instanceof Error ? err.message : String(err)
-            opts.subscriptionStore.upsertSnapshots([errorSnapshot({ machine, reportedAt, message })])
-            log(message)
+            return { ok: false, message: err instanceof Error ? err.message : String(err) }
         } finally {
             clearTimeout(cancel)
         }
+    }
+
+    async function pollOnce(): Promise<void> {
+        const reportedAt = now()
+
+        // /usage 是主信息源（生效账号的 primary/secondary 窗口明细），它失败就算这轮失败。
+        const usage = await getJson(opts.url)
+        if (!usage.ok) {
+            opts.subscriptionStore.upsertSnapshots([errorSnapshot({ machine, reportedAt, message: usage.message })])
+            log(usage.message)
+            return
+        }
+        const usageBody = usage.body as Cx2ccRawUsage
+
+        // /accounts 是增量信息（把备用账号也拉出来）。它不可用时**不算失败**——
+        // 老版本 cx2cc 没有这个路径，回落到只报生效账号，与加这个功能之前等价。
+        const accounts = await getJson(accountsUrl)
+        if (accounts.ok) {
+            const snapshots = cx2ccAccountsToSnapshots(
+                accounts.body as Cx2ccAccountsResponse,
+                usageBody,
+                { machine, reportedAt }
+            )
+            if (snapshots.length > 0) {
+                opts.subscriptionStore.upsertSnapshots(snapshots)
+                return
+            }
+        } else {
+            log(`/accounts 不可用（${accounts.message}），本轮只报当前生效账号`)
+        }
+
+        opts.subscriptionStore.upsertSnapshots([cx2ccResponseToSnapshot(usageBody, { machine, reportedAt })])
     }
 
     function scheduleNext(): void {
@@ -187,7 +318,11 @@ export function startCx2ccPoller(opts: Cx2ccPollerOptions): Cx2ccPollerHandle {
     }
 
     // 立刻跑一次,不等首个 interval——启动窗口内前端就能看到当前快照。
-    pollOnce().finally(() => scheduleNext())
+    if (opts.eager !== false) {
+        pollOnce().finally(() => scheduleNext())
+    } else {
+        scheduleNext()
+    }
 
     return {
         pollOnce,
