@@ -32,10 +32,19 @@ if (-not (Test-Path $script)) {
     exit 2
 }
 
-$bun = (Get-Command bun -ErrorAction SilentlyContinue).Source
-if (-not $bun) { $bun = Join-Path $env:APPDATA 'npm\bun.cmd' }
-if (-not (Test-Path $bun)) {
-    Write-Error 'bun 不在 PATH 里，且 %APPDATA%\npm\bun.cmd 也不存在'
+# 直接找真 exe，不用 `Get-Command bun`——那个在本机解析到 bun.ps1 垫片，
+# 在计划任务的 -NonInteractive 宿主里多一层 shim 只是多一个出错面。
+$bunCandidates = @(
+    (Join-Path $env:APPDATA 'npm\node_modules\bun\bin\bun.exe'),
+    (Join-Path $env:LOCALAPPDATA 'bun\bin\bun.exe')
+)
+$bun = $bunCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+if (-not $bun) {
+    # 兜底：PATH 里能找到什么算什么（可能是 .ps1/.cmd 垫片，但总比不跑强）。
+    $bun = (Get-Command bun -ErrorAction SilentlyContinue).Source
+}
+if (-not $bun -or -not (Test-Path $bun)) {
+    Write-Error "找不到 bun。已试过: $($bunCandidates -join ', ') 以及 PATH"
     exit 2
 }
 
