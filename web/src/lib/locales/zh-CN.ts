@@ -1289,4 +1289,5 @@ export default {
   'subscription.window.minutes': '{n} 分钟窗口',
   'subscription.window.primary': '主窗口',
   'subscription.window.secondary': '次窗口',
+  'subscription.window.accountWindow': '账号窗口',
 } as const

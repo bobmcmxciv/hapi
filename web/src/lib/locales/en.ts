@@ -1291,4 +1291,5 @@ export default {
   'subscription.window.minutes': '{n}-minute window',
   'subscription.window.primary': 'Primary window',
   'subscription.window.secondary': 'Secondary window',
+  'subscription.window.accountWindow': 'Account window',
 } as const

@@ -150,7 +150,8 @@ describe('translateWindowLabel — 标签跟随界面语言，不吃采集器的
             'subscription.window.scopedWeekly': '{model} weekly window',
             'subscription.window.toolCalls': 'Tool call quota',
             'subscription.window.planTotal': 'Plan quota',
-            'subscription.window.hours': '{n}-hour window'
+            'subscription.window.hours': '{n}-hour window',
+            'subscription.window.accountWindow': 'Account window'
         }
         let out = table[key] ?? key
         for (const [k, v] of Object.entries(vars ?? {})) out = out.replace(`{${k}}`, String(v))
@@ -170,6 +171,12 @@ describe('translateWindowLabel — 标签跟随界面语言，不吃采集器的
 
     it('kimi 的 duration_<minutes> 按小时渲染', () => {
         expect(translateWindowLabel('duration_300', '5 小时窗口', en)).toBe('5-hour window')
+    })
+
+    it('cx2cc 备用账号的 account_window 也走翻译', () => {
+        // 备用账号只给一个 used_percent+reset，没有 primary/secondary 之分。
+        // 漏加这条会让英文界面显示采集侧的中文串「账号窗口」（上线后截图发现过）。
+        expect(translateWindowLabel('account_window', '账号窗口', en)).toBe('Account window')
     })
 
     it('未知 key 退回采集器的 label（新 provider 至少有东西可看）', () => {

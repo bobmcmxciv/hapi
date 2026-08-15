@@ -164,6 +164,10 @@ export function translateWindowLabel(
             return t('subscription.window.primary')
         case 'secondary':
             return t('subscription.window.secondary')
+        case 'account_window':
+            // cx2cc 账号池里的**备用**账号只给一个 used_percent + reset，
+            // 没有 primary/secondary 之分（那两个只有当前生效账号才有）。
+            return t('subscription.window.accountWindow')
         default:
             return fallbackLabel
     }
