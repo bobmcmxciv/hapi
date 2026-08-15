@@ -1267,4 +1267,26 @@ export default {
   'usage.table.hitRate': '命中率',
   'usage.cacheHitRate': '缓存命中率',
   'usage.cacheHitRateHint': '缓存读取 ÷ 总输入（输入 + 缓存写入 + 缓存读取）',
+
+  // fork-features/subscription：订阅配额与余额面板
+  'subscription.title': '订阅与余额',
+  'subscription.subtitle': '各 provider 的剩余配额，重置时间按你所在时区显示。',
+  'subscription.balance': '账户余额',
+  'subscription.noWindows': '未上报配额窗口',
+  'subscription.collectFailed': '采集失败',
+  'subscription.loadFailed': '无法加载订阅数据',
+  'subscription.age.justNow': '刚刚',
+  'subscription.age.minutes': '{n} 分钟前',
+  'subscription.age.hours': '{n} 小时前',
+  'subscription.age.days': '{n} 天前',
+  // 窗口标签按快照里的稳定 key 翻译，而不是直接用采集器写的串，这样跟随界面语言。
+  'subscription.window.fiveHour': '5 小时窗口',
+  'subscription.window.weekly': '周窗口',
+  'subscription.window.scopedWeekly': '{model} 周窗口',
+  'subscription.window.toolCalls': '工具调用额度',
+  'subscription.window.planTotal': '套餐额度',
+  'subscription.window.hours': '{n} 小时窗口',
+  'subscription.window.minutes': '{n} 分钟窗口',
+  'subscription.window.primary': '主窗口',
+  'subscription.window.secondary': '次窗口',
 } as const

@@ -18,6 +18,7 @@ import {
     machineChipShellClass
 } from '@/components/machinePresentation'
 import { cn } from '@/lib/utils'
+import SubscriptionPanel from './SubscriptionPanel'
 
 /** 用量页不按会话活跃日高亮，固定空集避免每次渲染新建 Set。 */
 const EMPTY_ACTIVITY_DATES: ReadonlySet<string> = new Set<string>()
@@ -354,6 +355,11 @@ export default function UsagePage() {
             </div>
 
             <div className="mx-auto max-w-5xl space-y-4 p-4">
+                {/* 订阅/余额面板放在时间筛选**之上**：它是"此刻还剩多少"的快照，
+                    不受下面那排时间范围按钮影响。放在筛选下面会让人误以为它也被筛。
+                    非 admin 或无快照时组件自己返回 null，不占位。 */}
+                <SubscriptionPanel />
+
                 <div className="flex flex-wrap items-center gap-3">
                     <div className="flex flex-wrap gap-1.5">
                         {PRESET_RANGES.map((r) => (

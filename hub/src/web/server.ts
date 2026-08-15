@@ -45,6 +45,8 @@ import type { Store } from '../store'
 import { mountMultiUserGateway, mountMultiUserPostAuth } from '../../../fork-features/multi-user/hubMount'
 import { createSseRequestFilterFactory } from '../../../fork-features/multi-user/sseVisibility'
 import type { MultiUserGatewayStore } from '../../../fork-features/multi-user/gatewayStore'
+import type { SubscriptionStore } from '../../../fork-features/subscription/subscriptionStore'
+import { createSubscriptionRoutes } from '../../../fork-features/subscription/subscriptionRoutes'
 import { createExecutionMiddleware, gatewayAccountId, mountExecutionRoutes } from '../../../fork-features/multi-user/executionMount'
 import { createSessionMachineResolver, createSessionPathResolver } from '../../../fork-features/multi-user/machineInheritance'
 import { resolveGatewayCliNamespace } from '../../../fork-features/multi-user/cliAdapter'
@@ -234,7 +236,7 @@ function createWebApp(options: {
     embeddedAssetMap: Map<string, EmbeddedWebAsset> | null
     relayMode?: boolean
     officialWebUrl?: string
-    multiUser: { store: MultiUserGatewayStore; coreUserId: number }
+    multiUser: { store: MultiUserGatewayStore; coreUserId: number; subscriptionStore: SubscriptionStore }
 }): Hono<WebAppEnv> {
     const app = new Hono<WebAppEnv>()
 
@@ -301,6 +303,14 @@ function createWebApp(options: {
         getSseManager: options.getSseManager,
         getStore: () => options.store
     })
+    // fork(subscription): 订阅/API 余额快照。admin-only,写读都靠 gateway JWT + role==='admin'。
+    // 挂在 executionMount 之后但仍在通配 middleware 之前——路由是显式 /api/subscription/*
+    // 不会跟上游冲突,顺序无关紧要,并列放在这里方便一起阅读。
+    app.route('/api', createSubscriptionRoutes({
+        gatewayStore: multiUserStore,
+        subscriptionStore: options.multiUser.subscriptionStore,
+        jwtSecret: options.jwtSecret
+    }))
     app.use('/api/*', createExecutionMiddleware({
         store: multiUserStore,
         jwtSecret: options.jwtSecret,
@@ -514,7 +524,7 @@ export async function startWebServer(options: {
     corsOrigins?: string[]
     relayMode?: boolean
     officialWebUrl?: string
-    multiUser: { store: MultiUserGatewayStore; coreUserId: number }
+    multiUser: { store: MultiUserGatewayStore; coreUserId: number; subscriptionStore: SubscriptionStore }
 }): Promise<BunServer<WebSocketData>> {
     const isCompiled = isBunCompiled()
     const embeddedAssetMap = isCompiled ? await loadEmbeddedAssetMap() : null

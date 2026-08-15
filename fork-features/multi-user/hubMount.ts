@@ -19,6 +19,7 @@ import {
 } from './legacyDbCompat'
 import { createPushOwnershipMiddleware } from './pushOwnership'
 import { hashApiToken } from './token'
+import { SubscriptionStore } from '../subscription/subscriptionStore'
 
 function validateTelegramIdentity(initData: string, botToken: string | null): TelegramGatewayResult | {
     kind: 'validated'
@@ -107,6 +108,9 @@ export function createMultiUserGatewayStore(dataDir: string, legacyAccessToken: 
 export type ForkMultiUserBootstrap = {
     store: Store
     multiUserGatewayStore: MultiUserGatewayStore
+    /** 订阅/API 余额快照存储。与 gateway 库物理分离(fork-features/subscription)。
+     *  跟随 fork 引导一并落地,方便 startHub 一次拿到所有 fork 侧资源。 */
+    subscriptionStore: SubscriptionStore
 }
 
 /**
@@ -154,7 +158,8 @@ export function bootstrapForkMultiUser(config: {
 
     const store = new Store(config.dbPath)
     const multiUserGatewayStore = createMultiUserGatewayStore(config.dataDir, config.cliApiToken)
+    const subscriptionStore = new SubscriptionStore(join(config.dataDir, 'subscription-snapshots.sqlite'))
     assertNoLegacyForkArtifactsRemaining(config.dbPath)
 
-    return { store, multiUserGatewayStore }
+    return { store, multiUserGatewayStore, subscriptionStore }
 }

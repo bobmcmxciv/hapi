@@ -32,6 +32,7 @@ import {
 } from '../../fork-features/multi-user/notificationAdapter'
 import { resolveGatewayCliNamespace } from '../../fork-features/multi-user/cliAdapter'
 import { createGatewayMemoryDelivery } from '../../fork-features/multi-user/memoryAdapter'
+import { startCx2ccPoller, type Cx2ccPollerHandle } from '../../fork-features/subscription/cx2ccPoller'
 
 /** Format config source for logging */
 function formatSource(source: ConfigSource | 'generated'): string {
@@ -120,6 +121,7 @@ export async function startHub(options: StartHubOptions = {}): Promise<HubInstan
     let visibilityTracker: VisibilityTracker | null = null
     let notificationHub: NotificationHub | null = null
     let tunnelManager: TunnelManager | null = null
+    let cx2ccPoller: Cx2ccPollerHandle | null = null
 
     // Load configuration (async - loads from env/file with persistence)
     const relayApiDomain = process.env.HAPI_RELAY_API || 'relay.hapi.run'
@@ -178,7 +180,7 @@ export async function startHub(options: StartHubOptions = {}): Promise<HubInstan
         console.log(`[Hub] Tunnel: disabled (${relayFlag.source})`)
     }
 
-    const { store, multiUserGatewayStore } = bootstrapForkMultiUser(config)
+    const { store, multiUserGatewayStore, subscriptionStore } = bootstrapForkMultiUser(config)
     const gatewayMemoryDelivery = createGatewayMemoryDelivery(multiUserGatewayStore)
     const jwtSecret = await getOrCreateJwtSecret()
     const vapidKeys = await getOrCreateVapidKeys(config.dataDir)
@@ -296,13 +298,31 @@ export async function startHub(options: StartHubOptions = {}): Promise<HubInstan
         officialWebUrl,
         multiUser: {
             store: multiUserGatewayStore,
-            coreUserId: await getOrCreateOwnerId()
+            coreUserId: await getOrCreateOwnerId(),
+            subscriptionStore
         }
     })
 
     // Start the bot if configured
     if (happyBot) {
         await happyBot.start()
+    }
+
+    // fork(subscription): 启动 cx2cc 轮询器(hub 直接调 ECS 上的 cx2cc-api/usage)。
+    // 只在两个 env 都设置时启动;缺任一 → 采集不启动、快照表这条留空,与其他
+    // provider 一样从 vircs collector 走推送即可。
+    const cx2ccUrl = process.env.HAPI_CX2CC_USAGE_URL?.trim()
+    const cx2ccKey = process.env.HAPI_CX2CC_API_KEY?.trim()
+    if (cx2ccUrl && cx2ccKey) {
+        cx2ccPoller = startCx2ccPoller({
+            url: cx2ccUrl,
+            apiKey: cx2ccKey,
+            intervalMs: 5 * 60 * 1000,
+            subscriptionStore
+        })
+        console.log('[Subscription] cx2cc poller started (interval=5m)')
+    } else {
+        console.log('[Subscription] cx2cc poller disabled (HAPI_CX2CC_USAGE_URL/HAPI_CX2CC_API_KEY unset)')
     }
 
     console.log('')
@@ -406,6 +426,8 @@ export async function startHub(options: StartHubOptions = {}): Promise<HubInstan
             syncEngine?.stop()
             sseManager?.stop()
             webServer?.stop()
+            cx2ccPoller?.stop()
+            subscriptionStore.close()
             multiUserGatewayStore.close()
         }
     }

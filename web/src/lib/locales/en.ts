@@ -1268,4 +1268,27 @@ export default {
   'usage.table.hitRate': 'Hit rate',
   'usage.cacheHitRate': 'Cache hit rate',
   'usage.cacheHitRateHint': 'Cache read ÷ total input (input + cache creation + cache read)',
+
+  // fork-features/subscription: quota & balance panel
+  'subscription.title': 'Subscriptions & balances',
+  'subscription.subtitle': 'Remaining quota per provider. Reset times shown in your local timezone.',
+  'subscription.balance': 'Balance',
+  'subscription.noWindows': 'No quota window reported',
+  'subscription.collectFailed': 'Collection failed',
+  'subscription.loadFailed': 'Could not load subscription data',
+  'subscription.age.justNow': 'just now',
+  'subscription.age.minutes': '{n}m ago',
+  'subscription.age.hours': '{n}h ago',
+  'subscription.age.days': '{n}d ago',
+  // Window labels are resolved from the snapshot's stable `key`, not the
+  // collector-supplied string, so they follow the UI language.
+  'subscription.window.fiveHour': '5-hour window',
+  'subscription.window.weekly': 'Weekly window',
+  'subscription.window.scopedWeekly': '{model} weekly window',
+  'subscription.window.toolCalls': 'Tool call quota',
+  'subscription.window.planTotal': 'Plan quota',
+  'subscription.window.hours': '{n}-hour window',
+  'subscription.window.minutes': '{n}-minute window',
+  'subscription.window.primary': 'Primary window',
+  'subscription.window.secondary': 'Secondary window',
 } as const
