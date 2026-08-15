@@ -1,4 +1,4 @@
-# 订阅采集器常驻包装。由计划任务 HapiSubscriptionCollector 调起。
+﻿# 订阅采集器常驻包装。由计划任务 HapiSubscriptionCollector 调起。
 #
 # 凭据不写进计划任务的命令行（那是所有人可读的），而是从 ACL 锁死的
 # ~/.hapi/subscription-collector.env 读进环境变量再交给采集器。
