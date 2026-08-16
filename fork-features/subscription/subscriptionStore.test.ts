@@ -69,6 +69,64 @@ describe('SubscriptionStore', () => {
         expect(row?.windows).toHaveLength(0)
     })
 
+    test('同一 (machine, provider) 整组替换——失败留下的 default 幽灵行会被清掉', () => {
+        // 复现线上现象：anthropic 采集失败写了 account_key='default'，
+        // 下一轮成功写的是邮箱那行，主键不同 → 'default' 行永远没人覆盖，
+        // 页面上一直挂着几小时前的红卡。整组替换从根上消掉这个类别。
+        const store = new SubscriptionStore(':memory:')
+        store.upsertSnapshots([snap({
+            account_key: 'default', error: 'HTTP 429', windows: [], plan_name: null
+        })])
+        expect(store.listAll()).toHaveLength(1)
+
+        store.upsertSnapshots([snap({ account_key: 'bob@example.com' })])
+        const rows = store.listAll()
+        expect(rows).toHaveLength(1)
+        expect(rows[0]?.account_key).toBe('bob@example.com')
+        expect(rows[0]?.error).toBeNull()
+    })
+
+    test('同一批里的多账号都保留（清场只做一次，不会自相残杀）', () => {
+        // cx2cc 账号池一次上报两个账号；若每条快照都先 DELETE 一遍，
+        // 第二条会把第一条刚插进去的删掉，只剩一个账号。
+        const store = new SubscriptionStore(':memory:')
+        store.upsertSnapshots([
+            snap({ provider: 'cx2cc', account_key: 'a@x.com' }),
+            snap({ provider: 'cx2cc', account_key: 'b@x.com' })
+        ])
+        const rows = store.listAll().filter(r => r.provider === 'cx2cc')
+        expect(rows).toHaveLength(2)
+        expect(rows.map(r => r.account_key).sort()).toEqual(['a@x.com', 'b@x.com'])
+    })
+
+    test('账号从池子里移除后，它那行也随之消失', () => {
+        const store = new SubscriptionStore(':memory:')
+        store.upsertSnapshots([
+            snap({ provider: 'cx2cc', account_key: 'kept@x.com' }),
+            snap({ provider: 'cx2cc', account_key: 'removed@x.com' })
+        ])
+        expect(store.listAll().filter(r => r.provider === 'cx2cc')).toHaveLength(2)
+        store.upsertSnapshots([snap({ provider: 'cx2cc', account_key: 'kept@x.com' })])
+        const rows = store.listAll().filter(r => r.provider === 'cx2cc')
+        expect(rows).toHaveLength(1)
+        expect(rows[0]?.account_key).toBe('kept@x.com')
+    })
+
+    test('替换只影响同一 (machine, provider)，别的 provider 不受牵连', () => {
+        const store = new SubscriptionStore(':memory:')
+        store.upsertSnapshots([
+            snap({ provider: 'anthropic', account_key: 'a@x.com' }),
+            snap({ provider: 'kimi', account_key: 'k1' }),
+            snap({ machine: 'desktop', provider: 'anthropic', account_key: 'd@x.com' })
+        ])
+        store.upsertSnapshots([snap({ provider: 'anthropic', account_key: 'a2@x.com' })])
+        const all = store.listAll()
+        expect(all).toHaveLength(3)
+        expect(all.find(r => r.machine === 'vircs' && r.provider === 'anthropic')?.account_key).toBe('a2@x.com')
+        expect(all.find(r => r.provider === 'kimi')?.account_key).toBe('k1')
+        expect(all.find(r => r.machine === 'desktop')?.account_key).toBe('d@x.com')
+    })
+
     test('error snapshot is stored so UI can show stale/failed state', () => {
         const store = new SubscriptionStore(':memory:')
         store.upsertSnapshots([

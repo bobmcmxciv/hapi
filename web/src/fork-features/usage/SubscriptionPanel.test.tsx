@@ -211,12 +211,31 @@ describe('SubscriptionPanel 渲染', () => {
         expect(screen.getByText('CNY')).toBeTruthy()
     })
 
-    it('采集失败的快照显示错误而不是消失', async () => {
-        mockSummary([claudeSnapshot({
-            error: 'HTTP 401(凭据无效或过期)', windows: [], plan_name: null
-        })])
+    it('采集失败的 provider 不占卡片位（失效账号不该跟正常配额平起平坐）', async () => {
+        mockSummary([
+            claudeSnapshot(),
+            claudeSnapshot({
+                provider: 'cx2cc', account_key: 'default',
+                error: 'Unexpected end of JSON input', windows: [], plan_name: null
+            })
+        ])
         renderPanel()
-        await waitFor(() => expect(screen.getByText(/HTTP 401/)).toBeTruthy())
+        await waitFor(() => expect(screen.getByText('5-hour window')).toBeTruthy())
+        // 红卡不再出现
+        expect(screen.queryByText(/Unexpected end of JSON input/)).toBeNull()
+        // 但也不能一声不吭——页脚点名是哪个 provider 挂了
+        expect(screen.getByText(/cx2cc/)).toBeTruthy()
+    })
+
+    it('全部失败时面板仍渲染——否则「全炸」和「没配置」长得一样', async () => {
+        mockSummary([
+            claudeSnapshot({ error: 'HTTP 429', windows: [], plan_name: null }),
+            claudeSnapshot({ provider: 'kimi', account_key: 'k', error: 'ECONNRESET', windows: [], plan_name: null })
+        ])
+        const { container } = renderPanel()
+        await waitFor(() => expect(container.textContent).toContain('Subscriptions'))
+        expect(container.textContent).toContain('anthropic')
+        expect(container.textContent).toContain('kimi')
     })
 
     it('403（非 admin）时整块不渲染', async () => {

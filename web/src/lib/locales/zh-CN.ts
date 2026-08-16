@@ -1274,6 +1274,7 @@ export default {
   'subscription.balance': '账户余额',
   'subscription.noWindows': '未上报配额窗口',
   'subscription.collectFailed': '采集失败',
+  'subscription.hiddenFailures': '已隐藏 {n} 个采集失败的 provider（{providers}），悬停查看原因。',
   'subscription.loadFailed': '无法加载订阅数据',
   'subscription.age.justNow': '刚刚',
   'subscription.age.minutes': '{n} 分钟前',

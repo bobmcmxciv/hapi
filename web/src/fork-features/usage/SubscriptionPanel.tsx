@@ -288,21 +288,32 @@ export default function SubscriptionPanel() {
         retry: (count, error) => error instanceof Error && error.message === 'FORBIDDEN' ? false : count < 2
     })
 
-    // 排序：先按机器，再把有窗口的排前面（纯余额型信息密度低，放后面）。
-    // 同机同类再按 provider 名，保证每次渲染顺序稳定不跳动。
-    const snapshots = useMemo(() => {
+    // 采集失败的不占卡片位。失效账号、过期 token、偶发 429 都会产生错误快照，
+    // 让它们以红卡形式跟正常配额平起平坐会淹没真正要看的数字。
+    //
+    // 但**不能完全不吭声**：如果所有 provider 都挂了，面板会静默变空，看起来
+    // 像「没配置」而不是「全炸了」。所以错误行从卡片里剔除，改在页脚记一行。
+    const { healthy, failed } = useMemo(() => {
         const rows = query.data?.snapshots ?? []
-        return [...rows].sort((a, b) =>
+        const healthy = rows.filter(s => s.error === null)
+        const failed = rows.filter(s => s.error !== null)
+        // 排序：先按机器，再把有窗口的排前面（纯余额型信息密度低，放后面）。
+        // 同机同类再按 provider 名，保证每次渲染顺序稳定不跳动。
+        healthy.sort((a, b) =>
             a.machine.localeCompare(b.machine)
             || Number(b.windows.length > 0) - Number(a.windows.length > 0)
             || a.provider.localeCompare(b.provider)
         )
+        return { healthy, failed }
     }, [query.data])
+    const snapshots = healthy
 
     if (query.isError && query.error instanceof Error && query.error.message === 'FORBIDDEN') return null
     // 首次加载中也不占位——用量页主体先出来，这块补上即可，避免顶部跳动。
     if (query.isLoading) return null
-    if (query.isSuccess && snapshots.length === 0) return null
+    // 全部失败时仍要渲染（下面的页脚会说明哪些挂了），否则「全炸」和「没配置」
+    // 在界面上长得一模一样。只有真的一条快照都没有才整块隐藏。
+    if (query.isSuccess && snapshots.length === 0 && failed.length === 0) return null
 
     const now = Date.now()
 
@@ -318,11 +329,26 @@ export default function SubscriptionPanel() {
                         {t('subscription.loadFailed')}: {query.error instanceof Error ? query.error.message : ''}
                     </div>
                 ) : (
-                    <div className="grid gap-2.5 sm:grid-cols-2">
-                        {snapshots.map(s => (
-                            <SnapshotCard key={`${s.machine}/${s.provider}/${s.account_key}`} snapshot={s} now={now} />
-                        ))}
-                    </div>
+                    <>
+                        <div className="grid gap-2.5 sm:grid-cols-2">
+                            {snapshots.map(s => (
+                                <SnapshotCard key={`${s.machine}/${s.provider}/${s.account_key}`} snapshot={s} now={now} />
+                            ))}
+                        </div>
+                        {failed.length > 0 && (
+                            // 采集失败的不占卡片位，但也不能一声不吭——这里一行带过，
+                            // title 里给出各自的错误原因，需要排查时鼠标一悬停就有。
+                            <div
+                                className="mt-2.5 text-xs text-[var(--app-hint)]"
+                                title={failed.map(s => `${s.machine}/${s.provider}: ${s.error}`).join('\n')}
+                            >
+                                {t('subscription.hiddenFailures', {
+                                    n: failed.length,
+                                    providers: [...new Set(failed.map(s => s.provider))].join('、')
+                                })}
+                            </div>
+                        )}
+                    </>
                 )}
             </CardContent>
         </Card>
