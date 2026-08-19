@@ -48,6 +48,20 @@ if (-not $bun -or -not (Test-Path $bun)) {
     exit 2
 }
 
-Write-Output "[run-subscription-collector] $(Get-Date -Format o) 启动，仓库=$repo"
-& $bun run $script
-exit $LASTEXITCODE
+# 日志落盘。2026-08-19 采集器挂死 13 小时，事后一行日志都没有——计划任务的
+# stdout 无人接管，直接进了空。滚动保留最近两份，避免无限长。
+$logDir = Join-Path $env:USERPROFILE '.hapi\logs'
+if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Force $logDir | Out-Null }
+$logFile = Join-Path $logDir 'subscription-collector.log'
+if ((Test-Path $logFile) -and ((Get-Item $logFile).Length -gt 5MB)) {
+    Move-Item -LiteralPath $logFile -Destination "$logFile.1" -Force
+}
+
+"[run-subscription-collector] $(Get-Date -Format o) 启动，仓库=$repo" | Tee-Object -FilePath $logFile -Append
+
+# 2>&1 合并 stderr，否则采集器的报错只会消失。stdout 有真实去处后，
+# 写日志也不再可能因为句柄关闭而抛。
+& $bun run $script 2>&1 | Tee-Object -FilePath $logFile -Append
+$code = $LASTEXITCODE
+"[run-subscription-collector] $(Get-Date -Format o) 退出，code=$code" | Tee-Object -FilePath $logFile -Append
+exit $code

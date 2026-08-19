@@ -315,6 +315,86 @@ describe('startCollector', () => {
         expect(authCalls).toBe(1)
     })
 
+    test('log 抛异常也不能停掉轮询——这正是线上停 13 小时的形状', async () => {
+        // 计划任务里 stdout 是关闭句柄，写它会抛。旧代码把 scheduleNext() 放在
+        // catch 之后而不是 finally 里，catch 里那句 log 一抛，定时器就再也不重新
+        // 武装：进程活着、循环已死、页面数据冻结在最后一次。
+        let rounds = 0
+        const store: string[] = []
+        const handle = startCollector(baseConfig({
+            intervalMs: 5,
+            log: () => { throw new Error('EPIPE: stdout closed') },
+            credentials: { anthropicAccessToken: null, deepseekApiKey: 'd', kimiApiKey: null, glmApiKey: null },
+            fetchImpl: (async (url: string) => {
+                const u = String(url)
+                if (u.includes('deepseek')) { rounds++; store.push('collect') }
+                if (u.endsWith('/api/auth')) return jsonResponse({ token: 'jwt' })
+                if (u.endsWith('/api/subscription/report')) return jsonResponse({ accepted: 1 })
+                return jsonResponse({ is_available: true, balance_infos: [{ currency: 'CNY', total_balance: '1' }] })
+            }) as unknown as typeof fetch
+        }))
+        // 等几个 interval，确认循环还在转
+        await new Promise(r => setTimeout(r, 80))
+        handle.stop()
+        expect(rounds).toBeGreaterThan(1)
+    })
+
+    /** 模拟一个挂住的连接：永不响应，但**尊重 AbortSignal**（真 fetch 就是这样，
+     *  超时能生效正是靠这一点）。断言的是"我们确实传了 signal 进去"。 */
+    const hangingFetch = (() => (_url: string, init?: RequestInit) =>
+        new Promise<Response>((_resolve, reject) => {
+            const signal = init?.signal
+            if (!signal) return // 没传 signal → 永远挂着，测试会超时失败，这正是我们要防的
+            signal.addEventListener('abort', () => reject(new Error('The operation was aborted.')))
+        })) ()
+
+    test('authenticate 带超时——挂住的连接不能让 await 永不返回', async () => {
+        await expect(authenticate(
+            baseConfig({ hubTimeoutMs: 50 }),
+            hangingFetch as unknown as typeof fetch
+        )).rejects.toThrow(/abort/i)
+    }, 45_000)
+
+    test('pushSnapshots 带超时', async () => {
+        const snap: SubscriptionSnapshot = {
+            machine: 'v', provider: 'p', account_key: 'a', plan_name: null,
+            windows: [], balance: null, error: null, reported_at: 1
+        }
+        await expect(pushSnapshots(
+            baseConfig({ hubTimeoutMs: 50 }), 'jwt', [snap], hangingFetch as unknown as typeof fetch
+        )).rejects.toThrow(/abort/i)
+    }, 45_000)
+
+    test('看门狗：连续没有成功推送就退出，让计划任务重启', async () => {
+        // 不真的 process.exit，替换掉观察调用。
+        const realExit = process.exit
+        // 用容器持有，避免 TS 把闭包外的 let 窄化成 null（赋值发生在它看不见的回调里）
+        const observed: { exitCode: number | null } = { exitCode: null }
+        process.exit = ((code?: number) => { observed.exitCode = code ?? 0 }) as never
+        try {
+            let t = 1_700_000_000_000
+            const handle = startCollector(baseConfig({
+                intervalMs: 5,
+                watchdogMs: 50,
+                now: () => t,
+                credentials: { anthropicAccessToken: null, deepseekApiKey: 'd', kimiApiKey: null, glmApiKey: null },
+                // 推送恒失败 → 永远不会更新 lastSuccessAt
+                fetchImpl: (async (url: string) => {
+                    const u = String(url)
+                    if (u.endsWith('/api/auth')) return new Response('', { status: 500 })
+                    return jsonResponse({ is_available: true, balance_infos: [{ currency: 'CNY', total_balance: '1' }] })
+                }) as unknown as typeof fetch
+            }))
+            // 把时钟推过看门狗窗口，再等一个 interval 让回调跑到 checkWatchdog
+            t += 200
+            await new Promise(r => setTimeout(r, 60))
+            handle.stop()
+            expect(observed.exitCode).toBe(1)
+        } finally {
+            process.exit = realExit
+        }
+    })
+
     test('stop() prevents further scheduled rounds', async () => {
         let calls = 0
         const fetchImpl = (async (url: string) => {
