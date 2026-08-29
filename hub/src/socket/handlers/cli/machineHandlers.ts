@@ -2,6 +2,7 @@ import type { ClientToServerEvents } from '@hapi/protocol'
 import { z } from 'zod'
 import { randomUUID } from 'node:crypto'
 import type { Store, StoredMachine } from '../../../store'
+import { preserveHubOwnedMachineMetadata } from '../../../store/machines'
 import type { SyncEvent } from '../../../sync/syncEngine'
 import type { CliSocketWithData } from '../../socketTypes'
 import type { AccessErrorReason, AccessResult } from './types'
@@ -68,7 +69,9 @@ export function registerMachineHandlers(socket: CliSocketWithData, deps: Machine
             return
         }
 
-        const result = store.machines.updateMachineMetadata(id, metadata, expectedVersion, machineAccess.value.namespace)
+        // 机器名归 hub 所有，CLI 的整体替换不许把它带走。
+        const effectiveMetadata = preserveHubOwnedMachineMetadata(machineAccess.value.metadata, metadata)
+        const result = store.machines.updateMachineMetadata(id, effectiveMetadata, expectedVersion, machineAccess.value.namespace)
         if (result.result === 'success') {
             cb({ result: 'success', version: result.version, metadata: result.value })
         } else if (result.result === 'version-mismatch') {
@@ -85,7 +88,7 @@ export function registerMachineHandlers(socket: CliSocketWithData, deps: Machine
                 body: {
                     t: 'update-machine' as const,
                     machineId: id,
-                    metadata: { version: result.version, value: metadata },
+                    metadata: { version: result.version, value: effectiveMetadata },
                     runnerState: null
                 }
             }

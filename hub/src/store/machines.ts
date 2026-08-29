@@ -51,6 +51,21 @@ export function mergeMachineMetadata(stored: unknown, incoming: unknown): Record
     return JSON.stringify(merged) === JSON.stringify(base) ? undefined : merged
 }
 
+// `displayName` is hub-owned: only `PATCH /api/machines/:id` writes it and the
+// CLI never reports it. But `machine-update-metadata` replaces the whole
+// metadata object (the CLI needs to be able to *drop* keys, e.g. clearing
+// workspaceRoots), so one update computed from a stale or empty base silently
+// erases a rename. Production hit exactly that: machine 28ac3d22 was pushed
+// back to `{workspaceRoots}` and the operator's rename kept "not working".
+// Carry the stored name across CLI-driven metadata writes.
+export function preserveHubOwnedMachineMetadata(stored: unknown, incoming: unknown): unknown {
+    if (!isPlainObject(incoming) || !isPlainObject(stored)) return incoming
+    const displayName = stored.displayName
+    if (typeof displayName !== 'string' || displayName.length === 0) return incoming
+    if (incoming.displayName === displayName) return incoming
+    return { ...incoming, displayName }
+}
+
 // Registration also carries the runner's self-declared capabilities (e.g.
 // `piExistingSessionResume`), but live fields of runner_state (status, pid,
 // startedAt, ...) are owned by the socket heartbeat and must not be clobbered

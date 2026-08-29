@@ -126,6 +126,23 @@ describe('MachineCache.renameMachine', () => {
         })
     })
 
+    it('surfaces the new name on a row that lost its CLI-reported fields', async () => {
+        const { store, cache } = createCache()
+        // 生产上 28ac3d22 就是这个形状：CLI 拿空 base 整体替换，把 host/platform/
+        // happyCliVersion 写没了，只剩 workspaceRoots。当这三个字段还是必填时，
+        // refreshMachine 会把整份 metadata 塌成 null，改名 PATCH 明明返回 200，
+        // `GET /api/machines` 里却连名字都看不到。
+        seedMachine(store, { workspaceRoots: ['C:\\Users\\bobmc'] })
+        cache.reloadAll()
+
+        await cache.renameMachine('machine-1', '吹雪3080')
+
+        expect(cache.getMachine('machine-1')?.metadata).toEqual({
+            workspaceRoots: ['C:\\Users\\bobmc'],
+            displayName: '吹雪3080'
+        })
+    })
+
     it('renames a machine that has no metadata at all', async () => {
         const { store, cache } = createCache()
         seedMachine(store, null)

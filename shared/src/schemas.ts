@@ -509,10 +509,17 @@ const MachineCapabilitiesSchema = z.object({
     omp: z.boolean().optional()
 })
 
+// host / platform / happyCliVersion 由 CLI 上报，但**不能当必填**：整条元数据是
+// 单个 JSON 列，一次基于空 base 的整体替换就能把它们写没（见 apiMachine 的
+// metadataBase 注释）。必填时这种行缺一个字段 = 整份元数据解析失败，hub 侧
+// `refreshMachine` 会把 metadata 整个塌成 null，连 hub 自己写的 displayName 都
+// 跟着看不见 —— 生产机器 28ac3d22 的 displayName 明明是「吹雪3080」，
+// `GET /api/machines` 却返回 `metadata: null`，改名怎么点都不生效。
+// 缺字段应该退化成「不知道 host」，而不是「这台机器没有元数据」。
 export const MachineMetadataSchema = z.object({
-    host: z.string(),
-    platform: z.string(),
-    happyCliVersion: z.string(),
+    host: z.string().optional(),
+    platform: z.string().optional(),
+    happyCliVersion: z.string().optional(),
     displayName: z.string().optional(),
     homeDir: z.string().optional(),
     happyHomeDir: z.string().optional(),
