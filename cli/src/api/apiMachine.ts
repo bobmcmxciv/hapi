@@ -139,7 +139,8 @@ export class ApiMachineClient {
         private readonly machine: Machine,
         private readonly workspaceRoots?: string[],
         private readonly ompAvailable: boolean = false,
-        private readonly launchDefaults?: MachineLaunchDefaults
+        private readonly launchDefaults?: MachineLaunchDefaults,
+        private readonly registrationMetadata?: MachineMetadata
     ) {
         // Realpath roots once so all subsequent comparisons are against
         // canonical, symlink-resolved locations. Falls back to lexical
@@ -538,6 +539,22 @@ export class ApiMachineClient {
         })
     }
 
+    /**
+     * 元数据整体替换时的基底。
+     *
+     * `this.machine.metadata` 会在 hub 返回的值解析不过时变成 `null`
+     * （`applyVersionedAck` 的 parseValue 失败即置空）。此前 workspaceRoots 同步
+     * 在这种情况下直接写一个只有 `workspaceRoots` 的对象，把 host / platform /
+     * happyCliVersion 从 hub 上抹掉——抹掉之后 hub 返回的值更解析不过，下次重连
+     * 再抹一遍，自我维持。生产机器 28ac3d22 就卡死在这个状态，元数据只剩
+     * `{workspaceRoots}`，机器名改了也显示不出来。
+     *
+     * 用注册时那份元数据兜底，保证写回 hub 的对象永远带着机器自有字段。
+     */
+    private metadataBase(current: MachineMetadata | null): MachineMetadata {
+        return current ?? this.machine.metadata ?? this.registrationMetadata ?? {}
+    }
+
     async updateMachineMetadata(handler: (metadata: MachineMetadata | null) => MachineMetadata): Promise<void> {
         await backoff(async () => {
             const updated = handler(this.machine.metadata)
@@ -642,15 +659,12 @@ export class ApiMachineClient {
                     console.log(`[HAPI] Clearing workspace roots on hub (was: ${formatWorkspaceRoots(hubWorkspaceRoots)})`)
                 }
                 this.updateMachineMetadata((current) => {
-                    const base = current ?? this.machine.metadata
-                    if (!base) {
-                        return { workspaceRoots: desiredWorkspaceRoots } as MachineMetadata
-                    }
+                    const base = this.metadataBase(current)
                     if (desiredWorkspaceRoots?.length) {
                         return { ...base, workspaceRoots: desiredWorkspaceRoots }
                     }
                     const { workspaceRoots: _workspaceRoots, ...rest } = base
-                    return rest as MachineMetadata
+                    return rest
                 }).then(() => {
                     console.log(`[HAPI] Workspace roots synced: ${formatWorkspaceRoots(this.machine.metadata?.workspaceRoots)}`)
                 }).catch((error) => {
@@ -672,8 +686,7 @@ export class ApiMachineClient {
                 || desiredLaunchEffort !== this.machine.metadata?.defaultLaunchEffort) {
                 logger.debug(`[API MACHINE] Syncing launch defaults to hub: model=${desiredLaunchModel ?? '(none)'} effort=${desiredLaunchEffort ?? '(none)'}`)
                 this.updateMachineMetadata((current) => {
-                    const base = (current ?? this.machine.metadata ?? {}) as MachineMetadata
-                    const next = { ...base } as MachineMetadata
+                    const next = { ...this.metadataBase(current) }
                     if (desiredLaunchModel) {
                         next.defaultLaunchModel = desiredLaunchModel
                     } else {
@@ -693,8 +706,7 @@ export class ApiMachineClient {
             const hubOmpAvailable = this.machine.metadata?.capabilities?.omp === true
             if (hubOmpAvailable !== this.ompAvailable) {
                 this.updateMachineMetadata((current) => {
-                    const base = current ?? this.machine.metadata
-                    if (!base) throw new Error('Machine metadata unavailable for capability sync')
+                    const base = this.metadataBase(current)
                     return {
                         ...base,
                         capabilities: {
@@ -709,11 +721,7 @@ export class ApiMachineClient {
 
             this.startKeepAlive()
             void this.usageMonitor.connect(async (usage) => {
-                await this.updateMachineMetadata((current) => {
-                    const base = current ?? this.machine.metadata
-                    if (!base) throw new Error('Machine metadata unavailable for usage sync')
-                    return { ...base, usage }
-                })
+                await this.updateMachineMetadata((current) => ({ ...this.metadataBase(current), usage }))
             }).catch((error) => {
                 logger.debug('[API MACHINE] Failed to start usage monitor', error)
             })

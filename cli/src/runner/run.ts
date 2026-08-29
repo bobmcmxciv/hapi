@@ -1140,15 +1140,17 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
     });
     logger.debug(`[RUNNER RUN] Machine launch defaults: ${JSON.stringify(machineLaunchDefaults ?? null)}`);
 
+    const registrationMetadata = buildMachineMetadata({
+      workspaceRoots,
+      ompAvailable: ompAvailability.available,
+      launchDefaults: machineLaunchDefaults
+    });
+
     // Get or create machine (with retry for transient connection errors)
     const machine = await withRetry(
       () => api.getOrCreateMachine({
         machineId,
-        metadata: buildMachineMetadata({
-          workspaceRoots,
-          ompAvailable: ompAvailability.available,
-          launchDefaults: machineLaunchDefaults
-        }),
+        metadata: registrationMetadata,
         runnerState: initialRunnerState
       }),
       {
@@ -1168,7 +1170,8 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
     const apiMachine = api.machineSyncClient(machine, {
       workspaceRoots,
       ompAvailable: ompAvailability.available,
-      launchDefaults: machineLaunchDefaults
+      launchDefaults: machineLaunchDefaults,
+      registrationMetadata
     });
 
     // Set RPC handlers

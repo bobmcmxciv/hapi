@@ -329,14 +329,24 @@ export class ApiClient {
 
     machineSyncClient(
         machine: Machine,
-        options?: { workspaceRoots?: string[]; ompAvailable?: boolean; launchDefaults?: MachineLaunchDefaults }
+        options?: {
+            workspaceRoots?: string[]
+            ompAvailable?: boolean
+            launchDefaults?: MachineLaunchDefaults
+            /**
+             * 本次注册上报的元数据。hub 返回的值解析不过时用它兜底，避免把机器
+             * 自有字段写没 —— 见 ApiMachineClient.metadataBase。
+             */
+            registrationMetadata?: MachineMetadata
+        }
     ): ApiMachineClient {
         return new ApiMachineClient(
             this.token,
             machine,
             options?.workspaceRoots,
             options?.ompAvailable ?? false,
-            options?.launchDefaults
+            options?.launchDefaults,
+            options?.registrationMetadata
         )
     }
 }
