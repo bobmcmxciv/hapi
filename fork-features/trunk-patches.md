@@ -262,6 +262,17 @@ Remove the store patch when upstream lands its own #326/#327 held-range
 contract; remove the placeholder patch when assistant-ui exposes a stable
 optimistic-id hook or upstream ships #331.
 
+### OMP configurable event presentation
+
+The event catalog and strict allowlist loader live in fork-owned
+`cli/src/omp/rpc/types.ts` and `eventAllowlist.ts`; adapter/host presentation uses
+the policy without filtering functional RPC dispatch.
+
+| Files | Missing upstream seam | Why it cannot move out | Sync verification |
+| --- | --- | --- | --- |
+| `cli/src/persistence.ts` (`Settings` import and `ompEventAllowlist` field) | No typed settings-contribution registry | The shared settings writer needs the optional event-name array in its closed `Settings` product; parsing remains in the OMP policy module and other persistence behavior is unchanged | Re-check for typed settings extensions; exercise file/env precedence, rejection, and preservation of unrelated settings |
+| `cli/README.md` (Configuration), `docs/guide/omp.md` (RPC event timeline allowlist) | No documentation contribution hook | Configuration discovery and the full protocol inventory belong beside existing CLI/OMP instructions | Compare documented defaults and all event names against the installed OMP unions and stdout producers on each protocol upgrade |
+
 ## multi-user gateway (2026-07-16)
 
 Account, API-token, ownership, grant, authorization, cross-namespace routing,

@@ -9,6 +9,7 @@ import { readFile, writeFile, mkdir, open, unlink, rename, stat } from 'node:fs/
 import { existsSync, writeFileSync, readFileSync, unlinkSync } from 'node:fs'
 import { configuration } from '@/configuration'
 import { isProcessAlive } from '@/utils/process';
+import type { OmpKnownEventType } from '@/omp/rpc/types';
 
 interface Settings {
   // This ID is used as the actual database ID on the server
@@ -27,6 +28,8 @@ interface Settings {
   // (e.g. "gpt-5.6-sol[1m]" + "xhigh") instead of an Anthropic placeholder.
   defaultLaunchModel?: string
   defaultLaunchEffort?: string
+  // RPC timeline presentation, overridden by HAPI_OMP_EVENT_ALLOWLIST_JSON
+  ompEventAllowlist?: readonly OmpKnownEventType[]
   // Legacy field name (for migration, read-only)
   serverUrl?: string
 }
