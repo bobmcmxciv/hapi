@@ -41,6 +41,8 @@ Error: Maximum update depth exceeded. The result of getSnapshot should be cached
 | 5 | environment | fork.15 换芯前门槛 | 4SQALMG 删 node_modules → `bun install --frozen-lockfile`（必须 exit 0）→ tap 0.9.8 → dist 与二进制前缀整句计数 0 | 4SQALMG + ecs | 全部满足才换芯 | 同事会话报告：冻结安装 1631 包 exit 0、tap 0.9.8、dist 计数 0；21:42:40Z 换芯，sha `6d921f65b1efad78…`。我独立核实：二进制整句 0 / 短子串 3 / `pending-turn:` 1 / `claudeProxyModelOptions` 2，容器 running，user_version 20，公开站点 `index-DxibrTnm.js` → `vendor-assistant-D-s6EwTk.js` 整句计数 0 |
 | 6 | integration | fork.15 后会话页可开 | 无头 Chrome 打开 `/sessions/4cd662c8…`，`Runtime.exceptionThrown` 30s | ecs + browser | 无异常，DOM 有消息 | 通过（新 SW 激活后）：无异常，7 条消息，`index-DxibrTnm.js` |
 
+**CI 验证（2026-09-06 21:54Z）**：同事推送 tag `v0.27.1-fork.15`（= a1676edb）后，Release 工作流用 `bun install --frozen-lockfile` 运行成功（run 34062437752）。下载其 `hapi-linux-x64-baseline.tar.gz`（65972622 B）解包：二进制 146405504 B，sha256 前缀 `5510ff94…`，整句计数 0、短子串 3、`pending-turn:` 1，与线上 fork.15 一致；此前 fork.13 的 CI 产物是在坏 lockfile 下用非冻结安装构建的。
+
 **换芯后的客户端残留（实测）**：同一 Chrome profile 换芯后首次打开会话页仍然崩，栈仍是 fork.13 的 `vendor-assistant-OltFwI5w.js`、页面脚本 `index-qlbbbfOg.js`——PWA 的旧 service worker 仍在控制页面并从 precache 供旧包，新 SW 处于 `waiting`（`registerType: 'prompt'`），侧栏出现「New version available」横幅。崩溃页的「刷新页面」只是 `window.location.reload()`，**不会**切换到等待中的新 SW，用户会一直崩；只有点横幅（`updateSW` → `SKIP_WAITING` → `controllerchange` → 重载）才换到 fork.15。在无头 Chrome 里向 waiting SW 发 `SKIP_WAITING` 后复测：无异常、7 条消息。建议：让崩溃页的「刷新页面」走 `tryRecoverFromStaleChunks` 同款路径（update + SKIP_WAITING + reload），目前它只在 chunk 加载失败时触发。
 
 **判据勘误**：不带前缀的短子串 `should be cached to avoid an infinite loop` 在好的 fork.12 二进制里也命中 3 次（react-dom 的 dev 警告文本），fork.14 是 4 次；只有带 `Maximum update depth exceeded. ` 前缀的整句是 tap 的错误：fork.12 = 0，fork.14 = 1（2026-09-06 在 ECS 上对两个二进制实测）。以后一律用整句。
