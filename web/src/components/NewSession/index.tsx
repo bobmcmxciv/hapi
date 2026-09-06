@@ -744,6 +744,19 @@ export function NewSession(props: {
         setOpencodeSelectedModel(null)
     }, [agent, machineId, deferredDirectory])
 
+    // fork(claude-proxy-models)：机器声明的默认值取成两个字符串再喂给下面的 effect。
+    // 之前 effect 直接依赖 `props.machines`，而机器心跳（runnerState/activeAt，约 20s 一次）
+    // 每次都换一个新数组 → effect 重跑 → 把用户刚选的模型改回机器默认（2026-09-06 生产实测：
+    // 在吹雪3080 上选 gpt-6-astra，40s 内被改回 gpt-5.6-sol）。只在字符串本身变化时才重播。
+    const machineDefaultLaunchModel = useMemo(
+        () => props.machines.find((candidate) => candidate.id === machineId)?.metadata?.defaultLaunchModel,
+        [machineId, props.machines]
+    )
+    const machineDefaultLaunchEffort = useMemo(
+        () => props.machines.find((candidate) => candidate.id === machineId)?.metadata?.defaultLaunchEffort,
+        [machineId, props.machines]
+    )
+
     useEffect(() => {
         if (!machineId || preserveRestoredDraftRef.current) {
             return
@@ -753,14 +766,13 @@ export function NewSession(props: {
         // relayed through machine metadata) seed the form when this browser has
         // no stored preference — so a proxy-fronted machine opens on the model
         // that actually serves it instead of `auto`.
-        const selectedMachine = props.machines.find((candidate) => candidate.id === machineId)
         const preferred = resolvePreferredLaunchSettings(
             agent,
             loadPreferredLaunchSettings(machineId, agent),
             agent === 'claude'
                 ? {
-                    model: selectedMachine?.metadata?.defaultLaunchModel,
-                    effort: selectedMachine?.metadata?.defaultLaunchEffort
+                    model: machineDefaultLaunchModel,
+                    effort: machineDefaultLaunchEffort
                 }
                 : undefined,
             claudeDynamicModelIdsRef.current
@@ -777,7 +789,7 @@ export function NewSession(props: {
         setAgySelectedModel(
             agent === 'agy' && preferred.model !== 'auto' ? preferred.model : null
         )
-    }, [agent, machineId, props.machines])
+    }, [agent, machineId, machineDefaultLaunchModel, machineDefaultLaunchEffort])
 
     // fork(claude-proxy-models)：目录到达后再校验记住的 Claude 模型——不在清单里就回落 Default，
     // 并把原因写在选择器下方（不静默）。目录不可用时按静态清单校验。

@@ -662,7 +662,7 @@ slug 都要改 HAPI 常量并换芯**：`gpt-6-astra` 上线后创建窗口看�
 | `web/src/api/client.ts`、`web/src/lib/query-keys.ts` | 无 API 方法/查询键注册点 | `getClaudeProxyModels(refresh)` 与 `claudeProxyModels` 键各一处 | hook → client → hub 路由 | 单测 + 浏览器网络面板看到请求 |
 | `web/src/components/AssistantChat/claudeModelOptions.ts`、`modelOptions.ts` | 选项表由常量拼装，无 provider 目录注入点 | 新增可选参数 `proxyModels`：数组则替换静态代理尾巴，null/undefined 保留静态回落；`isListedClaudeModel` 同理 | 目录 → 选项 → 选择器/自定义单选 | 单测钉死「数组替换、空数组=无代理模型、null=静态回落」 |
 | `web/src/components/AssistantChat/HappyComposer.tsx`、`web/src/components/SessionChat.tsx` | composer 无模型目录 provider 插槽 | 新增 prop `claudeProxyModelOptions` 并透传给上面两函数与自定义模型判定 | 会话内切换模型 → 目录 → `set-session-config` | 真会话打开设置面板能看到 `gpt-6-astra · default` |
-| `web/src/components/NewSession/index.tsx`、`preferences.ts` | 表单无目录/校验扩展点 | 目录三态（加载中保留记忆值 / 数组权威 / 不可用静态校验）、目录到达后校验并**显示**回落原因、加载期禁创建、选择器下方状态行 | 打开 New Session → 目录 → 选项 + 记忆恢复 → `--model` 透传 | 浏览器：Claude 代理机器上看到 astra 且记忆的 astra 能恢复；单测 5 例 |
+| `web/src/components/NewSession/index.tsx`、`preferences.ts` | 表单无目录/校验扩展点 | 目录三态（加载中保留记忆值 / 数组权威 / 不可用静态校验）、目录到达后校验并**显示**回落原因、加载期禁创建、选择器下方状态行；偏好 effect 改为只依赖机器默认值的两个字符串（此前依赖 `props.machines` 整个数组，机器心跳约 20s 一次就把用户刚选的模型改回机器默认，生产实测复现） | 打开 New Session → 目录 → 选项 + 记忆恢复 → `--model` 透传 | 浏览器：Claude 代理机器上看到 astra、选中后等 40s 不被改回、记忆的 astra 能恢复；单测 6 例 |
 | `web/src/chat/modelConfig.ts` | 窗口启发式是纯函数常量表 | 加一张由 hook 注册的 id→契约窗口表，优先于手写常量与 200k 兜底；`[1m]` 后缀仍最优先 | 目录 → 注册 → 状态栏分母 | 单测；真会话状态栏分母 262k（272k-10k） |
 | `web/src/lib/locales/en.ts`、`zh-CN.ts` | 无文案注册 | 7 条 `newSession.model.proxyCatalog*` | 状态行/回落提示 | 两种语言渲染 |
 

@@ -350,6 +350,66 @@ describe('NewSession launch preferences', () => {
             })
         })
 
+        it('keeps the user-picked model when machine heartbeats replace the machines array', async () => {
+            // Machine metadata (runnerState/activeAt) refreshes every ~20s and hands NewSession a
+            // new `machines` array each time; the seeding effect must not re-run on that and
+            // overwrite the selection with the machine-advertised default (seen live 2026-09-06).
+            mocks.claudeProxyConfigured = true
+            mocks.claudeProxyOptions = [
+                { value: 'gpt-5.6-sol', label: 'gpt-5.6-sol → gpt-6-astra' },
+                { value: 'gpt-5.6-terra', label: 'gpt-5.6-terra' }
+            ]
+            const advertised = {
+                id: 'machine-1',
+                active: true,
+                activeAt: 1,
+                metadata: { defaultLaunchModel: 'gpt-5.6-sol', defaultLaunchEffort: 'xhigh' }
+            } as unknown as Machine
+            savePreferredAgent('claude')
+            const view = render(
+                <NewSession
+                    api={api}
+                    machines={[advertised]}
+                    initialMachineId="machine-1"
+                    initialDirectory="C:\repo"
+                    onSuccess={mocks.onSuccess}
+                    onCancel={() => {}}
+                />
+            )
+            await waitFor(() => expect(screen.getByTestId('model')).toHaveTextContent('gpt-5.6-sol'))
+
+            // The mocked ModelSelector picks gpt-5.6-terra on click.
+            fireEvent.click(screen.getByTestId('model'))
+            await waitFor(() => expect(screen.getByTestId('model')).toHaveTextContent('gpt-5.6-terra'))
+
+            // Heartbeat: same machine, new array identity and a bumped activeAt.
+            view.rerender(
+                <NewSession
+                    api={api}
+                    machines={[{ ...advertised, activeAt: 2 } as unknown as Machine]}
+                    initialMachineId="machine-1"
+                    initialDirectory="C:\repo"
+                    onSuccess={mocks.onSuccess}
+                    onCancel={() => {}}
+                />
+            )
+            await act(async () => { await new Promise((resolve) => setTimeout(resolve, 50)) })
+            expect(screen.getByTestId('model')).toHaveTextContent('gpt-5.6-terra')
+
+            // A genuinely changed advertised default still re-seeds.
+            view.rerender(
+                <NewSession
+                    api={api}
+                    machines={[{ ...advertised, metadata: { defaultLaunchModel: 'gpt-5.6-terra', defaultLaunchEffort: 'xhigh' } } as unknown as Machine]}
+                    initialMachineId="machine-1"
+                    initialDirectory="C:\repo"
+                    onSuccess={mocks.onSuccess}
+                    onCancel={() => {}}
+                />
+            )
+            await waitFor(() => expect(screen.getByTestId('model')).toHaveTextContent('gpt-5.6-terra'))
+        })
+
         it('disables creation while a remembered Claude model waits for the catalog', async () => {
             savePreferredLaunchSettings('machine-1', 'claude', {
                 model: 'gpt-6-astra',
