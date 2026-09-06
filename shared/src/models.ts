@@ -12,6 +12,9 @@ export type ClaudeModelPreset = keyof typeof CLAUDE_MODEL_LABELS
 export const CLAUDE_MODEL_PRESETS = Object.keys(CLAUDE_MODEL_LABELS) as ClaudeModelPreset[]
 
 export const CLAUDE_MODEL_ID_LABELS = {
+    // Claude Code ≥ 2.1.257 resolves the `fable` alias to this id; machines on
+    // older CLIs silently get Fable 5, so keep the concrete id selectable.
+    'claude-fable-5-1': 'Fable 5.1',
     'claude-fable-5': 'Fable 5',
     'claude-opus-4-8': 'Opus 4.8',
     'claude-opus-4-7': 'Opus 4.7',

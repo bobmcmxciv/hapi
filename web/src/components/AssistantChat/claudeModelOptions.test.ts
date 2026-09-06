@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { getClaudeComposerModelOptions, getNextClaudeComposerModel, isListedClaudeModel, normalizeCustomClaudeModelId } from './claudeModelOptions'
 
 const SPECIFIC_MODEL_IDS = [
+    'claude-fable-5-1',
     'claude-fable-5',
     'claude-opus-4-8',
     'claude-opus-4-7',
@@ -13,6 +14,7 @@ const SPECIFIC_MODEL_IDS = [
 ]
 
 const SPECIFIC_MODEL_OPTIONS = [
+    { value: 'claude-fable-5-1', label: 'Fable 5.1' },
     { value: 'claude-fable-5', label: 'Fable 5' },
     { value: 'claude-opus-4-8', label: 'Opus 4.8' },
     { value: 'claude-opus-4-7', label: 'Opus 4.7' },

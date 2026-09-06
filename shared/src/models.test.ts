@@ -49,6 +49,7 @@ describe('getClaudeModelLabel', () => {
 
     test('returns labels for specific model ids', () => {
         expect(getClaudeModelLabel('claude-opus-4-8')).toBe('Opus 4.8')
+        expect(getClaudeModelLabel('claude-fable-5-1')).toBe('Fable 5.1')
         expect(getClaudeModelLabel('claude-fable-5')).toBe('Fable 5')
     })
 
