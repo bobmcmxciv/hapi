@@ -267,6 +267,46 @@ describe('machines routes', () => {
         expect(captured![12]).toBeUndefined()
     })
 
+    // fork(claude-proxy-models)：创建窗口选定的 cc-switch 供应商落在 spawnSession 的第 14 个槽位。
+    it('forwards ccSwitchProviderId to SyncEngine.spawnSession for Claude spawns only', async () => {
+        const machine = createMachine()
+        const calls: unknown[][] = []
+        const engine = {
+            getMachine: () => machine,
+            getMachineByNamespace: () => machine,
+            spawnSession: async (...args: unknown[]) => {
+                calls.push(args)
+                return { type: 'success', sessionId: 's-1' }
+            }
+        } as unknown as Partial<SyncEngine>
+        const app = new Hono<WebAppEnv>()
+        app.use('*', async (c, next) => { c.set('namespace', 'default'); await next() })
+        app.route('/api', createMachinesRoutes(() => engine as SyncEngine))
+
+        const claude = await app.request('/api/machines/machine-1/spawn', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ directory: '/tmp/x', agent: 'claude', ccSwitchProviderId: 'prov-cx2cc' })
+        })
+        expect(claude.status).toBe(200)
+        expect(calls[0]![13]).toBe('prov-cx2cc')
+
+        const codex = await app.request('/api/machines/machine-1/spawn', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ directory: '/tmp/x', agent: 'codex', ccSwitchProviderId: 'prov-cx2cc' })
+        })
+        expect(codex.status).toBe(200)
+        expect(calls[1]![13]).toBeUndefined()
+
+        const empty = await app.request('/api/machines/machine-1/spawn', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ directory: '/tmp/x', agent: 'claude', ccSwitchProviderId: '' })
+        })
+        expect(empty.status).toBe(400)
+    })
+
     it('defaults AGY machine spawns to PTY mode', async () => {
         const machine = createMachine()
         let captured: unknown[] | null = null

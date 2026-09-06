@@ -27,7 +27,10 @@ const mocks = vi.hoisted(() => ({
     claudeProxyOptions: null as Array<{ value: string; label: string }> | null,
     claudeProxyLoading: false,
     claudeProxyConfigured: false,
-    claudeProxyRefetch: vi.fn()
+    claudeProxyRefetch: vi.fn(),
+    ccSwitchAvailable: false,
+    ccSwitchProviders: [] as Array<{ id: string; name: string; category: string | null; websiteUrl: string | null; isCurrent: boolean }>,
+    ccSwitchCurrentProviderId: null as string | null
 }))
 
 vi.mock('@/lib/use-translation', () => ({
@@ -102,6 +105,16 @@ vi.mock('@/fork-features/claude-proxy-models/useClaudeProxyModels', () => ({
         fetchedAt: mocks.claudeProxyOptions ? 1 : null,
         source: null,
         refetch: mocks.claudeProxyRefetch
+    })
+}))
+vi.mock('@/hooks/queries/useCcSwitchProviders', () => ({
+    useCcSwitchProviders: () => ({
+        providers: mocks.ccSwitchProviders,
+        available: mocks.ccSwitchAvailable,
+        currentProviderId: mocks.ccSwitchCurrentProviderId,
+        isLoading: false,
+        error: null,
+        refetch: vi.fn()
     })
 }))
 vi.mock('@/fork-features/claude-proxy-models/ClaudeProxyCatalogHint', () => ({
@@ -271,7 +284,77 @@ describe('NewSession launch preferences', () => {
         mocks.claudeProxyLoading = false
         mocks.claudeProxyConfigured = false
         mocks.claudeProxyRefetch.mockReset()
+        mocks.ccSwitchAvailable = false
+        mocks.ccSwitchProviders = []
+        mocks.ccSwitchCurrentProviderId = null
         savePreferredAgent('codex')
+    })
+
+    // fork(claude-proxy-models)：创建窗口可为这一个 Claude 会话指定 cc-switch 供应商。
+    describe('cc-switch provider selector', () => {
+        const PROVIDERS = [
+            { id: 'glm', name: 'Zhipu GLM', category: null, websiteUrl: null, isCurrent: true },
+            { id: 'cx2cc', name: 'cx2cc-ECS直连', category: null, websiteUrl: null, isCurrent: false }
+        ]
+
+        function renderClaude() {
+            savePreferredAgent('claude')
+            return render(
+                <NewSession
+                    api={api}
+                    machines={[machine]}
+                    initialMachineId="machine-1"
+                    initialDirectory="C:\\repo"
+                    onSuccess={mocks.onSuccess}
+                    onCancel={() => {}}
+                />
+            )
+        }
+
+        it('is hidden when the machine has no cc-switch', async () => {
+            renderClaude()
+            await waitFor(() => expect(screen.getByTestId('model')).toBeInTheDocument())
+            expect(screen.queryByTestId('cc-switch-provider')).toBeNull()
+        })
+
+        it('defaults to the machine current provider and sends nothing', async () => {
+            mocks.ccSwitchAvailable = true
+            mocks.ccSwitchProviders = PROVIDERS
+            mocks.ccSwitchCurrentProviderId = 'glm'
+            mocks.spawnSession.mockResolvedValue({ type: 'success', sessionId: 'session-1' })
+            renderClaude()
+            await waitFor(() => expect(screen.getByTestId('cc-switch-provider')).toHaveValue(''))
+            fireEvent.click(screen.getByTestId('create'))
+            await waitFor(() => expect(mocks.onSuccess).toHaveBeenCalledWith('session-1'))
+            expect(mocks.spawnSession).toHaveBeenCalledWith(expect.objectContaining({ ccSwitchProviderId: undefined }))
+        })
+
+        it('sends the chosen non-current provider and remembers it per machine', async () => {
+            mocks.ccSwitchAvailable = true
+            mocks.ccSwitchProviders = PROVIDERS
+            mocks.ccSwitchCurrentProviderId = 'glm'
+            mocks.spawnSession.mockResolvedValue({ type: 'success', sessionId: 'session-2' })
+            renderClaude()
+            await waitFor(() => expect(screen.getByTestId('cc-switch-provider')).toBeInTheDocument())
+            fireEvent.change(screen.getByTestId('cc-switch-provider'), { target: { value: 'cx2cc' } })
+            fireEvent.click(screen.getByTestId('create'))
+            await waitFor(() => expect(mocks.onSuccess).toHaveBeenCalledWith('session-2'))
+            expect(mocks.spawnSession).toHaveBeenCalledWith(expect.objectContaining({ ccSwitchProviderId: 'cx2cc' }))
+            expect(localStorage.getItem('hapi:newSession:ccSwitchProvider:v1:machine-1')).toBe('cx2cc')
+        })
+
+        it('does not send a remembered provider that is now the current one', async () => {
+            localStorage.setItem('hapi:newSession:ccSwitchProvider:v1:machine-1', 'glm')
+            mocks.ccSwitchAvailable = true
+            mocks.ccSwitchProviders = PROVIDERS
+            mocks.ccSwitchCurrentProviderId = 'glm'
+            mocks.spawnSession.mockResolvedValue({ type: 'success', sessionId: 'session-3' })
+            renderClaude()
+            await waitFor(() => expect(screen.getByTestId('cc-switch-provider')).toHaveValue('glm'))
+            fireEvent.click(screen.getByTestId('create'))
+            await waitFor(() => expect(mocks.onSuccess).toHaveBeenCalledWith('session-3'))
+            expect(mocks.spawnSession).toHaveBeenCalledWith(expect.objectContaining({ ccSwitchProviderId: undefined }))
+        })
     })
 
     // fork(claude-proxy-models)：Claude 的模型清单由 hub 动态目录驱动。

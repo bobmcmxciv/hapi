@@ -16,6 +16,13 @@ import { useCopilotModelsForCwd } from '@/hooks/queries/useCopilotModelsForCwd'
 import { useClaudeProxyModels } from '@/fork-features/claude-proxy-models/useClaudeProxyModels'
 import { ClaudeProxyCatalogHint } from '@/fork-features/claude-proxy-models/ClaudeProxyCatalogHint'
 import { CLAUDE_PROXY_MODEL_IDS } from '@hapi/protocol'
+import { useCcSwitchProviders } from '@/hooks/queries/useCcSwitchProviders'
+import { CcSwitchProviderSelector } from '@/fork-features/claude-proxy-models/CcSwitchProviderSelector'
+import {
+    loadPreferredCcSwitchProvider,
+    resolveSpawnCcSwitchProviderId,
+    savePreferredCcSwitchProvider
+} from '@/fork-features/claude-proxy-models/ccSwitchProviderPreference'
 import { useSessions } from '@/hooks/queries/useSessions'
 import { useActiveSuggestions, type Suggestion } from '@/hooks/useActiveSuggestions'
 import { useDirectorySuggestions } from '@/hooks/useDirectorySuggestions'
@@ -331,6 +338,26 @@ export function NewSession(props: {
             : claudeProxyModelsState.isLoading
                 ? null
                 : undefined
+    // fork(claude-proxy-models)：为这一个 Claude 会话指定 cc-switch 供应商（按机器记忆）。
+    // 目录是全 hub 一份，但机器实际打到哪个上游由它的 cc-switch 当前供应商决定；
+    // 当前不是 cx2cc 时（吹雪3080 = Zhipu GLM）选了代理模型也跑不到代理上。
+    const ccSwitchProvidersState = useCcSwitchProviders({
+        api: props.api,
+        machineId,
+        enabled: agent === 'claude' && Boolean(machineId)
+    })
+    const [ccSwitchProviderId, setCcSwitchProviderId] = useState<string | null>(null)
+    useEffect(() => {
+        setCcSwitchProviderId(machineId ? loadPreferredCcSwitchProvider(machineId) : null)
+    }, [machineId])
+    const resolvedCcSwitchProviderId = agent === 'claude'
+        ? resolveSpawnCcSwitchProviderId({
+            selected: ccSwitchProviderId,
+            available: ccSwitchProvidersState.available,
+            providerIds: ccSwitchProvidersState.providers.map((provider) => provider.id),
+            currentProviderId: ccSwitchProvidersState.currentProviderId
+        })
+        : undefined
     const [agySelectedModel, setAgySelectedModel] = useState<string | null>(null)
     const runnerSpawnError = useMemo(
         () => formatRunnerSpawnError(selectedMachine),
@@ -1545,7 +1572,8 @@ export function NewSession(props: {
                 serviceTier: resolvedServiceTier,
                 collaborationMode: resolvedCollaborationMode,
                 copilotAgentMode: agent === 'copilot' ? copilotAgentMode : undefined,
-                startingMode: agent === 'agy' ? 'pty' : undefined
+                startingMode: agent === 'agy' ? 'pty' : undefined,
+                ccSwitchProviderId: resolvedCcSwitchProviderId
             })
 
 
@@ -1798,6 +1826,19 @@ export function NewSession(props: {
                             state={claudeProxyModelsState}
                             notice={claudeModelNotice}
                             isDisabled={isFormDisabled}
+                        />
+                    ) : null}
+                    {agent === 'claude' && ccSwitchProvidersState.available && machineId ? (
+                        <CcSwitchProviderSelector
+                            providers={ccSwitchProvidersState.providers}
+                            currentProviderId={ccSwitchProvidersState.currentProviderId}
+                            value={ccSwitchProviderId}
+                            isLoading={ccSwitchProvidersState.isLoading}
+                            isDisabled={isFormDisabled}
+                            onChange={(providerId) => {
+                                setCcSwitchProviderId(providerId)
+                                savePreferredCcSwitchProvider(machineId, providerId)
+                            }}
                         />
                     ) : null}
                     </>

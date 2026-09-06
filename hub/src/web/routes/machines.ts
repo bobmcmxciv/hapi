@@ -104,9 +104,10 @@ export function createMachinesRoutes(getSyncEngine: () => SyncEngine | null): Ho
             parsed.data.effort,
             parsed.data.permissionMode,
             parsed.data.serviceTier,
-            undefined,
-            undefined,
-            undefined,
+            undefined, // claudeLaunch
+            // fork(claude-proxy-models)：创建窗口选定的 cc-switch 供应商透传到 runner。
+            parsed.data.agent === 'claude' || parsed.data.agent === undefined ? parsed.data.ccSwitchProviderId : undefined,
+            undefined, // existingSessionId
             parsed.data.collaborationMode,
             parsed.data.copilotAgentMode,
             startingMode

@@ -19,6 +19,8 @@ type SpawnInput = {
     collaborationMode?: CodexCollaborationMode
     copilotAgentMode?: CopilotAgentMode
     startingMode?: 'remote' | 'pty'
+    // fork(claude-proxy-models)：为这一个 Claude 会话指定 cc-switch 供应商。
+    ccSwitchProviderId?: string
 }
 
 export function useSpawnSession(api: ApiClient | null): {
@@ -47,7 +49,8 @@ export function useSpawnSession(api: ApiClient | null): {
                 input.serviceTier,
                 input.collaborationMode,
                 input.copilotAgentMode,
-                input.startingMode
+                input.startingMode,
+                input.ccSwitchProviderId
             )
         },
         onSuccess: () => {

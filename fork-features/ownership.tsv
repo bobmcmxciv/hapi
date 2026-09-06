@@ -252,8 +252,8 @@ hub/src/web/routes/cli.ts	trunk-patch	#171	origin-only delta; fork commits a6f9e
 hub/src/web/routes/events.ts	trunk-patch	sse-isolation	按认证 userId 取谓词注入订阅；路由工厂参数为唯一注入点
 hub/src/web/routes/git.test.ts	trunk-patch	#176	origin-only delta; fork commits 3edb7db8,b4c31e88,bfa252da,d28853c7
 hub/src/web/routes/git.ts	trunk-patch	#176	origin-only delta; fork commits 3edb7db8,b4c31e88,bfa252da
-hub/src/web/routes/machines.test.ts	trunk-patch	#173	origin-only delta; fork commits 51929072,3994ee9a,fc7d7b4a,a8815d47,c853bcbf
-hub/src/web/routes/machines.ts	trunk-patch	#173	origin-only delta; fork commits 51929072,3994ee9a,fc7d7b4a,a8815d47,c853bcbf
+hub/src/web/routes/machines.test.ts	trunk-patch	#173	origin-only delta; fork commits 51929072,3994ee9a,fc7d7b4a,a8815d47,c853bcbf; claude-proxy-models: ccSwitchProviderId 槽位用例
+hub/src/web/routes/machines.ts	trunk-patch	#173	origin-only delta; fork commits 51929072,3994ee9a,fc7d7b4a,a8815d47,c853bcbf; claude-proxy-models: spawn 透传 ccSwitchProviderId（仅 Claude）
 hub/src/web/routes/sessions.test.ts	trunk-patch	#173	both refs changed; fork commits 51929072,9e76994b,c58622c2,bec12318,413e76cc
 hub/src/web/routes/sessions.ts	trunk-patch	#173	both refs changed; fork commits 51929072,9e76994b,c58622c2,bec12318,413e76cc,7e0010b8
 hub/src/web/server.ts	trunk-patch	#171,#256	closed authenticated Hono app mounts multi-user, session-fork, history-import, and hapi agent routes; claude-proxy-models: 挂 /api/claude-proxy-models（env 单例）
@@ -262,7 +262,7 @@ package.json	trunk-patch	#171	origin-only delta; fork commits a6f9e3f9
 scripts/dev/recompute-usage-prod.ts	fork-owned	usage-page	origin-only delta; 生产库副本离线复算 + 信封形状直方图 (2026-08-09)
 scripts/dev/sse-toast-leak-e2e.ts	fork-owned	sse-isolation	真 hub 进程复现跨账号提醒泄漏，改 SSE 可见性后前后各跑一次
 shared/package.json	trunk-patch	#176	origin-only delta; fork commits 3edb7db8
-shared/src/apiTypes.ts	trunk-patch	#173	both refs changed; fork commits 8d828436,51929072,92e8a6e1,3994ee9a,fc7d7b4a,b4c31e88,a8815d47,bfa252da,c853bcbf,413e76cc
+shared/src/apiTypes.ts	trunk-patch	#173	both refs changed; fork commits 8d828436,51929072,92e8a6e1,3994ee9a,fc7d7b4a,b4c31e88,a8815d47,bfa252da,c853bcbf,413e76cc; claude-proxy-models: SpawnSessionRequestSchema.ccSwitchProviderId
 shared/src/flavors.test.ts	trunk-patch	#172	origin-only delta; fork commits 3686370a
 shared/src/flavors.ts	trunk-patch	#172	origin-only delta; fork commits 3686370a
 shared/src/messages.test.ts	fork-owned	#179	origin-only delta; fork commits d1f9f394
@@ -501,3 +501,7 @@ web/src/sw.ts	trunk-patch	web-stability	cleanupOutdatedCaches + NavigationRoute 
 web/src/types/api.ts	upstream-sync	#180	merge-base 87f5c78a; changed only on upstream/main
 web/src/types/global.d.ts	trunk-patch	#179	origin-only delta; fork commits 4a0c5f0b; disposition fork-specific #179: fork PWA changelog feature
 web/vite.config.ts	trunk-patch	#179	origin-only delta; fork commits 4a0c5f0b,69c5250d; disposition fork-specific #179: fork PWA changelog feature; fork release/build metadata
+web/src/fork-features/claude-proxy-models/CcSwitchProviderSelector.tsx	fork-owned	claude-proxy-models	fork-owned module: New Session 的 cc-switch 供应商选择器（按机器记忆，只对本会话注入 env）
+web/src/fork-features/claude-proxy-models/ccSwitchProviderPreference.ts	fork-owned	claude-proxy-models	fork-owned module: 供应商偏好存取 + 发送判定
+web/src/fork-features/claude-proxy-models/ccSwitchProviderPreference.test.ts	fork-owned	claude-proxy-models	fork-owned module tests
+web/src/hooks/mutations/useSpawnSession.ts	trunk-patch	claude-proxy-models	claude-proxy-models: ccSwitchProviderId 透传
