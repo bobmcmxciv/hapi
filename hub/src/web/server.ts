@@ -47,6 +47,8 @@ import { createSseRequestFilterFactory } from '../../../fork-features/multi-user
 import type { MultiUserGatewayStore } from '../../../fork-features/multi-user/gatewayStore'
 import type { SubscriptionStore } from '../../../fork-features/subscription/subscriptionStore'
 import { createSubscriptionRoutes } from '../../../fork-features/subscription/subscriptionRoutes'
+import { createClaudeProxyModelsRoutes } from '../../../fork-features/claude-proxy-models/routes'
+import { createClaudeProxyModelCatalogFromEnv, type ClaudeProxyModelCatalog } from '../../../fork-features/claude-proxy-models/claudeProxyModelCatalog'
 import { createExecutionMiddleware, gatewayAccountId, mountExecutionRoutes } from '../../../fork-features/multi-user/executionMount'
 import { createSessionMachineResolver, createSessionPathResolver } from '../../../fork-features/multi-user/machineInheritance'
 import { resolveGatewayCliNamespace } from '../../../fork-features/multi-user/cliAdapter'
@@ -343,6 +345,15 @@ function createWebApp(options: {
     app.route('/api', createMessagesRoutes(options.getSyncEngine))
     app.route('/api', createPermissionsRoutes(options.getSyncEngine))
     app.route('/api', createMachinesRoutes(options.getSyncEngine))
+    // fork(claude-proxy-models)：Claude 会话经代理（cx2cc）时的动态模型目录。
+    // 单例按需从 HAPI_CLAUDE_PROXY_MODELS_URL 建；未配置则路由回答 configured:false。
+    let claudeProxyModelCatalog: ClaudeProxyModelCatalog | null | undefined
+    app.route('/api', createClaudeProxyModelsRoutes(() => {
+        if (claudeProxyModelCatalog === undefined) {
+            claudeProxyModelCatalog = createClaudeProxyModelCatalogFromEnv()
+        }
+        return claudeProxyModelCatalog
+    }))
     app.route('/api', createStorageRoutes(configuration.dbPath))
     app.route('/api', createImportableSessionsRoutes(options.getSyncEngine))
     // fork(usage)：不挂上游的 /api/usage/summary。它按 namespace 全量统计，网关下

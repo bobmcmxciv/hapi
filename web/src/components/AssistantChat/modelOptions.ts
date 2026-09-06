@@ -43,12 +43,18 @@ function withCurrentModelOption(options: ModelOption[], currentModel?: string | 
     return nextOptions
 }
 
-function getClaudeModelOptions(currentModel?: string | null, customOptions?: ModelOption[]): ModelOption[] {
+// fork(claude-proxy-models)：`claudeProxyModels` 是 hub 动态拉到的代理目录；给了数组就替换
+// 静态代理项（见 claudeModelOptions.getClaudeComposerModelOptions）。`customOptions` 语义不变。
+function getClaudeModelOptions(
+    currentModel?: string | null,
+    customOptions?: ModelOption[],
+    claudeProxyModels?: readonly ModelOption[] | null
+): ModelOption[] {
     if (!customOptions || customOptions.length === 0) {
-        return getClaudeComposerModelOptions(currentModel)
+        return getClaudeComposerModelOptions(currentModel, claudeProxyModels)
     }
 
-    const options = getClaudeComposerModelOptions(currentModel)
+    const options = getClaudeComposerModelOptions(currentModel, claudeProxyModels)
     const nextOptions = [...options]
     let insertIndex = Math.max(1, nextOptions.findIndex((option) => option.value !== null))
 
@@ -104,13 +110,14 @@ function getNextGeminiModel(currentModel?: string | null): string | null {
 export function getModelOptionsForFlavor(
     flavor: string | undefined | null,
     currentModel?: string | null,
-    customOptions?: ModelOption[]
+    customOptions?: ModelOption[],
+    claudeProxyModels?: readonly ModelOption[] | null
 ): ModelOption[] {
     if (flavor === 'agy') {
         return getAgyModelOptions(currentModel)
     }
     if (flavor === 'claude') {
-        return getClaudeModelOptions(currentModel, customOptions)
+        return getClaudeModelOptions(currentModel, customOptions, claudeProxyModels)
     }
     if (customOptions && customOptions.length > 0) {
         if (flavor === 'cursor') {
@@ -159,13 +166,14 @@ export function getModelOptionsForFlavor(
     if (flavor === 'omp') {
         return []
     }
-    return getClaudeModelOptions(currentModel)
+    return getClaudeModelOptions(currentModel, undefined, claudeProxyModels)
 }
 
 export function getNextModelForFlavor(
     flavor: string | undefined | null,
     currentModel?: string | null,
-    customOptions?: ModelOption[]
+    customOptions?: ModelOption[],
+    claudeProxyModels?: readonly ModelOption[] | null
 ): string | null {
     if (flavor === 'agy') {
         const options = getAgyModelOptions(currentModel)
@@ -176,7 +184,7 @@ export function getNextModelForFlavor(
         return options[(currentIndex + 1) % options.length]?.value ?? null
     }
     if (flavor === 'claude') {
-        const options = getClaudeModelOptions(currentModel, customOptions)
+        const options = getClaudeModelOptions(currentModel, customOptions, claudeProxyModels)
         const currentIndex = options.findIndex((option) => option.value === (normalizeCurrentModel(currentModel) ?? null))
         if (currentIndex === -1) {
             return options[0]?.value ?? null
@@ -222,5 +230,5 @@ export function getNextModelForFlavor(
     if (flavor === 'omp') {
         return normalizeCurrentModel(currentModel)
     }
-    return getNextClaudeComposerModel(currentModel)
+    return getNextClaudeComposerModel(currentModel, claudeProxyModels)
 }

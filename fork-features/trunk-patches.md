@@ -637,6 +637,39 @@ DESKTOP-4SQALMG）的 Claude Code 指向 cx2cc，真正在跑的是 `gpt-5.6-sol
 `gpt-5.6-sol` 这个名字来自 `cx2cc/.env` 的 `CX2CC_UPSTREAM_MODEL`；operator
 换上游模型时这里要同步改。
 
+## 代理模型目录动态发现 (2026-09-06)
+
+上一节把代理直供的 id 写进 `CLAUDE_PROXY_MODEL_LABELS` 常量，代价是**上游每出一个新
+slug 都要改 HAPI 常量并换芯**：`gpt-6-astra` 上线后创建窗口看不到它，而写死的
+`gpt-5.4[1m]` 已在上游下架却仍被推荐。改为 hub 从代理的 `/v1/models` 动态拉目录
+（`fork-features/claude-proxy-models/`，环境变量 `HAPI_CLAUDE_PROXY_MODELS_URL`），
+前端目录可用时替换静态代理项，不可用时静态清单照旧回落。
+
+**为什么在 hub 而不是在目标 runner 上查**（与 HAPI 会话 f01a9529 的建议不同）：本 fork
+全机群共用 vircs 上的一个 cx2cc，ECS 上的 hub 经 vircs 的反向隧道直达
+`127.0.0.1:18901`（容器 `network_mode: host`，实测 200）；runner RPC 方案要机群 CLI
+换芯（换芯必杀会话，见 `.claude/rules/hapi-fork-cd-release.rule.md` §5.5）。目录本身无
+凭据、匿名可读，hub 直取不引入新的秘密流动。若将来各机指向不同代理，再补 runner
+侧 RPC 并在 hub 路由里按机器优先。
+
+目录来源链：codex-bridge（`client_version` 改为从已装 Codex CLI 发现，0.146.0 钉死时
+目录里没有 astra、0.153.4 才有）→ cx2cc `/v1/models`（镜像 + 标注 `served_as` 别名、
+`is_default`、`unknown_model_policy`；未知显式模型 400 而非静默换默认）→ hub 归一化。
+
+| Files | Missing upstream seam | Why it cannot move out | Runtime path | Sync verification |
+|---|---|---|---|---|
+| `hub/src/web/server.ts`、`hub/package.json`、`hub/tsconfig.json` | 无路由/测试目录注册 API | 一行 `app.route('/api', createClaudeProxyModelsRoutes(...))` + 测试/编译 include | env → 目录单例 → `GET /api/claude-proxy-models` | 换芯后 curl 该路由：`configured:true`、`models[]` 含 `gpt-6-astra`、`fetchedAt` 非空 |
+| `web/src/api/client.ts`、`web/src/lib/query-keys.ts` | 无 API 方法/查询键注册点 | `getClaudeProxyModels(refresh)` 与 `claudeProxyModels` 键各一处 | hook → client → hub 路由 | 单测 + 浏览器网络面板看到请求 |
+| `web/src/components/AssistantChat/claudeModelOptions.ts`、`modelOptions.ts` | 选项表由常量拼装，无 provider 目录注入点 | 新增可选参数 `proxyModels`：数组则替换静态代理尾巴，null/undefined 保留静态回落；`isListedClaudeModel` 同理 | 目录 → 选项 → 选择器/自定义单选 | 单测钉死「数组替换、空数组=无代理模型、null=静态回落」 |
+| `web/src/components/AssistantChat/HappyComposer.tsx`、`web/src/components/SessionChat.tsx` | composer 无模型目录 provider 插槽 | 新增 prop `claudeProxyModelOptions` 并透传给上面两函数与自定义模型判定 | 会话内切换模型 → 目录 → `set-session-config` | 真会话打开设置面板能看到 `gpt-6-astra · default` |
+| `web/src/components/NewSession/index.tsx`、`preferences.ts` | 表单无目录/校验扩展点 | 目录三态（加载中保留记忆值 / 数组权威 / 不可用静态校验）、目录到达后校验并**显示**回落原因、加载期禁创建、选择器下方状态行 | 打开 New Session → 目录 → 选项 + 记忆恢复 → `--model` 透传 | 浏览器：Claude 代理机器上看到 astra 且记忆的 astra 能恢复；单测 5 例 |
+| `web/src/chat/modelConfig.ts` | 窗口启发式是纯函数常量表 | 加一张由 hook 注册的 id→契约窗口表，优先于手写常量与 200k 兜底；`[1m]` 后缀仍最优先 | 目录 → 注册 → 状态栏分母 | 单测；真会话状态栏分母 262k（272k-10k） |
+| `web/src/lib/locales/en.ts`、`zh-CN.ts` | 无文案注册 | 7 条 `newSession.model.proxyCatalog*` | 状态行/回落提示 | 两种语言渲染 |
+
+上游若提供 provider 模型目录的注册入口（或把 Claude 模型清单改成可注入），把
+`fork-features/claude-proxy-models/` 与 `web/src/fork-features/claude-proxy-models/`
+迁进去并删掉本节；上一节的常量届时也应一并退场（目录可用时它们已不参与渲染）。
+
 ## 机器授权向下继承到会话 (2026-08-08)
 
 把一台机器授权给某个账号后，该机器上**新建**的会话对他仍然不可见：会话是独立的

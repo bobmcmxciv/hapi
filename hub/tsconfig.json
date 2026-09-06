@@ -21,6 +21,7 @@
         "../fork-features/multi-user/**/*.ts",
         "../fork-features/usage/**/*.ts",
         "../fork-features/subscription/**/*.ts",
+        "../fork-features/claude-proxy-models/**/*.ts",
         "../fork-features/history-import/hub/routes.ts"
     ]
 }

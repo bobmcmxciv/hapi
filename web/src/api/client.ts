@@ -1,3 +1,4 @@
+import type { ClaudeProxyModelsResponse } from '@/fork-features/claude-proxy-models/types'
 import type {
     AttachmentMetadata,
     AuthResponse,
@@ -933,6 +934,13 @@ export class ApiClient {
     async getMachineCcSwitchProviders(machineId: string): Promise<ListCcSwitchProvidersResponse> {
         return await this.request<ListCcSwitchProvidersResponse>(
             `/api/machines/${encodeURIComponent(machineId)}/cc-switch/providers`
+        )
+    }
+
+    // fork(claude-proxy-models)：Claude 会话经代理时的动态模型目录（hub 全局一份）。
+    async getClaudeProxyModels(refresh: boolean = false): Promise<ClaudeProxyModelsResponse> {
+        return await this.request<ClaudeProxyModelsResponse>(
+            refresh ? '/api/claude-proxy-models?refresh=1' : '/api/claude-proxy-models'
         )
     }
 

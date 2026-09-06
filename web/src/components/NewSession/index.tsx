@@ -13,6 +13,9 @@ import { useOpencodeModelsForCwd } from '@/hooks/queries/useOpencodeModelsForCwd
 import { useGrokModelsForCwd } from '@/hooks/queries/useGrokModelsForCwd'
 import { useOmpModelsForCwd } from '@/fork-features/omp-host-integration/useOmpModelsForCwd'
 import { useCopilotModelsForCwd } from '@/hooks/queries/useCopilotModelsForCwd'
+import { useClaudeProxyModels } from '@/fork-features/claude-proxy-models/useClaudeProxyModels'
+import { ClaudeProxyCatalogHint } from '@/fork-features/claude-proxy-models/ClaudeProxyCatalogHint'
+import { CLAUDE_PROXY_MODEL_IDS } from '@hapi/protocol'
 import { useSessions } from '@/hooks/queries/useSessions'
 import { useActiveSuggestions, type Suggestion } from '@/hooks/useActiveSuggestions'
 import { useDirectorySuggestions } from '@/hooks/useDirectorySuggestions'
@@ -38,6 +41,7 @@ import {
     shouldRestoreNewSessionFormDraft
 } from './newSessionFormDraft'
 import type { AgentType, LaunchEffort, CodexReasoningEffort, NewSessionServiceTier, SessionType } from './types'
+import { MODEL_OPTIONS } from './types'
 import { ActionButtons } from './ActionButtons'
 import { AgentSelector } from './AgentSelector'
 import { CollaborationModeSelector } from './CollaborationModeSelector'
@@ -300,6 +304,33 @@ export function NewSession(props: {
         machineId,
         enabled: agent === 'codex' && Boolean(machineId)
     })
+    // fork(claude-proxy-models)：Claude 的代理模型目录（hub 全局一份，不按机器）。目录可用时
+    // 替换静态 CLAUDE_PROXY_MODEL_IDS；不可用（未配置 / 失败且无快照）时静态清单照旧。
+    const claudeProxyModelsState = useClaudeProxyModels({
+        api: props.api,
+        enabled: agent === 'claude'
+    })
+    const [claudeModelNotice, setClaudeModelNotice] = useState<string | null>(null)
+    const claudeModelOptions = useMemo(() => {
+        if (agent !== 'claude' || !claudeProxyModelsState.options) {
+            return undefined
+        }
+        const staticProxyIds = new Set<string>(CLAUDE_PROXY_MODEL_IDS)
+        return [
+            ...MODEL_OPTIONS.claude.filter((option) => !staticProxyIds.has(option.value)),
+            ...claudeProxyModelsState.options
+        ]
+    }, [agent, claudeProxyModelsState.options])
+    // 三态给偏好校验用：null = 目录还在加载（先别把记住的动态 id 重置掉）；数组 = 权威集合；
+    // undefined = 目录不可用，按静态清单校验。用 ref 读最新值，避免偏好 effect 因目录刷新而重跑。
+    const claudeDynamicModelIdsRef = useRef<readonly string[] | null | undefined>(undefined)
+    claudeDynamicModelIdsRef.current = agent !== 'claude'
+        ? undefined
+        : claudeProxyModelsState.options
+            ? claudeProxyModelsState.ids
+            : claudeProxyModelsState.isLoading
+                ? null
+                : undefined
     const [agySelectedModel, setAgySelectedModel] = useState<string | null>(null)
     const runnerSpawnError = useMemo(
         () => formatRunnerSpawnError(selectedMachine),
@@ -731,8 +762,10 @@ export function NewSession(props: {
                     model: selectedMachine?.metadata?.defaultLaunchModel,
                     effort: selectedMachine?.metadata?.defaultLaunchEffort
                 }
-                : undefined
+                : undefined,
+            claudeDynamicModelIdsRef.current
         )
+        setClaudeModelNotice(null)
 
         setModel(agent === 'opencode' ? 'auto' : preferred.model)
         setCursorSelectedBase(preferred.cursorSelectedBase)
@@ -745,6 +778,24 @@ export function NewSession(props: {
             agent === 'agy' && preferred.model !== 'auto' ? preferred.model : null
         )
     }, [agent, machineId, props.machines])
+
+    // fork(claude-proxy-models)：目录到达后再校验记住的 Claude 模型——不在清单里就回落 Default，
+    // 并把原因写在选择器下方（不静默）。目录不可用时按静态清单校验。
+    useEffect(() => {
+        if (agent !== 'claude' || model === 'auto' || claudeProxyModelsState.isLoading) {
+            return
+        }
+        const dynamicOptions = claudeProxyModelsState.options
+        const staticProxyIds = new Set<string>(CLAUDE_PROXY_MODEL_IDS)
+        const listed = dynamicOptions
+            ? MODEL_OPTIONS.claude.some((option) => option.value === model && !staticProxyIds.has(option.value))
+                || dynamicOptions.some((option) => option.value === model)
+            : MODEL_OPTIONS.claude.some((option) => option.value === model)
+        if (!listed) {
+            setClaudeModelNotice(t('newSession.model.proxyCatalogUnlisted', { model }))
+            setModel('auto')
+        }
+    }, [agent, model, claudeProxyModelsState.isLoading, claudeProxyModelsState.options, t])
 
     useEffect(() => {
         if (
@@ -1513,6 +1564,9 @@ export function NewSession(props: {
         (agent === 'codex'
             && (model !== 'auto' || modelReasoningEffort !== 'default')
             && codexModelsState.isLoading)
+        || (agent === 'claude'
+            && model !== 'auto'
+            && claudeProxyModelsState.isLoading)
         || (agent === 'agy'
             && agySelectedModel !== null
             && agyModelsState.isLoading)
@@ -1684,12 +1738,15 @@ export function NewSession(props: {
                         ) : null}
                     </>
                 ) : (
+                    <>
                     <ModelSelector
                         agent={agent}
                         model={model}
                         options={
                             agent === 'codex'
                                 ? codexModelOptions
+                                : agent === 'claude'
+                                    ? claudeModelOptions
                                 : agent === 'grok'
                                     ? grokModelOptions
                                 : agent === 'omp'
@@ -1706,6 +1763,7 @@ export function NewSession(props: {
                             || (agent === 'copilot' && Boolean(copilotModelsState.error))
                         }
                         isLoading={(agent === 'codex' && codexModelsState.isLoading)
+                            || (agent === 'claude' && claudeProxyModelsState.isLoading)
                             || (agent === 'grok' && grokModelsState.isLoading)
                             || (agent === 'omp' && ompModelsState.isLoading)
                             || (agent === 'copilot' && copilotModelsState.isLoading)}
@@ -1718,8 +1776,19 @@ export function NewSession(props: {
                                     : agent === 'copilot' && copilotModelsState.error
                                         ? `${t('newSession.model.loadFailed')}: ${copilotModelsState.error}`
                                         : null}
-                        onModelChange={setModel}
+                        onModelChange={(value) => {
+                            setClaudeModelNotice(null)
+                            setModel(value)
+                        }}
                     />
+                    {agent === 'claude' ? (
+                        <ClaudeProxyCatalogHint
+                            state={claudeProxyModelsState}
+                            notice={claudeModelNotice}
+                            isDisabled={isFormDisabled}
+                        />
+                    ) : null}
+                    </>
                 )
             )}
             <LaunchEffortSelector

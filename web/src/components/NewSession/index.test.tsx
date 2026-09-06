@@ -22,7 +22,12 @@ const mocks = vi.hoisted(() => ({
     copilotModelsLoading: false,
     piDialogSelection: ['pi-native-1'] as string[],
     refetchSessions: vi.fn(),
-    addToast: vi.fn()
+    addToast: vi.fn(),
+    // fork(claude-proxy-models)
+    claudeProxyOptions: null as Array<{ value: string; label: string }> | null,
+    claudeProxyLoading: false,
+    claudeProxyConfigured: false,
+    claudeProxyRefetch: vi.fn()
 }))
 
 vi.mock('@/lib/use-translation', () => ({
@@ -83,6 +88,26 @@ vi.mock('@/hooks/queries/useCodexModels', () => ({
         isLoading: mocks.codexModelsLoading,
         error: null
     })
+}))
+vi.mock('@/fork-features/claude-proxy-models/useClaudeProxyModels', () => ({
+    useClaudeProxyModels: () => ({
+        configured: mocks.claudeProxyConfigured,
+        models: [],
+        options: mocks.claudeProxyOptions,
+        ids: (mocks.claudeProxyOptions ?? []).map((option) => option.value),
+        defaultModel: null,
+        isLoading: mocks.claudeProxyLoading,
+        error: null,
+        stale: false,
+        fetchedAt: mocks.claudeProxyOptions ? 1 : null,
+        source: null,
+        refetch: mocks.claudeProxyRefetch
+    })
+}))
+vi.mock('@/fork-features/claude-proxy-models/ClaudeProxyCatalogHint', () => ({
+    ClaudeProxyCatalogHint: (props: { notice?: string | null }) => (
+        <div data-testid="claude-proxy-notice">{props.notice ?? ''}</div>
+    )
 }))
 vi.mock('@/hooks/queries/useAgyModels', () => ({
     useAgyModels: () => ({
@@ -242,7 +267,104 @@ describe('NewSession launch preferences', () => {
         mocks.refetchSessions.mockReset()
         mocks.refetchSessions.mockResolvedValue(undefined)
         mocks.addToast.mockReset()
+        mocks.claudeProxyOptions = null
+        mocks.claudeProxyLoading = false
+        mocks.claudeProxyConfigured = false
+        mocks.claudeProxyRefetch.mockReset()
         savePreferredAgent('codex')
+    })
+
+    // fork(claude-proxy-models)：Claude 的模型清单由 hub 动态目录驱动。
+    describe('Claude proxy model catalog', () => {
+        const DYNAMIC = [
+            { value: 'gpt-6-astra', label: 'gpt-6-astra · default' },
+            { value: 'gpt-5.6-sol', label: 'gpt-5.6-sol → gpt-6-astra' }
+        ]
+
+        function renderClaude() {
+            savePreferredAgent('claude')
+            return render(
+                <NewSession
+                    api={api}
+                    machines={[machine]}
+                    initialMachineId="machine-1"
+                    initialDirectory="C:\\repo"
+                    onSuccess={mocks.onSuccess}
+                    onCancel={() => {}}
+                />
+            )
+        }
+
+        it('lists the dynamic catalog instead of the static proxy ids once loaded', async () => {
+            mocks.claudeProxyConfigured = true
+            mocks.claudeProxyOptions = DYNAMIC
+            renderClaude()
+            await waitFor(() => {
+                const labels = screen.getByTestId('model-options').textContent ?? ''
+                expect(labels).toContain('gpt-6-astra · default')
+                expect(labels).toContain('gpt-5.6-sol → gpt-6-astra')
+                expect(labels).not.toContain('gpt-5.4[1m]')
+                expect(labels).toContain('Opus')
+            })
+        })
+
+        it('passes no explicit options when the hub has no catalog configured (static list fallback)', async () => {
+            renderClaude()
+            // The mocked ModelSelector renders its `options` prop only; undefined means the
+            // real component falls back to MODEL_OPTIONS.claude (presets + static proxy ids).
+            await waitFor(() => {
+                expect(screen.getByTestId('model')).toHaveTextContent('auto')
+            })
+            expect(screen.getByTestId('model-options').textContent).toBe('')
+        })
+
+        it('restores a remembered dynamic model id once the catalog confirms it', async () => {
+            savePreferredLaunchSettings('machine-1', 'claude', {
+                model: 'gpt-6-astra',
+                cursorSelectedBase: 'auto',
+                effort: 'auto',
+                modelReasoningEffort: 'default'
+            })
+            mocks.claudeProxyConfigured = true
+            mocks.claudeProxyOptions = DYNAMIC
+            renderClaude()
+            await waitFor(() => {
+                expect(screen.getByTestId('model')).toHaveTextContent('gpt-6-astra')
+                expect(screen.getByTestId('claude-proxy-notice')).toHaveTextContent('')
+            })
+        })
+
+        it('resets a remembered model the catalog no longer offers to Default and says why', async () => {
+            savePreferredLaunchSettings('machine-1', 'claude', {
+                model: 'gpt-5.4[1m]',
+                cursorSelectedBase: 'auto',
+                effort: 'auto',
+                modelReasoningEffort: 'default'
+            })
+            mocks.claudeProxyConfigured = true
+            mocks.claudeProxyOptions = DYNAMIC
+            renderClaude()
+            await waitFor(() => {
+                expect(screen.getByTestId('model')).toHaveTextContent('auto')
+                expect(screen.getByTestId('claude-proxy-notice')).toHaveTextContent('newSession.model.proxyCatalogUnlisted')
+            })
+        })
+
+        it('disables creation while a remembered Claude model waits for the catalog', async () => {
+            savePreferredLaunchSettings('machine-1', 'claude', {
+                model: 'gpt-6-astra',
+                cursorSelectedBase: 'auto',
+                effort: 'auto',
+                modelReasoningEffort: 'default'
+            })
+            mocks.claudeProxyConfigured = true
+            mocks.claudeProxyLoading = true
+            renderClaude()
+            await waitFor(() => {
+                expect(screen.getByTestId('model')).toHaveTextContent('gpt-6-astra')
+                expect(screen.getByTestId('create')).toBeDisabled()
+            })
+        })
     })
 
     it('restores the last successful model and reasoning effort for the machine and agent', async () => {

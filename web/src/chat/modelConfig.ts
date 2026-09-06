@@ -24,6 +24,20 @@ const DEFAULT_CODEX_CONTEXT_WINDOW_TOKENS = 258_400
 // precedence over this fallback.
 const DEFAULT_PI_CONTEXT_WINDOW_TOKENS = 200_000
 
+// fork(claude-proxy-models)：hub 动态拉到的代理目录里各 slug 的**服务端契约窗口**。
+// 由 useClaudeProxyModels 在目录到达时注册；查不到时才落到下面的静态启发式。
+// 只对裸 id 生效——`[1m]` 后缀是 CC 侧的启动声明，仍优先于这里。
+let claudeProxyContextWindows: Record<string, number> = {}
+
+export function registerClaudeProxyContextWindows(windows: Record<string, number>): void {
+    claudeProxyContextWindows = { ...windows }
+}
+
+export function getRegisteredClaudeProxyContextWindow(model: string): number | null {
+    const value = claudeProxyContextWindows[model]
+    return typeof value === 'number' && value > 0 ? value : null
+}
+
 function parseCursorWireContextWindow(model: string): number | null {
     const match = model.match(/\[([^\]]+)\]/)
     if (!match) {
@@ -97,6 +111,12 @@ export function getContextBudgetTokens(model: string | null | undefined, flavor?
             return isFable
                 ? LARGE_CLAUDE_CONTEXT_WINDOW_TOKENS
                 : DEFAULT_CLAUDE_CONTEXT_WINDOW_TOKENS
+        }
+        // fork(claude-proxy-models)：代理目录声明了该 slug 的契约窗口就用它——
+        // 这是 /backend-api/codex/models 的实时元数据，比下面手写的常量更权威。
+        const registeredWindow = getRegisteredClaudeProxyContextWindow(trimmedModel)
+        if (registeredWindow) {
+            return registeredWindow
         }
         // 已实锤契约的代理别名直接给真值：`gpt-5.6-sol` 服务端契约 272k
         // （/backend-api/codex/models 实时元数据 context_window=max=272000，

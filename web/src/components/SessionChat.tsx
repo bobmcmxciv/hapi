@@ -91,6 +91,7 @@ import { useSessionActions } from '@/hooks/mutations/useSessionActions'
 import { useCcSwitchProvider } from '@/hooks/mutations/useCcSwitchProvider'
 import { useCodexModels } from '@/hooks/queries/useCodexModels'
 import { useCcSwitchProviders } from '@/hooks/queries/useCcSwitchProviders'
+import { useClaudeProxyModels } from '@/fork-features/claude-proxy-models/useClaudeProxyModels'
 import { useCursorModels } from '@/hooks/queries/useCursorModels'
 import { useCursorModelsForMachine } from '@/hooks/queries/useCursorModelsForMachine'
 import {
@@ -990,6 +991,11 @@ function SessionChatInner(props: SessionChatProps) {
         api: props.api,
         machineId: sessionMachineId,
         enabled: agentFlavor === 'claude' && Boolean(sessionMachineId)
+    })
+    // fork(claude-proxy-models)：Claude 会话经代理时的动态模型目录，喂给 composer 的模型选择器。
+    const claudeProxyModelsState = useClaudeProxyModels({
+        api: props.api,
+        enabled: agentFlavor === 'claude' && props.session.active
     })
     const { switchProvider: switchCcSwitchProvider } = useCcSwitchProvider({
         api: props.api,
@@ -2025,6 +2031,7 @@ function SessionChatInner(props: SessionChatProps) {
                                         // so Pi model changes go through the dedicated picker only.
                                         : undefined
                         }
+                        claudeProxyModelOptions={agentFlavor === 'claude' ? claudeProxyModelsState.options : undefined}
                         piModels={piModels}
                         piSelectedModel={agentFlavor === 'pi' ? piSelectedModel : undefined}
                         availableModelReasoningEffortOptions={

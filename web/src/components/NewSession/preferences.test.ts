@@ -218,3 +218,42 @@ describe('NewSession preferences', () => {
         })
     })
 })
+
+// fork(claude-proxy-models)：Claude 的合法模型集合 = 静态清单 ∪ hub 动态目录，三态语义见实现注释。
+describe('dynamic Claude proxy catalog (fork claude-proxy-models)', () => {
+    const REMEMBERED = {
+        model: 'gpt-6-astra',
+        cursorSelectedBase: 'auto',
+        effort: 'high' as const,
+        modelReasoningEffort: 'default' as const
+    }
+
+    it('keeps a remembered dynamic id while the catalog is still loading (null)', () => {
+        expect(resolvePreferredLaunchSettings('claude', REMEMBERED, undefined, null).model).toBe('gpt-6-astra')
+    })
+
+    it('accepts a remembered dynamic id once the catalog lists it', () => {
+        expect(resolvePreferredLaunchSettings('claude', REMEMBERED, undefined, ['gpt-6-astra', 'gpt-5.6-sol']).model)
+            .toBe('gpt-6-astra')
+    })
+
+    it('falls back to auto when the loaded catalog does not list the remembered id', () => {
+        expect(resolvePreferredLaunchSettings('claude', REMEMBERED, undefined, ['gpt-5.6-sol']).model).toBe('auto')
+    })
+
+    it('validates against the static list when the catalog is unavailable (undefined)', () => {
+        expect(resolvePreferredLaunchSettings('claude', REMEMBERED, undefined, undefined).model).toBe('auto')
+        expect(resolvePreferredLaunchSettings('claude', { ...REMEMBERED, model: 'gpt-5.6-sol' }, undefined, undefined).model)
+            .toBe('gpt-5.6-sol')
+    })
+
+    it('seeds a machine-advertised dynamic default once the catalog confirms it', () => {
+        expect(resolvePreferredLaunchSettings('claude', null, { model: 'gpt-6-astra', effort: 'max' }, ['gpt-6-astra']))
+            .toEqual({ model: 'gpt-6-astra', cursorSelectedBase: 'auto', effort: 'max', modelReasoningEffort: 'default' })
+    })
+
+    it('ignores the dynamic list for non-Claude agents', () => {
+        expect(resolvePreferredLaunchSettings('codex', REMEMBERED, undefined, null).model).toBe('gpt-6-astra')
+        expect(resolvePreferredLaunchSettings('gemini', REMEMBERED, undefined, ['gpt-6-astra']).model).toBe('auto')
+    })
+})

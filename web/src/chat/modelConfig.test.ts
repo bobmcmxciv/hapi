@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { getContextBudgetTokens } from './modelConfig'
+import { getContextBudgetTokens, registerClaudeProxyContextWindows } from './modelConfig'
 
 describe('getContextBudgetTokens', () => {
     it('uses the large budget only for explicit 1m Claude presets', () => {
@@ -53,5 +53,23 @@ describe('getContextBudgetTokens', () => {
         expect(getContextBudgetTokens(null, 'claude')).toBe(190_000)
         expect(getContextBudgetTokens('', 'claude')).toBe(190_000)
         expect(getContextBudgetTokens('   ', 'claude')).toBe(190_000)
+    })
+})
+
+// fork(claude-proxy-models)：代理目录声明的契约窗口优先于手写常量与 200k 兜底。
+describe('registered proxy context windows (fork claude-proxy-models)', () => {
+    it('uses the registered contract window for a bare proxy id and keeps [1m] ahead of it', () => {
+        registerClaudeProxyContextWindows({ 'gpt-6-astra': 272_000, 'gpt-5.6-sol': 300_000 })
+        try {
+            expect(getContextBudgetTokens('gpt-6-astra', 'claude')).toBe(262_000)
+            expect(getContextBudgetTokens('gpt-5.6-sol', 'claude')).toBe(290_000)
+            expect(getContextBudgetTokens('gpt-6-astra[1m]', 'claude')).toBe(990_000)
+            expect(getContextBudgetTokens('claude-sonnet-4-6', 'claude')).toBe(190_000)
+            expect(getContextBudgetTokens('gpt-unknown', 'claude')).toBe(190_000)
+        } finally {
+            registerClaudeProxyContextWindows({})
+        }
+        expect(getContextBudgetTokens('gpt-6-astra', 'claude')).toBe(190_000)
+        expect(getContextBudgetTokens('gpt-5.6-sol', 'claude')).toBe(262_000)
     })
 })

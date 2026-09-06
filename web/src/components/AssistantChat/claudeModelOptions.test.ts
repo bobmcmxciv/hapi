@@ -108,3 +108,49 @@ describe('normalizeCustomClaudeModelId', () => {
         expect(normalizeCustomClaudeModelId('   ')).toBeNull()
     })
 })
+
+// fork(claude-proxy-models)：hub 动态目录到达后替换静态代理项。
+describe('dynamic proxy catalog (fork claude-proxy-models)', () => {
+    const DYNAMIC = [
+        { value: 'gpt-6-astra', label: 'gpt-6-astra · default' },
+        { value: 'gpt-5.6-sol', label: 'gpt-5.6-sol → gpt-6-astra' }
+    ]
+
+    it('replaces the static proxy tail with the dynamic catalog, keeping presets and ids', () => {
+        const options = getClaudeComposerModelOptions(null, DYNAMIC)
+        expect(options[0]).toEqual({ value: null, label: 'Default' })
+        expect(options.some((o) => o.value === 'opus')).toBe(true)
+        expect(options.some((o) => o.value === 'claude-fable-5-1')).toBe(true)
+        // Retired static proxy id is gone once the catalog is authoritative.
+        expect(options.some((o) => o.value === 'gpt-5.4[1m]')).toBe(false)
+        expect(options.slice(-2)).toEqual(DYNAMIC)
+    })
+
+    it('an empty catalog means "no proxy models", not "fall back to the static list"', () => {
+        const options = getClaudeComposerModelOptions(null, [])
+        expect(options.some((o) => o.value === 'gpt-5.6-sol')).toBe(false)
+        expect(options.some((o) => o.value === 'gpt-5.4[1m]')).toBe(false)
+    })
+
+    it('null/undefined catalog keeps the static fallback', () => {
+        expect(getClaudeComposerModelOptions(null, null)).toEqual(getClaudeComposerModelOptions(null))
+    })
+
+    it('does not double-list a dynamic id that is also a built-in id', () => {
+        const options = getClaudeComposerModelOptions(null, [{ value: 'claude-opus-4-8', label: 'x' }])
+        expect(options.filter((o) => o.value === 'claude-opus-4-8')).toHaveLength(1)
+    })
+
+    it('isListedClaudeModel consults the dynamic catalog instead of the static proxy ids', () => {
+        expect(isListedClaudeModel('gpt-6-astra', DYNAMIC)).toBe(true)
+        expect(isListedClaudeModel('gpt-5.4[1m]', DYNAMIC)).toBe(false)
+        expect(isListedClaudeModel('gpt-5.4[1m]')).toBe(true)
+        expect(isListedClaudeModel('opus', DYNAMIC)).toBe(true)
+        expect(isListedClaudeModel('vendor-claude-ultra', DYNAMIC)).toBe(false)
+    })
+
+    it('cycles through the dynamic catalog entries', () => {
+        expect(getNextClaudeComposerModel('gpt-6-astra', DYNAMIC)).toBe('gpt-5.6-sol')
+        expect(getNextClaudeComposerModel('gpt-5.6-sol', DYNAMIC)).toBeNull()
+    })
+})

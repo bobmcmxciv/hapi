@@ -126,15 +126,28 @@ export type MachineAdvertisedLaunchDefaults = {
     effort?: string
 }
 
+/**
+ * fork(claude-proxy-models)：Claude 的可选模型不再只有静态清单——hub 会动态拉代理目录。
+ * `dynamicClaudeModels` 三态：
+ * - `undefined`/`null`：目录**尚未就绪**（加载中 / 未配置时也先按静态校验的旧路径走不到这里），
+ *   记住的模型原样保留，等目录到了再由调用方校验（否则 `gpt-6-astra` 这类动态 id 在
+ *   目录到达前就被这里重置成 `auto`，用户上次的选择永远记不住）；
+ * - 数组：静态清单 ∪ 数组为合法集合。
+ */
 export function resolvePreferredLaunchSettings(
     agent: AgentType,
     preferred: PreferredLaunchSettings | null,
-    machineDefaults?: MachineAdvertisedLaunchDefaults
+    machineDefaults?: MachineAdvertisedLaunchDefaults,
+    dynamicClaudeModels?: readonly string[] | null
 ): PreferredLaunchSettings {
     const preferredModel = preferred?.model ?? machineDefaults?.model ?? 'auto'
     const staticModelValues = MODEL_OPTIONS[agent].map((option) => option.value)
-    const model = staticModelValues.length > 0 && agent !== 'codex' && agent !== 'copilot'
-        ? resolvePreferredOptionValue(preferredModel, staticModelValues, 'auto')
+    const claudeCatalogPending = agent === 'claude' && dynamicClaudeModels === null
+    const modelValues = agent === 'claude' && Array.isArray(dynamicClaudeModels)
+        ? [...staticModelValues, ...dynamicClaudeModels]
+        : staticModelValues
+    const model = modelValues.length > 0 && agent !== 'codex' && agent !== 'copilot' && !claudeCatalogPending
+        ? resolvePreferredOptionValue(preferredModel, modelValues, 'auto')
         : preferredModel
     const fallbackEffort = preferred?.effort ?? machineDefaults?.effort ?? 'auto'
     const effort = agent === 'claude'

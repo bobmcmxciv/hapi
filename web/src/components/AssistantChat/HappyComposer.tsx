@@ -305,6 +305,8 @@ export function HappyComposer(props: {
     controlledByUser?: boolean
     agentFlavor?: string | null
     availableModelOptions?: Array<{ value: string | null; label: string }>
+    /** fork(claude-proxy-models)：Claude 的动态代理目录；数组 = 替换静态代理项，null/undefined = 目录不可用。 */
+    claudeProxyModelOptions?: Array<{ value: string; label: string }> | null
     /** Full Pi model data with thinkingLevelMap for provider grouping + thinking level filtering */
     piModels?: PiModelSummary[]
     /** Pi: provider-qualified selected model from metadata (survives reload;
@@ -417,6 +419,7 @@ export function HappyComposer(props: {
         controlledByUser = false,
         agentFlavor,
         availableModelOptions,
+        claudeProxyModelOptions,
         piModels,
         piSelectedModel,
         availableModelReasoningEffortOptions,
@@ -1008,8 +1011,8 @@ export function HappyComposer(props: {
         [agentFlavor]
     )
     const modelOptions = useMemo(
-        () => getModelOptionsForFlavor(agentFlavor, model, availableModelOptions),
-        [agentFlavor, model, availableModelOptions]
+        () => getModelOptionsForFlavor(agentFlavor, model, availableModelOptions, claudeProxyModelOptions),
+        [agentFlavor, model, availableModelOptions, claudeProxyModelOptions]
     )
 
     // Cursor dual picker: after choosing a multi-variant base, drill into variant
@@ -1396,7 +1399,7 @@ export function HappyComposer(props: {
                 if (onCycleModel) {
                     onCycleModel()
                 } else {
-                    onModelChange?.(getNextModelForFlavor(agentFlavor, model, availableModelOptions))
+                    onModelChange?.(getNextModelForFlavor(agentFlavor, model, availableModelOptions, claudeProxyModelOptions))
                 }
                 haptic('light')
             }
@@ -1404,7 +1407,7 @@ export function HappyComposer(props: {
 
         window.addEventListener('keydown', handleGlobalKeyDown)
         return () => window.removeEventListener('keydown', handleGlobalKeyDown)
-    }, [model, onModelChange, onCycleModel, haptic, agentFlavor, availableModelOptions])
+    }, [model, onModelChange, onCycleModel, haptic, agentFlavor, availableModelOptions, claudeProxyModelOptions])
 
     const handleChange = useCallback((e: ReactChangeEvent<HTMLTextAreaElement>) => {
         const selection = {
@@ -1577,12 +1580,12 @@ export function HappyComposer(props: {
     useEffect(() => {
         if (showSettings) {
             setCustomModelDraft(
-                agentFlavor === 'claude' && model && !isListedClaudeModel(model)
+                agentFlavor === 'claude' && model && !isListedClaudeModel(model, claudeProxyModelOptions)
                     ? model
                     : ''
             )
         }
-    }, [showSettings, agentFlavor, model])
+    }, [showSettings, agentFlavor, model, claudeProxyModelOptions])
 
     const handleCustomModelSubmit = useCallback(() => {
         const modelId = normalizeCustomClaudeModelId(customModelDraft)
@@ -1997,18 +2000,18 @@ export function HappyComposer(props: {
                                         <button
                                             type="button"
                                             role="radio"
-                                            aria-checked={Boolean(model && !isListedClaudeModel(model))}
+                                            aria-checked={Boolean(model && !isListedClaudeModel(model, claudeProxyModelOptions))}
                                             aria-label={t('composer.customModel')}
                                             disabled={controlsDisabled}
                                             className={`flex h-4 w-4 shrink-0 items-center justify-center rounded-full border-2 ${
-                                                model && !isListedClaudeModel(model)
+                                                model && !isListedClaudeModel(model, claudeProxyModelOptions)
                                                     ? 'border-[var(--app-link)]'
                                                     : 'border-[var(--app-hint)]'
                                             }`}
                                             onClick={handleCustomModelSubmit}
                                             onMouseDown={(event) => event.preventDefault()}
                                         >
-                                            {model && !isListedClaudeModel(model) ? (
+                                            {model && !isListedClaudeModel(model, claudeProxyModelOptions) ? (
                                                 <div className="h-2 w-2 rounded-full bg-[var(--app-link)]" />
                                             ) : null}
                                         </button>
