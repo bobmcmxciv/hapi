@@ -453,8 +453,8 @@ web/src/hooks/useThemeColors.test.ts	upstream-fix	#179	both refs changed; fork c
 web/src/hooks/useThemeColors.ts	upstream-sync	#180	merge-base 87f5c78a; changed only on upstream/main
 web/src/index.css	upstream-fix	#179	both refs changed; fork commits a2d26372; disposition upstream-issue https://github.com/tiann/hapi/issues/1074: general fix reported against latest upstream main
 web/src/lib/app-context.tsx	trunk-patch	#171	origin-only delta; fork commits a6f9e3f9
-web/src/lib/assistant-runtime.test.ts	trunk-patch	#203	both refs changed; disposition fork-specific #203: OMP main-timeline event visibility coverage
-web/src/lib/assistant-runtime.ts	trunk-patch	#176,#203	origin-only delta; fork commits b4c31e88,253e5184; disposition fork-specific #203: filter unsupported OMP quota cards
+web/src/lib/assistant-runtime.test.ts	trunk-patch	#203,mouriya#323	both refs changed; disposition fork-specific #203: OMP main-timeline event visibility coverage; mouriya-s-lab/hapi#323 B.4 stable running-placeholder coverage
+web/src/lib/assistant-runtime.ts	trunk-patch	#176,#203,mouriya#323	origin-only delta; fork commits b4c31e88,253e5184; disposition fork-specific #203: filter unsupported OMP quota cards; mouriya-s-lab/hapi#323 B.4: adapter-owned `pending-turn:` placeholder replaces assistant-ui's per-render optimistic id (remove when upstream ships #331 or assistant-ui exposes a stable-id seam)
 web/src/lib/changelog.test.ts	fork-owned	#179	origin-only delta; fork commits 4a0c5f0b
 web/src/lib/changelog.ts	fork-owned	#179	origin-only delta; fork commits 4a0c5f0b
 web/src/lib/crashGuard.test.ts	fork-owned	web-stability	crashGuard 单测（错配措辞识别/护栏窗口/去重限量/积压补发）
@@ -466,8 +466,8 @@ web/src/lib/generatedInlineMedia.test.ts	fork-owned	#175	origin-only delta; fork
 web/src/lib/generatedInlineMedia.ts	fork-owned	#175	origin-only delta; fork commits d28853c7
 web/src/lib/locales/en.ts	trunk-patch	#171	both refs changed; fork commits ba37bcfb,606c6579,302180e5,7faed2eb,85743eb7,4a0c5f0b,7b197fec,a8815d47,bfa252da,c853bcbf,aee648ee,d1f9f394,413e76cc,291c8db0,3582e989,d3199037; claude-proxy-models: newSession.model.proxyCatalog* 文案
 web/src/lib/locales/zh-CN.ts	trunk-patch	#171	both refs changed; fork commits ba37bcfb,606c6579,302180e5,7faed2eb,85743eb7,4a0c5f0b,7b197fec,a8815d47,bfa252da,c853bcbf,aee648ee,d1f9f394,413e76cc,291c8db0,3582e989,d3199037; claude-proxy-models: newSession.model.proxyCatalog* 文案
-web/src/lib/message-window-store.test.ts	upstream-fix	#179	origin-only delta; fork commits 7a5232bf; disposition upstream-issue https://github.com/tiann/hapi/issues/1071: general fix reported against latest upstream main
-web/src/lib/message-window-store.ts	upstream-fix	#179	origin-only delta; fork commits 7a5232bf; disposition upstream-issue https://github.com/tiann/hapi/issues/1071: general fix reported against latest upstream main
+web/src/lib/message-window-store.test.ts	upstream-fix	#179,mouriya#323	origin-only delta; fork commits 7a5232bf; disposition upstream-issue https://github.com/tiann/hapi/issues/1071: general fix reported against latest upstream main; mouriya-s-lab/hapi#323 mechanism 1: held-range revalidation cases (older page + tail sync while reading history)
+web/src/lib/message-window-store.ts	upstream-fix	#179,mouriya#323	origin-only delta; fork commits 7a5232bf; disposition upstream-issue https://github.com/tiann/hapi/issues/1071: general fix reported against latest upstream main; mouriya-s-lab/hapi#323 mechanism 1: epoch change while reading history re-reads the held interval (after+until) instead of replacing the window with latest — drop when upstream lands #326/#327
 web/src/lib/query-keys.ts	trunk-patch	#173	both refs changed; fork commits 3994ee9a,fc7d7b4a,a8815d47,c58622c2; claude-proxy-models: claudeProxyModels 键
 web/src/lib/remark-file-path-links.test.ts	trunk-patch	#179	origin-only delta; fork commits 473d69b4; disposition fork-specific #179: bob fork customization import
 web/src/lib/remark-file-path-links.ts	trunk-patch	#179	origin-only delta; fork commits 473d69b4; disposition fork-specific #179: bob fork customization import

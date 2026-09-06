@@ -22,7 +22,10 @@ const assistantUiMocks = vi.hoisted(() => ({
     useExternalStoreRuntime: vi.fn((adapter: unknown) => adapter)
 }))
 
-vi.mock('@assistant-ui/react', () => assistantUiMocks)
+vi.mock('@assistant-ui/react', async (importOriginal) => ({
+    ...(await importOriginal<typeof import('@assistant-ui/react')>()),
+    ...assistantUiMocks
+}))
 
 // Minimal builders for VisibleChatBlock fixtures. Tests focus on metadata
 // aggregation behavior across response groups; non-metadata fields default to
@@ -884,5 +887,61 @@ describe('aggregateResponseGroups', () => {
         const meta = aggregates.get('a1')
         expect(meta?.usage?.cache_creation_input_tokens).toBe(300)
         expect(meta?.usage?.cache_read_input_tokens).toBe(100)
+    })
+})
+
+// mouriya-s-lab/hapi#323 contract B.4: the waiting placeholder keeps one
+// identity for the whole turn instead of a fresh assistant-ui optimistic id
+// on every message-array change.
+describe('useHappyRuntime running placeholder', () => {
+    afterEach(() => vi.clearAllMocks())
+
+    type AdapterShape = { isRunning: boolean; messages: Array<{ id: string; role: string; content: unknown[] }> }
+
+    function runtimeProps(blocks: VisibleChatBlock[], sessionOverrides: Partial<Session> = {}) {
+        return {
+            blocks,
+            isSending: false,
+            onSendMessage: () => undefined,
+            onAbort: async () => undefined,
+            messagesVersion: 0,
+            historyVersion: 0,
+            session: { ...session('claude'), thinking: true, activeTurnStartedAt: 1_700, ...sessionOverrides }
+        }
+    }
+
+    it('supplies one stable placeholder while the turn waits for assistant output', () => {
+        const { result, rerender } = renderHook(
+            (props: ReturnType<typeof runtimeProps>) => useHappyRuntime(props),
+            { initialProps: runtimeProps([userText('q1')]) }
+        )
+        const first = result.current as unknown as AdapterShape
+        expect(first.isRunning).toBe(true)
+        expect(first.messages.at(-1)).toMatchObject({ id: 'pending-turn:session-1:1700', role: 'assistant', content: [] })
+        const firstIds = first.messages.map((message) => message.id)
+
+        // A content-only update re-creates the converted array; the placeholder must not change identity.
+        rerender(runtimeProps([userText('q1'), userText('q2')]))
+        const second = result.current as unknown as AdapterShape
+        expect(second.messages.at(-1)?.id).toBe('pending-turn:session-1:1700')
+        expect(second.messages).toHaveLength(firstIds.length + 1)
+
+        // A new turn is a new waiting lifecycle.
+        rerender(runtimeProps([userText('q1'), userText('q2')], { activeTurnStartedAt: 2_400 }))
+        expect((result.current as unknown as AdapterShape).messages.at(-1)?.id).toBe('pending-turn:session-1:2400')
+    })
+
+    it('adds no placeholder once assistant output exists or when the thread is idle', () => {
+        const running = renderHook(() => useHappyRuntime(runtimeProps([userText('q1'), agentText('a1')])))
+        const runningAdapter = running.result.current as unknown as AdapterShape
+        expect(runningAdapter.messages.at(-1)?.id).not.toMatch(/^pending-turn:/)
+        expect(runningAdapter.messages).toHaveLength(2)
+        running.unmount()
+
+        const idle = renderHook(() => useHappyRuntime(runtimeProps([userText('q1')], { thinking: false })))
+        const idleAdapter = idle.result.current as unknown as AdapterShape
+        expect(idleAdapter.isRunning).toBe(false)
+        expect(idleAdapter.messages.map((message) => message.id)).not.toContain('pending-turn:session-1:1700')
+        expect(idleAdapter.messages).toHaveLength(1)
     })
 })

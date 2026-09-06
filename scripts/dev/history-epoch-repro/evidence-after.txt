@@ -1,0 +1,24 @@
+# #323 mechanism-1 verification (after fix) — 2026-09-06
+hub: local real hub `bun run hub/src/index.ts`, HAPI_HOME=.tmp/hub323, :3399 (same DB as the pre-fix run)
+web: vite dev :5199 proxy → hub (restarted after the edit so the probe and the app share one store module instance)
+browser: dedicated headless Chrome 150, CDP :9333, one page target, rAF verified firing
+session B: 352f27be-1cb9-4a07-b20c-e88cf205268d
+
+## Path 1: older page discovers a new epoch while reading history
+baseline: viewMode=history, window n=800 (seq 54..853), reading anchor `hapi-message-user-text:fc58fe28-…` (Q#0301) present
+trigger: real CLI socket `message` with createdAt = head-90s (inside the held interval) → hub epoch 1→2
+  (bump script output: {"epoch":2,"headAt":1788720064494,"headSeq":854})
+after SSE ingest: n=600 (history-mode trim evicted the tail, requiresLatestReset=true), anchor present, epoch still 1 on the client
+action: scrollTop=0 + Home → hub served `beforeAt=1788700818615&beforeSeq=54` (53 rows, epoch 2)
+observed store after the load: {"n":653,"epoch":2,"oldestSeq":1,"newestSeq":653,"viewMode":"history"}
+observed DOM: 653 rows, anchor Q#0301 still in DOM (true), visibleFirst "A#0056" (row the user was on stays at the top of the viewport), scrollTop 9608
+hub request sequence (verbatim from .tmp/hub323.log):
+  beforeAt=1788700818615&beforeSeq=54&limit=200 200 2s
+  afterAt=1788700818615&afterSeq=53&untilAt=1788701417615&untilSeq=653&limit=200 200 22ms
+  afterAt=1788701017615&afterSeq=253&untilAt=1788701417615&untilSeq=653&limit=200 200 31ms
+  afterAt=1788701217615&afterSeq=453&untilAt=1788701417615&untilSeq=653&limit=200 200 28ms
+  → no bare `limit=200` latest reset was issued (pre-fix run issued one right after the beforeAt page)
+pre-fix contrast (same session, same trigger, evidence323-before.txt): store n=200 oldestSeq=653, anchor removed from DOM, DOM 198 rows.
+
+## Path 2: tail sync hits an epoch reset while reading history (SSE reconnect)
+(recorded below when the hub-restart run completes)

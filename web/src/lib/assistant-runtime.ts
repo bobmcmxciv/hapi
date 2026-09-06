@@ -1,7 +1,7 @@
 import { useCallback, useMemo, useRef } from 'react'
 import type React from 'react'
-import type { AppendMessage, AttachmentAdapter, ThreadMessageLike } from '@assistant-ui/react'
-import { useExternalMessageConverter, useExternalStoreRuntime } from '@assistant-ui/react'
+import type { AppendMessage, AttachmentAdapter, ThreadMessage, ThreadMessageLike } from '@assistant-ui/react'
+import { fromThreadMessageLike, useExternalMessageConverter, useExternalStoreRuntime } from '@assistant-ui/react'
 import type { PendingSchedule } from '@/components/AssistantChat/ScheduleTimePicker'
 import { resolvePendingSchedule } from '@/components/AssistantChat/ScheduleTimePicker'
 import {
@@ -437,6 +437,44 @@ export function findLatestCompletedBoundaryId(
     return candidate
 }
 
+/**
+ * The "waiting for the first assistant output" placeholder for a running
+ * turn. assistant-ui mints its own optimistic placeholder with a fresh id
+ * every time the external message array changes identity while the thread
+ * is running and the last message is not an assistant message, so a mere
+ * content update looks like a structural change to the message list
+ * (mouriya-s-lab/hapi#323, contract B.4). Supplying the placeholder here
+ * keeps its identity stable for the lifetime of the turn.
+ */
+export function buildRunningPlaceholder(
+    sessionId: string,
+    activeTurnStartedAt: number | null | undefined
+): ThreadMessage {
+    const id = `pending-turn:${sessionId}:${activeTurnStartedAt ?? 'unknown'}`
+    return fromThreadMessageLike({
+        id,
+        role: 'assistant',
+        content: [],
+        createdAt: new Date(activeTurnStartedAt ?? 0),
+        metadata: {
+            isOptimistic: true,
+            custom: { kind: 'assistant' } satisfies HappyChatMessageMetadata
+        }
+    }, id, { type: 'running' })
+}
+
+export function withRunningPlaceholder(
+    messages: ThreadMessage[],
+    isRunning: boolean,
+    sessionId: string,
+    activeTurnStartedAt: number | null | undefined
+): ThreadMessage[] {
+    if (!isRunning) return messages
+    const last = messages[messages.length - 1]
+    if (last?.role === 'assistant') return messages
+    return [...messages, buildRunningPlaceholder(sessionId, activeTurnStartedAt)]
+}
+
 function toThreadMessageLike(
     block: VisibleChatBlock,
     threadMessageId: string,
@@ -817,9 +855,15 @@ export function useHappyRuntime(props: {
     }, [props.onAbort])
 
     const runningSince = props.session.activeTurnStartedAt ?? 0
+    const activeTurnStartedAt = props.session.activeTurnStartedAt
+    const sessionId = props.session.id
+    const runtimeMessages = useMemo(
+        () => withRunningPlaceholder(convertedMessages, isRunning, sessionId, activeTurnStartedAt),
+        [activeTurnStartedAt, convertedMessages, isRunning, sessionId]
+    )
     const shareHiddenByMessageId = useMemo(
-        () => buildShareHiddenByMessageId(convertedMessages, isRunning, runningSince),
-        [convertedMessages, isRunning, runningSince]
+        () => buildShareHiddenByMessageId(runtimeMessages, isRunning, runningSince),
+        [runtimeMessages, isRunning, runningSince]
     )
     const extras = useMemo<HappyRuntimeExtras>(() => ({
         messagesVersion: props.messagesVersion,
@@ -833,7 +877,7 @@ export function useHappyRuntime(props: {
     const adapter = useMemo(() => ({
         isDisabled: props.isSending || (!props.session.active && !props.allowSendWhenInactive),
         isRunning,
-        messages: convertedMessages,
+        messages: runtimeMessages,
         extras,
         onNew,
         onCancel,
@@ -844,7 +888,7 @@ export function useHappyRuntime(props: {
         props.isSending,
         props.allowSendWhenInactive,
         isRunning,
-        convertedMessages,
+        runtimeMessages,
         extras,
         onNew,
         onCancel,

@@ -1065,26 +1065,115 @@ describe('history view and older pagination', () => {
         expect(getMessageWindowState(id).epoch).toBe(2)
     })
 
-    it('ends the current coverage run when an older page discovers a new epoch', async () => {
-        const id = sessionId('older-epoch-mismatch')
-        const getMessages = vi.fn()
-            .mockResolvedValueOnce(latestResponse([
-                makeAgentMessage({ id: 'initial', seq: 10, at: 10_000 })
+    // mouriya-s-lab/hapi#323 mechanism 1: an epoch change discovered by an
+    // older page must not replace the rows being read with the latest page.
+    function epochShiftApi(options: {
+        revalidated: DecryptedMessage[]
+        revalidationPage?: Partial<MessagesResponse['page']>
+    }) {
+        const calls: Array<Parameters<ApiClient['getMessages']>[1] | undefined> = []
+        const getMessages = vi.fn(async (_sessionId: string, requestOptions?: Parameters<ApiClient['getMessages']>[1]) => {
+            calls.push(requestOptions)
+            if (requestOptions?.beforeAt !== undefined) {
+                return beforeResponse([
+                    makeAgentMessage({ id: 'older', seq: 9, at: 9_000 })
+                ], {
+                    epoch: 2,
+                    hasMore: false,
+                    nextBeforeAt: 9_000,
+                    nextBeforeSeq: 9
+                })
+            }
+            if (requestOptions?.afterAt !== undefined && requestOptions?.untilAt != null) {
+                const response = afterResponse(options.revalidated, {
+                    epoch: 2,
+                    nextAfterAt: 12_000,
+                    nextAfterSeq: 12,
+                    snapshotHeadAt: 12_000,
+                    snapshotHeadSeq: 12
+                })
+                return { ...response, page: { ...response.page, ...options.revalidationPage } }
+            }
+            return latestResponse([
+                makeAgentMessage({ id: 'initial', seq: 10, at: 10_000 }),
+                makeAgentMessage({ id: 'tail', seq: 12, at: 12_000 })
             ], {
                 epoch: 1,
                 hasMore: true,
                 nextBeforeAt: 10_000,
                 nextBeforeSeq: 10
-            }))
-            .mockResolvedValueOnce(beforeResponse([], {
-                epoch: 2,
-                hasMore: false,
-                nextBeforeAt: null,
-                nextBeforeSeq: null
-            }))
-            .mockResolvedValueOnce(latestResponse([
-                makeAgentMessage({ id: 'fresh', seq: 20, at: 20_000 })
-            ], { epoch: 2 }))
+            })
+        }) as ApiClient['getMessages']
+        return { api: createApi(getMessages), calls }
+    }
+
+    it('keeps the older page and the rows being read when the page discovers a new epoch', async () => {
+        const id = sessionId('older-epoch-shift-keeps-window')
+        const { api, calls } = epochShiftApi({
+            revalidated: [
+                makeAgentMessage({ id: 'initial', seq: 10, at: 10_000 }),
+                makeAgentMessage({ id: 'inserted', seq: 13, at: 11_000 }),
+                makeAgentMessage({ id: 'tail', seq: 12, at: 12_000 })
+            ]
+        })
+        await syncTailMessages(api, id)
+        setMessageViewMode(id, 'history')
+
+        const loadedOlderPage = await fetchOlderMessages(api, id)
+
+        expect(loadedOlderPage).toMatchObject({ kind: 'applied', addedRenderableCount: 1 })
+        expect(getMessageWindowState(id).messages.map((message) => message.id))
+            .toEqual(['older', 'initial', 'inserted', 'tail'])
+        expect(getMessageWindowState(id)).toMatchObject({ epoch: 2, viewMode: 'history', isLoadingMore: false })
+        // Revalidation re-reads exactly the interval the window already held,
+        // without an epoch, and no latest-page reset is issued.
+        expect(calls[2]).toMatchObject({ afterAt: 10_000, afterSeq: 9, untilAt: 12_000, untilSeq: 12 })
+        expect(calls[2]?.epoch).toBeUndefined()
+        expect(calls).toHaveLength(3)
+    })
+
+    it('drops rows the hub no longer returns inside the held range after an epoch change', async () => {
+        const id = sessionId('older-epoch-shift-rewind')
+        const { api } = epochShiftApi({
+            revalidated: [
+                makeAgentMessage({ id: 'initial', seq: 10, at: 10_000 })
+            ]
+        })
+        await syncTailMessages(api, id)
+        setMessageViewMode(id, 'history')
+
+        const loadedOlderPage = await fetchOlderMessages(api, id)
+
+        expect(loadedOlderPage).toMatchObject({ kind: 'applied' })
+        expect(getMessageWindowState(id).messages.map((message) => message.id)).toEqual(['older', 'initial'])
+        expect(getMessageWindowState(id).epoch).toBe(2)
+    })
+
+    it('falls back to the latest reset when the held range cannot be re-read', async () => {
+        const id = sessionId('older-epoch-shift-fallback')
+        let escalated = false
+        const getMessages = vi.fn(async (_sessionId: string, requestOptions?: Parameters<ApiClient['getMessages']>[1]) => {
+            if (requestOptions?.beforeAt !== undefined) {
+                return beforeResponse([
+                    makeAgentMessage({ id: 'older', seq: 9, at: 9_000 })
+                ], { epoch: 2, hasMore: false, nextBeforeAt: 9_000, nextBeforeSeq: 9 })
+            }
+            if (requestOptions?.afterAt !== undefined && requestOptions?.untilAt != null) {
+                // The hub refuses the positional read and escalates to latest.
+                escalated = true
+                return latestResponse([
+                    makeAgentMessage({ id: 'fresh', seq: 20, at: 20_000 })
+                ], { epoch: 2, reset: true })
+            }
+            if (escalated) {
+                return latestResponse([
+                    makeAgentMessage({ id: 'fresh', seq: 20, at: 20_000 })
+                ], { epoch: 2, hasMore: true, nextBeforeAt: 20_000, nextBeforeSeq: 20 })
+            }
+            return latestResponse([
+                makeAgentMessage({ id: 'initial', seq: 10, at: 10_000 })
+            ], { epoch: 1, hasMore: true, nextBeforeAt: 10_000, nextBeforeSeq: 10 })
+        }) as ApiClient['getMessages']
         const api = createApi(getMessages)
         await syncTailMessages(api, id)
 
@@ -1093,6 +1182,66 @@ describe('history view and older pagination', () => {
         expect(loadedOlderPage).toEqual({ kind: 'stopped', reason: 'epoch-reset' })
         expect(getMessageWindowState(id).messages.map((message) => message.id)).toEqual(['fresh'])
         expect(getMessageWindowState(id).epoch).toBe(2)
+    })
+
+    it('merges instead of replacing when a tail sync hits an epoch reset while reading history', async () => {
+        const id = sessionId('tail-reset-while-reading-history')
+        const calls: Array<Parameters<ApiClient['getMessages']>[1] | undefined> = []
+        const getMessages = vi.fn(async (_sessionId: string, requestOptions?: Parameters<ApiClient['getMessages']>[1]) => {
+            calls.push(requestOptions)
+            if (requestOptions?.afterAt !== undefined && requestOptions?.untilAt != null) {
+                return afterResponse([
+                    makeAgentMessage({ id: 'initial', seq: 10, at: 10_000 }),
+                    makeAgentMessage({ id: 'inserted', seq: 21, at: 10_500 })
+                ], {
+                    epoch: 2,
+                    nextAfterAt: 10_500,
+                    nextAfterSeq: 21,
+                    snapshotHeadAt: 10_500,
+                    snapshotHeadSeq: 21
+                })
+            }
+            if (requestOptions?.afterAt !== undefined) {
+                return latestResponse([
+                    makeAgentMessage({ id: 'fresh', seq: 20, at: 20_000 })
+                ], { epoch: 2, reset: true })
+            }
+            return latestResponse([
+                makeAgentMessage({ id: 'initial', seq: 10, at: 10_000 })
+            ], { epoch: 1, hasMore: true, nextBeforeAt: 10_000, nextBeforeSeq: 10 })
+        }) as ApiClient['getMessages']
+        const api = createApi(getMessages)
+        await syncTailMessages(api, id)
+        setMessageViewMode(id, 'history')
+
+        await syncTailMessages(api, id)
+
+        expect(getMessageWindowState(id).messages.map((message) => message.id))
+            .toEqual(['initial', 'inserted', 'fresh'])
+        expect(getMessageWindowState(id)).toMatchObject({ epoch: 2, viewMode: 'history', isSyncingTail: false })
+        expect(calls[2]).toMatchObject({ afterAt: 10_000, afterSeq: 9, untilAt: 10_000, untilSeq: 10 })
+        expect(calls[2]?.epoch).toBeUndefined()
+    })
+
+    it('still replaces the window on an epoch reset while following the tail', async () => {
+        const id = sessionId('tail-reset-in-tail-mode')
+        const getMessages = vi.fn(async (_sessionId: string, requestOptions?: Parameters<ApiClient['getMessages']>[1]) => {
+            if (requestOptions?.afterAt !== undefined) {
+                return latestResponse([
+                    makeAgentMessage({ id: 'fresh', seq: 20, at: 20_000 })
+                ], { epoch: 2, reset: true })
+            }
+            return latestResponse([
+                makeAgentMessage({ id: 'initial', seq: 10, at: 10_000 })
+            ], { epoch: 1, hasMore: true, nextBeforeAt: 10_000, nextBeforeSeq: 10 })
+        }) as ApiClient['getMessages']
+        const api = createApi(getMessages)
+        await syncTailMessages(api, id)
+
+        await syncTailMessages(api, id)
+
+        expect(getMessageWindowState(id).messages.map((message) => message.id)).toEqual(['fresh'])
+        expect(getMessageWindowState(id)).toMatchObject({ epoch: 2, viewMode: 'tail' })
     })
 
     it('protects regular conversation rows from an agent-run flood', () => {

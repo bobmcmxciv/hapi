@@ -1,0 +1,8 @@
+# #323 mechanism-1 reproduction (before fix) — 2026-09-06T14:01Z
+hub: local real hub bun run hub/src/index.ts, HAPI_HOME=.tmp/hub323, :3399; web: vite dev :5199 proxy; browser: headless Chrome 150 CDP :9333 (dedicated)
+session B: 352f27be-1cb9-4a07-b20c-e88cf205268d (850 alternating user/agent rows seeded via /cli socket 'message' events)
+baseline: history mode, window n=600 seq 251..850, reading Q#0301 at viewport top (scrollTop 7985)
+trigger: real CLI socket 'message' with createdAt inside held range -> hub epoch 0->1 (bumpMessageEpoch via out-of-order insert)
+after SSE: window unchanged n=600, anchor present
+action: user pulls older at top (Home key) -> hub served beforeAt=...&beforeSeq=251 (200 rows, epoch 1) then client issued limit=200 latest reset
+result: store epoch=1 n=200 oldestSeq=653 newestSeq=852; anchor Q#0301 removed from DOM; "dom":198 "visibleFirst":"Q#0653: user question number 0653 06:30" "scrollTop":0 "distanceFromBottom":32539 

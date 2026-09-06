@@ -578,6 +578,129 @@ function applyLatestResponse(
     })
 }
 
+type HeldRange = {
+    /** Exclusive lower bound: strictly before the oldest retained server row. */
+    after: MessagePosition
+    /** Inclusive upper bound: the newest position this window claims to cover. */
+    until: MessagePosition
+}
+
+/**
+ * The position interval the window currently claims as continuous coverage.
+ * An epoch change only says that rows were inserted before the head or
+ * removed (rewind); re-reading this interval under the new epoch lets the
+ * window learn what changed without discarding what the user is reading.
+ */
+function getHeldRange(state: InternalState): HeldRange | null {
+    const oldest = readPosition(state.oldestPositionAt, state.oldestPositionSeq)
+        ?? derivePosition(state.messages, 'oldest')
+    const newest = getNewestCursor(state) ?? derivePosition(state.messages, 'newest')
+    if (!oldest || !newest || comparePosition(newest, oldest) < 0) {
+        return null
+    }
+    return { after: { at: oldest.at, seq: oldest.seq - 1 }, until: newest }
+}
+
+type HeldRangeRevalidation =
+    | { kind: 'ok'; epoch: number; rows: DecryptedMessage[] }
+    | { kind: 'stale' }
+    | { kind: 'unavailable' }
+
+const MAX_REVALIDATION_PAGES = 12
+
+/**
+ * Re-reads `range` page by page. The request carries no epoch on purpose:
+ * that keeps the hub on the positional path, so it answers with the rows it
+ * has now instead of escalating to a latest-page reset.
+ */
+async function fetchHeldRangeRows(
+    api: ApiClient,
+    sessionId: string,
+    range: HeldRange,
+    isCurrent: () => boolean
+): Promise<HeldRangeRevalidation> {
+    let rows: DecryptedMessage[] = []
+    let after = range.after
+    let epoch: number | null = null
+    let restarts = 0
+    for (let page = 0; page < MAX_REVALIDATION_PAGES; page++) {
+        const response = await api.getMessages(sessionId, {
+            afterAt: after.at,
+            afterSeq: after.seq,
+            untilAt: range.until.at,
+            untilSeq: range.until.seq,
+            limit: PAGE_SIZE
+        })
+        if (!isCurrent()) {
+            return { kind: 'stale' }
+        }
+        if (response.page.direction !== 'after' || response.page.reset) {
+            return { kind: 'unavailable' }
+        }
+        if (epoch !== null && response.page.epoch !== epoch && restarts < 2) {
+            // The epoch moved again while we were reading: start over so the
+            // pages we keep all describe one epoch.
+            restarts += 1
+            rows = []
+            after = range.after
+            epoch = null
+            page = -1
+            continue
+        }
+        epoch = response.page.epoch
+        rows.push(...response.messages)
+        const nextAfter = pagePosition(response.page.nextAfterAt, response.page.nextAfterSeq)
+        if (!response.page.hasMore || !nextAfter || comparePosition(nextAfter, after) <= 0) {
+            return { kind: 'ok', epoch, rows }
+        }
+        after = nextAfter
+    }
+    return { kind: 'unavailable' }
+}
+
+/**
+ * Applies a re-read of `range`: server rows inside the interval that the hub
+ * no longer returns were deleted (rewind / clear) and leave the window;
+ * everything the hub returned is merged in. Trimming is prepend-sided so
+ * inserted rows can only evict the tail, never the side being read.
+ */
+function applyRevalidatedRange(
+    previous: InternalState,
+    range: HeldRange,
+    rows: DecryptedMessage[],
+    epoch: number,
+    regularLimit: number
+): InternalState {
+    const serverIds = new Set(rows.map((row) => row.id))
+    const insideRange = (message: DecryptedMessage): boolean => {
+        const position = messagePosition(message)
+        return position !== null
+            && comparePosition(position, range.after) > 0
+            && comparePosition(position, range.until) <= 0
+    }
+    const survivors = previous.messages.filter((message) => (
+        optimisticMessage(message)
+        || isQueuedForInvocation(message)
+        || !insideRange(message)
+        || serverIds.has(message.id)
+    ))
+    const merged = mergeMessages(survivors, rows.filter(shouldRetainWindowMessage))
+    const { kept, dropped } = trimPreservingQueued(merged, regularLimit, 'prepend')
+    const newestKept = derivePosition(kept, 'newest')
+    const tailEvicted = previous.requiresLatestReset || dropped.length > 0
+    const newest = tailEvicted
+        ? newestKept
+        : (newestKept && comparePosition(newestKept, range.until) > 0 ? newestKept : range.until)
+    return buildState(previous, {
+        messages: kept,
+        epoch,
+        newestPositionAt: newest?.at ?? null,
+        newestPositionSeq: newest?.seq ?? null,
+        requiresLatestReset: tailEvicted,
+        warning: null
+    })
+}
+
 function beginTailSync(sessionId: string): number {
     let generation = 0
     updateState(sessionId, (previous) => {
@@ -659,6 +782,46 @@ async function runTailSync(api: ApiClient, sessionId: string): Promise<void> {
             if (!isCurrentTailSync(sessionId, generation)) return
 
             if (response.page.reset || response.page.direction === 'latest') {
+                const current = getState(sessionId)
+                const heldRange = current.viewMode === 'history' ? getHeldRange(current) : null
+                if (heldRange) {
+                    // Reading history: the epoch moved, but replacing the window
+                    // with the latest page would throw away the rows the user is
+                    // on (#323). Merge the snapshot we were handed, then re-read
+                    // the covered interval under the new epoch.
+                    updateState(sessionId, (previous) => {
+                        if (previous.syncGeneration !== generation) return previous
+                        return mergeIntoWindow(previous, response.messages)
+                    })
+                    const revalidation = await fetchHeldRangeRows(
+                        api,
+                        sessionId,
+                        heldRange,
+                        () => isCurrentTailSync(sessionId, generation)
+                    )
+                    if (revalidation.kind === 'stale') return
+                    updateState(sessionId, (previous) => {
+                        if (previous.syncGeneration !== generation) return previous
+                        if (revalidation.kind !== 'ok') {
+                            // Could not re-read the interval: history is unverifiable,
+                            // fall back to the latest-page reset on the next sync.
+                            return buildState(previous, {
+                                epoch: null,
+                                newestPositionAt: null,
+                                newestPositionSeq: null,
+                                requiresLatestReset: true
+                            })
+                        }
+                        return applyRevalidatedRange(
+                            previous,
+                            heldRange,
+                            revalidation.rows,
+                            revalidation.epoch,
+                            HISTORY_WINDOW_SIZE
+                        )
+                    })
+                    break
+                }
                 updateState(sessionId, (previous) => {
                     if (previous.syncGeneration !== generation) return previous
                     return applyLatestResponse(previous, response, {
@@ -840,19 +1003,40 @@ export async function fetchOlderMessages(
             return { kind: 'stopped', reason: 'invalidated' }
         }
 
+        let revalidated: { range: HeldRange; rows: DecryptedMessage[]; epoch: number } | null = null
         if (initial.epoch !== null && response.page.epoch !== initial.epoch) {
-            updateState(sessionId, (previous) => {
-                if (previous.olderGeneration !== generation) return previous
-                return buildState(previous, {
-                    isLoadingMore: false,
-                    epoch: null,
-                    newestPositionAt: null,
-                    newestPositionSeq: null,
-                    requiresLatestReset: true
+            // The hub's epoch moved while this page was in flight: rows were
+            // inserted before the head or removed (rewind). The page itself is a
+            // valid slice by position, so keep it and re-read the interval this
+            // window already holds instead of discarding the user's reading
+            // range for the latest page (#323).
+            const heldRange = getHeldRange(initial)
+            const revalidation = heldRange
+                ? await fetchHeldRangeRows(
+                    api,
+                    sessionId,
+                    heldRange,
+                    () => getState(sessionId).olderGeneration === generation
+                )
+                : { kind: 'unavailable' as const }
+            if (revalidation.kind === 'stale') {
+                return { kind: 'stopped', reason: 'invalidated' }
+            }
+            if (revalidation.kind !== 'ok' || !heldRange) {
+                updateState(sessionId, (previous) => {
+                    if (previous.olderGeneration !== generation) return previous
+                    return buildState(previous, {
+                        isLoadingMore: false,
+                        epoch: null,
+                        newestPositionAt: null,
+                        newestPositionSeq: null,
+                        requiresLatestReset: true
+                    })
                 })
-            })
-            await syncTailMessages(api, sessionId, { ensureAfterCurrent: true })
-            return { kind: 'stopped', reason: 'epoch-reset' }
+                await syncTailMessages(api, sessionId, { ensureAfterCurrent: true })
+                return { kind: 'stopped', reason: 'epoch-reset' }
+            }
+            revalidated = { range: heldRange, rows: revalidation.rows, epoch: revalidation.epoch }
         }
 
         let historyVersion = 0
@@ -863,7 +1047,12 @@ export async function fetchOlderMessages(
         // expose rows that this state has already evicted.
         updateState(sessionId, (previous) => {
             if (previous.olderGeneration !== generation) return previous
-            addedRenderableCount = countNewRenderableMessages(previous, response.messages)
+            // Revalidated rows and the older page land in one publication so the
+            // scroll anchor restore sees a single history version.
+            const base = revalidated
+                ? applyRevalidatedRange(previous, revalidated.range, revalidated.rows, revalidated.epoch, OLDER_LOAD_WINDOW_SIZE)
+                : previous
+            addedRenderableCount = countNewRenderableMessages(base, response.messages)
             const nextHistoryVersion = previous.historyVersion + 1
             if (options.onBeforeApply && !options.onBeforeApply(nextHistoryVersion)) {
                 applyRejected = true
@@ -873,14 +1062,14 @@ export async function fetchOlderMessages(
                     warning: null
                 })
             }
-            const merged = mergeIntoWindow(previous, response.messages, {
+            const merged = mergeIntoWindow(base, response.messages, {
                 mode: 'prepend',
                 regularLimit: OLDER_LOAD_WINDOW_SIZE
             })
             historyVersion = nextHistoryVersion
             return buildState(merged, {
                 hasMore: response.page.hasMore,
-                epoch: response.page.epoch,
+                epoch: revalidated ? revalidated.epoch : response.page.epoch,
                 oldestPositionAt: response.page.nextBeforeAt,
                 oldestPositionSeq: response.page.nextBeforeSeq,
                 isLoadingMore: false,

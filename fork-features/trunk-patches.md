@@ -243,6 +243,24 @@ Each upstream sync must re-check for native RPC host-frame hooks, machine-RPC
 registration, settings contributions, and model-selector providers. Remove a
 trunk hook when upstream exposes an equivalent typed seam.
 
+## Chat history continuity under epoch changes (mouriya-s-lab/hapi#323, 2026-09-06)
+
+Two of the six mechanisms behind "reading history is interrupted while an
+agent is running" (#323) are fixed here as trunk patches; the remaining
+identity/ownership-mapping work (#330, #333, #334) stays with upstream and is
+not duplicated. Reproduction and verification recipe: local real hub +
+`/cli` socket seeding + headless Chrome over raw CDP, see
+`docs/evidence/323-history-epoch-continuity.md`.
+
+| Files | Missing upstream seam | Why it cannot move out | Runtime path | Sync verification |
+|---|---|---|---|---|
+| `web/src/lib/message-window-store.ts` and test | No window-store policy hook for an epoch change discovered while the user is reading history | The hub's message epoch only says "rows were inserted before the head or removed"; the store used to answer every mismatch by discarding the older page and replacing the window with the latest page. The fix keeps the page and re-reads the held interval with the existing `after`/`until` positional API (no epoch parameter, so the hub never escalates to a reset); rows the hub no longer returns inside the interval are dropped, inserted rows are merged. Both entry points are patched: `fetchOlderMessages` (older page carries a new epoch) and `runTailSync` (after-request answered with `reset` while `viewMode === 'history'`). Tail mode keeps the original replace behavior. No wire change. | user pulls older / SSE reconnect → epoch mismatch → held-range `after+until` re-read → single publication with the older page (one `historyVersion`) → HappyThread anchor restore | Seed ≥800 rows through the real `/cli` socket, scroll into history, insert one row with `createdAt` before the head through the same socket (hub bumps the epoch), pull older at the top: the window must keep the rows being read, adopt the new epoch, and the hub log must show `beforeAt` followed by `afterAt&untilAt` reads and no bare `limit=200` reset. Repeat with a hub restart while reading (SSE reconnect path). |
+| `web/src/lib/assistant-runtime.ts` and test | No external-store placeholder identity provider in assistant-ui | `@assistant-ui/core`'s external-store runtime mints a fresh optimistic id (`hasUpcomingMessage` → `generateId()`) every time the external message array changes identity while running and the last message is not an assistant message, so content-only updates read as structural changes to the thread list (#323 contract B.4). The adapter now appends its own `pending-turn:<session>:<activeTurnStartedAt>` assistant placeholder through `fromThreadMessageLike`, which keeps one identity per turn; a new `activeTurnStartedAt` is a new waiting lifecycle. | running turn without assistant output → adapter placeholder → thread list / message renderer (same empty-assistant rendering as the library placeholder) | While a session reports `thinking` with no assistant output yet, append rows over the socket and confirm the last assistant element id stays `pending-turn:…`; it must disappear when assistant output arrives or `thinking` ends. |
+
+Remove the store patch when upstream lands its own #326/#327 held-range
+contract; remove the placeholder patch when assistant-ui exposes a stable
+optimistic-id hook or upstream ships #331.
+
 ## multi-user gateway (2026-07-16)
 
 Account, API-token, ownership, grant, authorization, cross-namespace routing,
