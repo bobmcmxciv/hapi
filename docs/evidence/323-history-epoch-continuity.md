@@ -88,3 +88,7 @@
 |---|-----------|-------|---------|-----|--------|
 | 1 | environment | 生产换芯后真会话翻页 | 换芯后在生产大会话（>500 条）PageUp 翻两页，然后 rewind 自己的测试会话或等待一次乱序插入 | ecs + browser | 阅读位置保持，无整窗替换；`docker logs hapi-hub` 里 beforeAt 后跟 after+until |
 | 2 | integration | 真实 Claude 会话运行中占位 | 在生产对一个自己的会话发消息，模型回复前观察 DOM 末尾 assistant 元素 id | ecs + browser | id 形如 `pending-turn:<sid>:<activeTurnStartedAt>` 且流式输出前不变 |
+
+**2026-09-06 21:43Z fork.15（含 07ffd49d）换芯后在生产的实测**：
+- 行 2 通过：正在运行的会话 c7e6b1d5 的 DOM 末尾元素 id = `hapi-message-pending-turn:c7e6b1d5-…`，role assistant，`data-status=running`。
+- 行 1 部分完成：会话 89311e29（epoch 16，数千行）Home/PageUp 三轮，窗口 193→393→791→800 行（oldest seq 1088→288），无崩溃，20 秒空闲后锚点仍在 DOM。期间 epoch 未变化，**区间复核路径在生产尚未被触发**；触发需要一次 rewind 或乱序插入，未执行。
