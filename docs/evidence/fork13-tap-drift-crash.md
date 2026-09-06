@@ -35,7 +35,16 @@ Error: Maximum update depth exceeded. The result of getSnapshot should be cached
 | # | Dimension | Check | Command | Env | Expect | 实测 |
 |---|-----------|-------|---------|-----|--------|------|
 | 1 | assumption | 修后 lockfile 可被冻结安装 | 新 worktree + 修后 bun.lock：`bun install --frozen-lockfile` | local | exit 0，`node_modules/@assistant-ui/tap` = 0.9.8，dist 中无 "should be cached" | 通过：`1631 packages installed [685.81s]`，exit 0；tap 0.9.8、core 0.2.23、保护文本 0 个文件（修前同一命令在同样的干净 worktree 里 exit 1：`lockfile had changes, but lockfile is frozen`） |
-| 2 | function | 漂移安装确实复现崩溃 | 另一 worktree 非冻结安装（tap 0.9.16）起 dev 前端代理生产，打开会话 4cd662c8 | local + browser | 抛同一错误 | 待填 |
-| 3 | environment | 修后构建的二进制不含保护代码 | `grep -c "should be cached to avoid an infinite loop" <linux 二进制>` | local | 0 | 待填 |
-| 4 | integration | 换芯后线上会话页可开 | 无头 Chrome 打开 `https://bob…/sessions/4cd662c8…`，30s 内 `Runtime.exceptionThrown` 为空，DOM 有消息行 | ecs + browser | 无异常 | 待换芯 |
-| 5 | integration | 换芯后 ClientError 不再新增 | `docker logs hapi-hub --since <换芯时刻> | grep -c "update depth"` | ecs | 0 | 待换芯 |
+| 2 | function | 漂移安装确实复现崩溃 | 另一 worktree 非冻结安装（tap 0.9.16）起 dev 前端代理生产，打开会话 4cd662c8 | local + browser | 抛同一错误 | 未完成：非冻结安装在本机跑了 40 分钟仍在 Resolving，见「继承验证义务」 |
+| 3 | environment | 修后构建的二进制不含 tap 保护 | `grep -c -a "Maximum update depth exceeded. The result of getSnapshot should be cached" <linux 二进制>` | local | 0 | 待填（vircs 备用构建进行中） |
+| 4 | integration | 线上回滚后不再崩 | 同事会话 784e6db3 于 21:09:01Z 用 `cp` 把 `/root/hapi.bin.pre-fork13-20260906T182454Z`（fork.12）放回换芯目标；我独立核实：`sha256sum` 前缀 7fa021f1、容器 21:09:12Z 起 running、`docker logs hapi-hub --since 2026-09-06T21:09:00Z \| grep -c ClientError` = 0、公开站点 `index-Bp64Q_Ce.js` → `vendor-assistant-Doa23Z32.js` 前缀整句计数 0 | ecs + browser | 无新增崩溃 | 通过（fork.13/14 功能随之暂时下线） |
+| 5 | environment | fork.15 换芯前门槛 | 4SQALMG 删 node_modules → `bun install --frozen-lockfile`（必须 exit 0）→ tap 0.9.8 → dist 与二进制前缀整句计数 0 | 4SQALMG + ecs | 全部满足才换芯 | 待同事会话执行 |
+
+**判据勘误**：不带前缀的短子串 `should be cached to avoid an infinite loop` 在好的 fork.12 二进制里也命中 3 次（react-dom 的 dev 警告文本），fork.14 是 4 次；只有带 `Maximum update depth exceeded. ` 前缀的整句是 tap 的错误：fork.12 = 0，fork.14 = 1（2026-09-06 在 ECS 上对两个二进制实测）。以后一律用整句。
+
+## 继承验证义务（本机本轮跑不完，不可二次推迟）
+
+| # | Dimension | Check | Command | Env | Expect |
+|---|-----------|-------|---------|-----|--------|
+| 1 | function | 漂移安装在 dev 也能复现崩溃 | 干净目录用**修复前**的 bun.lock（`git show 24c242da:bun.lock`）非冻结安装 → 确认 tap ≥0.9.13 → `vite` 代理生产 → 打开任一 Claude 会话 | local + browser | 抛同一错误；换成修复后的 lockfile 冻结安装则不抛 |
+| 2 | integration | fork.15 换芯后会话页可开 | 无头 Chrome 打开 `https://bob…/sessions/4cd662c8…`，30s 内 `Runtime.exceptionThrown` 为空，DOM 有消息行；`docker logs hapi-hub --since <换芯时刻> \| grep -c "update depth"` = 0 | ecs + browser | 无异常 |
