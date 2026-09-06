@@ -80,8 +80,8 @@ cli/src/modules/common/generatedImages.ts	trunk-patch	#175	origin-only delta; fo
 cli/src/modules/common/handlers/ccSwitch.ts	fork-owned	#173	origin-only delta; fork commits 8d828436,51929072,fc7d7b4a,a8815d47
 cli/src/modules/common/handlers/files.test.ts	fork-owned	#177	origin-only delta; fork commits bfa252da
 cli/src/modules/common/handlers/files.ts	trunk-patch	#176	origin-only delta; fork commits b4c31e88,bfa252da
-cli/src/modules/common/hooks/generateHookSettings.test.ts	fork-owned	#174	origin-only delta; fork commits 8a621492
-cli/src/modules/common/hooks/generateHookSettings.ts	trunk-patch	#174	origin-only delta; fork commits 8a621492
+cli/src/modules/common/hooks/generateHookSettings.test.ts	fork-owned	#174	origin-only delta; fork commits 8a621492; claude-proxy-models: settings-level env override 用例
+cli/src/modules/common/hooks/generateHookSettings.ts	trunk-patch	#174	origin-only delta; fork commits 8a621492; claude-proxy-models: buildHookSettings 第 6 参 settingsEnvOverride + readSettingsEnvOverride
 cli/src/modules/common/permission/BasePermissionHandler.test.ts	upstream-sync	#180	merge-base 87f5c78a; changed only on upstream/main
 cli/src/modules/common/permission/BasePermissionHandler.ts	trunk-patch	#176	both refs changed; fork commits b4c31e88,d28853c7
 cli/src/modules/common/registerCommonHandlers.ts	trunk-patch	#173	origin-only delta; fork commits 3994ee9a,fc7d7b4a,a8815d47
@@ -114,7 +114,7 @@ cli/src/persistence.ts	upstream-sync	#180	merge-base 87f5c78a; changed only on u
 cli/src/runner/buildCliArgs.test.ts	trunk-patch	#170	origin-only delta; fork commits e009becc,fc377386,3686370a
 cli/src/runner/controlClient.ts	upstream-sync	#180	merge-base 87f5c78a; changed only on upstream/main
 cli/src/runner/controlServer.ts	trunk-patch	#173	origin-only delta; fork commits 9e76994b
-cli/src/runner/run.ts	trunk-patch	#173	both refs changed; fork commits 51929072,9e76994b,e009becc,fc377386,3686370a
+cli/src/runner/run.ts	trunk-patch	#173	both refs changed; fork commits 51929072,9e76994b,e009becc,fc377386,3686370a; claude-proxy-models: 供应商 env 同时以 HAPI_CLAUDE_SETTINGS_ENV_OVERRIDE 交给 wrapper（进程 env 会被 settings 级 env 盖掉）
 cli/src/runner/runnerIdentity.test.ts	upstream-sync	#180	merge-base 87f5c78a; changed only on upstream/main
 cli/src/runner/runnerIdentity.ts	upstream-sync	#180	merge-base 87f5c78a; changed only on upstream/main
 cli/src/ui/doctor.test.ts	upstream-sync	#180	merge-base 87f5c78a; changed only on upstream/main

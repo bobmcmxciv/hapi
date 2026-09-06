@@ -667,6 +667,14 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
         const providerEnv = agent === 'claude' && options.ccSwitchProviderId
           ? getCcSwitchProviderLaunchEnv(options.ccSwitchProviderId)
           : {};
+        // fork(claude-proxy-models)：进程 env 会被 Claude Code 的 settings 级 env 盖掉——
+        // wrapper 生成的 --settings 钩子文件整份复制了 ~/.claude/settings.json（含 cc-switch
+        // 写进去的当前供应商 ANTHROPIC_*），命令行级设置优先级高于进程 env（2026-09-06
+        // 生产实测：吹雪3080 当前供应商 GLM，选 cx2cc 供应商 + gpt-6-astra 仍跑 glm-5.3）。
+        // 所以同时把供应商 env 交给 wrapper，让它在生成钩子设置时覆盖 settings.env。
+        const providerSettingsOverride = Object.keys(providerEnv).length > 0
+          ? { HAPI_CLAUDE_SETTINGS_ENV_OVERRIDE: JSON.stringify(providerEnv) }
+          : {};
         happyProcess = spawnHappyCLI(args, {
           cwd: spawnDirectory,
           detached: true,  // Sessions stay alive when runner stops
@@ -674,7 +682,8 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
           env: {
             ...process.env,
             ...extraEnv,
-            ...providerEnv
+            ...providerEnv,
+            ...providerSettingsOverride
           }
         });
 

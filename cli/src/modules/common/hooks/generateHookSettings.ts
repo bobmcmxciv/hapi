@@ -82,12 +82,38 @@ function asRecord(value: unknown): Record<string, unknown> {
         : {};
 }
 
+/**
+ * fork(claude-proxy-models)：runner 为「本会话指定的 cc-switch 供应商」交来的 env。
+ * 钩子设置文件是 ~/.claude/settings.json 的整份副本再加 hooks，而 `--settings` 是命令行级
+ * 设置，其 `env` 盖过进程 env——所以供应商 env 必须落在这里的 `env` 里才真正生效。
+ * 来源：环境变量 HAPI_CLAUDE_SETTINGS_ENV_OVERRIDE（JSON 对象，字符串值）。坏 JSON 忽略。
+ */
+export function readSettingsEnvOverride(raw: string | undefined = process.env.HAPI_CLAUDE_SETTINGS_ENV_OVERRIDE): Record<string, string> {
+    if (!raw || !raw.trim()) {
+        return {};
+    }
+    try {
+        const parsed = JSON.parse(raw) as unknown;
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+            return {};
+        }
+        return Object.fromEntries(
+            Object.entries(parsed as Record<string, unknown>)
+                .filter(([key, value]) => key.trim().length > 0 && typeof value === 'string')
+        ) as Record<string, string>;
+    } catch {
+        logger.debug('[HookSettings] Ignoring malformed HAPI_CLAUDE_SETTINGS_ENV_OVERRIDE');
+        return {};
+    }
+}
+
 export function buildHookSettings(
     machineSettings: ClaudeSettings,
     command: string,
     hooksEnabled?: boolean,
     trackPermissionMode?: boolean,
-    includePreToolUse?: boolean
+    includePreToolUse?: boolean,
+    settingsEnvOverride?: Record<string, string>
 ): HookSettings {
     const commandHook = {
         hooks: [
@@ -130,6 +156,12 @@ export function buildHookSettings(
         ...machineSettings,
         hooks
     };
+    if (settingsEnvOverride && Object.keys(settingsEnvOverride).length > 0) {
+        settings.env = {
+            ...asRecord(machineSettings.env),
+            ...settingsEnvOverride
+        };
+    }
     if (hooksEnabled !== undefined) {
         settings.hooksConfig = {
             ...asRecord(machineSettings.hooksConfig),
@@ -166,7 +198,8 @@ export function generateHookSettingsFile(
         hookCommand,
         options.hooksEnabled,
         options.trackPermissionMode,
-        options.includePreToolUse
+        options.includePreToolUse,
+        readSettingsEnvOverride()
     );
 
     writeFileSync(filepath, JSON.stringify(settings, null, 4));

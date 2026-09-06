@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import {
     buildAgyHooksJson,
     buildHookSettings,
+    readSettingsEnvOverride,
     cleanupHookSettingsFile,
     generateHookSettingsFile
 } from './generateHookSettings'
@@ -108,6 +109,46 @@ describe('generateHookSettingsFile', () => {
         } finally {
             cleanupHookSettingsFile(generatedPath, 'test')
         }
+    })
+})
+
+// fork(claude-proxy-models)：本会话指定的 cc-switch 供应商 env 必须落进 settings.env，
+// 否则被整份复制过来的 ~/.claude/settings.json env（cc-switch 当前供应商）盖掉。
+describe('buildHookSettings settings-level env override', () => {
+    it('overrides the copied machine env keys and keeps the rest', () => {
+        const settings = buildHookSettings(
+            { env: { ANTHROPIC_BASE_URL: 'https://glm.example/api', ANTHROPIC_MODEL: 'glm-5.3', KEEP: '1' } },
+            'forward-cmd',
+            undefined,
+            false,
+            false,
+            { ANTHROPIC_BASE_URL: 'http://127.0.0.1:18901', ANTHROPIC_AUTH_TOKEN: 'tok' }
+        )
+        expect(settings.env).toEqual({
+            ANTHROPIC_BASE_URL: 'http://127.0.0.1:18901',
+            ANTHROPIC_MODEL: 'glm-5.3',
+            KEEP: '1',
+            ANTHROPIC_AUTH_TOKEN: 'tok'
+        })
+    })
+
+    it('adds an env block when the machine settings had none', () => {
+        const settings = buildHookSettings({}, 'forward-cmd', undefined, false, false, { ANTHROPIC_BASE_URL: 'http://x' })
+        expect(settings.env).toEqual({ ANTHROPIC_BASE_URL: 'http://x' })
+    })
+
+    it('leaves the machine env untouched without an override', () => {
+        const machine = { env: { ANTHROPIC_BASE_URL: 'https://glm.example/api' } }
+        expect(buildHookSettings(machine, 'forward-cmd').env).toEqual(machine.env)
+        expect(buildHookSettings(machine, 'forward-cmd', undefined, false, false, {}).env).toEqual(machine.env)
+    })
+
+    it('parses HAPI_CLAUDE_SETTINGS_ENV_OVERRIDE and ignores garbage', () => {
+        expect(readSettingsEnvOverride('{"ANTHROPIC_BASE_URL":"http://x","N":1,"":"skip"}')).toEqual({ ANTHROPIC_BASE_URL: 'http://x' })
+        expect(readSettingsEnvOverride('not json')).toEqual({})
+        expect(readSettingsEnvOverride('[1]')).toEqual({})
+        expect(readSettingsEnvOverride(undefined)).toEqual({})
+        expect(readSettingsEnvOverride('   ')).toEqual({})
     })
 })
 
