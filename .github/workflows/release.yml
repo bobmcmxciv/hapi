@@ -16,7 +16,10 @@ jobs:
             - uses: oven-sh/setup-bun@v2
               with:
                   bun-version: 1.3.14
-            - run: bun install
+            # 冻结 lockfile：lockfile 解析失败或与 manifest 不一致时必须失败，
+            # 不能静默按 semver 重解析（2026-09-06 fork.13 事故：坏 lockfile 被忽略，
+            # @assistant-ui/tap 漂到 0.9.16 与冻结的 core 0.2.23 相撞，会话页必崩）。
+            - run: bun install --frozen-lockfile
             - run: bun run build:single-exe:all
               env:
                   # Bake the fork tag (e.g. v0.20.0-fork.3) into the web bundle so
