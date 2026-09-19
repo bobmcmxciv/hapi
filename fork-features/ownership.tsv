@@ -24,6 +24,7 @@ cli/src/api/api.ts	trunk-patch	#174	origin-only delta; fork commits 413e76cc
 cli/src/api/apiMachine.test.ts	trunk-patch	#177	both refs changed; fork commits c853bcbf,7e3edb0f
 cli/src/api/apiMachine.ts	trunk-patch	#173	both refs changed; fork commits 51929072,9e76994b,3994ee9a,c853bcbf,fc377386,e1611788
 cli/src/api/apiSession.test.ts	trunk-patch	#174	origin-only delta; fork commits 6ba438a1
+cli/src/api/apiSession.ts	trunk-patch	fork.16	origin-only delta; fork commits 05710223；缺 upstream seam：blob 存储与上传器没有注册点
 cli/src/claude/claudeLocalLauncher.test.ts	upstream-fix	#179	origin-only delta; fork commits d1f9f394; disposition upstream-issue https://github.com/tiann/hapi/issues/1077: general fix reported against latest upstream main
 cli/src/claude/claudeRemote.ts	trunk-patch	#170	origin-only delta; fork commits e009becc,fc377386
 cli/src/claude/model.test.ts	trunk-patch	#174	origin-only delta; fork commits 7e3edb0f
@@ -73,6 +74,8 @@ cli/src/kimi/kimiRemoteLauncher.test.ts	upstream-sync	#180	merge-base 87f5c78a; 
 cli/src/kimi/kimiRemoteLauncher.ts	trunk-patch	#175	both refs changed; fork commits d28853c7
 cli/src/modules/common/ccSwitch.ts	fork-owned	#173	origin-only delta; fork commits 51929072,92e8a6e1,9e76994b,faec872c,fc7d7b4a,a8815d47
 cli/src/modules/common/displayImagePrompt.ts	fork-owned	#176	origin-only delta; fork commits b4c31e88,d28853c7
+cli/src/modules/common/generatedBlobUpload.test.ts	fork-owned	fork.16	origin-only delta; fork commits 05710223（发送即上传 / hub blob 存储）
+cli/src/modules/common/generatedBlobUpload.ts	fork-owned	fork.16	origin-only delta; fork commits 05710223（发送即上传 / hub blob 存储）
 cli/src/modules/common/generatedFiles.test.ts	fork-owned	#176	origin-only delta; fork commits 3edb7db8,b4c31e88
 cli/src/modules/common/generatedFiles.ts	fork-owned	#176	origin-only delta; fork commits 3edb7db8,b4c31e88
 cli/src/modules/common/generatedImages.test.ts	trunk-patch	#175	origin-only delta; fork commits d28853c7
@@ -220,6 +223,12 @@ fork-features/usage/usageAgentFrames.test.ts	fork-owned	usage-page	origin-only d
 fork-features/usage/usageAggregate.test.ts	fork-owned	usage-page	origin-only delta; token usage stats (2026-07-28)
 fork-features/usage/usageAggregate.ts	fork-owned	usage-page	origin-only delta; token usage stats SQL + response assembly (2026-07-28)
 hub/package.json	trunk-patch	claude-proxy-models	trunk hook for claude-proxy-models（见 trunk-patches.md 2026-09-06 节）; test script 加 ../fork-features/claude-proxy-models
+hub/src/blobs/blobFetcher.test.ts	fork-owned	fork.16	origin-only delta; fork commits 05710223（发送即上传 / hub blob 存储）
+hub/src/blobs/blobFetcher.ts	fork-owned	fork.16	origin-only delta; fork commits 05710223（发送即上传 / hub blob 存储）
+hub/src/blobs/blobStore.test.ts	fork-owned	fork.16	origin-only delta; fork commits 05710223（发送即上传 / hub blob 存储）
+hub/src/blobs/blobStore.ts	fork-owned	fork.16	origin-only delta; fork commits 05710223（发送即上传 / hub blob 存储）
+hub/src/blobs/index.ts	fork-owned	fork.16	origin-only delta; fork commits 05710223（发送即上传 / hub blob 存储）
+hub/src/configuration.ts	trunk-patch	fork.16	origin-only delta; fork commits 05710223；缺 upstream seam：blob 存储与上传器没有注册点
 hub/src/cursor/cursorLegacyMigrator.ts	upstream-fix	win-sqlite-gc	删源库吃 Windows EBUSY：sqlite3_close_v2 句柄挂 GC，win32 下 GC 后重试一次
 hub/src/fork-features/task-panel/taskProjection.test.ts	fork-owned	#181	origin-only delta; fork commits 17fee65e
 hub/src/fork-features/task-panel/taskProjection.ts	fork-owned	#181	origin-only delta; fork commits 17fee65e
@@ -250,6 +259,7 @@ hub/src/sync/syncEngine.ts	trunk-patch	#173,#256	closed sync engine; provider/us
 hub/src/telegram/sessionView.test.ts	trunk-patch	#174	origin-only delta; fork commits 413e76cc
 hub/src/web/routes/cli.ts	trunk-patch	#171	origin-only delta; fork commits a6f9e3f9
 hub/src/web/routes/events.ts	trunk-patch	sse-isolation	按认证 userId 取谓词注入订阅；路由工厂参数为唯一注入点
+hub/src/web/routes/generatedBlobs.test.ts	fork-owned	fork.16	origin-only delta; fork commits 05710223（发送即上传 / hub blob 存储）
 hub/src/web/routes/git.test.ts	trunk-patch	#176	origin-only delta; fork commits 3edb7db8,b4c31e88,bfa252da,d28853c7
 hub/src/web/routes/git.ts	trunk-patch	#176	origin-only delta; fork commits 3edb7db8,b4c31e88,bfa252da
 hub/src/web/routes/machines.test.ts	trunk-patch	#173	origin-only delta; fork commits 51929072,3994ee9a,fc7d7b4a,a8815d47,c853bcbf; claude-proxy-models: ccSwitchProviderId 槽位用例
@@ -299,6 +309,7 @@ web/e2e/reasoning-sticky.spec.ts	fork-owned	#179	origin-only delta; fork commits
 web/index.html	upstream-sync	#180	merge-base 87f5c78a; changed only on upstream/main
 web/package.json	trunk-patch	#177	origin-only delta; fork commits 4a0c5f0b,c36d2daf,d3199037
 web/src/App.tsx	trunk-patch	#171	origin-only delta; fork commits a6f9e3f9
+web/src/api/client.generatedBlob.test.ts	fork-owned	fork.16	origin-only delta; fork commits 05710223（发送即上传 / hub blob 存储）
 web/src/api/client.test.ts	upstream-sync	#180	merge-base 87f5c78a; changed only on upstream/main
 web/src/api/client.ts	trunk-patch	#171	both refs changed; fork commits a6f9e3f9,51929072,9e76994b,3994ee9a,fc7d7b4a,b4c31e88,a8815d47,bfa252da,d28853c7,c853bcbf,c58622c2,5262a261,7dca6478,2ef4c618,413e76cc; claude-proxy-models: getClaudeProxyModels(refresh)
 web/src/chat/agentTimestamp.test.ts	upstream-sync	#180	merge-base 87f5c78a; changed only on upstream/main
@@ -329,6 +340,7 @@ web/src/components/AssistantChat/StatusBar.tsx	trunk-patch	proxy-models	contextM
 web/src/components/AssistantChat/claudeModelOptions.test.ts	trunk-patch	#174	origin-only delta; fork commits 8240268f,606c6579,7e3edb0f; proxy-models: 代理 id 算 listed 不算 custom，循环切换在末尾回到 Default; trunk hook for claude-proxy-models（见 trunk-patches.md 2026-09-06 节）
 web/src/components/AssistantChat/claudeModelOptions.ts	trunk-patch	#174	origin-only delta; fork commits 8240268f,606c6579; proxy-models: 代理 id 进 CLAUDE_SELECTABLE_MODELS，会话中途也能切; claude-proxy-models: proxyModels 参数替换静态代理尾巴、isListedClaudeModel 认动态目录
 web/src/components/AssistantChat/messages/AssistantMessage.tsx	trunk-patch	#178	origin-only delta; fork commits 302180e5,7faed2eb
+web/src/components/AssistantChat/messages/GeneratedBlobCards.test.tsx	fork-owned	fork.16	origin-only delta; fork commits 05710223（发送即上传 / hub blob 存储）
 web/src/components/AssistantChat/messages/GeneratedFileCard.test.ts	fork-owned	#176	origin-only delta; fork commits 3edb7db8
 web/src/components/AssistantChat/messages/GeneratedImageCard.test.tsx	fork-owned	#175	origin-only delta; fork commits d28853c7
 web/src/components/AssistantChat/messages/MessageActions.test.tsx	upstream-sync	#180	merge-base 87f5c78a; changed only on upstream/main
@@ -409,7 +421,10 @@ web/src/components/assistant-ui/reasoning.tsx	trunk-patch	#179	origin-only delta
 web/src/components/assistant-ui/shiki-highlighter.tsx	upstream-fix	#179	origin-only delta; fork commits a2d26372; disposition upstream-issue https://github.com/tiann/hapi/issues/1074: general fix reported against latest upstream main
 web/src/components/icons.tsx	trunk-patch	#179	origin-only delta; fork commits 7faed2eb,16321159; disposition fork-specific #179,https://github.com/tiann/hapi/issues/1076: Qwen summary speech feature; shared path also carries separately reported upstream fix
 web/src/components/ui/Toast.tsx	upstream-fix	#179	origin-only delta; fork commits d1f9f394; disposition upstream-issue https://github.com/tiann/hapi/issues/1077: general fix reported against latest upstream main
+web/src/fork-features/claude-proxy-models/CcSwitchProviderSelector.tsx	fork-owned	claude-proxy-models	fork-owned module: New Session 的 cc-switch 供应商选择器（按机器记忆，只对本会话注入 env）
 web/src/fork-features/claude-proxy-models/ClaudeProxyCatalogHint.tsx	fork-owned	claude-proxy-models	fork-owned module: Claude 代理模型目录动态发现（hub 从 HAPI_CLAUDE_PROXY_MODELS_URL 拉 cx2cc /v1/models，替代写死的 CLAUDE_PROXY_MODEL_LABELS）
+web/src/fork-features/claude-proxy-models/ccSwitchProviderPreference.test.ts	fork-owned	claude-proxy-models	fork-owned module tests
+web/src/fork-features/claude-proxy-models/ccSwitchProviderPreference.ts	fork-owned	claude-proxy-models	fork-owned module: 供应商偏好存取 + 发送判定
 web/src/fork-features/claude-proxy-models/claudeProxyModelOptions.test.ts	fork-owned	claude-proxy-models	fork-owned module: Claude 代理模型目录动态发现（hub 从 HAPI_CLAUDE_PROXY_MODELS_URL 拉 cx2cc /v1/models，替代写死的 CLAUDE_PROXY_MODEL_LABELS）
 web/src/fork-features/claude-proxy-models/claudeProxyModelOptions.ts	fork-owned	claude-proxy-models	fork-owned module: Claude 代理模型目录动态发现（hub 从 HAPI_CLAUDE_PROXY_MODELS_URL 拉 cx2cc /v1/models，替代写死的 CLAUDE_PROXY_MODEL_LABELS）
 web/src/fork-features/claude-proxy-models/types.ts	fork-owned	claude-proxy-models	fork-owned module: Claude 代理模型目录动态发现（hub 从 HAPI_CLAUDE_PROXY_MODELS_URL 拉 cx2cc /v1/models，替代写死的 CLAUDE_PROXY_MODEL_LABELS）
@@ -427,6 +442,7 @@ web/src/hooks/mutations/useCcSwitchProvider.test.tsx	fork-owned	#173	origin-only
 web/src/hooks/mutations/useCcSwitchProvider.ts	fork-owned	#173	origin-only delta; fork commits 44f2bce5,51929072,9e76994b,faec872c,3994ee9a,fc7d7b4a,a8815d47
 web/src/hooks/mutations/useSessionActions.test.tsx	trunk-patch	#170	origin-only delta; fork commits 2ef4c618
 web/src/hooks/mutations/useSessionActions.ts	trunk-patch	#170	origin-only delta; fork commits 5262a261,2ef4c618,413e76cc
+web/src/hooks/mutations/useSpawnSession.ts	trunk-patch	claude-proxy-models	claude-proxy-models: ccSwitchProviderId 透传
 web/src/hooks/queries/useCcSwitchProviders.ts	fork-owned	#173	origin-only delta; fork commits a8815d47
 web/src/hooks/queries/useCodexModels.test.tsx	fork-owned	#179	origin-only delta; fork commits c58622c2
 web/src/hooks/queries/useCodexModels.ts	upstream-fix	#179	origin-only delta; fork commits c58622c2; disposition upstream-issue https://github.com/tiann/hapi/issues/1072: general fix reported against latest upstream main
@@ -484,8 +500,8 @@ web/src/lib/sessionModelLabel.ts	trunk-patch	#173	origin-only delta; fork commit
 web/src/lib/sessionResume.test.ts	trunk-patch	#179	both refs changed; fork commits 291c8db0; disposition fork-specific #179: session ID feature
 web/src/lib/sessionResume.ts	trunk-patch	#179	both refs changed; fork commits 291c8db0; disposition fork-specific #179: session ID feature
 web/src/lib/sessionTitle.ts	upstream-sync	#180	merge-base 87f5c78a; changed only on upstream/main
-web/src/lib/swNavigationScope.ts	fork-owned	sw-scope	SW 导航 allowlist 构造（尊重 Vite base）+ APP_TOP_LEVEL_SEGMENTS 单一事实源
 web/src/lib/swNavigationScope.test.ts	fork-owned	sw-scope	钉死同域他站不被劫持、深链仍归本应用、子路径部署；含读取 router.tsx 的漂移守卫
+web/src/lib/swNavigationScope.ts	fork-owned	sw-scope	SW 导航 allowlist 构造（尊重 Vite base）+ APP_TOP_LEVEL_SEGMENTS 单一事实源
 web/src/lib/toast-context.tsx	upstream-fix	#179	origin-only delta; fork commits d1f9f394; disposition upstream-issue https://github.com/tiann/hapi/issues/1077: general fix reported against latest upstream main
 web/src/lib/usageReportBackfill.test.ts	fork-owned	usage-footer	回填口径单测（首帧基线/回落全额/同轮同 delta）
 web/src/lib/usageReportBackfill.ts	fork-owned	usage-footer	usage_report 帧差值回填逐条页脚 token
@@ -501,7 +517,3 @@ web/src/sw.ts	trunk-patch	web-stability	cleanupOutdatedCaches + NavigationRoute 
 web/src/types/api.ts	upstream-sync	#180	merge-base 87f5c78a; changed only on upstream/main
 web/src/types/global.d.ts	trunk-patch	#179	origin-only delta; fork commits 4a0c5f0b; disposition fork-specific #179: fork PWA changelog feature
 web/vite.config.ts	trunk-patch	#179	origin-only delta; fork commits 4a0c5f0b,69c5250d; disposition fork-specific #179: fork PWA changelog feature; fork release/build metadata
-web/src/fork-features/claude-proxy-models/CcSwitchProviderSelector.tsx	fork-owned	claude-proxy-models	fork-owned module: New Session 的 cc-switch 供应商选择器（按机器记忆，只对本会话注入 env）
-web/src/fork-features/claude-proxy-models/ccSwitchProviderPreference.ts	fork-owned	claude-proxy-models	fork-owned module: 供应商偏好存取 + 发送判定
-web/src/fork-features/claude-proxy-models/ccSwitchProviderPreference.test.ts	fork-owned	claude-proxy-models	fork-owned module tests
-web/src/hooks/mutations/useSpawnSession.ts	trunk-patch	claude-proxy-models	claude-proxy-models: ccSwitchProviderId 透传
