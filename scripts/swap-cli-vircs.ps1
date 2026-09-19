@@ -11,6 +11,9 @@ param(
   [string]$Staged   = 'C:\Users\Administrator\AppData\Local\Temp\hapi-fork7.exe',
   [string]$ExpectSha = 'bc00d703e39622f734eb9f196becd50e5af57e7842ef45c038bc4bd637c515ee',
   [int]$DelaySeconds = 30,
+  # Backup label, used only in the rollback filename. Pass the real tag so the
+  # rollback point does not look like it came from another release.
+  [string]$Tag = 'fork7',
   [string]$Log      = 'C:\Users\Administrator\hapi-fork7-swap.log'
 )
 function Say($m) { $line = (Get-Date -Format 'HH:mm:ss') + '  ' + $m; Add-Content -Path $Log -Value $line }
@@ -39,20 +42,24 @@ taskkill /F /IM hapi.exe 2>&1 | Out-Null
 Start-Sleep -Seconds 4
 
 $ts = Get-Date -Format 'yyyyMMddTHHmmss'
-$backup = "$Target.pre-fork7-$ts"
+$backup = "$Target.pre-$Tag-$ts"
 try {
   Move-Item -LiteralPath $Target -Destination $backup -Force -ErrorAction Stop
   Move-Item -LiteralPath $Staged -Destination $Target -Force -ErrorAction Stop
 } catch {
   Say ("FATAL during swap: " + $_.Exception.Message)
   if ((Test-Path $backup) -and -not (Test-Path $Target)) { Move-Item -LiteralPath $backup -Destination $Target -Force; Say "rolled back" }
-  Start-ScheduledTask -TaskName 'HAPI Runner Autostart' -ErrorAction SilentlyContinue
+  foreach ($n in $taskNames) { Start-ScheduledTask -TaskName $n -ErrorAction SilentlyContinue }
   exit 1
 }
 Say "new sha = $((Get-FileHash $Target -Algorithm SHA256).Hash.ToLower())"
 Say "rollback = $backup"
 
-Start-ScheduledTask -TaskName 'HAPI Runner Autostart' -ErrorAction SilentlyContinue
+# Start every task we stopped, not just one: vircs carries both
+# 'HAPI Runner Autostart' and 'HapiRunnerVircs', both sit in State='Ready' even
+# while the runner is up, and starting only one can leave the machine without a
+# runner until the 5-minute watchdog fires.
+foreach ($n in $taskNames) { Start-ScheduledTask -TaskName $n -ErrorAction SilentlyContinue }
 Start-Sleep -Seconds 12
 $after = @(Get-CimInstance Win32_Process -Filter "Name='hapi.exe'")
 Say "hapi.exe after swap = $($after.Count)"
