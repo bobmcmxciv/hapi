@@ -22,6 +22,7 @@ import { createPermissionsRoutes } from './routes/permissions'
 import { createMachinesRoutes } from './routes/machines'
 import { createStorageRoutes } from './routes/storage'
 import { createGitRoutes } from './routes/git'
+import type { GeneratedBlobServices } from '../blobs'
 import { createCliRoutes } from './routes/cli'
 import { createCodexDesktopRoutes } from './routes/codexDesktop'
 import { createPiSessionRoutes } from './routes/piSessions'
@@ -239,6 +240,7 @@ function createWebApp(options: {
     relayMode?: boolean
     officialWebUrl?: string
     multiUser: { store: MultiUserGatewayStore; coreUserId: number; subscriptionStore: SubscriptionStore }
+    blobs?: GeneratedBlobServices
 }): Hono<WebAppEnv> {
     const app = new Hono<WebAppEnv>()
 
@@ -288,7 +290,11 @@ function createWebApp(options: {
         return next()
     })
 
-    app.route('/cli', createCliRoutes(options.getSyncEngine, token => resolveGatewayCliNamespace(multiUserStore, token)))
+    app.route('/cli', createCliRoutes(
+        options.getSyncEngine,
+        token => resolveGatewayCliNamespace(multiUserStore, token),
+        { blobStore: options.blobs?.store }
+    ))
 
     app.route('/api', createAuthRoutes(options.jwtSecret, options.store))
     app.route('/api', createBindRoutes(options.jwtSecret, options.store))
@@ -362,7 +368,7 @@ function createWebApp(options: {
     // /api/events 双路由陷阱同型，这里改为显式不挂载，不再依赖注册顺序。
     // 副作用：上游 usageService 的 usage_events 投影不再被喂数（fork 引擎直读
     // messages），usage_events/usage_scan_state 两表保持为空，见 trunk-patches.md。
-    app.route('/api', createGitRoutes(options.getSyncEngine))
+    app.route('/api', createGitRoutes(options.getSyncEngine, { blobs: options.blobs }))
     // 中文注释：这里提供两类 Codex 辅助能力：扫描本地 transcript 以导入到 Hapi，以及按需重启 Codex Desktop 客户端。
     app.route('/api', createCodexDesktopRoutes({
         store: options.store,
@@ -536,6 +542,7 @@ export async function startWebServer(options: {
     relayMode?: boolean
     officialWebUrl?: string
     multiUser: { store: MultiUserGatewayStore; coreUserId: number; subscriptionStore: SubscriptionStore }
+    blobs?: GeneratedBlobServices
 }): Promise<BunServer<WebSocketData>> {
     const isCompiled = isBunCompiled()
     const embeddedAssetMap = isCompiled ? await loadEmbeddedAssetMap() : null
@@ -550,7 +557,8 @@ export async function startWebServer(options: {
         embeddedAssetMap,
         relayMode: options.relayMode,
         officialWebUrl: options.officialWebUrl,
-        multiUser: options.multiUser
+        multiUser: options.multiUser,
+        blobs: options.blobs
     })
 
     const configuration = getConfiguration()

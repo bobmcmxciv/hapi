@@ -2,7 +2,9 @@ import { randomUUID } from 'node:crypto'
 import { lstat, readFile } from 'node:fs/promises'
 import { basename } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { createHash } from 'node:crypto'
 import { asString, isObject } from '@hapi/protocol'
+import { registerGeneratedBlobSource, scheduleGeneratedBlobUpload } from './generatedBlobUpload'
 
 export type GeneratedImageMetadata = {
     id: string
@@ -136,8 +138,27 @@ export function registerGeneratedImage(args: { id: string; path: string; mimeTyp
 
     evictOldGeneratedImages()
 
+    // Inline media lives only in this process's memory; pushing it to the hub is
+    // what lets the card survive a restart and spares the uplink on every view.
+    void scheduleGeneratedBlobUpload('image', args.id)
+
     return metadata
 }
+
+registerGeneratedBlobSource('image', {
+    open: async (id) => {
+        const image = generatedImages.get(id)
+        if (!image) return null
+        const content = image.content
+        return {
+            size: content.byteLength,
+            mimeType: image.mimeType,
+            fileName: image.fileName,
+            read: async (offset, length) => new Uint8Array(content.subarray(offset, Math.min(offset + length, content.byteLength))),
+            sha256: async () => createHash('sha256').update(content).digest('hex')
+        }
+    }
+})
 
 function evictOldGeneratedImages(): void {
     while (generatedImages.size > MAX_GENERATED_IMAGE_COUNT || generatedImageBytes > MAX_GENERATED_IMAGE_TOTAL_BYTES) {

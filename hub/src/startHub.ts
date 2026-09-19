@@ -1,5 +1,6 @@
 import { createConfiguration, type ConfigSource } from './configuration'
 import { Store } from './store'
+import { BlobStore, GeneratedBlobFetcher } from './blobs'
 import { SyncEngine, type SyncEvent } from './sync/syncEngine'
 import { NotificationHub } from './notifications/notificationHub'
 import type { NotificationChannel } from './notifications/notificationTypes'
@@ -284,8 +285,25 @@ export async function startHub(options: StartHubOptions = {}): Promise<HubInstan
 
     notificationHub = new NotificationHub(syncEngine, notificationChannels)
 
+    // Generated blobs (sent files, inline media) live on the hub's own disk so
+    // viewers never depend on the sending machine's uplink. HAPI_BLOB_DIR points
+    // production at the data volume rather than the system disk.
+    const blobStore = await BlobStore.open(config.blobDir, {
+        maxBytes: config.blobMaxBytes,
+        maxAgeMs: config.blobMaxAgeDays * 24 * 60 * 60 * 1000,
+        minFreeBytes: config.blobMinFreeBytes
+    })
+    const blobUsage = blobStore.usage()
+    console.log(`[Hub] Blob store at ${config.blobDir}: ${blobUsage.count} blobs, ${Math.round(blobUsage.bytes / (1024 * 1024))} MiB`)
+    const blobPruneTimer = setInterval(() => {
+        void blobStore.prune().catch((error) => console.warn('[Hub] Blob prune failed:', error))
+    }, 60 * 60 * 1000)
+    blobPruneTimer.unref()
+    const blobs = { store: blobStore, fetcher: new GeneratedBlobFetcher(blobStore) }
+
     // Start HTTP service first (before tunnel, so tunnel has something to forward to)
     webServer = await startWebServer({
+        blobs,
         getSyncEngine: () => syncEngine,
         getSseManager: () => sseManager,
         getVisibilityTracker: () => visibilityTracker,

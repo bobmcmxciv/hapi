@@ -378,13 +378,14 @@ export class RpcGateway {
      *  uses that to fall back to the whole-blob read. */
     async readGeneratedBlobChunk(
         sessionId: string,
-        request: GeneratedBlobChunkRequest
+        request: GeneratedBlobChunkRequest,
+        timeoutMs: number = GENERATED_BLOB_RPC_TIMEOUT_MS
     ): Promise<RpcGeneratedBlobChunkResponse> {
         return await this.sessionRpc(
             sessionId,
             RPC_METHODS.ReadGeneratedBlobChunk,
             request,
-            GENERATED_BLOB_RPC_TIMEOUT_MS
+            timeoutMs
         ) as RpcGeneratedBlobChunkResponse
     }
 

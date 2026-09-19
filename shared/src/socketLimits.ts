@@ -22,3 +22,23 @@ export const MAX_SOCKET_RPC_BINARY_BYTES = Math.floor(
  * so one stalled slice no longer voids the whole download.
  */
 export const GENERATED_BLOB_CHUNK_BYTES = 2 * 1024 * 1024
+
+/**
+ * Slice size the **hub requests** when it pulls a blob from a CLI (the legacy
+ * pull path, kept for envelopes whose bytes were never pushed to the hub).
+ *
+ * 2 MiB per frame was the second failure mode on slow uplinks: a 2.8 MB base64
+ * frame took 40-60 s to clear a 50 KB/s link, so the socket.io pong queued
+ * behind it missed the 20 s ping deadline and the CLI socket was dropped
+ * mid-transfer (measured on vircs: 27% of chunk reads were followed by a
+ * `transport close` within 60 s, against an 8% baseline). 256 KiB clears the
+ * same link in ~7 s. CLIs clamp to `GENERATED_BLOB_CHUNK_BYTES` at most and
+ * honour smaller requests, so this needs no CLI upgrade.
+ */
+export const GENERATED_BLOB_PULL_CHUNK_BYTES = 256 * 1024
+
+/** Slice size the CLI pushes to the hub over HTTP when a blob is sent. */
+export const GENERATED_BLOB_UPLOAD_CHUNK_BYTES = 512 * 1024
+
+/** Largest blob the hub accepts into its store (push or pull). */
+export const MAX_GENERATED_BLOB_BYTES = MAX_SOCKET_RPC_BINARY_BYTES

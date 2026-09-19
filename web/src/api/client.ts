@@ -104,19 +104,90 @@ export class ApiError extends Error {
     }
 }
 
-// Generated blobs are pulled from the CLI machine on demand, so a download can
-// fail for reasons that have nothing to do with the file: the machine dropped
-// off, or a slice ran out of budget. The hub now says which is which — 503
-// session-offline and 504 timeout are retryable, 404 is not — so retry those
-// two instead of surfacing a dead end the user can only fix by clicking again.
-const BLOB_FETCH_RETRIES = 2
+// Generated blobs (sent files, inline media) are served by the hub from its
+// own disk once it has them. While the bytes are still in transit — the CLI is
+// pushing them, or the hub is pulling them from the machine — the download
+// answers `202` with progress, and the client polls. Transport failures at the
+// edge (502/503/504) are retried with backoff instead of surfacing a dead end
+// the user can only fix by clicking again.
+const BLOB_FETCH_RETRIES = 4
 const BLOB_FETCH_RETRY_DELAY_MS = 800
+const BLOB_PENDING_DEFAULT_POLL_MS = 1500
+const BLOB_PENDING_MIN_POLL_MS = 500
+const BLOB_PENDING_MAX_POLL_MS = 5000
+/** Give up polling a transfer that has made no progress for this long. */
+const BLOB_PENDING_STALL_MS = 3 * 60_000
+/** Absolute cap on how long one download keeps polling. */
+const BLOB_PENDING_TOTAL_MS = 20 * 60_000
+/** Blob requests in flight at once. Each one costs the hub's egress and, for
+ *  pulls, the sending machine's uplink; a chat with eight screenshots must not
+ *  open eight transfers at the same instant. */
+const BLOB_CONCURRENCY = 2
 
 export function isRetryableBlobStatus(status: number): boolean {
-    return status === 503 || status === 504
+    return status === 502 || status === 503 || status === 504
+}
+
+export type GeneratedBlobProgress = {
+    state: 'uploading' | 'fetching' | 'downloading'
+    received: number
+    size: number | null
+}
+
+export type GeneratedBlobFetchOptions = {
+    onProgress?: (progress: GeneratedBlobProgress) => void
+    signal?: AbortSignal
+}
+
+/** Short human label for a transfer state, with a percentage when the size is known. */
+export function formatGeneratedBlobProgress(progress: GeneratedBlobProgress): string {
+    if (progress.state === 'downloading') {
+        // Byte progress of the final download is the browser's business; we only
+        // know that the hub has started streaming.
+        return 'Downloading…'
+    }
+    const label = progress.state === 'uploading' ? 'Uploading from machine' : 'Fetching from machine'
+    if (progress.size && progress.size > 0) {
+        const percent = Math.min(100, Math.floor((progress.received / progress.size) * 100))
+        return `${label} ${percent}%`
+    }
+    return `${label}…`
 }
 
 const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
+
+class RequestGate {
+    private active = 0
+    private readonly waiters: (() => void)[] = []
+
+    constructor(private readonly limit: number) {}
+
+    async acquire(): Promise<void> {
+        if (this.active < this.limit) {
+            this.active += 1
+            return
+        }
+        await new Promise<void>((resolve) => this.waiters.push(resolve))
+        this.active += 1
+    }
+
+    release(): void {
+        this.active -= 1
+        const next = this.waiters.shift()
+        if (next) next()
+    }
+
+    inFlight(): number {
+        return this.active
+    }
+}
+
+const blobGate = new RequestGate(BLOB_CONCURRENCY)
+
+/** Test-only: how many blob requests are in flight right now. */
+export function generatedBlobRequestsInFlight(): number {
+    return blobGate.inFlight()
+}
 
 export class ApiClient {
     private token: string
@@ -414,68 +485,111 @@ export class ApiClient {
         return await this.request<FileSearchResponse>(`/api/sessions/${encodeURIComponent(sessionId)}/files${qs ? `?${qs}` : ''}`)
     }
 
-    async getGeneratedImageBlob(sessionId: string, imageId: string, attempt: number = 0, overrideToken?: string | null): Promise<Blob> {
-        const headers = new Headers()
-        const liveToken = this.getToken ? this.getToken() : null
-        const authToken = overrideToken !== undefined
-            ? (overrideToken ?? (liveToken ?? this.token))
-            : (liveToken ?? this.token)
-        if (authToken) {
-            headers.set('authorization', `Bearer ${authToken}`)
-        }
+    async getGeneratedImageBlob(sessionId: string, imageId: string, options: GeneratedBlobFetchOptions = {}): Promise<Blob> {
         const url = this.buildUrl(`/api/sessions/${encodeURIComponent(sessionId)}/generated-images/${encodeURIComponent(imageId)}`)
-        let res = await fetch(url, { headers })
-        if (res.status === 304) {
-            res = await fetch(url, { headers, cache: 'force-cache' })
-        }
-        if (res.status === 401 && attempt === 0 && this.onUnauthorized) {
-            const refreshed = await this.onUnauthorized()
-            if (refreshed) {
-                this.token = refreshed
-                return await this.getGeneratedImageBlob(sessionId, imageId, attempt + 1, refreshed)
-            }
-        }
-        if (isRetryableBlobStatus(res.status) && attempt < BLOB_FETCH_RETRIES) {
-            await delay(BLOB_FETCH_RETRY_DELAY_MS * (attempt + 1))
-            return await this.getGeneratedImageBlob(sessionId, imageId, attempt + 1, overrideToken)
-        }
-        if (!res.ok) {
-            throw new ApiError(`HTTP ${res.status}`, res.status, undefined, await res.text().catch(() => undefined))
-        }
-        return await res.blob()
+        return await this.fetchGeneratedBlob(url, options)
     }
 
-    async getGeneratedFileBlob(sessionId: string, fileId: string, attempt: number = 0, overrideToken?: string | null): Promise<Blob> {
-        const headers = new Headers()
-        const liveToken = this.getToken ? this.getToken() : null
-        const authToken = overrideToken !== undefined
-            ? (overrideToken ?? (liveToken ?? this.token))
-            : (liveToken ?? this.token)
-        if (authToken) {
-            headers.set('authorization', `Bearer ${authToken}`)
-        }
+    async getGeneratedFileBlob(sessionId: string, fileId: string, options: GeneratedBlobFetchOptions = {}): Promise<Blob> {
         const url = this.buildUrl(`/api/sessions/${encodeURIComponent(sessionId)}/generated-files/${encodeURIComponent(fileId)}`)
-        let res = await fetch(url, { headers })
-        // 304 mirrors the image path: the hub answers a revalidation without
-        // bytes, so re-read them from the HTTP cache.
-        if (res.status === 304) {
-            res = await fetch(url, { headers, cache: 'force-cache' })
-        }
-        if (res.status === 401 && attempt === 0 && this.onUnauthorized) {
-            const refreshed = await this.onUnauthorized()
-            if (refreshed) {
-                this.token = refreshed
-                return await this.getGeneratedFileBlob(sessionId, fileId, attempt + 1, refreshed)
+        return await this.fetchGeneratedBlob(url, options)
+    }
+
+    /**
+     * Download a generated blob, riding out the states the hub can answer with:
+     * `202` while the bytes are still arriving (poll, report progress), a
+     * transient edge failure (retry with backoff), an expired token (refresh
+     * once), a `304` revalidation (re-read from the HTTP cache).
+     */
+    private async fetchGeneratedBlob(url: string, options: GeneratedBlobFetchOptions): Promise<Blob> {
+        const startedAt = Date.now()
+        let lastProgressAt = startedAt
+        let lastReceived = -1
+        let attempt = 0
+        let refreshed = false
+        let overrideToken: string | null | undefined = undefined
+
+        for (;;) {
+            if (options.signal?.aborted) {
+                throw new DOMException('Aborted', 'AbortError')
             }
-        }
-        if (isRetryableBlobStatus(res.status) && attempt < BLOB_FETCH_RETRIES) {
-            await delay(BLOB_FETCH_RETRY_DELAY_MS * (attempt + 1))
-            return await this.getGeneratedFileBlob(sessionId, fileId, attempt + 1, overrideToken)
-        }
-        if (!res.ok) {
+            const headers = new Headers()
+            const liveToken = this.getToken ? this.getToken() : null
+            const authToken = overrideToken !== undefined
+                ? (overrideToken ?? (liveToken ?? this.token))
+                : (liveToken ?? this.token)
+            if (authToken) {
+                headers.set('authorization', `Bearer ${authToken}`)
+            }
+
+            let res: Response
+            await blobGate.acquire()
+            try {
+                try {
+                    res = await fetch(url, { headers, signal: options.signal })
+                    if (res.status === 304) {
+                        res = await fetch(url, { headers, cache: 'force-cache', signal: options.signal })
+                    }
+                } catch (error) {
+                    if (options.signal?.aborted || (error instanceof DOMException && error.name === 'AbortError')) {
+                        throw error
+                    }
+                    // Network failure: same treatment as a bad gateway.
+                    if (attempt < BLOB_FETCH_RETRIES) {
+                        attempt += 1
+                        await delay(BLOB_FETCH_RETRY_DELAY_MS * attempt)
+                        continue
+                    }
+                    throw error
+                }
+                if (res.ok && res.status !== 202) {
+                    const declared = Number(res.headers.get('content-length'))
+                    options.onProgress?.({ state: 'downloading', received: 0, size: Number.isFinite(declared) && declared > 0 ? declared : null })
+                    return await res.blob()
+                }
+            } finally {
+                blobGate.release()
+            }
+
+            if (res.status === 202) {
+                let pending: { state?: string; received?: number; size?: number | null; retryAfterMs?: number } = {}
+                try {
+                    pending = await res.json() as typeof pending
+                } catch {
+                    // keep defaults
+                }
+                const received = typeof pending.received === 'number' ? pending.received : 0
+                const size = typeof pending.size === 'number' ? pending.size : null
+                options.onProgress?.({ state: pending.state === 'uploading' ? 'uploading' : 'fetching', received, size })
+                const now = Date.now()
+                if (received !== lastReceived) {
+                    lastReceived = received
+                    lastProgressAt = now
+                }
+                if (now - lastProgressAt > BLOB_PENDING_STALL_MS || now - startedAt > BLOB_PENDING_TOTAL_MS) {
+                    throw new ApiError('Transfer stalled', 202, 'blob_stalled', 'The file is still being transferred from the machine that sent it. Try again later.')
+                }
+                const poll = typeof pending.retryAfterMs === 'number' ? pending.retryAfterMs : BLOB_PENDING_DEFAULT_POLL_MS
+                await delay(Math.min(BLOB_PENDING_MAX_POLL_MS, Math.max(BLOB_PENDING_MIN_POLL_MS, poll)))
+                attempt = 0
+                continue
+            }
+            if (res.status === 401 && !refreshed && this.onUnauthorized) {
+                refreshed = true
+                const next = await this.onUnauthorized()
+                if (next) {
+                    this.token = next
+                    overrideToken = next
+                    continue
+                }
+            }
+            if (isRetryableBlobStatus(res.status) && attempt < BLOB_FETCH_RETRIES) {
+                attempt += 1
+                await delay(BLOB_FETCH_RETRY_DELAY_MS * attempt)
+                continue
+            }
             throw new ApiError(`HTTP ${res.status}`, res.status, undefined, await res.text().catch(() => undefined))
         }
-        return await res.blob()
     }
 
     async readSessionFile(sessionId: string, path: string): Promise<FileReadResponse> {

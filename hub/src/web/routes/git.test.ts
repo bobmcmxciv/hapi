@@ -6,6 +6,7 @@ import { RpcTargetMissingError } from '../../sync/rpcGateway'
 import type { WebAppEnv } from '../middleware/auth'
 import { createAuthMiddleware } from '../middleware/auth'
 import { createGitRoutes, parseSingleByteRange } from './git'
+import { GENERATED_BLOB_PULL_CHUNK_BYTES } from '@hapi/protocol/socketLimits'
 
 const JWT_SECRET = new TextEncoder().encode('generated-media-route-test')
 
@@ -292,7 +293,9 @@ describe('chunked generated blob transfer', () => {
         expect(received.byteLength).toBe(payload.byteLength)
         expect(received.equals(payload)).toBe(true)
         // The probe read is reused, so the transfer costs ceil(size/chunk) calls, not one more.
-        expect(chunkCalls).toEqual([0, 2 * 1024 * 1024, 4 * 1024 * 1024])
+        const expectedOffsets = []
+        for (let offset = 0; offset < payload.byteLength; offset += GENERATED_BLOB_PULL_CHUNK_BYTES) expectedOffsets.push(offset)
+        expect(chunkCalls).toEqual(expectedOffsets)
     })
 
     it('retries a stalled chunk instead of failing the whole download', async () => {

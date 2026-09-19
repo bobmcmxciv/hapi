@@ -21,6 +21,8 @@
  * - VAPID_SUBJECT: Contact email or URL for Web Push (defaults to mailto:admin@hapi.run)
  * - HAPI_HOME: Data directory (default: ~/.hapi)
  * - DB_PATH: SQLite database path (default: {HAPI_HOME}/hapi.db)
+ * - HAPI_BLOB_DIR: Generated blob storage directory (default: {HAPI_HOME}/blobs)
+ * - HAPI_BLOB_MAX_BYTES / HAPI_BLOB_MAX_AGE_DAYS / HAPI_BLOB_MIN_FREE_BYTES: blob store caps
  */
 
 import { existsSync, mkdirSync } from 'node:fs'
@@ -42,6 +44,12 @@ export interface ConfigSources {
     publicUrl: ConfigSource
     corsOrigins: ConfigSource
     cliApiToken: 'env' | 'file' | 'generated'
+}
+
+function readPositiveInt(raw: string | undefined, fallback: number): number {
+    if (!raw) return fallback
+    const parsed = Number(raw)
+    return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback
 }
 
 class Configuration {
@@ -78,6 +86,19 @@ class Configuration {
     /** SQLite DB path */
     public readonly dbPath: string
 
+    /** Directory that holds generated blobs (sent files, inline media). Point it
+     *  at a roomy data volume in production: HAPI_BLOB_DIR. */
+    public readonly blobDir: string
+
+    /** Byte cap for finished blobs before LRU eviction (HAPI_BLOB_MAX_BYTES). */
+    public readonly blobMaxBytes: number
+
+    /** Age cap for finished blobs in days (HAPI_BLOB_MAX_AGE_DAYS). */
+    public readonly blobMaxAgeDays: number
+
+    /** Free space the blob volume must keep (HAPI_BLOB_MIN_FREE_BYTES). */
+    public readonly blobMinFreeBytes: number
+
     /** Port for the HTTP service */
     public readonly listenPort: number
 
@@ -103,6 +124,12 @@ class Configuration {
         this.dataDir = dataDir
         this.dbPath = dbPath
         this.settingsFile = getSettingsFile(dataDir)
+        this.blobDir = process.env.HAPI_BLOB_DIR
+            ? process.env.HAPI_BLOB_DIR.replace(/^~/, homedir())
+            : join(dataDir, 'blobs')
+        this.blobMaxBytes = readPositiveInt(process.env.HAPI_BLOB_MAX_BYTES, 20 * 1024 * 1024 * 1024)
+        this.blobMaxAgeDays = readPositiveInt(process.env.HAPI_BLOB_MAX_AGE_DAYS, 180)
+        this.blobMinFreeBytes = readPositiveInt(process.env.HAPI_BLOB_MIN_FREE_BYTES, 2 * 1024 * 1024 * 1024)
 
         // Apply server settings
         this.telegramBotToken = serverSettings.telegramBotToken

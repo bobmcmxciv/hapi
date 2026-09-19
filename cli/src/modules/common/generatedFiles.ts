@@ -2,8 +2,11 @@ import { basename, extname, join } from 'path'
 import { copyFile, lstat, mkdir, open, readdir, readFile, rename, rm, writeFile } from 'fs/promises'
 import { rmSync } from 'node:fs'
 import { tmpdir } from 'os'
+import { createHash } from 'node:crypto'
+import { createReadStream } from 'node:fs'
 import { MAX_SOCKET_RPC_BINARY_BYTES } from '@hapi/protocol/socketLimits'
 import { detectImageMimeType, detectVideoMimeType } from './generatedImages'
+import { getGeneratedBlobUploaderSessionId, registerGeneratedBlobSource, scheduleGeneratedBlobUpload } from './generatedBlobUpload'
 
 export type GeneratedFileMetadata = {
     id: string
@@ -12,6 +15,10 @@ export type GeneratedFileMetadata = {
     mimeType: string
     size: number
     createdAt: number
+    /** Session that sent the file; lets a restarted process resume its uploads. */
+    sessionId?: string | null
+    /** Set once the hub confirmed it holds every byte. */
+    uploadedAt?: number | null
 }
 
 // Files are snapshotted to disk (not held in memory like generated images) because they
@@ -181,7 +188,9 @@ async function writeSidecar(metadata: GeneratedFileMetadata): Promise<void> {
         snapshotFileName: basename(metadata.snapshotPath),
         mimeType: metadata.mimeType,
         size: metadata.size,
-        createdAt: metadata.createdAt
+        createdAt: metadata.createdAt,
+        sessionId: metadata.sessionId ?? null,
+        uploadedAt: metadata.uploadedAt ?? null
     }
     const target = getSidecarPath(metadata.id)
     const temp = `${target}.${process.pid}.tmp`
@@ -201,7 +210,9 @@ async function readSidecar(id: string): Promise<GeneratedFileMetadata | null> {
             snapshotPath: join(getSentFilesDir(), parsed.snapshotFileName),
             mimeType: parsed.mimeType,
             size: parsed.size,
-            createdAt: parsed.createdAt
+            createdAt: parsed.createdAt,
+            sessionId: typeof parsed.sessionId === 'string' ? parsed.sessionId : null,
+            uploadedAt: typeof parsed.uploadedAt === 'number' ? parsed.uploadedAt : null
         }
     } catch {
         return null
@@ -320,7 +331,9 @@ export async function registerGeneratedFile(args: { id: string; path: string; fi
             snapshotPath,
             mimeType: detectFileMimeType(fileName, header),
             size: snapshotInfo.size,
-            createdAt: Date.now()
+            createdAt: Date.now(),
+            sessionId: getGeneratedBlobUploaderSessionId(),
+            uploadedAt: null
         }
         generatedFiles.set(args.id, metadata)
         generatedFileBytes += snapshotInfo.size
@@ -329,6 +342,11 @@ export async function registerGeneratedFile(args: { id: string; path: string; fi
         // before anything else in the store is reclaimed.
         await writeSidecar(metadata)
         await pruneStore()
+
+        // Push the bytes to the hub in the background so viewers never pull them
+        // back through this machine's uplink. The card is usable as soon as the
+        // hub has them; until then the hub answers 202 with progress.
+        void scheduleGeneratedBlobUpload('file', args.id)
 
         return metadata
     } catch (error) {
@@ -404,6 +422,67 @@ export async function readGeneratedFileChunk(
         await handle.close()
     }
 }
+
+/** Mark a snapshot as held by the hub so a later process does not re-upload it. */
+export async function markGeneratedFileUploaded(id: string): Promise<void> {
+    const metadata = generatedFiles.get(id) ?? await readSidecar(id)
+    if (!metadata) return
+    metadata.uploadedAt = Date.now()
+    generatedFiles.set(id, metadata)
+    await writeSidecar(metadata)
+}
+
+/**
+ * Re-queue uploads this session started but never finished — typically because
+ * the process was replaced mid-transfer. Called once when a session process
+ * binds to the hub.
+ */
+export async function resumePendingGeneratedFileUploads(sessionId: string): Promise<string[]> {
+    let entries: string[]
+    try {
+        entries = await readdir(getSentFilesDir())
+    } catch {
+        return []
+    }
+    const resumed: string[] = []
+    for (const entry of entries) {
+        if (!entry.endsWith('.meta.json')) continue
+        const metadata = await readSidecar(entry.slice(0, -'.meta.json'.length))
+        if (!metadata || metadata.sessionId !== sessionId || metadata.uploadedAt) continue
+        void scheduleGeneratedBlobUpload('file', metadata.id)
+        resumed.push(metadata.id)
+    }
+    return resumed
+}
+
+async function sha256OfSnapshot(path: string): Promise<string> {
+    const hash = createHash('sha256')
+    await new Promise<void>((resolve, reject) => {
+        const stream = createReadStream(path)
+        stream.on('data', (chunk) => hash.update(chunk))
+        stream.on('end', () => resolve())
+        stream.on('error', reject)
+    })
+    return hash.digest('hex')
+}
+
+registerGeneratedBlobSource('file', {
+    open: async (id) => {
+        const metadata = await loadGeneratedFile(id)
+        if (!metadata) return null
+        return {
+            size: metadata.size,
+            mimeType: metadata.mimeType,
+            fileName: metadata.fileName,
+            read: async (offset, length) => {
+                const chunk = await readGeneratedFileChunk(id, offset, length)
+                return chunk ? new Uint8Array(chunk.bytes) : new Uint8Array(0)
+            },
+            sha256: () => sha256OfSnapshot(metadata.snapshotPath)
+        }
+    },
+    markUploaded: markGeneratedFileUploaded
+})
 
 /** Test-only: drop both the in-memory registry and the on-disk store. */
 export function clearGeneratedFiles(): void {

@@ -11,6 +11,18 @@ import { getConfiguration } from '../../configuration'
 import { constantTimeEquals } from '../../utils/crypto'
 import { parseAccessToken } from '../../utils/accessToken'
 import type { Machine, Session, SyncEngine } from '../../sync/syncEngine'
+import type { GeneratedBlobUploadResponse } from '@hapi/protocol/apiTypes'
+import { GENERATED_BLOB_UPLOAD_CHUNK_BYTES, MAX_GENERATED_BLOB_BYTES } from '@hapi/protocol/socketLimits'
+import {
+    BlobChecksumMismatchError,
+    BlobOffsetMismatchError,
+    BlobSizeMismatchError,
+    BlobStorageFullError,
+    BlobTooLargeError,
+    isBlobKind,
+    isSafeBlobId,
+    type BlobStore
+} from '../../blobs/blobStore'
 import { SessionIdentityConflictError } from '../../store/sessions'
 
 const bearerSchema = z.string().regex(/^Bearer\s+(.+)$/i)
@@ -64,11 +76,21 @@ function clearErrorStatus(code: string): 403 | 404 | 409 | 500 {
                 : 500
 }
 
+/** Largest single upload slice the hub accepts; the CLI sends
+ *  `GENERATED_BLOB_UPLOAD_CHUNK_BYTES` and older/newer clients may differ. */
+const MAX_BLOB_UPLOAD_SLICE_BYTES = Math.max(4 * 1024 * 1024, GENERATED_BLOB_UPLOAD_CHUNK_BYTES)
+
+const blobUploadQuerySchema = z.object({
+    offset: z.coerce.number().int().min(0)
+})
+
 export function createCliRoutes(
     getSyncEngine: () => SyncEngine | null,
-    resolveExternalNamespace?: (token: string) => string | null
+    resolveExternalNamespace?: (token: string) => string | null,
+    deps: { blobStore?: BlobStore } = {}
 ): Hono<CliEnv> {
     const app = new Hono<CliEnv>()
+    const blobStore = deps.blobStore ?? null
 
     app.use('*', async (c, next) => {
         c.header('X-Hapi-Protocol-Version', String(PROTOCOL_VERSION))
@@ -95,6 +117,122 @@ export function createCliRoutes(
 
         c.set('namespace', parsedToken.namespace)
         return await next()
+    })
+
+    // —— Generated blob push (send_file / display_image) ——————————————————————
+    //
+    // The CLI pushes a blob's bytes here right after it emits the envelope, in
+    // `offset`-addressed slices so a dropped connection resumes instead of
+    // restarting. The hub answers the offset it holds on every slice; a 409
+    // carries the offset to resume from. Once the bytes are here every viewer
+    // is served from the hub's disk and the CLI machine's uplink is out of the
+    // loop for good.
+
+    app.get('/sessions/:id/blobs/:kind/:blobId', async (c) => {
+        if (!blobStore) {
+            return c.json({ success: false, error: 'Blob storage is not enabled on this hub', reason: 'unsupported' }, 501)
+        }
+        const engine = getSyncEngine()
+        if (!engine) {
+            return c.json({ success: false, error: 'Not ready' }, 503)
+        }
+        const kind = c.req.param('kind')
+        const blobId = c.req.param('blobId')
+        if (!isBlobKind(kind) || !isSafeBlobId(blobId)) {
+            return c.json({ success: false, error: 'Invalid blob reference' }, 400)
+        }
+        const access = resolveSessionForNamespace(engine, c.req.param('id'), c.get('namespace'))
+        if (!access.ok) {
+            return c.json({ success: false, error: access.error }, access.status)
+        }
+        const record = blobStore.stat(kind, blobId)
+        if (!record) {
+            return c.json({ success: true, state: 'missing', received: 0, size: null })
+        }
+        return c.json({ success: true, state: record.state, received: record.received, size: record.size })
+    })
+
+    app.put('/sessions/:id/blobs/:kind/:blobId', async (c) => {
+        if (!blobStore) {
+            return c.json({ success: false, error: 'Blob storage is not enabled on this hub', reason: 'unsupported' }, 501)
+        }
+        const engine = getSyncEngine()
+        if (!engine) {
+            return c.json({ success: false, error: 'Not ready' }, 503)
+        }
+        const kind = c.req.param('kind')
+        const blobId = c.req.param('blobId')
+        if (!isBlobKind(kind) || !isSafeBlobId(blobId)) {
+            return c.json({ success: false, error: 'Invalid blob reference' }, 400)
+        }
+        const access = resolveSessionForNamespace(engine, c.req.param('id'), c.get('namespace'))
+        if (!access.ok) {
+            return c.json({ success: false, error: access.error }, access.status)
+        }
+        const query = blobUploadQuerySchema.safeParse(c.req.query())
+        if (!query.success) {
+            return c.json({ success: false, error: 'Invalid offset' }, 400)
+        }
+        const size = Number(c.req.header('x-blob-size'))
+        if (!Number.isInteger(size) || size < 0) {
+            return c.json({ success: false, error: 'Missing or invalid x-blob-size' }, 400)
+        }
+        if (size > MAX_GENERATED_BLOB_BYTES) {
+            const body: GeneratedBlobUploadResponse = { success: false, error: 'Blob too large', reason: 'too-large' }
+            return c.json(body, 413)
+        }
+        const mimeType = c.req.header('x-blob-mime') || 'application/octet-stream'
+        let fileName = blobId
+        const rawName = c.req.header('x-blob-name')
+        if (rawName) {
+            try {
+                fileName = decodeURIComponent(rawName)
+            } catch {
+                fileName = rawName
+            }
+        }
+        const sha256Header = c.req.header('x-blob-sha256')
+        const sha256 = sha256Header && /^[a-f0-9]{64}$/i.test(sha256Header) ? sha256Header.toLowerCase() : null
+        const bytes = new Uint8Array(await c.req.arrayBuffer())
+        if (bytes.byteLength > MAX_BLOB_UPLOAD_SLICE_BYTES) {
+            const body: GeneratedBlobUploadResponse = { success: false, error: 'Upload slice too large', reason: 'too-large' }
+            return c.json(body, 413)
+        }
+        try {
+            const record = await blobStore.append(kind, blobId, {
+                sessionId: access.sessionId,
+                fileName,
+                mimeType,
+                size,
+                origin: 'push',
+                sha256
+            }, query.data.offset, bytes)
+            const body: GeneratedBlobUploadResponse = { success: true, state: record.state, received: record.received, size: record.size }
+            return c.json(body)
+        } catch (error) {
+            if (error instanceof BlobOffsetMismatchError) {
+                const body: GeneratedBlobUploadResponse = { success: false, error: error.message, reason: 'offset-mismatch', received: error.received }
+                return c.json(body, 409)
+            }
+            if (error instanceof BlobSizeMismatchError) {
+                const body: GeneratedBlobUploadResponse = { success: false, error: error.message, reason: 'size-mismatch', received: error.received, size: error.expected }
+                return c.json(body, 409)
+            }
+            if (error instanceof BlobChecksumMismatchError) {
+                const body: GeneratedBlobUploadResponse = { success: false, error: error.message, reason: 'checksum-mismatch', received: 0 }
+                return c.json(body, 422)
+            }
+            if (error instanceof BlobTooLargeError) {
+                const body: GeneratedBlobUploadResponse = { success: false, error: error.message, reason: 'too-large' }
+                return c.json(body, 413)
+            }
+            if (error instanceof BlobStorageFullError) {
+                const body: GeneratedBlobUploadResponse = { success: false, error: error.message, reason: 'insufficient-storage' }
+                return c.json(body, 507)
+            }
+            const message = error instanceof Error ? error.message : String(error)
+            return c.json({ success: false, error: message }, 500)
+        }
     })
 
     app.post('/sessions', async (c) => {

@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, type RefObject } from 'react'
+import { formatGeneratedBlobProgress, type GeneratedBlobProgress } from '@/api/client'
 import type { ToolCallMessagePartProps } from '@assistant-ui/react'
 import type { ChatBlock } from '@/chat/types'
 import type { GeneratedFileBlock, GeneratedImageBlock, ToolCallBlock } from '@/chat/types'
@@ -54,11 +55,43 @@ function isGeneratedImageBlock(value: unknown): value is GeneratedImageBlock {
     return true
 }
 
+/**
+ * True once the element has been scrolled near the viewport (sticky). Cards
+ * that are never seen never start a transfer — a long chat with many
+ * screenshots used to open every one of them at mount, all at once.
+ */
+function useNearViewport(ref: RefObject<HTMLElement | null>): boolean {
+    const [near, setNear] = useState(() => typeof IntersectionObserver === 'undefined')
+
+    useEffect(() => {
+        if (near) return
+        const element = ref.current
+        if (!element || typeof IntersectionObserver === 'undefined') {
+            setNear(true)
+            return
+        }
+        const observer = new IntersectionObserver((entries) => {
+            if (entries.some((entry) => entry.isIntersecting)) {
+                setNear(true)
+                observer.disconnect()
+            }
+        }, { rootMargin: '400px 0px' })
+        observer.observe(element)
+        return () => observer.disconnect()
+    }, [near, ref])
+
+    return near
+}
+
 export function GeneratedImageCard(props: { block: GeneratedImageBlock }) {
     const ctx = useHappyChatContext()
     const [objectUrl, setObjectUrl] = useState<string | null>(null)
     const [error, setError] = useState<string | null>(null)
+    const [progress, setProgress] = useState<GeneratedBlobProgress | null>(null)
+    const [retryKey, setRetryKey] = useState(0)
     const objectUrlRef = useRef<string | null>(null)
+    const cardRef = useRef<HTMLDivElement | null>(null)
+    const nearViewport = useNearViewport(cardRef)
     const isVideo = isInlineVideoMimeType(props.block.mimeType)
     const mediaLabel = generatedInlineMediaLabel(props.block.mimeType)
 
@@ -80,27 +113,42 @@ export function GeneratedImageCard(props: { block: GeneratedImageBlock }) {
         }
         setObjectUrl(null)
         setError(null)
-        void ctx.api.getGeneratedImageBlob(ctx.sessionId, props.block.imageId)
+        setProgress(null)
+        if (!nearViewport) {
+            return
+        }
+        const controller = new AbortController()
+        void ctx.api.getGeneratedImageBlob(ctx.sessionId, props.block.imageId, {
+            signal: controller.signal,
+            onProgress: (next) => {
+                if (!disposed) setProgress(next)
+            }
+        })
             .then((blob) => {
                 if (disposed) return
                 const nextObjectUrl = URL.createObjectURL(blob)
                 objectUrlRef.current = nextObjectUrl
                 setObjectUrl(nextObjectUrl)
+                setProgress(null)
             })
             .catch((err: unknown) => {
                 if (disposed) return
+                if (err instanceof DOMException && err.name === 'AbortError') return
+                setProgress(null)
                 setError(err instanceof Error ? err.message : 'Failed to load inline media')
             })
 
         return () => {
             disposed = true
+            controller.abort()
         }
-    }, [ctx.api, ctx.sessionId, props.block.imageId, isVideo])
+    }, [ctx.api, ctx.sessionId, props.block.imageId, isVideo, nearViewport, retryKey])
 
     return (
-        <div className="max-w-[92%] rounded-2xl border border-[var(--app-border)] bg-[var(--app-tool-card-bg)] p-3">
+        <div ref={cardRef} className="max-w-[92%] rounded-2xl border border-[var(--app-border)] bg-[var(--app-tool-card-bg)] p-3">
             <div className="mb-2 min-w-0 truncate text-xs font-medium text-[var(--app-hint)]">
                 {mediaLabel} · {props.block.fileName}
+                {progress ? ` · ${formatGeneratedBlobProgress(progress)}` : ''}
             </div>
             {objectUrl ? (
                 isVideo ? (
@@ -121,7 +169,14 @@ export function GeneratedImageCard(props: { block: GeneratedImageBlock }) {
                 )
             ) : error ? (
                 <div className="text-sm text-[var(--app-hint)]">
-                    {mediaLabel} is unavailable. {error}
+                    {mediaLabel} is unavailable. {error}{' '}
+                    <button
+                        type="button"
+                        onClick={() => setRetryKey((key) => key + 1)}
+                        className="font-medium text-[var(--app-link)] hover:underline"
+                    >
+                        Retry
+                    </button>
                 </div>
             ) : (
                 <div className="h-48 w-72 max-w-full animate-pulse rounded-xl bg-[var(--app-subtle-bg)]" />
@@ -166,15 +221,20 @@ export function GeneratedFileCard(props: { block: GeneratedFileBlock }) {
     const ctx = useHappyChatContext()
     const [busy, setBusy] = useState(false)
     const [error, setError] = useState<string | null>(null)
+    const [progress, setProgress] = useState<GeneratedBlobProgress | null>(null)
     const mimeType = props.block.mimeType ?? 'application/octet-stream'
 
     const fetchBlob = async (): Promise<Blob> => {
         setBusy(true)
         setError(null)
+        setProgress(null)
         try {
-            return await ctx.api.getGeneratedFileBlob(ctx.sessionId, props.block.fileId)
+            return await ctx.api.getGeneratedFileBlob(ctx.sessionId, props.block.fileId, {
+                onProgress: setProgress
+            })
         } finally {
             setBusy(false)
+            setProgress(null)
         }
     }
 
@@ -215,7 +275,7 @@ export function GeneratedFileCard(props: { block: GeneratedFileBlock }) {
                     </div>
                     <div className="text-xs text-[var(--app-hint)]">
                         {props.block.size !== null ? formatFileSize(props.block.size) : 'File'}
-                        {busy ? ' · Downloading…' : ''}
+                        {busy ? ` · ${progress ? formatGeneratedBlobProgress(progress) : 'Downloading…'}` : ''}
                     </div>
                 </div>
             </button>

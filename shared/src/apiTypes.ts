@@ -682,6 +682,37 @@ export type GeneratedBlobChunkResponse = {
     error?: string
 }
 
+/**
+ * Where a generated blob's bytes currently are, from the viewer's point of view.
+ *
+ * - `uploading`: the sending CLI is pushing the bytes to the hub right now.
+ * - `fetching`:  the hub is pulling the bytes from the CLI (legacy envelope or
+ *                a push that stalled); a single job serves every viewer.
+ * - `ready`:     the hub holds the whole blob and serves it from local disk.
+ */
+export type GeneratedBlobTransferState = 'uploading' | 'fetching' | 'ready'
+
+/** Body of the `202 Accepted` a blob download answers while the bytes are still
+ *  in transit. `retryAfterMs` is the poll interval the client should honour. */
+export type GeneratedBlobPendingResponse = {
+    success: false
+    state: Exclude<GeneratedBlobTransferState, 'ready'>
+    received: number
+    size: number | null
+    retryAfterMs: number
+}
+
+/** Answer to a CLI upload slice (`PUT /cli/sessions/:id/blobs/:kind/:blobId`). */
+export type GeneratedBlobUploadResponse = {
+    success: boolean
+    state?: 'uploading' | 'ready'
+    /** Bytes the hub holds so far; on a `409` this is the offset to resume from. */
+    received?: number
+    size?: number
+    error?: string
+    reason?: 'offset-mismatch' | 'size-mismatch' | 'checksum-mismatch' | 'too-large' | 'insufficient-storage' | 'busy'
+}
+
 export type UploadFileResponse = {
     success: boolean
     path?: string

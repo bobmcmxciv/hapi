@@ -36,6 +36,8 @@ import type {
 import { AgentStateSchema, CliMessagesResponseSchema, MetadataSchema, UserMessageSchema } from './types'
 import { RpcHandlerManager } from './rpc/RpcHandlerManager'
 import { registerCommonHandlers } from '../modules/common/registerCommonHandlers'
+import { configureGeneratedBlobUploader, hasPendingGeneratedBlobUploads, waitForGeneratedBlobUploads } from '@/modules/common/generatedBlobUpload'
+import { resumePendingGeneratedFileUploads } from '@/modules/common/generatedFiles'
 import { cleanupUploadDir } from '../modules/common/handlers/uploads'
 import { TerminalManager } from '@/terminal/TerminalManager'
 import { applyVersionedAck } from './versionedUpdate'
@@ -297,6 +299,23 @@ export class ApiSessionClient extends EventEmitter {
         if (this.metadata?.path) {
             registerCommonHandlers(this.rpcHandlerManager, this.metadata.path)
         }
+
+        // Generated blobs (send_file / display_image) are pushed to the hub over
+        // HTTP as soon as they are registered; bind the uploader to this session
+        // and pick up anything a previous process of it left half-sent.
+        configureGeneratedBlobUploader({
+            sessionId: this.sessionId,
+            apiUrl: configuration.apiUrl,
+            token: this.token,
+            extraHeaders: buildHubRequestHeaders({})
+        })
+        void resumePendingGeneratedFileUploads(this.sessionId).then((ids) => {
+            if (ids.length > 0) {
+                logger.debug('[API] Resuming', ids.length, 'unfinished generated file upload(s)')
+            }
+        }).catch((error) => {
+            logger.debug('[API] Failed to scan for unfinished uploads:', error instanceof Error ? error.message : String(error))
+        })
 
         this.socket = io(`${configuration.apiUrl}/cli`, {
             auth: {
@@ -1325,6 +1344,12 @@ export class ApiSessionClient extends EventEmitter {
     async flush(options?: { timeoutMs?: number }): Promise<boolean> {
         const deadlineMs = Date.now() + (options?.timeoutMs ?? 5_000)
         const remainingMs = () => Math.max(0, deadlineMs - Date.now())
+
+        // Blobs still on their way to the hub get the same budget as everything
+        // else; a handoff will not wait long, and the next process resumes them.
+        if (hasPendingGeneratedBlobUploads()) {
+            await waitForGeneratedBlobUploads({ timeoutMs: remainingMs() })
+        }
 
         const materializationTask = this.materializationTask
         if (materializationTask) {

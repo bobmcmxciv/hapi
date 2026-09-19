@@ -3858,9 +3858,10 @@ async uploadScratchlistAttachment(
 
     async readGeneratedBlobChunk(
         sessionId: string,
-        request: GeneratedBlobChunkRequest
+        request: GeneratedBlobChunkRequest,
+        timeoutMs?: number
     ): Promise<RpcGeneratedBlobChunkResponse> {
-        return await this.rpcGateway.readGeneratedBlobChunk(sessionId, request)
+        return await this.rpcGateway.readGeneratedBlobChunk(sessionId, request, timeoutMs)
     }
 
     async listDirectory(sessionId: string, path: string): Promise<RpcListDirectoryResponse> {

@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { render, screen, waitFor } from '@testing-library/react'
 import type { ApiClient } from '@/api/client'
 import type { GeneratedImageBlock } from '@/chat/types'
@@ -32,8 +32,30 @@ function context(getGeneratedImageBlob: (sessionId: string, imageId: string) => 
     }
 }
 
+/** The shared test setup installs an IntersectionObserver that never fires;
+ *  these tests want the card to load right away, so reveal it on observe(). */
+function revealImmediately(): void {
+    class RevealingObserver {
+        private readonly callback: IntersectionObserverCallback
+        constructor(callback: IntersectionObserverCallback) {
+            this.callback = callback
+        }
+        observe() {
+            this.callback([{ isIntersecting: true } as IntersectionObserverEntry], this as unknown as IntersectionObserver)
+        }
+        disconnect() {}
+        unobserve() {}
+        takeRecords(): IntersectionObserverEntry[] { return [] }
+    }
+    vi.stubGlobal('IntersectionObserver', RevealingObserver)
+}
+
 describe('GeneratedImageCard', () => {
-    afterEach(() => vi.restoreAllMocks())
+    beforeEach(() => revealImmediately())
+    afterEach(() => {
+        vi.unstubAllGlobals()
+        vi.restoreAllMocks()
+    })
 
     it('renders video MIME as an inline controlled video', async () => {
         vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:video-1')

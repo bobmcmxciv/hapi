@@ -1,8 +1,9 @@
 import { Hono } from 'hono'
 import type { Context } from 'hono'
 import { z } from 'zod'
-import type { GeneratedBlobChunkResponse, GeneratedBlobKind } from '@hapi/protocol/apiTypes'
-import { GENERATED_BLOB_CHUNK_BYTES } from '@hapi/protocol/socketLimits'
+import type { GeneratedBlobChunkResponse, GeneratedBlobKind, GeneratedBlobPendingResponse } from '@hapi/protocol/apiTypes'
+import { GENERATED_BLOB_PULL_CHUNK_BYTES } from '@hapi/protocol/socketLimits'
+import type { BlobRecord, BlobStore, GeneratedBlobServices } from '../../blobs'
 import type { SyncEngine } from '../../sync/syncEngine'
 import { RpcTargetMissingError } from '../../sync/rpcGateway'
 import type { WebAppEnv } from '../middleware/auth'
@@ -62,24 +63,31 @@ const GENERATED_IMAGE_CACHE_CONTROL = 'private, max-age=31536000, immutable'
 // —— Generated blob transfer ————————————————————————————————————————————
 //
 // Downloads used to be a single RPC that had to move the whole blob inside the
-// default 30 s budget. On the production hub between 2026-08-01 and 08-12 that
-// lost 52 downloads: each returned `404 "not found"` after exactly `30s`, so a
-// perfectly present 14 MB file was reported as missing. Successful transfers of
-// the same size were already taking 21–22 s, i.e. the failures were the slow
-// tail of a normal distribution, not an anomaly.
+// default 30 s budget; then a per-request chunked stream. Both pulled the bytes
+// from the CLI machine on every request. Now the hub keeps the bytes itself
+// (`BlobStore`): the CLI pushes them at send time, and for envelopes that were
+// never pushed a single `GeneratedBlobFetcher` job pulls them once. A request
+// that finds the bytes on disk is served from disk with Range support; one that
+// finds them still in transit answers `202` with progress and the client polls.
+// No HTTP request waits on the CLI link for long any more, which is what kept
+// tripping the reverse proxy's idle timeout (502) on slow uplinks.
 //
-// The transfer is now a sequence of `GENERATED_BLOB_CHUNK_BYTES` slices: each
-// slice has its own budget, is retried on its own, and is written to the
-// response as soon as it lands. A stalled slice costs a retry instead of the
-// whole download, and the client sees bytes flowing rather than a dead socket.
+// `serveGeneratedBlobDirect` below is the previous streaming path; it is only
+// used when the hub runs without a blob store (tests, minimal setups).
 
 const BLOB_CHUNK_RETRIES = 3
 const BLOB_CHUNK_RETRY_DELAY_MS = 750
+/** How long a download request waits for a running pull before answering 202. */
+const BLOB_PENDING_WAIT_MS = 12_000
+/** A push with no bytes for this long is treated as abandoned and pulled instead. */
+const BLOB_PUSH_STALL_MS = 60_000
+const BLOB_PENDING_RETRY_AFTER_MS = 1_500
 
 type BlobFailure =
     | { kind: 'offline'; message: string }
     | { kind: 'timeout'; message: string }
     | { kind: 'not-found'; message: string }
+    | { kind: 'storage'; message: string }
 
 /**
  * Classify a failed blob read.
@@ -108,7 +116,28 @@ function blobFailureResponse(c: Context<WebAppEnv>, failure: BlobFailure) {
     if (failure.kind === 'timeout') {
         return c.json({ success: false, error: failure.message, reason: 'timeout', retryable: true }, 504)
     }
+    if (failure.kind === 'storage') {
+        return c.json({ success: false, error: failure.message, reason: 'insufficient-storage', retryable: false }, 507)
+    }
     return c.json({ success: false, error: failure.message, reason: 'not-found', retryable: false }, 404)
+}
+
+function blobPendingResponse(
+    c: Context<WebAppEnv>,
+    state: 'uploading' | 'fetching',
+    progress: { received: number; size: number | null }
+) {
+    const body: GeneratedBlobPendingResponse = {
+        success: false,
+        state,
+        received: progress.received,
+        size: progress.size,
+        retryAfterMs: BLOB_PENDING_RETRY_AFTER_MS
+    }
+    return c.json(body, 202, {
+        'Cache-Control': 'no-store',
+        'Retry-After': String(Math.ceil(BLOB_PENDING_RETRY_AFTER_MS / 1000))
+    })
 }
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
@@ -172,29 +201,95 @@ export function parseSingleByteRange(header: string | undefined, size: number): 
     return { start, end }
 }
 
+type GeneratedBlobServeOptions = {
+    sessionId: string
+    kind: GeneratedBlobKind
+    id: string
+    etag: string
+    disposition: 'inline' | 'attachment'
+    fallbackFileName: string
+    notFoundMessage: string
+    legacyRead: () => Promise<{ success: boolean; content?: string; mimeType?: string; fileName?: string; error?: string }>
+}
+
+function blobHeaders(options: GeneratedBlobServeOptions, mimeType: string, fileName: string): Record<string, string> {
+    return {
+        'Content-Type': mimeType,
+        'Content-Disposition': `${options.disposition}; filename="${encodeURIComponent(fileName)}"`,
+        'Cache-Control': GENERATED_IMAGE_CACHE_CONTROL,
+        // Advertised so browsers and download managers know a failed transfer
+        // can be resumed rather than restarted.
+        'Accept-Ranges': 'bytes',
+        ETag: options.etag
+    }
+}
+
+/** Serve a finished blob straight from the hub's disk, honouring Range. */
+function serveStoredBlob(c: Context<WebAppEnv>, store: BlobStore, record: BlobRecord, options: GeneratedBlobServeOptions): Response {
+    store.touch(record.kind, record.id)
+    const baseHeaders = blobHeaders(options, record.mimeType, record.fileName || options.fallbackFileName)
+    const size = record.size
+    const range = parseSingleByteRange(c.req.header('range'), size)
+    if (range === 'unsatisfiable') {
+        return c.body(null, 416, { ...baseHeaders, 'Content-Range': `bytes */${size}` })
+    }
+    if (size === 0) {
+        return c.body(new Uint8Array(0), 200, { ...baseHeaders, 'Content-Length': '0' })
+    }
+    const start = range ? range.start : 0
+    const end = range ? range.end : size - 1
+    const length = end - start + 1
+    const file = Bun.file(store.finalPath(record.kind, record.id))
+    const body = range ? file.slice(start, end + 1) : file
+    const headers = range
+        ? { ...baseHeaders, 'Content-Range': `bytes ${start}-${end}/${size}`, 'Content-Length': String(length) }
+        : { ...baseHeaders, 'Content-Length': String(length) }
+    return new Response(body, { status: range ? 206 : 200, headers })
+}
+
 /**
- * Serve a sent file or a generated image over the chunked path, falling back to
- * the legacy whole-blob RPC when the CLI is too old to expose chunked reads.
- *
- * Range requests are honoured because they are the client-side half of the same
- * reliability story: a download that dies at 80% can now ask for the remaining
- * 20% instead of starting over.
+ * Serve a sent file or a generated image from the hub store, pulling it from the
+ * CLI first if the store does not have it yet. Never blocks on the CLI link for
+ * more than `BLOB_PENDING_WAIT_MS`: past that the answer is `202` + progress.
  */
 async function serveGeneratedBlob(
     c: Context<WebAppEnv>,
     engine: SyncEngine,
-    options: {
-        sessionId: string
-        kind: GeneratedBlobKind
-        id: string
-        etag: string
-        disposition: 'inline' | 'attachment'
-        fallbackFileName: string
-        notFoundMessage: string
-        legacyRead: () => Promise<{ success: boolean; content?: string; mimeType?: string; fileName?: string; error?: string }>
+    blobs: GeneratedBlobServices,
+    options: GeneratedBlobServeOptions
+): Promise<Response> {
+    const { store, fetcher } = blobs
+    const { sessionId, kind, id } = options
+    const record = store.stat(kind, id)
+    if (record?.state === 'ready') {
+        return serveStoredBlob(c, store, record, options)
     }
+    if (record?.state === 'uploading' && record.origin === 'push' && store.now() - record.lastActivityAt < BLOB_PUSH_STALL_MS) {
+        // The sending CLI is still pushing; pulling concurrently would only
+        // compete with it for the same uplink.
+        return blobPendingResponse(c, 'uploading', { received: record.received, size: record.size })
+    }
+    const job = fetcher.ensure(engine, sessionId, kind, id)
+    const outcome = await job.waitFor(blobs.pendingWaitMs ?? BLOB_PENDING_WAIT_MS)
+    if (outcome === 'pending') {
+        return blobPendingResponse(c, 'fetching', job.status())
+    }
+    if (!outcome.ok) {
+        return blobFailureResponse(c, outcome.failure)
+    }
+    return serveStoredBlob(c, store, outcome.record, options)
+}
+
+/**
+ * Previous behaviour, kept for hubs running without a blob store: stream the
+ * blob straight from the CLI, slice by slice, into this response.
+ */
+async function serveGeneratedBlobDirect(
+    c: Context<WebAppEnv>,
+    engine: SyncEngine,
+    options: GeneratedBlobServeOptions
 ) {
-    const { sessionId, kind, id, etag, disposition, fallbackFileName, legacyRead } = options
+    const { sessionId, kind, id, fallbackFileName, legacyRead } = options
     const read: ChunkReader = (offset, length) =>
         engine.readGeneratedBlobChunk(sessionId, { kind, id, offset, length })
 
@@ -203,7 +298,7 @@ async function serveGeneratedBlob(
     // does not expose it. Both fall back to the whole-blob read.
     const chunkCapable = typeof engine.readGeneratedBlobChunk === 'function'
     const head = chunkCapable
-        ? await readChunkWithRetry(read, 0, GENERATED_BLOB_CHUNK_BYTES)
+        ? await readChunkWithRetry(read, 0, GENERATED_BLOB_PULL_CHUNK_BYTES)
         : null
 
     if (head === null || (!head.ok && head.failure.kind === 'offline' && /handler not registered/i.test(head.failure.message))) {
@@ -221,10 +316,10 @@ async function serveGeneratedBlob(
         const bytes = Uint8Array.from(Buffer.from(legacy.content, 'base64'))
         return c.body(bytes, 200, {
             'Content-Type': legacy.mimeType ?? 'application/octet-stream',
-            'Content-Disposition': `${disposition}; filename="${encodeURIComponent(legacy.fileName ?? fallbackFileName)}"`,
+            'Content-Disposition': `${options.disposition}; filename="${encodeURIComponent(legacy.fileName ?? fallbackFileName)}"`,
             'Content-Length': String(bytes.byteLength),
             'Cache-Control': GENERATED_IMAGE_CACHE_CONTROL,
-            ETag: etag
+            ETag: options.etag
         })
     }
 
@@ -236,17 +331,7 @@ async function serveGeneratedBlob(
     const size = typeof first.size === 'number' && first.size >= 0
         ? first.size
         : Buffer.byteLength(first.content ?? '', 'base64')
-    const mimeType = first.mimeType ?? 'application/octet-stream'
-    const fileName = first.fileName ?? fallbackFileName
-    const baseHeaders: Record<string, string> = {
-        'Content-Type': mimeType,
-        'Content-Disposition': `${disposition}; filename="${encodeURIComponent(fileName)}"`,
-        'Cache-Control': GENERATED_IMAGE_CACHE_CONTROL,
-        // Advertised so browsers and download managers know a failed transfer
-        // can be resumed rather than restarted.
-        'Accept-Ranges': 'bytes',
-        ETag: etag
-    }
+    const baseHeaders = blobHeaders(options, first.mimeType ?? 'application/octet-stream', first.fileName ?? fallbackFileName)
 
     const range = parseSingleByteRange(c.req.header('range'), size)
     if (range === 'unsatisfiable') {
@@ -272,7 +357,7 @@ async function serveGeneratedBlob(
             try {
                 let cursor = start
                 while (cursor <= end) {
-                    const want = Math.min(GENERATED_BLOB_CHUNK_BYTES, end - cursor + 1)
+                    const want = Math.min(GENERATED_BLOB_PULL_CHUNK_BYTES, end - cursor + 1)
                     let bytes: Buffer
                     // The probe read already fetched [0, chunk); reuse it so a
                     // plain (rangeless) download costs no extra round-trip.
@@ -318,8 +403,12 @@ function ifNoneMatchMatches(header: string | undefined, etag: string): boolean {
     })
 }
 
-export function createGitRoutes(getSyncEngine: () => SyncEngine | null): Hono<WebAppEnv> {
+export function createGitRoutes(
+    getSyncEngine: () => SyncEngine | null,
+    deps: { blobs?: GeneratedBlobServices } = {}
+): Hono<WebAppEnv> {
     const app = new Hono<WebAppEnv>()
+    const blobs = deps.blobs ?? null
 
     app.get('/sessions/:id/git-status', async (c) => {
         const engine = requireSyncEngine(c, getSyncEngine)
@@ -468,7 +557,7 @@ export function createGitRoutes(getSyncEngine: () => SyncEngine | null): Hono<We
         // Generated images are content-addressed by an immutable random id, so the bytes for a
         // given id never change. Cache aggressively so remounts/scroll/session reopen don't
         // re-run the full HTTP -> socket.io RPC -> base64 round-trip every time (issue #927).
-        return await serveGeneratedBlob(c, engine, {
+        const serve: GeneratedBlobServeOptions = {
             sessionId: sessionResult.sessionId,
             kind: 'image',
             id: parsed.data.imageId,
@@ -477,7 +566,10 @@ export function createGitRoutes(getSyncEngine: () => SyncEngine | null): Hono<We
             fallbackFileName: 'generated-image',
             notFoundMessage: 'Generated image not found',
             legacyRead: () => engine.readGeneratedImage(sessionResult.sessionId, parsed.data.imageId)
-        })
+        }
+        return blobs
+            ? await serveGeneratedBlob(c, engine, blobs, serve)
+            : await serveGeneratedBlobDirect(c, engine, serve)
     })
 
     app.get('/sessions/:id/generated-files/:fileId', async (c) => {
@@ -506,7 +598,7 @@ export function createGitRoutes(getSyncEngine: () => SyncEngine | null): Hono<We
             })
         }
 
-        return await serveGeneratedBlob(c, engine, {
+        const serve: GeneratedBlobServeOptions = {
             sessionId: sessionResult.sessionId,
             kind: 'file',
             id: parsed.data.fileId,
@@ -515,7 +607,10 @@ export function createGitRoutes(getSyncEngine: () => SyncEngine | null): Hono<We
             fallbackFileName: 'file',
             notFoundMessage: 'Sent file not found',
             legacyRead: () => engine.readGeneratedFile(sessionResult.sessionId, parsed.data.fileId)
-        })
+        }
+        return blobs
+            ? await serveGeneratedBlob(c, engine, blobs, serve)
+            : await serveGeneratedBlobDirect(c, engine, serve)
     })
 
     app.get('/sessions/:id/files', async (c) => {
