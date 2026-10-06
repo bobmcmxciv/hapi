@@ -898,3 +898,19 @@ JWT 解析不出 `gaid`）同样改用统一的 `carriesResourceId`，否则它�
 | `web/src/components/machinePresentation.tsx`, `MachineFilterBar.tsx` and test, `SessionList.tsx`, `SessionRowSummary.tsx`, `SessionHeader.tsx`, `NewSession/MachineSelector.tsx`, `routes/settings/machines.tsx`, `hooks/useMachineLabels.ts`, `router.tsx`, `api/client.ts`, locale files, `fork-features/usage/UsagePage.tsx` | No machine-icon provider in the shared machine presentation | Every surface that labels a machine renders `MachineOsIcon` or a bare label directly; the icon has to be threaded through each of them | `useMachineIcons` (localStorage-sticky) → `MachineOsIcon icon=` in chips, group headers, in-progress rows, chat header, New Session and usage board | With two machines of the same OS, pick different icons from the right-click dialog and from Settings → Machines; both chips, group headers and the chat header must change without reload; "By OS" must remove the key |
 
 上游若给机器加原生的图标/外观字段，先比语义再决定去留。
+
+## 会话/项目 AI 摘要、折叠已归档、用量折线图 (2026-10-06)
+
+hub 侧调度器（`fork-features/session-digest/`）用 env `HAPI_DIGEST_API_URL` / `HAPI_DIGEST_API_KEY`
+指向的 Anthropic Messages 端点（生产走 cx2cc-gateway，chat scope key）给空闲 3 分钟以上、
+有新消息的会话生成摘要（做过的事 / 现状 / 待办 / 是否已办完）并在用户没手动起名时自动重命名
+（走 `engine.renameSession`，`touchUpdatedAt:false`）；同项目（machineId + 目录，与前端分组同键）
+的会话摘要再汇总成项目概况。数据在独立的 `<dataDir>/session-digests.sqlite`，不动 SCHEMA_VERSION。
+用量折线图每个时间桶复用 `aggregateUsageForSessions` 的窗口口径。
+
+| Files | Missing upstream seam | Why it cannot move out | Runtime path | Sync verification |
+|---|---|---|---|---|
+| `hub/src/startHub.ts`, `hub/tsconfig.json`, `fork-features/multi-user/executionMount.ts` | No background-job or route registry for fork services | The scheduler needs the live SyncEngine and message store, which only exist inside `startHub`; routes must reuse the gateway visibility resolver private to executionMount | hub start → `startDigestService` → 30 s tick → LLM → digest sqlite / `renameSession`; `/api/digests/*`, `/api/usage/timeseries` | Start the hub with the two env vars, let a real session go idle, confirm a digest row, the auto name, and a project row appear; `/api/usage/timeseries` bucket sum equals `/api/usage/summary` total for the same window |
+| `web/src/components/SessionList.tsx`, `SessionRowSummary.tsx`, `SessionHeader.tsx`, `fork-features/settings/ForkSettingsPage.tsx`, `fork-features/usage/UsagePage.tsx`, locale files | No list-row badge slot, group-header action slot, header action slot, or settings section registry | Fold-archived toggle, completed check, project-overview button and session digest button have to live in the upstream-owned list/header renderers | session list header toggle → per-group "已归档 N" row; row ✓ from `/api/digests/sessions`; header digest dialog; group digest dialog; settings → AI 摘要; usage page trend card | In a real browser: fold archived, open a session digest and mark it completed (✓ appears in the list), open a project overview, change the model in settings, switch usage ranges and read the tooltip |
+
+上游若提供原生的会话摘要/标题生成或项目实体，先比语义再决定去留。
