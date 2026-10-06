@@ -521,6 +521,8 @@ export const MachineMetadataSchema = z.object({
     platform: z.string().optional(),
     happyCliVersion: z.string().optional(),
     displayName: z.string().optional(),
+    // fork(machine-icons)：hub 自有的设备图标 id（见 MACHINE_ICON_IDS），与 displayName 同样不由 CLI 上报。
+    icon: z.string().optional(),
     homeDir: z.string().optional(),
     happyHomeDir: z.string().optional(),
     happyLibDir: z.string().optional(),

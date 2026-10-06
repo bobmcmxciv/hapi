@@ -28,6 +28,9 @@ import { getWorktreeSessionLabel } from '@/lib/sessionWorktreeLabel'
 import type { MachineWithOwner } from '@/types/api'
 import { getMachineHost, getMachinePlatform, presentMachineHealth } from '@/lib/machineHealth'
 import { MachineFilterBar } from '@/components/MachineFilterBar'
+import { MachineOsIcon } from '@/components/machinePresentation'
+import type { MachineIconId } from '@hapi/protocol'
+import type { MachinePresentationPatch } from '@/fork-features/machine-icons/types'
 import { useQueryClient } from '@tanstack/react-query'
 import { queryKeys } from '@/lib/query-keys'
 import { useSessionListMachineFilter } from '@/hooks/useSessionListMachineFilter'
@@ -857,9 +860,10 @@ function SessionItem(props: {
     inRunningSection?: boolean
     projectLabel?: string
     machineLabel?: string
+    machineIcon?: React.ReactNode
 }) {
     const { t } = useTranslation()
-    const { session: s, onSelect, showPath = true, api, selected = false, showDetailedStatus = false, inRunningSection = false, projectLabel, machineLabel } = props
+    const { session: s, onSelect, showPath = true, api, selected = false, showDetailedStatus = false, inRunningSection = false, projectLabel, machineLabel, machineIcon } = props
     const { haptic } = usePlatform()
     const [menuOpen, setMenuOpen] = useState(false)
     const [menuAnchorPoint, setMenuAnchorPoint] = useState<{ x: number; y: number }>({ x: 0, y: 0 })
@@ -978,6 +982,7 @@ function SessionItem(props: {
                     inRunningSection={inRunningSection}
                     projectLabel={projectLabel}
                     machineLabel={machineLabel}
+                    machineIcon={machineIcon}
                 />
             </button>
 
@@ -1122,6 +1127,8 @@ export function SessionList(props: {
     headerActions?: React.ReactNode
     api: ApiClient | null
     machineLabelsById?: Record<string, string>
+    /** fork(machine-icons)：machineId → 设备图标的粘性映射，见 useMachineIcons。 */
+    machineIconsById?: Record<string, MachineIconId>
     machinesById?: Record<string, MachineWithOwner>
     /** machineId → 归属账号用户名的粘性映射，见 useMachineOwners。 */
     machineOwnersById?: Record<string, string>
@@ -1135,6 +1142,7 @@ export function SessionList(props: {
         api,
         selectedSessionId,
         machineLabelsById = {},
+        machineIconsById = {},
         machinesById = {},
         machineOwnersById = {},
         onNewSessionInDirectory,
@@ -1151,9 +1159,10 @@ export function SessionList(props: {
     const queryClient = useQueryClient()
     // 右键机器 chip 的改名入口：写的是机器全局 displayName（与设置页同一 API），
     // 保存后刷新 machines 查询，别名立即体现在 chip 与会话行副标题上。
-    const renameMachine = useCallback(async (machineId: string, displayName: string) => {
+    // fork(machine-icons)：同一对话框也设置设备图标，一次 PATCH 提交。
+    const renameMachine = useCallback(async (machineId: string, patch: MachinePresentationPatch) => {
         if (!api) throw new Error('API unavailable')
-        await api.renameMachine(machineId, displayName)
+        await api.updateMachine(machineId, patch)
         await queryClient.invalidateQueries({ queryKey: queryKeys.machines })
     }, [api, queryClient])
     const showDetailedStatus = sessionListStatusMode === 'detailed'
@@ -1191,6 +1200,14 @@ export function SessionList(props: {
         }
         return m
     }, [props.sessions])
+
+    // fork(machine-icons)：分组标题与「进行中」行前的机器图标——设了设备图标画设备，
+    // 否则按系统；系统先取机器对象，缺席时用会话 metadata.os 兜底。
+    const renderMachineIcon = (machineId: string | null, className?: string): React.ReactNode => {
+        if (!machineId) return null
+        const platform = getMachinePlatform(machinesById[machineId]) ?? osByMachineId.get(machineId) ?? null
+        return <MachineOsIcon platform={platform} icon={machineIconsById[machineId] ?? null} className={className} />
+    }
 
     const resolveMachineLabel = (machineId: string | null): string => {
         if (machineId) {
@@ -1249,6 +1266,7 @@ export function SessionList(props: {
                 ),
                 platform: getMachinePlatform(machine)
                     ?? (mg.machineId ? osByMachineId.get(mg.machineId) ?? null : null),
+                icon: mg.machineId ? machineIconsById[mg.machineId] ?? null : null,
                 // 归属只由 /api/machines 下发，机器暂时缺席那份投影时回落到
                 // 上次已知归属——否则一次刷新时序抖动就能把分组整条打回平铺。
                 owner: machine?.ownerUsername
@@ -1259,7 +1277,7 @@ export function SessionList(props: {
                 canRename: machine !== undefined
             }
         }),
-        [machineFilters, machinesById, machineOwnersById, osByMachineId, hostByMachineId]
+        [machineFilters, machinesById, machineOwnersById, machineIconsById, osByMachineId, hostByMachineId]
     )
     const showMachineFilterBar = machineFilters.length >= 2
     // A persisted filter whose machine no longer has sessions falls back to
@@ -1750,6 +1768,7 @@ export function SessionList(props: {
                                                     inRunningSection
                                                     projectLabel={getGroupDisplayName(s.metadata?.worktree?.basePath ?? s.metadata?.path ?? 'Other')}
                                                     machineLabel={resolveMachineLabel(s.metadata?.machineId ?? null)}
+                                                    machineIcon={showMachineFilterBar ? renderMachineIcon(s.metadata?.machineId ?? null, 'h-3 w-3') : undefined}
                                                 />
                                             ))}
                                         </div>
@@ -1779,7 +1798,8 @@ export function SessionList(props: {
                     const canStartInGroupDirectory = group.directory !== 'Other'
                     // With multiple machines in the unfiltered view, disambiguate
                     // same-named directories by suffixing the machine label.
-                    const groupTitle = showMachineFilterBar && activeMachineFilter === null
+                    const showGroupMachine = showMachineFilterBar && activeMachineFilter === null
+                    const groupTitle = showGroupMachine
                         ? `${group.displayName} · ${resolveMachineLabel(group.machineId)}`
                         : group.displayName
                     return (
@@ -1790,6 +1810,7 @@ export function SessionList(props: {
                                 title={group.directory}
                             >
                                 <ChevronIcon className="h-3.5 w-3.5 text-[var(--app-hint)] shrink-0" collapsed={isCollapsed} />
+                                {showGroupMachine ? renderMachineIcon(group.machineId, 'h-4 w-4') : null}
                                 <span className="font-medium text-sm truncate flex-1">
                                     {groupTitle}
                                 </span>

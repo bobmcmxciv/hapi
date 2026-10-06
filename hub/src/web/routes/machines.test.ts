@@ -541,6 +541,8 @@ describe('machines routes', () => {
             return app
         }
 
+        type Presentation = { displayName?: string; icon?: string | null }
+
         function patch(app: Hono<WebAppEnv>, body: unknown, machineId = 'machine-1') {
             return app.request(`/api/machines/${machineId}`, {
                 method: 'PATCH',
@@ -551,18 +553,18 @@ describe('machines routes', () => {
 
         it('renames a machine', async () => {
             const machine = createMachine()
-            let captured: { id: string; displayName: string } | undefined
+            let captured: { id: string; patch: Presentation } | undefined
             const app = createApp({
                 getMachine: () => machine,
-                renameMachine: async (id: string, displayName: string) => {
-                    captured = { id, displayName }
+                updateMachinePresentation: async (id: string, patch: Presentation) => {
+                    captured = { id, patch }
                 }
             } as Partial<SyncEngine>)
 
             const response = await patch(app, { displayName: 'Workstation' })
 
             expect(response.status).toBe(200)
-            expect(captured).toEqual({ id: 'machine-1', displayName: 'Workstation' })
+            expect(captured).toEqual({ id: 'machine-1', patch: { displayName: 'Workstation' } })
         })
 
         it('trims the name before storing it', async () => {
@@ -570,8 +572,8 @@ describe('machines routes', () => {
             let captured: string | undefined
             const app = createApp({
                 getMachine: () => machine,
-                renameMachine: async (_id: string, displayName: string) => {
-                    captured = displayName
+                updateMachinePresentation: async (_id: string, patch: Presentation) => {
+                    captured = patch.displayName
                 }
             } as Partial<SyncEngine>)
 
@@ -585,8 +587,8 @@ describe('machines routes', () => {
             let captured: string | undefined
             const app = createApp({
                 getMachine: () => machine,
-                renameMachine: async (_id: string, displayName: string) => {
-                    captured = displayName
+                updateMachinePresentation: async (_id: string, patch: Presentation) => {
+                    captured = patch.displayName
                 }
             } as Partial<SyncEngine>)
 
@@ -601,7 +603,7 @@ describe('machines routes', () => {
             let called = false
             const app = createApp({
                 getMachine: () => machine,
-                renameMachine: async () => {
+                updateMachinePresentation: async () => {
                     called = true
                 }
             } as Partial<SyncEngine>)
@@ -612,20 +614,82 @@ describe('machines routes', () => {
             expect(called).toBe(false)
         })
 
-        it('rejects a body without displayName', async () => {
+        it('rejects a body without displayName or icon', async () => {
             const machine = createMachine()
             const app = createApp({
                 getMachine: () => machine,
-                renameMachine: async () => {}
+                updateMachinePresentation: async () => {}
             } as Partial<SyncEngine>)
 
             expect((await patch(app, {})).status).toBe(400)
         })
 
+        it('sets a known icon without touching the name', async () => {
+            const machine = createMachine()
+            let captured: Presentation | undefined
+            const app = createApp({
+                getMachine: () => machine,
+                updateMachinePresentation: async (_id: string, patch: Presentation) => {
+                    captured = patch
+                }
+            } as Partial<SyncEngine>)
+
+            const response = await patch(app, { icon: 'rack-server' })
+
+            expect(response.status).toBe(200)
+            expect(captured).toEqual({ icon: 'rack-server' })
+        })
+
+        it('clears the icon when given null or an empty string', async () => {
+            const machine = createMachine()
+            const captured: Presentation[] = []
+            const app = createApp({
+                getMachine: () => machine,
+                updateMachinePresentation: async (_id: string, patch: Presentation) => {
+                    captured.push(patch)
+                }
+            } as Partial<SyncEngine>)
+
+            expect((await patch(app, { icon: null })).status).toBe(200)
+            expect((await patch(app, { icon: '' })).status).toBe(200)
+            expect(captured).toEqual([{ icon: null }, { icon: null }])
+        })
+
+        it('writes name and icon together in one update', async () => {
+            const machine = createMachine()
+            const captured: Presentation[] = []
+            const app = createApp({
+                getMachine: () => machine,
+                updateMachinePresentation: async (_id: string, patch: Presentation) => {
+                    captured.push(patch)
+                }
+            } as Partial<SyncEngine>)
+
+            await patch(app, { displayName: ' VIRCS ', icon: 'macbook' })
+
+            expect(captured).toEqual([{ displayName: 'VIRCS', icon: 'macbook' }])
+        })
+
+        it('rejects an icon outside the vocabulary', async () => {
+            const machine = createMachine()
+            let called = false
+            const app = createApp({
+                getMachine: () => machine,
+                updateMachinePresentation: async () => {
+                    called = true
+                }
+            } as Partial<SyncEngine>)
+
+            const response = await patch(app, { icon: 'toaster' })
+
+            expect(response.status).toBe(400)
+            expect(called).toBe(false)
+        })
+
         it('returns 404 for an unknown machine', async () => {
             const app = createApp({
                 getMachine: () => undefined,
-                renameMachine: async () => {}
+                updateMachinePresentation: async () => {}
             } as Partial<SyncEngine>)
 
             expect((await patch(app, { displayName: 'Nope' }, 'missing')).status).toBe(404)
@@ -635,7 +699,7 @@ describe('machines routes', () => {
             const machine = createMachine({ namespace: 'other' })
             const app = createApp({
                 getMachine: () => machine,
-                renameMachine: async () => {}
+                updateMachinePresentation: async () => {}
             } as Partial<SyncEngine>)
 
             expect((await patch(app, { displayName: 'Nope' })).status).toBe(403)
@@ -645,7 +709,7 @@ describe('machines routes', () => {
             const machine = createMachine()
             const app = createApp({
                 getMachine: () => machine,
-                renameMachine: async () => {
+                updateMachinePresentation: async () => {
                     throw new Error('Machine was modified concurrently. Please try again.')
                 }
             } as Partial<SyncEngine>)
@@ -657,7 +721,7 @@ describe('machines routes', () => {
             const machine = createMachine()
             const app = createApp({
                 getMachine: () => machine,
-                renameMachine: async () => {
+                updateMachinePresentation: async () => {
                     throw new Error('disk on fire')
                 }
             } as Partial<SyncEngine>)

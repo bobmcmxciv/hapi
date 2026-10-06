@@ -1,5 +1,6 @@
 import {
     MACHINE_DISPLAY_NAME_MAX_LENGTH,
+    isMachineIconId,
     MachineCreateDirectoryRequestSchema,
     MachineListDirectoryRequestSchema,
     MachinePathsExistsRequestSchema,
@@ -44,18 +45,30 @@ export function createMachinesRoutes(getSyncEngine: () => SyncEngine | null): Ho
         const body = await c.req.json().catch(() => null)
         const parsed = RenameMachineRequestSchema.safeParse(body)
         if (!parsed.success) {
-            return c.json({ error: 'Invalid body: displayName is required' }, 400)
+            return c.json({ error: 'Invalid body: displayName or icon is required' }, 400)
         }
 
-        // Trim first: a name is stored trimmed, so the ceiling applies to what
-        // actually gets stored. An empty result clears the custom name.
-        const displayName = parsed.data.displayName.trim()
-        if (displayName.length > MACHINE_DISPLAY_NAME_MAX_LENGTH) {
-            return c.json({ error: `displayName must be at most ${MACHINE_DISPLAY_NAME_MAX_LENGTH} characters` }, 400)
+        const patch: { displayName?: string; icon?: string | null } = {}
+        if (parsed.data.displayName !== undefined) {
+            // Trim first: a name is stored trimmed, so the ceiling applies to what
+            // actually gets stored. An empty result clears the custom name.
+            const displayName = parsed.data.displayName.trim()
+            if (displayName.length > MACHINE_DISPLAY_NAME_MAX_LENGTH) {
+                return c.json({ error: `displayName must be at most ${MACHINE_DISPLAY_NAME_MAX_LENGTH} characters` }, 400)
+            }
+            patch.displayName = displayName
+        }
+        if (parsed.data.icon !== undefined) {
+            // fork(machine-icons)：null / 空串清掉图标；其余必须在词表里。
+            const icon = parsed.data.icon === null ? '' : parsed.data.icon.trim()
+            if (icon.length > 0 && !isMachineIconId(icon)) {
+                return c.json({ error: `Unknown machine icon: ${icon}` }, 400)
+            }
+            patch.icon = icon.length > 0 ? icon : null
         }
 
         try {
-            await engine.renameMachine(machineId, displayName)
+            await engine.updateMachinePresentation(machineId, patch)
             return c.json({ ok: true })
         } catch (error) {
             const message = error instanceof Error ? error.message : 'Failed to rename machine'

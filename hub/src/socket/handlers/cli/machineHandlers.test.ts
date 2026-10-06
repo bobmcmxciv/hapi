@@ -107,6 +107,18 @@ describe('cli machine metadata updates', () => {
         expect(ack.metadata.displayName).toBe('吹雪3080')
     })
 
+    it('keeps the hub-set icon alongside the name when the CLI replaces metadata (fork machine-icons)', () => {
+        const { store, socket } = setup({ ...CLI_METADATA, displayName: '吹雪3080', icon: 'workstation' })
+
+        pushMetadata(socket, store, CLI_METADATA)
+
+        expect(store.machines.getMachine('machine-1')?.metadata).toEqual({
+            ...CLI_METADATA,
+            displayName: '吹雪3080',
+            icon: 'workstation'
+        })
+    })
+
     it('leaves metadata untouched when the hub has no name of its own', () => {
         const { store, socket } = setup(CLI_METADATA)
 

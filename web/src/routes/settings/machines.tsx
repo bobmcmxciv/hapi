@@ -1,6 +1,6 @@
 import { useRef, useState } from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
-import { MACHINE_DISPLAY_NAME_MAX_LENGTH } from '@hapi/protocol'
+import { MACHINE_DISPLAY_NAME_MAX_LENGTH, type MachineIconId } from '@hapi/protocol'
 import type { ApiClient } from '@/api/client'
 import type { Machine } from '@/types/api'
 import { useAppContext } from '@/lib/app-context'
@@ -9,6 +9,9 @@ import { useMachines } from '@/hooks/queries/useMachines'
 import { getMachineTitle } from '@/hooks/useMachineLabels'
 import { queryKeys } from '@/lib/query-keys'
 import { SettingsPageContent, SettingsSection } from '@/components/settings/SettingsPrimitives'
+import { MachineOsIcon } from '@/components/machinePresentation'
+import { MachineIconPicker } from '@/fork-features/machine-icons/MachineIconPicker'
+import { machineIconLabelKey, resolveMachineIcon } from '@/fork-features/machine-icons/MachineDeviceIcon'
 
 function MachineRow(props: { api: ApiClient | null; machine: Machine }) {
     const { t } = useTranslation()
@@ -21,7 +24,25 @@ function MachineRow(props: { api: ApiClient | null; machine: Machine }) {
     const label = getMachineTitle(props.machine)
     const host = props.machine.metadata?.host
     const platform = props.machine.metadata?.platform
-    const subtitle = [host, platform].filter(Boolean).join(' · ')
+    // fork(machine-icons)：行首图标按钮展开设备图标选择，点选即保存。
+    const icon = resolveMachineIcon(props.machine.metadata?.icon)
+    const [pickingIcon, setPickingIcon] = useState(false)
+    const subtitle = [host, icon ? t(machineIconLabelKey(icon)) : null, platform].filter(Boolean).join(' · ')
+
+    const iconMutation = useMutation({
+        mutationFn: async (next: MachineIconId | null) => {
+            if (!props.api) {
+                throw new Error('API unavailable')
+            }
+            await props.api.updateMachine(props.machine.id, { icon: next })
+        },
+        onSuccess: () => {
+            setPickingIcon(false)
+            setError(null)
+            void queryClient.invalidateQueries({ queryKey: queryKeys.machines })
+        },
+        onError: () => setError(t('machineIcon.error')),
+    })
 
     const renameMutation = useMutation({
         mutationFn: async (displayName: string) => {
@@ -67,6 +88,16 @@ function MachineRow(props: { api: ApiClient | null; machine: Machine }) {
     return (
         <div className="px-3 py-3">
             <div className="flex min-h-9 items-center justify-between gap-3">
+                <button
+                    type="button"
+                    onClick={() => setPickingIcon((open) => !open)}
+                    aria-expanded={pickingIcon}
+                    aria-label={t('machineIcon.change', { name: label })}
+                    title={t('machineIcon.change', { name: label })}
+                    className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-[var(--app-border)] text-[var(--app-fg)] transition-colors hover:bg-[var(--app-subtle-bg)]"
+                >
+                    <MachineOsIcon platform={platform ?? null} icon={icon} className="h-5 w-5" />
+                </button>
                 <div className="min-w-0 flex-1">
                     {editing ? (
                         <input
@@ -105,6 +136,21 @@ function MachineRow(props: { api: ApiClient | null; machine: Machine }) {
                     ) : null}
                 </div>
             </div>
+            {pickingIcon ? (
+                <MachineIconPicker
+                    className="mt-3 sm:grid-cols-5"
+                    value={icon}
+                    platform={platform ?? null}
+                    disabled={iconMutation.isPending}
+                    onChange={(next) => {
+                        if (next === icon) {
+                            setPickingIcon(false)
+                            return
+                        }
+                        iconMutation.mutate(next)
+                    }}
+                />
+            ) : null}
             {error ? <div role="alert" className="mt-1 text-xs text-red-600 dark:text-red-400">{error}</div> : null}
         </div>
     )

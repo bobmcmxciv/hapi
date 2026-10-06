@@ -1,5 +1,6 @@
 import type { ReactNode } from 'react'
 import { cn } from '@/lib/utils'
+import { MachineDeviceGlyph, resolveMachineIcon } from '@/fork-features/machine-icons/MachineDeviceIcon'
 
 /**
  * Shared machine-list presentation.
@@ -85,9 +86,18 @@ function UnknownMachineIcon(props: { className?: string }) {
 }
 
 /** OS icon: one silhouette per win32/darwin/linux, generic monitor for unknown
- *  platforms. `data-os` is the test hook. */
-export function MachineOsIcon(props: { platform: string | null; className?: string }) {
+ *  platforms. `data-os` is the test hook.
+ *  fork(machine-icons)：机器设了设备图标（metadata.icon）时改画设备外形，`data-icon` 标注。 */
+export function MachineOsIcon(props: { platform: string | null; icon?: string | null; className?: string }) {
     const iconClass = props.className ?? 'h-3.5 w-3.5'
+    const deviceIcon = resolveMachineIcon(props.icon)
+    if (deviceIcon) {
+        return (
+            <span aria-hidden="true" data-os={props.platform ?? 'unknown'} data-icon={deviceIcon} className="flex shrink-0 items-center opacity-80">
+                <MachineDeviceGlyph icon={deviceIcon} className={iconClass} />
+            </span>
+        )
+    }
     const icon = props.platform === 'darwin' ? <AppleLogoIcon className={iconClass} />
         : props.platform === 'win32' ? <WindowsLogoIcon className={iconClass} />
         : props.platform === 'linux' ? <LinuxTerminalIcon className={iconClass} />
@@ -128,6 +138,8 @@ export function MachineOwnerHeading(props: { owner: string | null; unknownLabel:
 export function MachineChip(props: {
     label: string
     platform: string | null
+    /** fork(machine-icons)：设备图标 id，未设为 null。 */
+    icon?: string | null
     stat: ReactNode
     selected: boolean
     title?: string
@@ -149,7 +161,7 @@ export function MachineChip(props: {
                 props.className
             )}
         >
-            <MachineOsIcon platform={props.platform} />
+            <MachineOsIcon platform={props.platform} icon={props.icon} />
             <span className="min-w-0 flex-1 truncate text-left">{props.label}</span>
             <span className="shrink-0 tabular-nums opacity-70">{props.stat}</span>
         </button>

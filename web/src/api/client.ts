@@ -1,4 +1,5 @@
 import type { ClaudeProxyModelsResponse } from '@/fork-features/claude-proxy-models/types'
+import type { MachinePresentationPatch } from '@/fork-features/machine-icons/types'
 import type {
     AttachmentMetadata,
     AuthResponse,
@@ -918,6 +919,14 @@ export class ApiClient {
         await this.request(`/api/machines/${encodeURIComponent(machineId)}`, {
             method: 'PATCH',
             body: JSON.stringify({ displayName })
+        })
+    }
+
+    /** fork(machine-icons)：名字与设备图标一次提交；省略的字段不动，null 清掉图标。 */
+    async updateMachine(machineId: string, patch: MachinePresentationPatch): Promise<void> {
+        await this.request(`/api/machines/${encodeURIComponent(machineId)}`, {
+            method: 'PATCH',
+            body: JSON.stringify(patch)
         })
     }
 

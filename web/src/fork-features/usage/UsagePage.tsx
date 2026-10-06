@@ -18,6 +18,9 @@ import {
     machineChipShellClass
 } from '@/components/machinePresentation'
 import { cn } from '@/lib/utils'
+import { useMachines } from '@/hooks/queries/useMachines'
+import { resolveMachineIcon } from '@/fork-features/machine-icons/MachineDeviceIcon'
+import type { MachineIconId } from '@hapi/protocol'
 import SubscriptionPanel from './SubscriptionPanel'
 
 /** 用量页不按会话活跃日高亮，固定空集避免每次渲染新建 Set。 */
@@ -128,6 +131,8 @@ const SEGMENT_COLORS = {
  */
 function MachineUsageBoard(props: {
     hosts: UsageHostSummary[]
+    /** fork(machine-icons)：host → 设备图标（榜单按 host 聚合，图标挂在机器上）。 */
+    iconByHost?: ReadonlyMap<string, MachineIconId>
     value: string
     onChange: (host: string) => void
     allLabel: string
@@ -152,6 +157,7 @@ function MachineUsageBoard(props: {
                     key={entry.host}
                     label={entry.host}
                     platform={entry.platform}
+                    icon={props.iconByHost?.get(entry.host) ?? null}
                     stat={formatTokens(entry.totalTokens)}
                     selected={props.value === entry.host}
                     title={[
@@ -294,7 +300,17 @@ function ModelTable(props: { models: UsageModelSummary[] }) {
 }
 
 export default function UsagePage() {
-    const { baseUrl, token } = useAppContext()
+    const { baseUrl, token, api } = useAppContext()
+    const { machines } = useMachines(api, Boolean(api))
+    const iconByHost = useMemo(() => {
+        const byHost = new Map<string, MachineIconId>()
+        for (const machine of machines) {
+            const machineHost = machine.metadata?.host
+            const icon = resolveMachineIcon(machine.metadata?.icon)
+            if (machineHost && icon && !byHost.has(machineHost)) byHost.set(machineHost, icon)
+        }
+        return byHost
+    }, [machines])
     const navigate = useNavigate()
     const { t } = useTranslation()
     const [range, setRange] = useState<RangeKey>('all')
@@ -420,6 +436,7 @@ export default function UsagePage() {
                 {hosts.length > 0 && (
                     <MachineUsageBoard
                         hosts={hosts}
+                        iconByHost={iconByHost}
                         value={host}
                         onChange={setHost}
                         allLabel={t('usage.host.all')}

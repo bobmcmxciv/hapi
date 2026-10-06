@@ -58,12 +58,19 @@ export function mergeMachineMetadata(stored: unknown, incoming: unknown): Record
 // erases a rename. Production hit exactly that: machine 28ac3d22 was pushed
 // back to `{workspaceRoots}` and the operator's rename kept "not working".
 // Carry the stored name across CLI-driven metadata writes.
+// fork(machine-icons)：设备图标 `icon` 同属 hub 自有字段，一并保留。
+const HUB_OWNED_MACHINE_METADATA_KEYS = ['displayName', 'icon'] as const
+
 export function preserveHubOwnedMachineMetadata(stored: unknown, incoming: unknown): unknown {
     if (!isPlainObject(incoming) || !isPlainObject(stored)) return incoming
-    const displayName = stored.displayName
-    if (typeof displayName !== 'string' || displayName.length === 0) return incoming
-    if (incoming.displayName === displayName) return incoming
-    return { ...incoming, displayName }
+    let result: Record<string, unknown> | null = null
+    for (const key of HUB_OWNED_MACHINE_METADATA_KEYS) {
+        const value = stored[key]
+        if (typeof value !== 'string' || value.length === 0) continue
+        if (incoming[key] === value) continue
+        result = { ...(result ?? incoming), [key]: value }
+    }
+    return result ?? incoming
 }
 
 // Registration also carries the runner's self-declared capabilities (e.g.

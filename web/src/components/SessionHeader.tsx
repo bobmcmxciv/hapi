@@ -23,6 +23,9 @@ import { useToast } from '@/lib/toast-context'
 import { queryKeys } from '@/lib/query-keys'
 import { markCodexSessionsImported } from '@/lib/codexImportedSessions'
 import { useMachineLabels } from '@/hooks/useMachineLabels'
+import { useMachineIcons } from '@/fork-features/machine-icons/useMachineIcons'
+import { MachineOsIcon } from '@/components/machinePresentation'
+import { getMachinePlatform } from '@/lib/machineHealth'
 import { formatAbsoluteDateTime, formatRelativeTime } from '@/lib/relativeTime'
 import { useSessionHeaderMetadata } from '@/hooks/useSessionHeaderMetadata'
 import { formatSessionHeaderTimestamp } from '@/lib/sessionHeaderTimestamp'
@@ -192,7 +195,17 @@ export function SessionHeader(props: {
         [session, machineLabelsById]
     )
     const sessionMachineId = session.metadata?.machineId ?? null
-    const machineUsage = machines.find((machine) => machine.id === sessionMachineId)?.metadata?.usage
+    const sessionMachine = machines.find((machine) => machine.id === sessionMachineId)
+    const machineUsage = sessionMachine?.metadata?.usage
+    // fork(machine-icons)：页头「机器」前画该机的设备图标（未设则系统图标）。
+    const machineIconsById = useMachineIcons(machines)
+    const machineIcon = sessionMachineId ? (
+        <MachineOsIcon
+            platform={getMachinePlatform(sessionMachine) ?? session.metadata?.os ?? null}
+            icon={machineIconsById[sessionMachineId] ?? null}
+            className="h-3.5 w-3.5"
+        />
+    ) : null
     const usageSnapshot = ['openusage', 'cc-switch']
         .flatMap((providerId) => machineUsage?.snapshots.find((snapshot) => snapshot.providerId === providerId) ?? [])
         .at(0)
@@ -417,7 +430,7 @@ export function SessionHeader(props: {
                                 ) : null}
                                 {mobileSecondary === 'model' && modelLabel ? <span className="inline-flex truncate items-center gap-1.5">{headerMetadata.showLabels ? `${t(modelLabel.key)}: ` : ''}{modelLabel.value}{isModelChanging ? <ModelChangingStatus /> : null}</span> : null}
                                 {mobileSecondary === 'reasoning' && reasoningLabel ? <span className="truncate">{reasoningLabel}</span> : null}
-                                {mobileSecondary === 'machine' && machineLabel ? <span className="truncate">{headerMetadata.showLabels ? `${t('session.item.machine')}: ` : ''}{machineLabel}</span> : null}
+                                {mobileSecondary === 'machine' && machineLabel ? <span className="inline-flex min-w-0 items-center gap-1">{machineIcon}<span className="truncate">{headerMetadata.showLabels ? `${t('session.item.machine')}: ` : ''}{machineLabel}</span></span> : null}
                                 {mobileSecondary === 'lastActive' && ageLabel ? <span className="truncate" title={ageAbsolute ?? undefined}>{ageLabel}</span> : null}
                                 {mobileSecondary === 'updatedAt' && updatedAtLabel ? <span className="truncate">{headerMetadata.showLabels ? `${t('session.header.updatedAt')}: ` : ''}{updatedAtLabel}</span> : null}
                                 {mobileSecondary === 'createdAt' && createdAtLabel ? <span className="truncate">{headerMetadata.showLabels ? `${t('session.header.createdAt')}: ` : ''}{createdAtLabel}</span> : null}
@@ -433,8 +446,9 @@ export function SessionHeader(props: {
                                 </span>
                             ) : null}
                             {headerMetadata.machine && machineLabel ? (
-                                <span data-testid="session-header-machine" className="max-w-[12rem] truncate" title={machineLabel}>
-                                    {headerMetadata.showLabels ? `${t('session.item.machine')}: ` : ''}{machineLabel}
+                                <span data-testid="session-header-machine" className="inline-flex max-w-[12rem] items-center gap-1" title={machineLabel}>
+                                    {machineIcon}
+                                    <span className="truncate">{headerMetadata.showLabels ? `${t('session.item.machine')}: ` : ''}{machineLabel}</span>
                                 </span>
                             ) : null}
                             {ageLabel ? (

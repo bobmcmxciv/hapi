@@ -142,15 +142,33 @@ export class MachineCache {
      * `machine-updated` event that makes web clients refetch.
      */
     async renameMachine(machineId: string, displayName: string): Promise<void> {
+        return this.updateMachinePresentation(machineId, { displayName })
+    }
+
+    /**
+     * fork(machine-icons)：名字与设备图标一次写入（同一 metadata 版本号）。
+     * 省略的字段不动；空串 / null 删除该键，回落到主机名 / 系统图标。
+     */
+    async updateMachinePresentation(
+        machineId: string,
+        patch: { displayName?: string; icon?: string | null }
+    ): Promise<void> {
         for (let attempt = 0; attempt < METADATA_RETRY_ATTEMPTS; attempt += 1) {
             const stored = this.store.machines.getMachine(machineId)
             if (!stored) {
                 throw new Error('Machine not found')
             }
 
-            const current = isPlainObject(stored.metadata) ? stored.metadata : {}
-            const { displayName: _previous, ...rest } = current
-            const newMetadata = displayName.length > 0 ? { ...rest, displayName } : rest
+            const newMetadata: Record<string, unknown> = isPlainObject(stored.metadata) ? { ...stored.metadata } : {}
+            for (const key of ['displayName', 'icon'] as const) {
+                if (!(key in patch)) continue
+                const value = patch[key]
+                if (typeof value === 'string' && value.length > 0) {
+                    newMetadata[key] = value
+                } else {
+                    delete newMetadata[key]
+                }
+            }
 
             const result = this.store.machines.updateMachineMetadata(
                 machineId,

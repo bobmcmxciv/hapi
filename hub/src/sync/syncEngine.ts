@@ -380,6 +380,13 @@ export class SyncEngine {
         return this.machineCache.renameMachine(machineId, displayName)
     }
 
+    async updateMachinePresentation(
+        machineId: string,
+        patch: { displayName?: string; icon?: string | null }
+    ): Promise<void> {
+        return this.machineCache.updateMachinePresentation(machineId, patch)
+    }
+
     getMessagesPage(
         sessionId: string,
         options: {

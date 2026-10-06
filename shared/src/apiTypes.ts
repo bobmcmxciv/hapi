@@ -312,14 +312,53 @@ export type RenameSessionRequest = z.infer<typeof RenameSessionRequestSchema>
  * An empty string clears the custom name, so unlike session rename there is no
  * `min(1)`: the machine falls back to its hostname. The length ceiling is
  * enforced after trimming, so it is not expressed here.
+ *
+ * fork(machine-icons)：同一个 PATCH 也设置机器图标；两个字段都可省，但至少给一个。
+ * `icon` 为 null 或空串表示清掉、回落到按系统（platform）的图标。
  */
 export const RenameMachineRequestSchema = z.object({
-    displayName: z.string()
-})
+    displayName: z.string().optional(),
+    icon: z.string().nullable().optional()
+}).refine(
+    (body) => body.displayName !== undefined || body.icon !== undefined,
+    { message: 'displayName or icon is required' }
+)
 
 export type RenameMachineRequest = z.infer<typeof RenameMachineRequestSchema>
 
 export const MACHINE_DISPLAY_NAME_MAX_LENGTH = 64
+
+/**
+ * fork(machine-icons)：可选的机器图标（设备外形）词表。hub 写入时按它校验；
+ * 读侧对不认识的值回落到系统图标，所以词表增删不需要迁移。
+ */
+export const MACHINE_ICON_IDS = [
+    'rack-server',
+    'workstation',
+    'desktop',
+    'mini-pc',
+    'imac',
+    'mac-mini',
+    'laptop',
+    'gaming-laptop',
+    'macbook',
+    'tablet',
+    'ipad',
+    'phone',
+    'iphone',
+    'handheld',
+    'nas',
+    'router',
+    'dev-board',
+    'vm',
+    'cloud'
+] as const
+
+export type MachineIconId = typeof MACHINE_ICON_IDS[number]
+
+export function isMachineIconId(value: unknown): value is MachineIconId {
+    return typeof value === 'string' && (MACHINE_ICON_IDS as readonly string[]).includes(value)
+}
 
 
 /**

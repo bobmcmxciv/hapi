@@ -166,3 +166,57 @@ describe('MachineCache.renameMachine', () => {
         expect((store.machines.getMachine('machine-1')?.metadata as { displayName?: string })?.displayName).toBe('Workstation')
     })
 })
+
+describe('MachineCache.updateMachinePresentation (fork machine-icons)', () => {
+    it('sets the icon and keeps the name and CLI-reported fields', async () => {
+        const { store, cache } = createCache()
+        seedMachine(store, { ...BASE_METADATA, displayName: 'VIRCS' })
+        cache.reloadAll()
+
+        await cache.updateMachinePresentation('machine-1', { icon: 'rack-server' })
+
+        expect(store.machines.getMachine('machine-1')?.metadata).toEqual({
+            ...BASE_METADATA,
+            displayName: 'VIRCS',
+            icon: 'rack-server'
+        })
+        expect(cache.getMachine('machine-1')?.metadata?.icon).toBe('rack-server')
+    })
+
+    it('removes the icon key when cleared with null', async () => {
+        const { store, cache } = createCache()
+        seedMachine(store, { ...BASE_METADATA, icon: 'macbook' })
+        cache.reloadAll()
+
+        await cache.updateMachinePresentation('machine-1', { icon: null })
+
+        expect(store.machines.getMachine('machine-1')?.metadata).toEqual(BASE_METADATA)
+    })
+
+    it('writes name and icon in a single metadata version bump', async () => {
+        const { store, cache } = createCache()
+        seedMachine(store, BASE_METADATA)
+        cache.reloadAll()
+        const before = store.machines.getMachine('machine-1')!.metadataVersion
+
+        await cache.updateMachinePresentation('machine-1', { displayName: 'Mac', icon: 'macbook' })
+
+        const after = store.machines.getMachine('machine-1')!
+        expect(after.metadataVersion).toBe(before + 1)
+        expect(after.metadata).toEqual({ ...BASE_METADATA, displayName: 'Mac', icon: 'macbook' })
+    })
+
+    it('a plain rename leaves an existing icon alone', async () => {
+        const { store, cache } = createCache()
+        seedMachine(store, { ...BASE_METADATA, icon: 'mini-pc' })
+        cache.reloadAll()
+
+        await cache.renameMachine('machine-1', 'Cube')
+
+        expect(store.machines.getMachine('machine-1')?.metadata).toEqual({
+            ...BASE_METADATA,
+            icon: 'mini-pc',
+            displayName: 'Cube'
+        })
+    })
+})

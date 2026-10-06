@@ -45,6 +45,7 @@ export function MachineSelector(props: {
             id: machine.id,
             label: getMachineTitle(machine),
             platform: getMachinePlatform(machine),
+            icon: machine.metadata?.icon ?? null,
             owner: (machine as MachineWithOwner).ownerUsername ?? owners[machine.id] ?? null,
             sessionCount: counts[machine.id] ?? 0
         })),
@@ -59,6 +60,7 @@ export function MachineSelector(props: {
                     key={item.id}
                     label={item.label}
                     platform={item.platform}
+                    icon={item.icon}
                     stat={item.sessionCount}
                     selected={props.machineId === item.id}
                     title={[item.label, item.owner].filter(Boolean).join(' · ')}

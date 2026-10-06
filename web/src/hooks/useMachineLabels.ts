@@ -14,7 +14,7 @@ function isBrowser(): boolean {
     return typeof window !== 'undefined' && typeof document !== 'undefined'
 }
 
-function readCachedStrings(key: string): Record<string, string> {
+export function readCachedStrings(key: string): Record<string, string> {
     if (!isBrowser()) return {}
     try {
         const raw = localStorage.getItem(key)
@@ -33,7 +33,7 @@ function readCachedStrings(key: string): Record<string, string> {
     }
 }
 
-function writeCachedStrings(key: string, values: Record<string, string>): void {
+export function writeCachedStrings(key: string, values: Record<string, string>): void {
     if (!isBrowser()) return
     try {
         localStorage.setItem(key, JSON.stringify(values))

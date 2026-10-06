@@ -11,6 +11,7 @@ function machineItem(overrides: Partial<MachineFilterItem> & { id: string; label
         sessionCount: 1,
         healthPresentation: null,
         platform: null,
+        icon: null,
         owner: null,
         displayName: null,
         host: null,
@@ -210,7 +211,7 @@ describe('MachineFilterBar', () => {
         fireEvent.change(input, { target: { value: 'vircs' } })
         fireEvent.click(screen.getByRole('button', { name: 'Save' }))
 
-        await vi.waitFor(() => expect(onRenameMachine).toHaveBeenCalledWith('machine-1', 'vircs'))
+        await vi.waitFor(() => expect(onRenameMachine).toHaveBeenCalledWith('machine-1', { displayName: 'vircs' }))
         await vi.waitFor(() => expect(screen.queryByPlaceholderText('mint.local')).toBeNull())
     })
 
@@ -224,7 +225,48 @@ describe('MachineFilterBar', () => {
         fireEvent.change(input, { target: { value: '' } })
         fireEvent.click(screen.getByRole('button', { name: 'Save' }))
 
-        await vi.waitFor(() => expect(onRenameMachine).toHaveBeenCalledWith('machine-2', ''))
+        await vi.waitFor(() => expect(onRenameMachine).toHaveBeenCalledWith('machine-2', { displayName: '' }))
+    })
+
+    it('picks a device icon in the same dialog and submits only the icon (fork machine-icons)', async () => {
+        const onRenameMachine = vi.fn().mockResolvedValue(undefined)
+        renderBar({ onRenameMachine })
+
+        fireEvent.contextMenu(screen.getByRole('button', { name: /Mint 3/ }))
+        await screen.findByPlaceholderText('mint.local')
+        fireEvent.click(screen.getByRole('radio', { name: 'Rack server' }))
+        fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+
+        await vi.waitFor(() => expect(onRenameMachine).toHaveBeenCalledWith('machine-1', { icon: 'rack-server' }))
+    })
+
+    it('clears a device icon back to the OS icon via the auto option (fork machine-icons)', async () => {
+        const onRenameMachine = vi.fn().mockResolvedValue(undefined)
+        renderBar({
+            machines: [machineItem({ id: 'm-i', label: 'Cube', host: 'cube', icon: 'mini-pc', canRename: true })],
+            onRenameMachine,
+        })
+
+        fireEvent.contextMenu(screen.getByRole('button', { name: /Cube 1/ }))
+        await screen.findByPlaceholderText('cube')
+        expect(screen.getByRole('radio', { name: 'Mini PC' }).getAttribute('aria-checked')).toBe('true')
+        fireEvent.click(screen.getByRole('radio', { name: 'By OS' }))
+        fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+
+        await vi.waitFor(() => expect(onRenameMachine).toHaveBeenCalledWith('m-i', { icon: null }))
+    })
+
+    it('renders the chosen device icon in place of the OS icon (fork machine-icons)', () => {
+        const { container } = renderBar({
+            machines: [
+                machineItem({ id: 'm-r', label: 'vircs', platform: 'win32', icon: 'rack-server' }),
+                machineItem({ id: 'm-w', label: 'plain', platform: 'win32' }),
+            ],
+        })
+
+        expect(container.querySelector('[data-icon="rack-server"]')).not.toBeNull()
+        expect(container.querySelectorAll('[data-icon]')).toHaveLength(1)
+        expect(container.querySelectorAll('[data-os="win32"]')).toHaveLength(2)
     })
 
     it('does not open the alias dialog without a rename handler', () => {

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { CSSProperties, MouseEvent as ReactMouseEvent, ReactNode } from 'react'
-import { MACHINE_DISPLAY_NAME_MAX_LENGTH } from '@hapi/protocol'
+import { MACHINE_DISPLAY_NAME_MAX_LENGTH, type MachineIconId } from '@hapi/protocol'
 import type { MachineHealthPresentation } from '@/lib/machineHealth'
 import { resolveMachineOsLabel } from '@/lib/machineHealth'
 import { MachineHealthTooltipBody } from '@/components/MachineHealthIndicator'
@@ -20,6 +20,9 @@ import {
 } from '@/components/machinePresentation'
 import { cn } from '@/lib/utils'
 import { useTranslation } from '@/lib/use-translation'
+import { MachineIconPicker } from '@/fork-features/machine-icons/MachineIconPicker'
+import { machineIconLabelKey } from '@/fork-features/machine-icons/MachineDeviceIcon'
+import type { MachinePresentationPatch } from '@/fork-features/machine-icons/types'
 
 export type MachineFilterItem = {
     id: string
@@ -28,6 +31,8 @@ export type MachineFilterItem = {
     healthPresentation: MachineHealthPresentation | null
     /** node 平台词表（win32 / darwin / linux）。机器对象缺失时由会话 metadata.os 兜底；未知为 null。 */
     platform: string | null
+    /** fork(machine-icons)：设备图标；未设为 null，chip 回落到系统图标。 */
+    icon: MachineIconId | null
     /** 多用户 gateway 标注的归属账号用户名；单用户 hub 或未知为 null。 */
     owner: string | null
     /** 当前自定义别名原值（区别于 label 的 displayName→host→id 回退链），改名对话框回填用。 */
@@ -80,7 +85,8 @@ function MachineFilterChip(props: {
 
     const osLabel = resolveMachineOsLabel(machine.platform)
     const osText = osLabel.kind === 'i18n' ? t(osLabel.key) : osLabel.value
-    const titleLine = [machine.label, osText, machine.owner].filter(Boolean).join(' · ')
+    const iconText = machine.icon ? t(machineIconLabelKey(machine.icon)) : null
+    const titleLine = [machine.label, iconText, osText, machine.owner].filter(Boolean).join(' · ')
     const canRename = Boolean(machine.canRename && onRenameRequest)
     const title = canRename ? `${titleLine}\n${t('sessions.machineFilter.renameTooltip')}` : titleLine
     const handleContextMenu = canRename
@@ -92,7 +98,7 @@ function MachineFilterChip(props: {
 
     const content = (
         <>
-            <MachineOsIcon platform={machine.platform} />
+            <MachineOsIcon platform={machine.platform} icon={machine.icon} />
             <span className="min-w-0 flex-1 truncate text-left">{machine.label}</span>
             <span className="shrink-0 tabular-nums opacity-70">{machine.sessionCount}</span>
         </>
@@ -151,10 +157,11 @@ function MachineFilterChip(props: {
 function MachineRenameDialog(props: {
     machine: MachineFilterItem
     onClose: () => void
-    onSubmit: (machineId: string, displayName: string) => Promise<void>
+    onSubmit: (machineId: string, patch: MachinePresentationPatch) => Promise<void>
 }) {
     const { t } = useTranslation()
     const [draft, setDraft] = useState(props.machine.displayName ?? '')
+    const [iconDraft, setIconDraft] = useState<MachineIconId | null>(props.machine.icon)
     const [pending, setPending] = useState(false)
     const [error, setError] = useState<string | null>(null)
     const inputRef = useRef<HTMLInputElement>(null)
@@ -171,14 +178,18 @@ function MachineRenameDialog(props: {
         event.preventDefault()
         const next = draft.trim()
         // 与机器改名 API 的语义一致：空串是合法输入，表示清掉别名回落主机名。
-        if (next === (props.machine.displayName ?? '')) {
+        // 只提交改动过的字段；名字与图标都没变就直接关掉。
+        const patch: MachinePresentationPatch = {}
+        if (next !== (props.machine.displayName ?? '')) patch.displayName = next
+        if (iconDraft !== props.machine.icon) patch.icon = iconDraft
+        if (Object.keys(patch).length === 0) {
             props.onClose()
             return
         }
         setPending(true)
         setError(null)
         try {
-            await props.onSubmit(props.machine.id, next)
+            await props.onSubmit(props.machine.id, patch)
             props.onClose()
         } catch {
             setError(t('settings.machines.error'))
@@ -209,6 +220,15 @@ function MachineRenameDialog(props: {
                         className="w-full rounded-lg border border-[var(--app-border)] bg-[var(--app-bg)] px-3 py-2.5 text-[var(--app-fg)] placeholder:text-[var(--app-hint)] focus:border-transparent focus:outline-none focus:ring-2 focus:ring-[var(--app-button)]"
                     />
                     <p className="text-xs text-[var(--app-hint)]">{t('sessions.machineFilter.renameHint')}</p>
+                    <div className="flex flex-col gap-1.5">
+                        <div className="text-xs font-medium text-[var(--app-hint)]">{t('machineIcon.label')}</div>
+                        <MachineIconPicker
+                            value={iconDraft}
+                            platform={props.machine.platform}
+                            onChange={setIconDraft}
+                            disabled={pending}
+                        />
+                    </div>
                     {error ? (
                         <div role="alert" className="rounded-md bg-red-50 p-3 text-sm text-red-600 dark:bg-red-900/20 dark:text-red-400">
                             {error}
@@ -244,8 +264,8 @@ export function MachineFilterBar(props: {
     totalCount: number
     value: string | null
     onChange: (id: string | null) => void
-    /** 注入后启用右键改名；SessionList 里包了 renameMachine API + 机器列表刷新。 */
-    onRenameMachine?: (machineId: string, displayName: string) => Promise<void>
+    /** 注入后启用右键「别名 + 图标」设置；SessionList 里包了 updateMachine API + 机器列表刷新。 */
+    onRenameMachine?: (machineId: string, patch: MachinePresentationPatch) => Promise<void>
 }) {
     const { t } = useTranslation()
     const [renameTarget, setRenameTarget] = useState<MachineFilterItem | null>(null)

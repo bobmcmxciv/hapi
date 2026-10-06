@@ -118,6 +118,8 @@ export function SessionRowSummary(props: {
     projectLabel?: string
     /** Machine label shown next to the project name (pinned "in progress" rows). */
     machineLabel?: string
+    /** fork(machine-icons)：副标题行首的机器图标（设备图标或系统图标）。 */
+    machineIcon?: React.ReactNode
 }) {
     const {
         session: s,
@@ -131,6 +133,7 @@ export function SessionRowSummary(props: {
         inRunningSection = false,
         projectLabel,
         machineLabel,
+        machineIcon,
     } = props
     const { t } = useTranslation()
     const sessionName = getSessionTitle(s)
@@ -260,8 +263,9 @@ export function SessionRowSummary(props: {
                 </div>
             </div>
             {projectLabel || machineLabel ? (
-                <div className="truncate text-xs text-[var(--app-hint)]" title={[projectLabel, machineLabel].filter(Boolean).join(' · ')}>
-                    {[projectLabel, machineLabel].filter(Boolean).join(' · ')}
+                <div className="flex min-w-0 items-center gap-1 text-xs text-[var(--app-hint)]" title={[projectLabel, machineLabel].filter(Boolean).join(' · ')}>
+                    {machineIcon}
+                    <span className="min-w-0 truncate">{[projectLabel, machineLabel].filter(Boolean).join(' · ')}</span>
                 </div>
             ) : showPath || worktreeLabel ? (
                 <div
