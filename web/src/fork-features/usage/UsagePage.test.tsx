@@ -6,6 +6,7 @@ import UsagePage, { cacheHitRate, formatHitRate, formatTokens, localDayEndExclus
 
 vi.mock('@/lib/app-context', () => ({ useAppContext: () => ({ baseUrl: 'http://hub', token: 'jwt', user: { id: 1 } }) }))
 vi.mock('@tanstack/react-router', () => ({ useNavigate: () => vi.fn() }))
+vi.mock('./UsageTrendChart', () => ({ UsageTrendChart: () => <div data-testid="usage-trend" /> }))
 
 afterEach(() => vi.unstubAllGlobals())
 

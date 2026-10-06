@@ -4,6 +4,7 @@ import { useTranslation } from '@/lib/use-translation'
 import { SettingsLinkRow, SettingsPageContent, SettingsSection } from '@/components/settings/SettingsPrimitives'
 import { HistoryImportSettingsRow } from '../history-import/HistoryImportSettingsRow'
 import { OmpProviderSettingsRow } from '../omp-host-integration/OmpProviderSettingsRow'
+import { DigestSettingsSection } from '../session-digest/DigestSettingsSection'
 
 export default function ForkSettingsPage() {
     const navigate = useNavigate()
@@ -23,6 +24,7 @@ export default function ForkSettingsPage() {
                 ) : null}
                 <OmpProviderSettingsRow />
             </SettingsSection>
+            {user.role === 'admin' ? <DigestSettingsSection /> : null}
         </SettingsPageContent>
     )
 }

@@ -9,6 +9,9 @@ import type { MultiUserGatewayStore } from './gatewayStore'
 import { ExecutionDispatcher } from './executionDispatcher'
 import type { Account, Capability, ResourceType } from './domain'
 import { buildUsageSummaryResponse, parseIsoParam, summarizeUsageHosts } from '../usage/usageAggregate'
+import { buildUsageTimeseries, parseBucketUnit, planBuckets, type UsageTimeseriesResponse } from '../usage/usageTimeseries'
+import { mountDigestRoutes } from '../session-digest/routes'
+import type { DigestSessionView } from '../session-digest/digestService'
 import { createSessionMachineResolver, createSessionPathResolver, pathWithinScope } from './machineInheritance'
 import { createSseEventFilterFactory } from './sseVisibility'
 import { streamSSE } from 'hono/streaming'
@@ -381,6 +384,58 @@ export function mountExecutionRoutes(app: Hono<WebAppEnv>, deps: {
             sessionIds => store.messages.aggregateUsageForSessions(sessionIds, { sinceIso, untilIso })
         )
         return c.json(buildUsageSummaryResponse(rows, hosts, { since: sinceIso, until: untilIso, host: hostParam }, Date.now()))
+    })
+
+    // fork-features/usage：用量随时间的折线数据。可见集与 /api/usage/summary 同构
+    // （只读、不认领）；每桶复用同一聚合口径。结果按账号+参数缓存 60s——统计页
+    // 每分钟轮询，而每桶都要跑一遍聚合。
+    const timeseriesCache = new Map<string, { at: number; body: UsageTimeseriesResponse }>()
+    app.get('/api/usage/timeseries', async (c) => {
+        const accountId = await gatewayAccountId(c.req.raw, deps.jwtSecret)
+        const account = accountId === null ? null : deps.store.getAccount(accountId)
+        const engine = deps.getSyncEngine()
+        const store = deps.getStore()
+        if (!account || !engine || !store) return c.json({ error: 'Not connected' }, account ? 503 : 401)
+
+        const now = Date.now()
+        const sinceIso = parseIsoParam(c.req.query('since'))
+        const untilIso = parseIsoParam(c.req.query('until'))
+        const unit = parseBucketUnit(c.req.query('bucket'))
+        const tzRaw = Number(c.req.query('tz'))
+        const tz = Number.isFinite(tzRaw) && Math.abs(tzRaw) <= 14 * 60 ? Math.round(tzRaw) : 0
+        const hostParam = c.req.query('host')?.trim() || null
+        const untilMs = untilIso ? Date.parse(untilIso) : now
+        const sinceMs = sinceIso ? Date.parse(sinceIso) : untilMs - 30 * 24 * 3600_000
+        const cacheKey = [account.id, sinceIso ?? '', untilIso ?? '', unit, tz, hostParam ?? ''].join('|')
+        const cached = timeseriesCache.get(cacheKey)
+        if (cached && now - cached.at < 60_000) return c.json(cached.body)
+
+        const visible = collectVisibleSessions(deps.store, engine, account, { claimUnbound: false })
+        const ids = (hostParam ? visible.filter(session => session.metadata?.host === hostParam) : visible)
+            .map(session => session.id)
+        const body = buildUsageTimeseries(
+            planBuckets(sinceMs, untilMs, unit, tz),
+            unit,
+            (since, until) => store.messages.aggregateUsageForSessions(ids, { sinceIso: since, untilIso: until }),
+            now
+        )
+        for (const [key, entry] of timeseriesCache) {
+            if (now - entry.at >= 60_000) timeseriesCache.delete(key)
+        }
+        timeseriesCache.set(cacheKey, { at: now, body })
+        return c.json(body)
+    })
+
+    // fork-features/session-digest：会话/项目 AI 摘要。可见集同 /api/sessions（只读，不认领）。
+    mountDigestRoutes(app, async (c) => {
+        const accountId = await gatewayAccountId(c.req.raw, deps.jwtSecret)
+        const account = accountId === null ? null : deps.store.getAccount(accountId)
+        const engine = deps.getSyncEngine()
+        if (!account || !engine) {
+            return { ok: false, response: c.json({ error: 'Not connected' }, account ? 503 : 401) }
+        }
+        const sessions = collectVisibleSessions(deps.store, engine, account, { claimUnbound: false })
+        return { ok: true, sessions: sessions as unknown as DigestSessionView[], isAdmin: account.role === 'admin' }
     })
 
     app.get('/api/machines', async (c) => {

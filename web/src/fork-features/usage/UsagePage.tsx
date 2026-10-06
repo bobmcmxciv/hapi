@@ -22,6 +22,7 @@ import { useMachines } from '@/hooks/queries/useMachines'
 import { resolveMachineIcon } from '@/fork-features/machine-icons/MachineDeviceIcon'
 import type { MachineIconId } from '@hapi/protocol'
 import SubscriptionPanel from './SubscriptionPanel'
+import { UsageTrendChart, type UsageBucketUnit } from './UsageTrendChart'
 
 /** 用量页不按会话活跃日高亮，固定空集避免每次渲染新建 Set。 */
 const EMPTY_ACTIVITY_DATES: ReadonlySet<string> = new Set<string>()
@@ -330,6 +331,22 @@ export default function UsagePage() {
         return { since: presetToSince(range), until: null }
     }, [range, hasCustomRange, customStart, customEnd])
 
+    // 折线图的时间粒度随范围走，桶数控制在 hub 上限（60）以内；「全部」看最近 52 周。
+    const trend = useMemo((): { since: string | null; until: string | null; unit: UsageBucketUnit } => {
+        if (range === '24h') return { since, until, unit: 'hour' }
+        if (range === '7d') return { since, until, unit: '6h' }
+        if (range === '30d') return { since, until, unit: 'day' }
+        if (range === 'custom' && since) {
+            const spanMs = (until ? Date.parse(until) : Date.now()) - Date.parse(since)
+            const unit: UsageBucketUnit = spanMs <= 2 * 86_400_000 ? 'hour'
+                : spanMs <= 14 * 86_400_000 ? '6h'
+                : spanMs <= 60 * 86_400_000 ? 'day'
+                : 'week'
+            return { since, until, unit }
+        }
+        return { since: new Date(Date.now() - 52 * 7 * 86_400_000).toISOString(), until: null, unit: 'week' }
+    }, [range, since, until])
+
     const usageQuery = useQuery({
         queryKey: ['fork-usage-summary', range, range === 'custom' ? `${customStart}~${customEnd}` : '', host],
         queryFn: async (): Promise<UsageSummaryResponse> => {
@@ -444,6 +461,16 @@ export default function UsagePage() {
                         ariaLabel={t('usage.host.label')}
                     />
                 )}
+
+                <Card>
+                    <CardHeader>
+                        <CardTitle>{t('usage.trend.title')}</CardTitle>
+                        <CardDescription>{t(`usage.trend.unit.${trend.unit}`)}</CardDescription>
+                    </CardHeader>
+                    <CardContent>
+                        <UsageTrendChart since={trend.since} until={trend.until} host={host} unit={trend.unit} trimLeadingEmpty={range === 'all'} />
+                    </CardContent>
+                </Card>
 
                 {usageQuery.isLoading && (
                     <Card><CardContent className="py-6 text-center text-sm text-[var(--app-hint)]">{t('usage.loading')}</CardContent></Card>

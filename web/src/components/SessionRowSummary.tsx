@@ -1,6 +1,7 @@
 import { useMemo } from 'react'
 import type { SessionSummary } from '@/types/api'
 import { AgentFlavorIcon } from '@/components/AgentFlavorIcon'
+import { CompletedMark } from '@/fork-features/session-digest/DigestDialogs'
 import { ScheduleIcon } from '@/components/icons'
 import { HoverTooltip, SESSION_ROW_TOOLTIP_FOCUS_CLASS, useSessionRowTooltipIds } from '@/components/HoverTooltip'
 import { getAttentionLabel, SessionAttentionIndicator } from '@/components/SessionAttentionIndicator'
@@ -120,6 +121,8 @@ export function SessionRowSummary(props: {
     machineLabel?: string
     /** fork(machine-icons)：副标题行首的机器图标（设备图标或系统图标）。 */
     machineIcon?: React.ReactNode
+    /** fork(session-digest)：会话已被标记为完结时在标题后画对勾。 */
+    completed?: boolean
 }) {
     const {
         session: s,
@@ -134,6 +137,7 @@ export function SessionRowSummary(props: {
         projectLabel,
         machineLabel,
         machineIcon,
+        completed = false,
     } = props
     const { t } = useTranslation()
     const sessionName = getSessionTitle(s)
@@ -174,6 +178,7 @@ export function SessionRowSummary(props: {
                     >
                         {sessionName}
                     </div>
+                    {completed ? <CompletedMark title={t('digest.completed')} /> : null}
                     {s.active && s.thinking ? (
                         <LoaderIcon className="h-3.5 w-3.5 shrink-0 animate-spin-slow text-[var(--app-badge-success-text)]" />
                     ) : urgentAttention && nestedTooltips && attentionId ? (

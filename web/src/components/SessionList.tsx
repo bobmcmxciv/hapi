@@ -31,6 +31,8 @@ import { MachineFilterBar } from '@/components/MachineFilterBar'
 import { MachineOsIcon } from '@/components/machinePresentation'
 import type { MachineIconId } from '@hapi/protocol'
 import type { MachinePresentationPatch } from '@/fork-features/machine-icons/types'
+import { useDigestIndex } from '@/fork-features/session-digest/digestApi'
+import { CompletedMark, ProjectDigestButton } from '@/fork-features/session-digest/DigestDialogs'
 import { useQueryClient } from '@tanstack/react-query'
 import { queryKeys } from '@/lib/query-keys'
 import { useSessionListMachineFilter } from '@/hooks/useSessionListMachineFilter'
@@ -173,6 +175,7 @@ function getGroupDisplayName(directory: string): string {
 }
 
 export const UNKNOWN_MACHINE_ID = '__unknown__'
+const FOLD_ARCHIVED_STORAGE_KEY = 'hapi-fold-archived-sessions'
 export const GROUP_SESSION_PREVIEW_LIMIT = DEFAULT_SESSION_PREVIEW_LIMIT
 
 export function getSessionDedupKey(session: SessionSummary): string | null {
@@ -369,6 +372,15 @@ function groupByMachine(
         if (a.hasActiveSession !== b.hasActiveSession) return a.hasActiveSession ? -1 : 1
         return b.latestUpdatedAt - a.latestUpdatedAt
     })
+}
+
+function ArchiveFoldIcon(props: { className?: string }) {
+    return (
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={props.className}>
+            <rect x="3" y="4" width="18" height="5" rx="1" />
+            <path d="M5 9v9a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V9M10 13h4" />
+        </svg>
+    )
 }
 
 function CopyPathButton({ path, className }: { path: string; className?: string }) {
@@ -861,9 +873,10 @@ function SessionItem(props: {
     projectLabel?: string
     machineLabel?: string
     machineIcon?: React.ReactNode
+    completed?: boolean
 }) {
     const { t } = useTranslation()
-    const { session: s, onSelect, showPath = true, api, selected = false, showDetailedStatus = false, inRunningSection = false, projectLabel, machineLabel, machineIcon } = props
+    const { session: s, onSelect, showPath = true, api, selected = false, showDetailedStatus = false, inRunningSection = false, projectLabel, machineLabel, machineIcon, completed = false } = props
     const { haptic } = usePlatform()
     const [menuOpen, setMenuOpen] = useState(false)
     const [menuAnchorPoint, setMenuAnchorPoint] = useState<{ x: number; y: number }>({ x: 0, y: 0 })
@@ -983,6 +996,7 @@ function SessionItem(props: {
                     projectLabel={projectLabel}
                     machineLabel={machineLabel}
                     machineIcon={machineIcon}
+                    completed={completed}
                 />
             </button>
 
@@ -1154,6 +1168,20 @@ export function SessionList(props: {
     const { showActiveSessionsOnly } = useShowActiveSessionsOnly()
     // Transient unread lens — not a Settings preference. Cleared on reload; rows drop as they're seen.
     const [showUnreadOnly, setShowUnreadOnly] = useState(false)
+    // fork(session-digest)：一键折叠已归档（已结束、非活跃）会话。每个项目里折成一行
+    // 「已归档 N 个」，点开才列出；开关记在 localStorage。
+    const [foldArchived, setFoldArchived] = useState<boolean>(() => {
+        try { return localStorage.getItem(FOLD_ARCHIVED_STORAGE_KEY) === 'true' } catch { return false }
+    })
+    const toggleFoldArchived = useCallback(() => {
+        setFoldArchived((value) => {
+            const next = !value
+            try { localStorage.setItem(FOLD_ARCHIVED_STORAGE_KEY, String(next)) } catch { /* ignore */ }
+            return next
+        })
+    }, [])
+    const [expandedArchivedGroups, setExpandedArchivedGroups] = useState<Set<string>>(() => new Set())
+    const digestIndex = useDigestIndex()
     const { pinInProgressSessions } = usePinInProgressSessions()
     const { machineFilter, setMachineFilter } = useSessionListMachineFilter()
     const queryClient = useQueryClient()
@@ -1627,6 +1655,21 @@ export function SessionList(props: {
                                 fork 已用平铺的 MachineFilterBar（下方）取代（568692df），只取 Unread 按钮。 */}
                             <button
                                 type="button"
+                                onClick={toggleFoldArchived}
+                                aria-pressed={foldArchived}
+                                title={foldArchived ? t('sessions.foldArchived.off') : t('sessions.foldArchived.on')}
+                                aria-label={t('sessions.foldArchived.on')}
+                                className={cn(
+                                    'flex h-9 w-9 items-center justify-center rounded-full text-[var(--app-hint)] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--app-link)]',
+                                    foldArchived
+                                        ? 'bg-[var(--app-subtle-bg)] text-[var(--app-link)]'
+                                        : 'hover:bg-[var(--app-subtle-bg)] hover:text-[var(--app-fg)]'
+                                )}
+                            >
+                                <ArchiveFoldIcon className="h-[18px] w-[18px]" />
+                            </button>
+                            <button
+                                type="button"
                                 onClick={() => setShowUnreadOnly(!showUnreadOnly)}
                                 aria-pressed={showUnreadOnly}
                                 title={t('sessions.unreadFilter.toggle')}
@@ -1779,7 +1822,14 @@ export function SessionList(props: {
                         </div>
                     </div>
                 ) : null}
-                {groups.map((group) => {
+                {groups.map((fullGroup) => {
+                    const archivedInGroup = foldArchived
+                        ? fullGroup.sessions.filter(session => !session.active && session.id !== selectedSessionId)
+                        : []
+                    const group = archivedInGroup.length > 0
+                        ? { ...fullGroup, sessions: fullGroup.sessions.filter(session => session.active || session.id === selectedSessionId) }
+                        : fullGroup
+                    const archivedExpanded = expandedArchivedGroups.has(group.key)
                     const isCollapsed = isGroupCollapsed(group)
                     const visibleGroupSessions = getVisibleGroupSessions(group)
                     const hiddenSessionCount = group.sessions.length - visibleGroupSessions.length
@@ -1815,6 +1865,7 @@ export function SessionList(props: {
                                     {groupTitle}
                                 </span>
                                 <CopyPathButton path={group.directory} className="opacity-0 group-hover/project:opacity-100 transition-opacity duration-150" />
+                                <ProjectDigestButton projectKey={group.key} title={group.displayName} className="opacity-50 md:opacity-0 md:group-hover/project:opacity-100 transition-opacity duration-150" />
                                 {onNewSessionInDirectory && canStartInGroupDirectory ? (
                                     <button
                                         type="button"
@@ -1833,7 +1884,7 @@ export function SessionList(props: {
                                     </button>
                                 ) : null}
                                 <span className="text-[11px] tabular-nums text-[var(--app-hint)] shrink-0">
-                                    ({group.sessions.length})
+                                    ({fullGroup.sessions.length})
                                 </span>
                             </div>
 
@@ -1850,6 +1901,7 @@ export function SessionList(props: {
                                             api={api}
                                             selected={s.id === selectedSessionId}
                                             showDetailedStatus={showDetailedStatus}
+                                            completed={digestIndex[s.id]?.completed}
                                         />
                                     ))}
                                     {group.sessions.length > sessionPreviewLimit && (hiddenSessionCount > 0 || canShowFewerSessions) ? (
@@ -1875,6 +1927,38 @@ export function SessionList(props: {
                                                 </button>
                                             ) : null}
                                         </div>
+                                    ) : null}
+                                    {archivedInGroup.length > 0 ? (
+                                        <>
+                                            <button
+                                                type="button"
+                                                data-testid="archived-fold-row"
+                                                aria-expanded={archivedExpanded}
+                                                onClick={() => setExpandedArchivedGroups((current) => {
+                                                    const next = new Set(current)
+                                                    if (next.has(group.key)) next.delete(group.key)
+                                                    else next.add(group.key)
+                                                    return next
+                                                })}
+                                                className="ml-2.5 mr-2 my-0.5 flex items-center gap-1.5 rounded-md px-2 py-1 text-left text-xs text-[var(--app-hint)] transition-colors hover:bg-[var(--app-subtle-bg)] hover:text-[var(--app-fg)]"
+                                            >
+                                                <ChevronIcon className="h-3 w-3 shrink-0" collapsed={!archivedExpanded} />
+                                                <ArchiveFoldIcon className="h-3.5 w-3.5 shrink-0" />
+                                                {t('sessions.foldArchived.row', { n: archivedInGroup.length })}
+                                            </button>
+                                            {archivedExpanded ? archivedInGroup.map((s) => (
+                                                <SessionItem
+                                                    key={s.id}
+                                                    session={s}
+                                                    onSelect={selectSession}
+                                                    showPath={false}
+                                                    api={api}
+                                                    selected={s.id === selectedSessionId}
+                                                    showDetailedStatus={showDetailedStatus}
+                                                    completed={digestIndex[s.id]?.completed}
+                                                />
+                                            )) : null}
+                                        </>
                                     ) : null}
                                 </div>
                                 </div>

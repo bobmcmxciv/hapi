@@ -34,6 +34,7 @@ import {
 import { resolveGatewayCliNamespace } from '../../fork-features/multi-user/cliAdapter'
 import { createGatewayMemoryDelivery } from '../../fork-features/multi-user/memoryAdapter'
 import { startCx2ccPoller, type Cx2ccPollerHandle } from '../../fork-features/subscription/cx2ccPoller'
+import { startDigestService } from '../../fork-features/session-digest/digestService'
 
 /** Format config source for logging */
 function formatSource(source: ConfigSource | 'generated'): string {
@@ -342,6 +343,18 @@ export async function startHub(options: StartHubOptions = {}): Promise<HubInstan
     } else {
         console.log('[Subscription] cx2cc poller disabled (HAPI_CX2CC_USAGE_URL/HAPI_CX2CC_API_KEY unset)')
     }
+
+    // fork(session-digest): 会话/项目 AI 摘要调度器。env HAPI_DIGEST_API_URL/KEY 缺任一时
+    // 只提供读写完结标记，不调模型。
+    const digestService = startDigestService({
+        dataDir: config.dataDir,
+        getSessions: () => syncEngine?.getSessions() ?? [],
+        getSession: (sessionId) => syncEngine?.getSession(sessionId),
+        getRecentMessages: (sessionId, limit) => store.messages.getMessages(sessionId, limit),
+        getFirstMessages: (sessionId, limit) => store.messages.getFirstMessages(sessionId, limit),
+        renameSession: async (sessionId, name) => { await syncEngine?.renameSession(sessionId, name) }
+    })
+    console.log(`[Digest] session digest scheduler started (${digestService.status().configured ? 'model configured' : 'HAPI_DIGEST_API_URL/KEY unset: model calls disabled'})`)
 
     console.log('')
     console.log('[Web] Hub listening on :' + config.listenPort)

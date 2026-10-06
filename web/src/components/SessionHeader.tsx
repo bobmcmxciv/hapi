@@ -24,6 +24,7 @@ import { queryKeys } from '@/lib/query-keys'
 import { markCodexSessionsImported } from '@/lib/codexImportedSessions'
 import { useMachineLabels } from '@/hooks/useMachineLabels'
 import { useMachineIcons } from '@/fork-features/machine-icons/useMachineIcons'
+import { SessionDigestButton } from '@/fork-features/session-digest/DigestDialogs'
 import { MachineOsIcon } from '@/components/machinePresentation'
 import { getMachinePlatform } from '@/lib/machineHealth'
 import { formatAbsoluteDateTime, formatRelativeTime } from '@/lib/relativeTime'
@@ -520,6 +521,11 @@ export function SessionHeader(props: {
                             <TerminalIcon />
                         </button>
                     ) : null}
+
+                    <SessionDigestButton
+                        sessionId={session.id}
+                        className="flex h-8 w-8 items-center justify-center rounded-full text-[var(--app-hint)] transition-colors hover:bg-[var(--app-secondary-bg)] hover:text-[var(--app-fg)]"
+                    />
 
                     <button
                         type="button"

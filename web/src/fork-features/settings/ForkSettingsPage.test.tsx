@@ -9,6 +9,7 @@ vi.mock('@tanstack/react-router', () => ({ useNavigate: () => navigate }))
 vi.mock('@/lib/app-context', () => ({ useAppContext: () => ({ user: { id: 1, role, defaultNamespace: 'ns' }, baseUrl: '', token: 't' }) }))
 vi.mock('../history-import/HistoryImportSettingsRow', () => ({ HistoryImportSettingsRow: () => <button type="button">Import agent sessions</button> }))
 vi.mock('../omp-host-integration/OmpProviderSettingsRow', () => ({ OmpProviderSettingsRow: () => <button type="button">Oh My Pi providers</button> }))
+vi.mock('../session-digest/DigestSettingsSection', () => ({ DigestSettingsSection: () => <section>AI digests</section> }))
 
 function renderPage() {
     return render(<I18nProvider><ForkSettingsPage /></I18nProvider>)
