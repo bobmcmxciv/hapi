@@ -18,14 +18,16 @@ export function mountDigestRoutes(app: Hono<WebAppEnv>, resolveViewer: ResolveDi
         const viewer = await resolveViewer(c)
         if (!viewer.ok) return viewer.response
         const visible = new Set(viewer.sessions.map(session => session.id))
-        const index: Record<string, { completed: boolean; suggestComplete: boolean; hasDigest: boolean }> = {}
+        const index: Record<string, { completed: boolean; suggestComplete: boolean; hasDigest: boolean; status: string }> = {}
         for (const digest of service.store.listSessions()) {
             if (!visible.has(digest.sessionId)) continue
             if (!digest.generatedAt && !digest.completed) continue
             index[digest.sessionId] = {
                 completed: digest.completed,
                 suggestComplete: digest.suggestComplete,
-                hasDigest: digest.generatedAt !== null
+                hasDigest: digest.generatedAt !== null,
+                // 左侧列表每行一句现状；截短控制索引体积（1000+ 会话时整份仍在 ~150KB）。
+                status: digest.status.slice(0, 80)
             }
         }
         return c.json({ digests: index })
@@ -90,6 +92,22 @@ export function mountDigestRoutes(app: Hono<WebAppEnv>, resolveViewer: ResolveDi
         }
         service.requestProject(key)
         return c.json({ ok: true })
+    })
+
+    // 「全部项目重新梳理」（admin）：把可见会话涉及的全部项目按最近活动排进强制队列。
+    app.post('/api/digests/projects/refresh-all', async (c) => {
+        const service = getDigestService()
+        if (!service) return unavailable(c)
+        const viewer = await resolveViewer(c)
+        if (!viewer.ok) return viewer.response
+        if (!viewer.isAdmin) return c.json({ error: 'Admin only' }, 403)
+        const latest = new Map<string, number>()
+        for (const session of viewer.sessions) {
+            const { key } = projectKeyOf(session)
+            latest.set(key, Math.max(latest.get(key) ?? 0, session.updatedAt))
+        }
+        const keys = [...latest.entries()].sort((a, b) => b[1] - a[1]).map(([key]) => key)
+        return c.json({ queued: service.requestAllProjects(keys) })
     })
 
     app.get('/api/digests/settings', async (c) => {

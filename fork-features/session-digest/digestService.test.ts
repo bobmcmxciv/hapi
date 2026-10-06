@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'bun:test'
 import { DigestStore } from './digestStore'
 import { DigestService, IDLE_MS, PROJECT_DEBOUNCE_MS, projectKeyOf, type DigestSessionView } from './digestService'
-import { extractTranscriptLine, parseSessionDigest, renderTranscript, type TranscriptMessage } from './transcript'
+import { extractArtifacts, extractTranscriptLine, mergeArtifacts, parseSessionDigest, renderTranscript, type TranscriptMessage } from './transcript'
 
 const user = (seq: number, text: string): TranscriptMessage => ({ seq, content: { role: 'user', content: { type: 'text', text } } })
 const assistant = (seq: number, text: string): TranscriptMessage => ({
@@ -165,5 +165,64 @@ describe('DigestService', () => {
         expect(service.setCompleted('s', true).completed).toBe(true)
         expect(service.store.getSession('s')?.title).toBe('机器图标')
         expect(service.setCompleted('s', false).completedAt).toBeNull()
+    })
+})
+
+describe('project overview inputs (artifacts, listing, readme)', () => {
+    const toolUse = (seq: number, name: string, input: Record<string, unknown>): TranscriptMessage => ({
+        seq,
+        content: { role: 'agent', content: { type: 'output', data: { type: 'assistant', message: { content: [{ type: 'tool_use', name, input }] } } } }
+    })
+
+    it('extracts written files and commit subjects from tool calls', () => {
+        const artifacts = extractArtifacts([
+            toolUse(1, 'Write', { file_path: '/repo/src/a.ts' }),
+            toolUse(2, 'Edit', { file_path: '/repo/src/a.ts' }),
+            toolUse(3, 'Bash', { command: 'git add -A && git commit -m "feat: 机器图标"' }),
+            toolUse(4, 'Bash', { command: "git commit -q -F - <<'MSGEOF'\nfix(usage): 缩放\n\nbody\nMSGEOF" }),
+            toolUse(5, 'Read', { file_path: '/repo/README.md' })
+        ])
+        expect(artifacts.files).toEqual(['/repo/src/a.ts', '/repo/src/a.ts'])
+        expect(artifacts.commits).toEqual(['feat: 机器图标', 'fix(usage): 缩放'])
+        expect(mergeArtifacts(null, artifacts).files).toEqual(['/repo/src/a.ts'])
+    })
+
+    it('feeds listing, readme, timeline, files and commits of unsummarized sessions to the project prompt', async () => {
+        const store = new DigestStore(':memory:')
+        const prompts: string[] = []
+        const sessions: DigestSessionView[] = [
+            { id: 'live', createdAt: 100, updatedAt: 10 * IDLE_MS, active: true, thinking: true, metadata: { path: '/repo', machineId: 'm1', summary: { text: '做图标' } } },
+            { id: 'old', createdAt: 50, updatedAt: 1000, active: false, thinking: false, metadata: { path: '/repo', machineId: 'm1', name: '旧任务' } }
+        ]
+        const service = new DigestService({
+            store,
+            getSessions: () => sessions,
+            getSession: id => sessions.find(s => s.id === id),
+            getRecentMessages: (id) => id === 'old' ? [toolUse(1, 'Bash', { command: 'git commit -m "初始化"' }), toolUse(2, 'Write', { file_path: '/repo/app.py' })] : [],
+            getFirstMessages: () => [],
+            renameSession: async () => {},
+            listDirectory: async () => ['src/', 'README.md'],
+            readFile: async (sessionId, path) => (sessionId === 'live' && path === '/repo/README.md' ? '# 图标项目' : null),
+            llm: async ({ prompt }) => {
+                prompts.push(prompt)
+                return JSON.stringify({ overview: '一个图标项目', stage: '开发中', stageReason: '有提交', capabilities: ['选图标'], artifacts: ['app.py'], status: '进行中', todo: [], judgement: '继续' })
+            },
+            defaults: { enabled: true, model: 'm', autoRename: true, maxPerHour: 60 },
+            now: () => 10 * IDLE_MS
+        })
+        expect(service.requestAllProjects(['m1::/repo'])).toBe(1)
+        expect(await service.tick()).toBe('project:m1::/repo')
+        const prompt = prompts[0]!
+        expect(prompt).toContain('src/，README.md')
+        expect(prompt).toContain('# 图标项目')
+        expect(prompt).toContain('app.py')
+        expect(prompt).toContain('初始化')
+        expect(prompt).toContain('旧任务')
+        expect(prompt).toContain('共 2 个会话')
+        const project = store.getProject('m1::/repo')!
+        expect(project.stage).toBe('开发中')
+        expect(project.overview).toBe('一个图标项目')
+        expect(project.judgement).toBe('继续')
+        expect(store.getSession('old')?.artifacts?.commits).toEqual(['初始化'])
     })
 })

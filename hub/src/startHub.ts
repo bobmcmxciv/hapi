@@ -352,7 +352,19 @@ export async function startHub(options: StartHubOptions = {}): Promise<HubInstan
         getSession: (sessionId) => syncEngine?.getSession(sessionId),
         getRecentMessages: (sessionId, limit) => store.messages.getMessages(sessionId, limit),
         getFirstMessages: (sessionId, limit) => store.messages.getFirstMessages(sessionId, limit),
-        renameSession: async (sessionId, name) => { await syncEngine?.renameSession(sessionId, name) }
+        renameSession: async (sessionId, name) => { await syncEngine?.renameSession(sessionId, name) },
+        listDirectory: async (machineId, path) => {
+            const result = await syncEngine?.listMachineDirectory(machineId, path)
+            if (!result?.success || !result.entries) return null
+            return result.entries
+                .map(entry => (entry.type === 'directory' ? `${entry.name}/` : entry.name))
+                .sort()
+                .slice(0, 80)
+        },
+        readFile: async (sessionId, path) => {
+            const result = await syncEngine?.readSessionFile(sessionId, path)
+            return result?.success && result.content ? Buffer.from(result.content, 'base64').toString('utf8') : null
+        }
     })
     console.log(`[Digest] session digest scheduler started (${digestService.status().configured ? 'model configured' : 'HAPI_DIGEST_API_URL/KEY unset: model calls disabled'})`)
 

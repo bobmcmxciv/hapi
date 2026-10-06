@@ -1,4 +1,5 @@
 import { Database } from 'bun:sqlite'
+import type { SessionArtifacts } from './transcript'
 
 /**
  * 会话 / 项目 AI 摘要的独立存储（`<dataDir>/session-digests.sqlite`）。
@@ -28,15 +29,22 @@ export type SessionDigest = {
     error: string | null
     errorCount: number
     lastAttemptAt: number | null
+    /** 会话里写/改过的文件与 git 提交（项目概况的产物依据）；未扫描过为 null。 */
+    artifacts: SessionArtifacts | null
 }
 
 export type ProjectDigest = {
     projectKey: string
     machineId: string | null
     path: string
+    overview: string
+    stage: string
+    stageReason: string
     capabilities: string[]
+    artifacts: string[]
     status: string
     todo: string[]
+    judgement: string
     model: string | null
     generatedAt: number | null
     /** 生成时项目内最新一条会话摘要的时间，用于判定是否过期。 */
@@ -70,13 +78,19 @@ type SessionRow = {
     error: string | null
     error_count: number
     last_attempt_at: number | null
+    artifacts_json: string | null
 }
 
 type ProjectRow = {
     project_key: string
     machine_id: string | null
     path: string
+    overview: string
+    stage: string
+    stage_reason: string
     capabilities_json: string
+    artifacts_json: string
+    judgement: string
     status: string
     todo_json: string
     model: string | null
@@ -93,6 +107,17 @@ function parseList(raw: string): string[] {
         return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : []
     } catch {
         return []
+    }
+}
+
+function parseArtifacts(raw: string | null): SessionArtifacts | null {
+    if (!raw) return null
+    try {
+        const value = JSON.parse(raw) as { files?: unknown; commits?: unknown }
+        const list = (v: unknown) => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : [])
+        return { files: list(value.files), commits: list(value.commits) }
+    } catch {
+        return null
     }
 }
 
@@ -113,7 +138,8 @@ function toSessionDigest(row: SessionRow): SessionDigest {
         autoName: row.auto_name,
         error: row.error,
         errorCount: row.error_count,
-        lastAttemptAt: row.last_attempt_at
+        lastAttemptAt: row.last_attempt_at,
+        artifacts: parseArtifacts(row.artifacts_json)
     }
 }
 
@@ -122,7 +148,12 @@ function toProjectDigest(row: ProjectRow): ProjectDigest {
         projectKey: row.project_key,
         machineId: row.machine_id,
         path: row.path,
+        overview: row.overview ?? '',
+        stage: row.stage ?? '',
+        stageReason: row.stage_reason ?? '',
         capabilities: parseList(row.capabilities_json),
+        artifacts: parseList(row.artifacts_json ?? '[]'),
+        judgement: row.judgement ?? '',
         status: row.status,
         todo: parseList(row.todo_json),
         model: row.model,
@@ -138,13 +169,14 @@ export function emptySessionDigest(sessionId: string): SessionDigest {
     return {
         sessionId, title: '', done: [], status: '', todo: [], suggestComplete: false,
         completed: false, completedAt: null, sourceSeq: 0, sourceUpdatedAt: 0, model: null,
-        generatedAt: null, autoName: null, error: null, errorCount: 0, lastAttemptAt: null
+        generatedAt: null, autoName: null, error: null, errorCount: 0, lastAttemptAt: null, artifacts: null
     }
 }
 
 export function emptyProjectDigest(projectKey: string, machineId: string | null, path: string): ProjectDigest {
     return {
-        projectKey, machineId, path, capabilities: [], status: '', todo: [], model: null,
+        projectKey, machineId, path, overview: '', stage: '', stageReason: '', capabilities: [], artifacts: [],
+        judgement: '', status: '', todo: [], model: null,
         generatedAt: null, sourceStamp: 0, error: null, errorCount: 0, lastAttemptAt: null
     }
 }
@@ -196,6 +228,22 @@ export class DigestStore {
                 at INTEGER NOT NULL
             );
         `)
+        // 加列走存在性检查（与 subscriptionStore 同模式），旧数据原样保留。
+        const columns = (table: string) => new Set(
+            (this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map(row => row.name)
+        )
+        const sessionCols = columns('session_digests')
+        if (!sessionCols.has('artifacts_json')) this.db.exec('ALTER TABLE session_digests ADD COLUMN artifacts_json TEXT')
+        const projectCols = columns('project_digests')
+        for (const [name, ddl] of [
+            ['overview', "TEXT NOT NULL DEFAULT ''"],
+            ['stage', "TEXT NOT NULL DEFAULT ''"],
+            ['stage_reason', "TEXT NOT NULL DEFAULT ''"],
+            ['artifacts_json', "TEXT NOT NULL DEFAULT '[]'"],
+            ['judgement', "TEXT NOT NULL DEFAULT ''"]
+        ] as const) {
+            if (!projectCols.has(name)) this.db.exec(`ALTER TABLE project_digests ADD COLUMN ${name} ${ddl}`)
+        }
     }
 
     getSession(sessionId: string): SessionDigest | null {
@@ -211,13 +259,15 @@ export class DigestStore {
         this.db.prepare(`
             INSERT OR REPLACE INTO session_digests (
                 session_id, title, done_json, status, todo_json, suggest_complete, completed, completed_at,
-                source_seq, source_updated_at, model, generated_at, auto_name, error, error_count, last_attempt_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                source_seq, source_updated_at, model, generated_at, auto_name, error, error_count, last_attempt_at,
+                artifacts_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `).run(
             digest.sessionId, digest.title, JSON.stringify(digest.done), digest.status, JSON.stringify(digest.todo),
             digest.suggestComplete ? 1 : 0, digest.completed ? 1 : 0, digest.completedAt,
             digest.sourceSeq, digest.sourceUpdatedAt, digest.model, digest.generatedAt, digest.autoName,
-            digest.error, digest.errorCount, digest.lastAttemptAt
+            digest.error, digest.errorCount, digest.lastAttemptAt,
+            digest.artifacts ? JSON.stringify(digest.artifacts) : null
         )
     }
 
@@ -234,12 +284,13 @@ export class DigestStore {
         this.db.prepare(`
             INSERT OR REPLACE INTO project_digests (
                 project_key, machine_id, path, capabilities_json, status, todo_json, model, generated_at,
-                source_stamp, error, error_count, last_attempt_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                source_stamp, error, error_count, last_attempt_at, overview, stage, stage_reason, artifacts_json, judgement
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `).run(
             digest.projectKey, digest.machineId, digest.path, JSON.stringify(digest.capabilities), digest.status,
             JSON.stringify(digest.todo), digest.model, digest.generatedAt, digest.sourceStamp, digest.error,
-            digest.errorCount, digest.lastAttemptAt
+            digest.errorCount, digest.lastAttemptAt, digest.overview, digest.stage, digest.stageReason,
+            JSON.stringify(digest.artifacts), digest.judgement
         )
     }
 

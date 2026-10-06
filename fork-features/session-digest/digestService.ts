@@ -9,14 +9,17 @@ import {
 } from './digestStore'
 import { createLlmCall, listLlmModels, type LlmCall, type LlmConfig } from './llmClient'
 import {
-    PROJECT_SYSTEM_PROMPT,
+    PROJECT_SYSTEM_PROMPT_V2,
     SESSION_SYSTEM_PROMPT,
-    buildProjectPrompt,
+    buildProjectPromptV2,
     buildSessionPrompt,
+    extractArtifacts,
     extractTranscriptLine,
-    parseProjectDigest,
+    mergeArtifacts,
+    parseProjectDigestV2,
     parseSessionDigest,
     renderTranscript,
+    type SessionArtifacts,
     type TranscriptLine,
     type TranscriptMessage
 } from './transcript'
@@ -24,12 +27,15 @@ import {
 /** 调度器眼里的会话：只用到这几个字段，便于测试注入。 */
 export type DigestSessionView = {
     id: string
+    createdAt?: number
     updatedAt: number
+    active?: boolean
     thinking: boolean
     metadata: {
         name?: string
         path?: string
         machineId?: string
+        summary?: { text?: string } | null
         worktree?: { basePath?: string } | null
     } | null
 }
@@ -42,6 +48,10 @@ export type DigestDeps = {
     getRecentMessages: (sessionId: string, limit: number) => TranscriptMessage[]
     getFirstMessages: (sessionId: string, limit: number) => TranscriptMessage[]
     renameSession: (sessionId: string, name: string) => Promise<void>
+    /** 机器在线且开放了工作区浏览时列出目录顶层；不可用返回 null。 */
+    listDirectory?: (machineId: string, path: string) => Promise<string[] | null>
+    /** 借项目里一个活跃会话读文件（README 等）；不可用返回 null。 */
+    readFile?: (sessionId: string, path: string) => Promise<string | null>
     llm: LlmCall | null
     defaults: DigestSettings
     now?: () => number
@@ -56,7 +66,23 @@ const ERROR_BACKOFF_MS = 30 * 60_000
 const RECENT_MESSAGES = 600
 const FIRST_MESSAGES = 40
 const SESSION_BUDGET_CHARS = 40_000
-const PROJECT_BUDGET_CHARS = 24_000
+const PROJECT_BUDGET_CHARS = 30_000
+const ARTIFACT_SCAN_MESSAGES = 400
+const README_CANDIDATES = ['README.md', 'readme.md', 'README.txt', 'CLAUDE.md', 'AGENTS.md', 'package.json']
+const README_MAX_CHARS = 3000
+
+async function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T | null> {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    try {
+        return await Promise.race([promise, new Promise<null>(resolve => { timer = setTimeout(() => resolve(null), ms) })])
+    } catch {
+        return null
+    } finally {
+        if (timer) clearTimeout(timer)
+    }
+}
+
+const yieldToLoop = () => new Promise<void>(resolve => setTimeout(resolve, 0))
 
 export function projectKeyOf(session: DigestSessionView): { key: string; machineId: string | null; path: string } {
     const path = session.metadata?.worktree?.basePath ?? session.metadata?.path ?? 'Other'
@@ -79,6 +105,7 @@ export type DigestStatus = {
     projects: number
     lastRunAt: number | null
     lastError: string | null
+    queuedProjects: number
 }
 
 export class DigestService {
@@ -133,6 +160,17 @@ export class DigestService {
         this.kick()
     }
 
+    /** 「全部项目重新梳理」：按最近活动排序排进强制队列，逐个跑（不受每小时上限）。 */
+    requestAllProjects(projectKeys: string[]): number {
+        for (const key of projectKeys) this.forcedProjects.add(key)
+        this.kick()
+        return projectKeys.length
+    }
+
+    queuedProjects(): number {
+        return this.forcedProjects.size
+    }
+
     setCompleted(sessionId: string, completed: boolean): SessionDigest {
         const digest = this.deps.store.getSession(sessionId) ?? emptySessionDigest(sessionId)
         const next = { ...digest, completed, completedAt: completed ? this.now() : null }
@@ -160,7 +198,8 @@ export class DigestService {
             digestedSessions: [...digests.values()].filter(d => d.generatedAt !== null).length,
             projects: this.deps.store.listProjects().length,
             lastRunAt: this.lastRunAt,
-            lastError: this.lastError
+            lastError: this.lastError,
+            queuedProjects: this.forcedProjects.size
         }
     }
 
@@ -253,7 +292,7 @@ export class DigestService {
         return null
     }
 
-    private collectLines(sessionId: string, afterSeq: number): TranscriptLine[] {
+    private collectMessages(sessionId: string, afterSeq: number): TranscriptMessage[] {
         const bySeq = new Map<number, TranscriptMessage>()
         if (afterSeq === 0) {
             for (const message of this.deps.getFirstMessages(sessionId, FIRST_MESSAGES)) bySeq.set(message.seq, message)
@@ -261,10 +300,11 @@ export class DigestService {
         for (const message of this.deps.getRecentMessages(sessionId, RECENT_MESSAGES)) {
             if (message.seq > afterSeq) bySeq.set(message.seq, message)
         }
-        return [...bySeq.values()]
-            .sort((a, b) => a.seq - b.seq)
-            .map(extractTranscriptLine)
-            .filter((line): line is TranscriptLine => line !== null)
+        return [...bySeq.values()].sort((a, b) => a.seq - b.seq)
+    }
+
+    private toLines(messages: TranscriptMessage[]): TranscriptLine[] {
+        return messages.map(extractTranscriptLine).filter((line): line is TranscriptLine => line !== null)
     }
 
     /** 返回是否真的调用了模型（计入限速）。 */
@@ -276,9 +316,11 @@ export class DigestService {
             ? { title: existing.title, done: existing.done, status: existing.status, todo: existing.todo }
             : null
         const afterSeq = previous ? existing.sourceSeq : 0
-        const lines = this.collectLines(session.id, afterSeq)
+        const messages = this.collectMessages(session.id, afterSeq)
+        const lines = this.toLines(messages)
+        const artifacts = mergeArtifacts(existing.artifacts, extractArtifacts(messages))
         if (lines.length === 0) {
-            this.deps.store.saveSession({ ...existing, sourceSeq: Math.max(existing.sourceSeq, newest), sourceUpdatedAt: session.updatedAt })
+            this.deps.store.saveSession({ ...existing, artifacts, sourceSeq: Math.max(existing.sourceSeq, newest), sourceUpdatedAt: session.updatedAt })
             return false
         }
 
@@ -295,6 +337,7 @@ export class DigestService {
                 ...existing,
                 ...parsed,
                 title: parsed.title || existing.title,
+                artifacts,
                 sourceSeq: Math.max(newest, lines[lines.length - 1]!.seq),
                 sourceUpdatedAt: session.updatedAt,
                 model: settings.model,
@@ -323,6 +366,26 @@ export class DigestService {
         return true
     }
 
+    /** 没被总结过的会话也要有产物依据：扫最近若干条消息抽一次，存起来复用。 */
+    private async artifactsFor(sessionId: string, digest: SessionDigest | undefined): Promise<SessionArtifacts> {
+        if (digest?.artifacts) return digest.artifacts
+        await yieldToLoop()
+        const artifacts = mergeArtifacts(null, extractArtifacts(this.deps.getRecentMessages(sessionId, ARTIFACT_SCAN_MESSAGES)))
+        this.deps.store.saveSession({ ...(digest ?? emptySessionDigest(sessionId)), artifacts })
+        return artifacts
+    }
+
+    private async readProjectReadme(members: DigestSessionView[], path: string): Promise<{ name: string; text: string } | null> {
+        const live = members.find(session => session.active)
+        if (!live || !this.deps.readFile) return null
+        const sep = path.includes('\\') ? '\\' : '/'
+        for (const name of README_CANDIDATES) {
+            const text = await withTimeout(this.deps.readFile(live.id, `${path.replace(/[\\/]+$/, '')}${sep}${name}`), 10_000)
+            if (text && text.trim()) return { name, text: text.slice(0, README_MAX_CHARS) }
+        }
+        return null
+    }
+
     async runProject(projectKey: string, settings: DigestSettings): Promise<boolean> {
         const now = this.now()
         const digests = new Map(this.deps.store.listSessions().map(d => [d.sessionId, d]))
@@ -331,26 +394,43 @@ export class DigestService {
         if (!first) return false
         const { machineId, path } = projectKeyOf(first)
         const existing = this.deps.store.getProject(projectKey) ?? emptyProjectDigest(projectKey, machineId, path)
-        const summaries = members
-            .map(session => ({ session, digest: digests.get(session.id) }))
-            .filter((entry): entry is { session: DigestSessionView; digest: SessionDigest } => Boolean(entry.digest?.generatedAt))
-        if (summaries.length === 0) return false
-        const stamp = Math.max(...summaries.map(entry => entry.digest.generatedAt ?? 0))
 
-        const prompt = buildProjectPrompt({
-            path,
-            sessions: summaries.map(({ session, digest }) => ({
-                title: digest.title,
-                done: digest.done,
-                status: digest.status,
-                todo: digest.todo,
-                completed: digest.completed,
-                updatedAt: session.updatedAt
-            }))
-        }, PROJECT_BUDGET_CHARS)
+        const fileCounts = new Map<string, number>()
+        const commits: Array<{ at: number; text: string }> = []
+        const sessions: Parameters<typeof buildProjectPromptV2>[0]['sessions'] = []
+        for (const session of members) {
+            const digest = digests.get(session.id)
+            const artifacts = await this.artifactsFor(session.id, digest)
+            artifacts.files.forEach((file, index) => fileCounts.set(file, (fileCounts.get(file) ?? 0) + Math.max(1, artifacts.files.length - index)))
+            for (const text of artifacts.commits) commits.push({ at: session.updatedAt, text })
+            const fallbackTitle = session.metadata?.name || session.metadata?.summary?.text || ''
+            sessions.push({
+                title: digest?.title || fallbackTitle,
+                createdAt: session.createdAt ?? session.updatedAt,
+                updatedAt: session.updatedAt,
+                completed: digest?.completed ?? false,
+                done: digest?.done ?? [],
+                status: digest?.status ?? '',
+                todo: digest?.todo ?? [],
+                summarized: Boolean(digest?.generatedAt)
+            })
+        }
+        const relative = (file: string) => {
+            const base = path.replace(/[\\/]+$/, '')
+            return file.toLowerCase().startsWith(base.toLowerCase()) ? file.slice(base.length).replace(/^[\\/]+/, '') || file : file
+        }
+        const files = [...fileCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 30).map(([file, count]) => ({ path: relative(file), count }))
+        const recentCommits = [...new Set(commits.sort((a, b) => b.at - a.at).map(c => c.text))].slice(0, 20)
+        const listing = machineId && this.deps.listDirectory
+            ? await withTimeout(this.deps.listDirectory(machineId, path), 10_000)
+            : null
+        const readme = await this.readProjectReadme(members, path)
+        const stamp = Math.max(0, ...[...digests.values()].filter(d => members.some(m => m.id === d.sessionId)).map(d => d.generatedAt ?? 0))
+
+        const prompt = buildProjectPromptV2({ path, listing, readme, sessions, files, commits: recentCommits }, PROJECT_BUDGET_CHARS)
         try {
-            const text = await this.deps.llm!({ model: settings.model, system: PROJECT_SYSTEM_PROMPT, prompt, maxTokens: 1200 })
-            const parsed = parseProjectDigest(text)
+            const text = await this.deps.llm!({ model: settings.model, system: PROJECT_SYSTEM_PROMPT_V2, prompt, maxTokens: 2000 })
+            const parsed = parseProjectDigestV2(text)
             if (!parsed) throw new Error(`unparseable project digest: ${text.slice(0, 120)}`)
             const next: ProjectDigest = {
                 ...existing,
@@ -398,6 +478,8 @@ export function startDigestService(params: {
     getRecentMessages: (sessionId: string, limit: number) => TranscriptMessage[]
     getFirstMessages: (sessionId: string, limit: number) => TranscriptMessage[]
     renameSession: (sessionId: string, name: string) => Promise<void>
+    listDirectory?: (machineId: string, path: string) => Promise<string[] | null>
+    readFile?: (sessionId: string, path: string) => Promise<string | null>
 }): DigestService {
     const baseUrl = process.env.HAPI_DIGEST_API_URL?.trim()
     const apiKey = process.env.HAPI_DIGEST_API_KEY?.trim()
@@ -409,6 +491,8 @@ export function startDigestService(params: {
         getRecentMessages: params.getRecentMessages,
         getFirstMessages: params.getFirstMessages,
         renameSession: params.renameSession,
+        listDirectory: params.listDirectory,
+        readFile: params.readFile,
         llm: llmConfig ? createLlmCall(llmConfig) : null,
         defaults: {
             enabled: true,

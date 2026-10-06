@@ -20,15 +20,20 @@ export type ProjectDigest = {
     projectKey: string
     machineId: string | null
     path: string
+    overview: string
+    stage: string
+    stageReason: string
     capabilities: string[]
+    artifacts: string[]
     status: string
     todo: string[]
+    judgement: string
     model: string | null
     generatedAt: number | null
     error: string | null
 }
 
-export type DigestIndexEntry = { completed: boolean; suggestComplete: boolean; hasDigest: boolean }
+export type DigestIndexEntry = { completed: boolean; suggestComplete: boolean; hasDigest: boolean; status: string }
 
 export type DigestSettings = { enabled: boolean; model: string; autoRename: boolean; maxPerHour: number }
 
@@ -42,6 +47,7 @@ export type DigestStatus = {
     projects: number
     lastRunAt: number | null
     lastError: string | null
+    queuedProjects: number
 }
 
 export const digestQueryKeys = {
@@ -110,11 +116,13 @@ export function useSessionDigest(sessionId: string, enabled: boolean) {
 }
 
 export function useProjectDigests(enabled: boolean) {
+    const connected = useOptionalConnection() !== null
     const fetchJson = useDigestFetch()
     return useQuery({
         queryKey: digestQueryKeys.projects,
         queryFn: () => fetchJson<{ projects: ProjectDigest[] }>('/api/digests/projects'),
-        enabled,
+        enabled: enabled && connected,
+        retry: false,
         refetchInterval: 60_000
     })
 }
@@ -164,5 +172,9 @@ export function useDigestSettings(enabled: boolean) {
         mutationFn: (patch: Partial<DigestSettings>) => fetchJson<DigestStatus>('/api/digests/settings', { method: 'PUT', body: patch }),
         onSuccess: (data) => queryClient.setQueryData(digestQueryKeys.settings, data)
     })
-    return { status, models, update }
+    const refreshAllProjects = useMutation({
+        mutationFn: () => fetchJson<{ queued: number }>('/api/digests/projects/refresh-all', { method: 'POST', body: {} }),
+        onSuccess: () => { void queryClient.invalidateQueries({ queryKey: digestQueryKeys.settings }) }
+    })
+    return { status, models, update, refreshAllProjects }
 }

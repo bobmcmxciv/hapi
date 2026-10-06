@@ -123,6 +123,8 @@ export function SessionRowSummary(props: {
     machineIcon?: React.ReactNode
     /** fork(session-digest)：会话已被标记为完结时在标题后画对勾。 */
     completed?: boolean
+    /** fork(session-digest)：AI 摘要的一句现状，列表里标题下方显示。 */
+    digestLine?: string
 }) {
     const {
         session: s,
@@ -138,6 +140,7 @@ export function SessionRowSummary(props: {
         machineLabel,
         machineIcon,
         completed = false,
+        digestLine,
     } = props
     const { t } = useTranslation()
     const sessionName = getSessionTitle(s)
@@ -267,6 +270,11 @@ export function SessionRowSummary(props: {
                     ) : null}
                 </div>
             </div>
+            {digestLine && !projectLabel && !machineLabel ? (
+                <div data-testid="session-digest-line" className={`truncate text-[11px] leading-4 text-[var(--app-hint)] ${!s.active ? 'opacity-70' : ''}`} title={digestLine}>
+                    {digestLine}
+                </div>
+            ) : null}
             {projectLabel || machineLabel ? (
                 <div className="flex min-w-0 items-center gap-1 text-xs text-[var(--app-hint)]" title={[projectLabel, machineLabel].filter(Boolean).join(' · ')}>
                     {machineIcon}

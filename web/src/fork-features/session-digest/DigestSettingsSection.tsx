@@ -22,7 +22,7 @@ function Toggle(props: { checked: boolean; disabled?: boolean; label: string; on
 /** 设置 → HAPI 扩展：会话/项目 AI 摘要（仅 admin）。 */
 export function DigestSettingsSection() {
     const { t } = useTranslation()
-    const { status, models, update } = useDigestSettings(true)
+    const { status, models, update, refreshAllProjects } = useDigestSettings(true)
     const data = status.data
     if (status.isError) {
         return (
@@ -86,6 +86,20 @@ export function DigestSettingsSection() {
                     className={`${controlClass} w-20 text-right tabular-nums`}
                 />
             </label>
+            <div className={rowClass}>
+                <span className="flex flex-col">
+                    <span className="text-sm text-[var(--app-fg)]">{t('digest.settings.refreshAll')}</span>
+                    <span className="text-xs text-[var(--app-hint)]">{t('digest.settings.refreshAllHint')}</span>
+                </span>
+                <button
+                    type="button"
+                    disabled={refreshAllProjects.isPending || !data.configured}
+                    onClick={() => refreshAllProjects.mutate()}
+                    className="shrink-0 rounded-lg border border-[var(--app-border)] px-3 py-1 text-sm text-[var(--app-fg)] hover:bg-[var(--app-subtle-bg)] disabled:opacity-50"
+                >
+                    {data.queuedProjects > 0 ? t('digest.settings.queued', { n: data.queuedProjects }) : t('digest.settings.refreshAllButton')}
+                </button>
+            </div>
             <div className="px-3 pb-3 pt-1 text-xs leading-relaxed text-[var(--app-hint)]">
                 {t('digest.settings.stats', {
                     digested: data.digestedSessions,

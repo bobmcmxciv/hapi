@@ -212,3 +212,128 @@ export function parseProjectDigest(text: string): ParsedProjectDigest | null {
     if (capabilities.length === 0 && !status) return null
     return { capabilities, status, todo: stringList(record.todo, 6) }
 }
+
+/** 会话产物：写/改过的文件、git 提交说明、send_file 发出的文件。从工具调用里抽，
+ *  不依赖任何机器在线。 */
+export type SessionArtifacts = { files: string[]; commits: string[] }
+
+const FILE_TOOLS = new Set(['Write', 'Edit', 'MultiEdit', 'NotebookEdit', 'mcp__hapi__send_file'])
+
+function commitMessageOf(command: string): string | null {
+    if (!/\bgit\b[^\n]*\bcommit\b/.test(command)) return null
+    const heredoc = command.match(/<<\s*'?(\w+)'?\s*\n([\s\S]*?)\n\1/)
+    if (heredoc) return heredoc[2]!.split('\n')[0]!.trim() || null
+    const quoted = command.match(/-m\s+(?:"([^"]+)"|'([^']+)')/)
+    if (quoted) return (quoted[1] ?? quoted[2] ?? '').split('\n')[0]!.trim() || null
+    return null
+}
+
+export function extractArtifacts(messages: TranscriptMessage[]): SessionArtifacts {
+    const files: string[] = []
+    const commits: string[] = []
+    for (const message of messages) {
+        const envelope = asRecord(message.content)
+        if (envelope?.role !== 'agent') continue
+        const record = asRecord(envelope.content)
+        const data = asRecord(record?.data)
+        if (record?.type !== 'output' || data?.type !== 'assistant') continue
+        const blocks = asRecord(data.message)?.content
+        if (!Array.isArray(blocks)) continue
+        for (const block of blocks) {
+            const tool = asRecord(block)
+            if (tool?.type !== 'tool_use' || typeof tool.name !== 'string') continue
+            const input = asRecord(tool.input)
+            if (!input) continue
+            if (FILE_TOOLS.has(tool.name)) {
+                const path = input.file_path ?? input.notebook_path ?? input.path
+                if (typeof path === 'string' && path.trim()) files.push(path.trim())
+            } else if ((tool.name === 'Bash' || tool.name === 'PowerShell') && typeof input.command === 'string') {
+                const commit = commitMessageOf(input.command)
+                if (commit) commits.push(commit.slice(0, 160))
+            }
+        }
+    }
+    return { files, commits }
+}
+
+/** 合并新旧产物：文件按出现次数排序去重，提交保留最近的。 */
+export function mergeArtifacts(previous: SessionArtifacts | null, next: SessionArtifacts, limits = { files: 40, commits: 20 }): SessionArtifacts {
+    const counts = new Map<string, number>()
+    for (const file of [...(previous?.files ?? []), ...next.files]) counts.set(file, (counts.get(file) ?? 0) + 1)
+    const files = [...counts.entries()].sort((a, b) => b[1] - a[1]).map(([file]) => file).slice(0, limits.files)
+    const commits = [...new Set([...(previous?.commits ?? []), ...next.commits])].slice(-limits.commits)
+    return { files, commits }
+}
+
+export const PROJECT_SYSTEM_PROMPT_V2 = [
+    '你是软件项目的评估员。下面给出一个项目目录的材料：目录结构、说明文件节选（如有）、各会话的摘要与时间线、会话里改动过的文件与 git 提交。请综合判断这个项目的总体情况和所处阶段，用简体中文输出严格的 JSON，不要输出任何其他文字。',
+    'JSON 结构：{"overview": string, "stage": string, "stageReason": string, "capabilities": string[], "artifacts": string[], "status": string, "todo": string[], "judgement": string}',
+    '- overview：项目是什么、为谁解决什么问题，不超过 120 字。',
+    '- stage：从「构思」「原型」「开发中」「试运行」「已上线」「维护中」「停滞」「已完成」中选一个。',
+    '- stageReason：判断阶段的依据（引用材料里的事实），不超过 80 字。',
+    '- capabilities：项目目前已经能做的事（功能/能力，不是工作流水），最多 6 条，每条不超过 40 字。',
+    '- artifacts：主要产物（代码模块、服务、文档、数据、部署物等），最多 6 条，每条不超过 40 字。',
+    '- status：当前现状，不超过 80 字。',
+    '- todo：还没办完的事，最多 5 条，每条不超过 40 字；没有就给空数组。',
+    '- judgement：基于以上对项目下一步的判断或建议，不超过 80 字。',
+    '只依据给出的材料，不要编造；材料不足时如实说明。'
+].join('\n')
+
+export type ParsedProjectDigestV2 = ParsedProjectDigest & {
+    overview: string
+    stage: string
+    stageReason: string
+    artifacts: string[]
+    judgement: string
+}
+
+export function parseProjectDigestV2(text: string): ParsedProjectDigestV2 | null {
+    const record = extractJsonObject(text)
+    if (!record) return null
+    const str = (value: unknown) => (typeof value === 'string' ? value.trim() : '')
+    const result: ParsedProjectDigestV2 = {
+        overview: str(record.overview),
+        stage: str(record.stage).slice(0, 12),
+        stageReason: str(record.stageReason),
+        capabilities: stringList(record.capabilities, 8),
+        artifacts: stringList(record.artifacts, 8),
+        status: str(record.status),
+        todo: stringList(record.todo, 6),
+        judgement: str(record.judgement)
+    }
+    if (!result.overview && result.capabilities.length === 0 && !result.status) return null
+    return result
+}
+
+export function buildProjectPromptV2(params: {
+    path: string
+    listing: string[] | null
+    readme: { name: string; text: string } | null
+    sessions: Array<{ title: string; createdAt: number; updatedAt: number; completed: boolean; done: string[]; status: string; todo: string[]; summarized: boolean }>
+    files: Array<{ path: string; count: number }>
+    commits: string[]
+}, budgetChars: number): string {
+    const day = (ms: number) => new Date(ms).toISOString().slice(0, 10)
+    const parts: string[] = [`项目目录：${params.path}`]
+    const sessions = [...params.sessions].sort((a, b) => b.updatedAt - a.updatedAt)
+    if (sessions.length > 0) {
+        const first = Math.min(...sessions.map(s => s.createdAt))
+        const last = Math.max(...sessions.map(s => s.updatedAt))
+        parts.push(`时间线：共 ${sessions.length} 个会话（已完结 ${sessions.filter(s => s.completed).length} 个），最早 ${day(first)}，最近活动 ${day(last)}`)
+    }
+    parts.push(params.listing ? `目录结构（顶层）：${params.listing.join('，')}` : '目录结构：不可读（机器离线或未开放浏览）')
+    if (params.readme) parts.push(`${params.readme.name} 节选：\n${params.readme.text}`)
+    if (params.files.length > 0) parts.push(`会话里改动最多的文件：${params.files.map(f => `${f.path}(${f.count})`).join('，')}`)
+    if (params.commits.length > 0) parts.push(`git 提交说明（最近）：\n${params.commits.map(c => `- ${c}`).join('\n')}`)
+    parts.push('会话（新的在前）：')
+    let used = parts.reduce((sum, part) => sum + part.length, 0)
+    for (const session of sessions) {
+        const entry = session.summarized
+            ? JSON.stringify({ title: session.title, date: day(session.updatedAt), done: session.done, status: session.status, todo: session.completed ? [] : session.todo, completed: session.completed })
+            : JSON.stringify({ title: session.title, date: day(session.updatedAt) })
+        if (used + entry.length > budgetChars) break
+        parts.push(entry)
+        used += entry.length
+    }
+    return parts.join('\n')
+}

@@ -31,8 +31,8 @@ import { MachineFilterBar } from '@/components/MachineFilterBar'
 import { MachineOsIcon } from '@/components/machinePresentation'
 import type { MachineIconId } from '@hapi/protocol'
 import type { MachinePresentationPatch } from '@/fork-features/machine-icons/types'
-import { useDigestIndex } from '@/fork-features/session-digest/digestApi'
-import { CompletedMark, ProjectDigestButton } from '@/fork-features/session-digest/DigestDialogs'
+import { useDigestIndex, useProjectDigests } from '@/fork-features/session-digest/digestApi'
+import { ProjectDigestButton, ProjectDigestLine } from '@/fork-features/session-digest/DigestDialogs'
 import { useQueryClient } from '@tanstack/react-query'
 import { queryKeys } from '@/lib/query-keys'
 import { useSessionListMachineFilter } from '@/hooks/useSessionListMachineFilter'
@@ -874,9 +874,10 @@ function SessionItem(props: {
     machineLabel?: string
     machineIcon?: React.ReactNode
     completed?: boolean
+    digestLine?: string
 }) {
     const { t } = useTranslation()
-    const { session: s, onSelect, showPath = true, api, selected = false, showDetailedStatus = false, inRunningSection = false, projectLabel, machineLabel, machineIcon, completed = false } = props
+    const { session: s, onSelect, showPath = true, api, selected = false, showDetailedStatus = false, inRunningSection = false, projectLabel, machineLabel, machineIcon, completed = false, digestLine } = props
     const { haptic } = usePlatform()
     const [menuOpen, setMenuOpen] = useState(false)
     const [menuAnchorPoint, setMenuAnchorPoint] = useState<{ x: number; y: number }>({ x: 0, y: 0 })
@@ -997,6 +998,7 @@ function SessionItem(props: {
                     machineLabel={machineLabel}
                     machineIcon={machineIcon}
                     completed={completed}
+                    digestLine={digestLine}
                 />
             </button>
 
@@ -1182,6 +1184,11 @@ export function SessionList(props: {
     }, [])
     const [expandedArchivedGroups, setExpandedArchivedGroups] = useState<Set<string>>(() => new Set())
     const digestIndex = useDigestIndex()
+    const projectDigestQuery = useProjectDigests(true)
+    const projectDigestByKey = useMemo(
+        () => new Map((projectDigestQuery.data?.projects ?? []).map(project => [project.projectKey, project])),
+        [projectDigestQuery.data]
+    )
     const { pinInProgressSessions } = usePinInProgressSessions()
     const { machineFilter, setMachineFilter } = useSessionListMachineFilter()
     const queryClient = useQueryClient()
@@ -1888,6 +1895,14 @@ export function SessionList(props: {
                                 </span>
                             </div>
 
+                            {(() => {
+                                const projectDigest = projectDigestByKey.get(group.key)
+                                const text = projectDigest?.overview || projectDigest?.status
+                                return projectDigest?.generatedAt && text ? (
+                                    <ProjectDigestLine projectKey={group.key} title={group.displayName} stage={projectDigest.stage} text={text} />
+                                ) : null
+                            })()}
+
                             {/* Sessions */}
                             <div className="collapsible-panel" data-open={!isCollapsed || undefined}>
                                 <div className="collapsible-inner">
@@ -1902,6 +1917,7 @@ export function SessionList(props: {
                                             selected={s.id === selectedSessionId}
                                             showDetailedStatus={showDetailedStatus}
                                             completed={digestIndex[s.id]?.completed}
+                                            digestLine={digestIndex[s.id]?.status}
                                         />
                                     ))}
                                     {group.sessions.length > sessionPreviewLimit && (hiddenSessionCount > 0 || canShowFewerSessions) ? (
@@ -1956,6 +1972,7 @@ export function SessionList(props: {
                                                     selected={s.id === selectedSessionId}
                                                     showDetailedStatus={showDetailedStatus}
                                                     completed={digestIndex[s.id]?.completed}
+                                                    digestLine={digestIndex[s.id]?.status}
                                                 />
                                             )) : null}
                                         </>

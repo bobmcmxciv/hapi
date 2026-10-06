@@ -146,9 +146,18 @@ export function ProjectDigestDialog(props: { projectKey: string; title: string; 
                         <p className="text-sm text-[var(--app-hint)]">{requested ? t('digest.generating') : t('digest.project.none')}</p>
                     ) : (
                         <>
+                            {digest.stage ? (
+                                <div className="flex flex-wrap items-baseline gap-2">
+                                    <StageBadge stage={digest.stage} />
+                                    {digest.stageReason ? <span className="text-xs text-[var(--app-hint)]">{digest.stageReason}</span> : null}
+                                </div>
+                            ) : null}
+                            {digest.overview ? <Section title={t('digest.overview')} text={digest.overview} empty="" /> : null}
                             <Section title={t('digest.capabilities')} items={digest.capabilities} empty={t('digest.emptyList')} />
+                            {digest.artifacts.length > 0 ? <Section title={t('digest.artifacts')} items={digest.artifacts} empty="" /> : null}
                             <Section title={t('digest.status')} text={digest.status} empty={t('digest.emptyList')} />
                             <Section title={t('digest.todo')} items={digest.todo} empty={t('digest.noTodo')} />
+                            {digest.judgement ? <Section title={t('digest.judgement')} text={digest.judgement} empty="" /> : null}
                             <p className="text-[11px] text-[var(--app-hint)]">{t('digest.generatedBy', { model: digest.model ?? '', time: formatTime(digest.generatedAt) })}</p>
                         </>
                     )}
@@ -166,6 +175,38 @@ export function ProjectDigestDialog(props: { projectKey: string; title: string; 
                 </div>
             </DialogContent>
         </Dialog>
+    )
+}
+
+export function StageBadge(props: { stage: string; className?: string }) {
+    return (
+        <span className={`inline-flex shrink-0 items-center rounded-full border border-[var(--app-border)] bg-[var(--app-subtle-bg)] px-1.5 py-px text-[10px] font-medium leading-4 text-[var(--app-fg)] ${props.className ?? ''}`}>
+            {props.stage}
+        </span>
+    )
+}
+
+/** 左侧列表里项目分组标题下的一行概况：阶段 + 总体情况，点开看全文。 */
+export function ProjectDigestLine(props: { projectKey: string; title: string; stage: string; text: string }) {
+    const [open, setOpen] = useState(false)
+    return (
+        <>
+            <button
+                type="button"
+                data-testid="project-digest-line"
+                onClick={(event) => { event.stopPropagation(); setOpen(true) }}
+                title={props.text}
+                className="ml-8 mr-2 -mt-0.5 mb-0.5 flex w-[calc(100%-2.5rem)] min-w-0 items-center gap-1.5 rounded px-1 py-0.5 text-left text-[11px] leading-4 text-[var(--app-hint)] hover:bg-[var(--app-subtle-bg)] hover:text-[var(--app-fg)]"
+            >
+                {props.stage ? <StageBadge stage={props.stage} /> : null}
+                <span className="min-w-0 truncate">{props.text}</span>
+            </button>
+            {open ? (
+                <div onClick={(event) => event.stopPropagation()}>
+                    <ProjectDigestDialog projectKey={props.projectKey} title={props.title} onClose={() => setOpen(false)} />
+                </div>
+            ) : null}
+        </>
     )
 }
 
