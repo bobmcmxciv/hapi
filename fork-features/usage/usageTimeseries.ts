@@ -3,9 +3,10 @@ import type { UsageAggregateRow } from './usageAggregate'
 /**
  * 用量随时间的折线数据。
  *
- * 每个时间桶直接复用 `aggregateUsageForSessions` 的窗口口径（去重、帧结算、
- * 代理会话改挂、缓存读归一全在里面），所以各桶之和与用量表同一时间窗的合计
- * 一致；解码有按会话的事件缓存，多跑几次窗口只多花聚合的 CPU。
+ * 每个时间桶复用 `aggregateUsageForSessions` 的窗口口径取「形状」，再按模型
+ * 逐项缩放到整段窗口的结算值上：结算（帧与 assistant 取大、代理会话改挂、
+ * 含缓存读归一）只在整段累计上成立，逐桶各自结算再相加会偏大（生产 7 天实测
+ * +11%，gpt-6.1-sol +48%）。缩放后各桶之和与用量表同窗合计逐模型相等。
  */
 
 export type UsageBucketUnit = 'hour' | '6h' | 'day' | 'week'
@@ -57,8 +58,34 @@ export function planBuckets(
     for (let cursor = start; cursor < untilMs; cursor += step) {
         buckets.push({ start: cursor, end: cursor + step })
     }
-    // 超出上限时保留最近的桶。
-    return buckets.slice(-MAX_BUCKETS)
+    // 超出上限时保留最近的桶；首尾桶裁到请求窗口内，使合计窗口与用量表一致。
+    const kept = buckets.slice(-MAX_BUCKETS)
+    if (kept.length > 0) {
+        kept[0] = { ...kept[0]!, start: Math.max(kept[0]!.start, sinceMs) }
+        kept[kept.length - 1] = { ...kept[kept.length - 1]!, end: Math.min(kept[kept.length - 1]!.end, untilMs) }
+    }
+    return kept
+}
+
+type Component = 'inputTokens' | 'outputTokens' | 'cacheCreationInputTokens' | 'cacheReadInputTokens' | 'requestCount'
+const COMPONENTS: Component[] = ['inputTokens', 'outputTokens', 'cacheCreationInputTokens', 'cacheReadInputTokens', 'requestCount']
+
+/** 把某模型各桶的某一项按比例缩放到 target，四舍五入后把误差补到最大的桶上，保证合计精确相等。 */
+function rescale(values: number[], target: number): number[] {
+    const sum = values.reduce((a, b) => a + b, 0)
+    if (sum <= 0) {
+        if (target <= 0) return values.map(() => 0)
+        // 桶里没有这一项却有整段合计（极少见）：整笔记到最后一个桶。
+        return values.map((_, i) => (i === values.length - 1 ? target : 0))
+    }
+    const scaled = values.map(v => Math.round((v * target) / sum))
+    const drift = target - scaled.reduce((a, b) => a + b, 0)
+    if (drift !== 0) {
+        let maxIndex = 0
+        scaled.forEach((v, i) => { if (v > scaled[maxIndex]!) maxIndex = i })
+        scaled[maxIndex] = Math.max(0, scaled[maxIndex]! + drift)
+    }
+    return scaled
 }
 
 export function buildUsageTimeseries(
@@ -67,6 +94,9 @@ export function buildUsageTimeseries(
     aggregate: (sinceIso: string, untilIso: string) => UsageAggregateRow[],
     now: number = Date.now()
 ): UsageTimeseriesResponse {
+    const totals = buckets.length > 0
+        ? aggregate(new Date(buckets[0]!.start).toISOString(), new Date(buckets[buckets.length - 1]!.end).toISOString())
+        : []
     const byModel = new Map<string, UsageTimeseriesSeries>()
     const series = (model: string): UsageTimeseriesSeries => {
         let entry = byModel.get(model)
@@ -95,6 +125,14 @@ export function buildUsageTimeseries(
             entry.requestCount[index]! += row.requestCount
         }
     })
+    for (const row of totals) series(row.model)
+    const totalByModel = new Map(totals.map(row => [row.model, row]))
+    for (const entry of byModel.values()) {
+        const target = totalByModel.get(entry.model)
+        for (const component of COMPONENTS) {
+            entry[component] = rescale(entry[component], target ? target[component] : 0)
+        }
+    }
     const total = (s: UsageTimeseriesSeries) => s.inputTokens.reduce((sum, value, i) =>
         sum + value + s.outputTokens[i]! + s.cacheCreationInputTokens[i]! + s.cacheReadInputTokens[i]!, 0)
     return {
