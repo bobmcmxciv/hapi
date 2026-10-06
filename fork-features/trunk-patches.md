@@ -884,3 +884,17 @@ JWT 解析不出 `gaid`）同样改用统一的 `carriesResourceId`，否则它�
 | `hub/src/sse/sseManager.ts` | `sendToast` 无按账号过滤的注册 API（`canDeliver` 此前只在 `broadcast` 用） | 受众判定要逐连接做，而连接只在订阅侧知道自己属于哪个账号 | 通知 → `PushNotificationChannel.deliverWebOrToast` → `sendToast` → 连接谓词 → SSE 帧 | `bun run scripts/dev/sse-toast-leak-e2e.ts`：真 hub + 真 SSE + 真 CLI socket，admin 收到 1 条、旁观账号 0 条 |
 
 上游若给 toast 加上原生的受众/订阅过滤，先比语义再决定去留。
+
+## 机器设备图标 machine-icons (2026-10-06)
+
+每台机器可选一个设备外形图标（机架服务器、工作站、MacBook、iPhone 等 19 种），
+存在机器元数据的 hub 自有字段 `icon` 里（与 `displayName` 同类，CLI 不上报、整体替换元数据时
+由 hub 保留），不加表、不迁移。未设或值不在词表里时回落到原来的系统图标。
+新代码在 `web/src/fork-features/machine-icons/`（fork-owned），其余是接线。
+
+| Files | Missing upstream seam | Why it cannot move out | Runtime path | Sync verification |
+|---|---|---|---|---|
+| `shared/src/apiTypes.ts`, `shared/src/schemas.ts`, `hub/src/web/routes/machines.ts`, `hub/src/sync/machineCache.ts`, `hub/src/sync/syncEngine.ts`, `hub/src/store/machines.ts` and tests | No machine-metadata field registry or hub-owned-key list | `MachineMetadataSchema` strips unknown keys, so `icon` must be declared in the shared schema to reach the web; the hub-owned key list that keeps `displayName` across CLI metadata replacement is a private constant in the store; the rename PATCH is the only machine write route | Settings / right-click dialog → `PATCH /api/machines/:id {icon}` → `updateMachinePresentation` (one metadata version) → `machine-updated` → web refetch | Set an icon, restart a real runner against the hub (HTTP re-registration + socket metadata push) and confirm `metadata.icon` survives; PATCH an unknown id → 400 |
+| `web/src/components/machinePresentation.tsx`, `MachineFilterBar.tsx` and test, `SessionList.tsx`, `SessionRowSummary.tsx`, `SessionHeader.tsx`, `NewSession/MachineSelector.tsx`, `routes/settings/machines.tsx`, `hooks/useMachineLabels.ts`, `router.tsx`, `api/client.ts`, locale files, `fork-features/usage/UsagePage.tsx` | No machine-icon provider in the shared machine presentation | Every surface that labels a machine renders `MachineOsIcon` or a bare label directly; the icon has to be threaded through each of them | `useMachineIcons` (localStorage-sticky) → `MachineOsIcon icon=` in chips, group headers, in-progress rows, chat header, New Session and usage board | With two machines of the same OS, pick different icons from the right-click dialog and from Settings → Machines; both chips, group headers and the chat header must change without reload; "By OS" must remove the key |
+
+上游若给机器加原生的图标/外观字段，先比语义再决定去留。

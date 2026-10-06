@@ -234,6 +234,7 @@ hub/src/fork-features/task-panel/taskProjection.test.ts	fork-owned	#181	origin-o
 hub/src/fork-features/task-panel/taskProjection.ts	fork-owned	#181	origin-only delta; fork commits 17fee65e
 hub/src/notifications/notificationHub.test.ts	trunk-patch	#174	origin-only delta; fork commits 413e76cc
 hub/src/serverchan/channel.test.ts	trunk-patch	#174	origin-only delta; fork commits 413e76cc
+hub/src/socket/handlers/cli/machineHandlers.test.ts	trunk-patch	machine-icons	machine-icons: CLI 推元数据保留 icon 用例
 hub/src/socket/handlers/cli/sessionHandlers.ts	trunk-patch	#181	origin-only delta; fork commits 17fee65e,85743eb7
 hub/src/socket/handlers/terminal.ts	trunk-patch	#171	origin-only delta; fork commits a6f9e3f9
 hub/src/socket/server.ts	trunk-patch	#171	origin-only delta; fork commits a6f9e3f9
@@ -244,26 +245,29 @@ hub/src/sse/sseManager.ts	trunk-patch	sse-isolation	订阅新增可选 canDelive
 hub/src/sse/sseManager.ts	trunk-patch	sse-isolation	订阅新增可选 canDeliver 谓词；SSE 层无按账号过滤的注册 API
 hub/src/startHub.ts	trunk-patch	#171	origin-only delta; fork commits a6f9e3f9
 hub/src/store/index.ts	trunk-patch	#174	#170 removed unused helper; remaining persisted-session hook closed by #174
+hub/src/store/machines.ts	trunk-patch	machine-icons	machine-icons: icon 并入 hub 自有字段，CLI 整体替换元数据时保留
 hub/src/store/messageStore.ts	trunk-patch	usage-page	origin-only delta; single seam exposing db to fork-features/usage aggregation (2026-07-28)
 hub/src/store/sessionStore.ts	trunk-patch	#174	origin-only delta; fork commits 413e76cc
 hub/src/store/sessions.test.ts	trunk-patch	#170	origin-only delta; fork commits 17e79d08,413e76cc
 hub/src/store/sessions.ts	trunk-patch	#170	origin-only delta; fork commits 17e79d08,413e76cc,89c7f579
 hub/src/store/types.ts	trunk-patch	#174	origin-only delta; fork commits 413e76cc
 hub/src/sync/archivePersistence.test.ts	fork-owned	#179	origin-only delta; fork commits 3582e989
+hub/src/sync/machineCache.test.ts	trunk-patch	machine-icons	machine-icons: 图标写入/清除/单版本号用例
+hub/src/sync/machineCache.ts	trunk-patch	machine-icons	machine-icons: updateMachinePresentation（名字与图标一次写入）
 hub/src/sync/messageService.test.ts	trunk-patch	#174	origin-only delta; fork commits 413e76cc
 hub/src/sync/rpcGateway.test.ts	upstream-sync	#180	merge-base 87f5c78a; changed only on upstream/main
 hub/src/sync/rpcGateway.ts	trunk-patch	#173	both refs changed; fork commits 8d828436,51929072,9e76994b,3994ee9a,fc7d7b4a,b4c31e88,a8815d47,bfa252da,c853bcbf,c58622c2,e009becc,fc377386,d840284a
 hub/src/sync/sessionCache.ts	trunk-patch	#173,#181	origin-only delta; fork commits 17fee65e,44f2bce5,85743eb7,413e76cc
 hub/src/sync/sessionModel.test.ts	trunk-patch	#173	both refs changed; fork commits 44f2bce5,17e79d08,413e76cc,89c7f579
-hub/src/sync/syncEngine.ts	trunk-patch	#173,#256	closed sync engine; provider/usage adapters plus narrow runner stop adapter for hapi agent
+hub/src/sync/syncEngine.ts	trunk-patch	#173,#256	closed sync engine; provider/usage adapters plus narrow runner stop adapter for hapi agent; machine-icons: updateMachinePresentation 透传
 hub/src/telegram/sessionView.test.ts	trunk-patch	#174	origin-only delta; fork commits 413e76cc
 hub/src/web/routes/cli.ts	trunk-patch	#171	origin-only delta; fork commits a6f9e3f9
 hub/src/web/routes/events.ts	trunk-patch	sse-isolation	按认证 userId 取谓词注入订阅；路由工厂参数为唯一注入点
 hub/src/web/routes/generatedBlobs.test.ts	fork-owned	fork.16	origin-only delta; fork commits 05710223（发送即上传 / hub blob 存储）
 hub/src/web/routes/git.test.ts	trunk-patch	#176	origin-only delta; fork commits 3edb7db8,b4c31e88,bfa252da,d28853c7
 hub/src/web/routes/git.ts	trunk-patch	#176	origin-only delta; fork commits 3edb7db8,b4c31e88,bfa252da
-hub/src/web/routes/machines.test.ts	trunk-patch	#173	origin-only delta; fork commits 51929072,3994ee9a,fc7d7b4a,a8815d47,c853bcbf; claude-proxy-models: ccSwitchProviderId 槽位用例
-hub/src/web/routes/machines.ts	trunk-patch	#173	origin-only delta; fork commits 51929072,3994ee9a,fc7d7b4a,a8815d47,c853bcbf; claude-proxy-models: spawn 透传 ccSwitchProviderId（仅 Claude）
+hub/src/web/routes/machines.test.ts	trunk-patch	#173	origin-only delta; fork commits 51929072,3994ee9a,fc7d7b4a,a8815d47,c853bcbf; claude-proxy-models: ccSwitchProviderId 槽位用例; machine-icons: PATCH icon 用例
+hub/src/web/routes/machines.ts	trunk-patch	#173	origin-only delta; fork commits 51929072,3994ee9a,fc7d7b4a,a8815d47,c853bcbf; claude-proxy-models: spawn 透传 ccSwitchProviderId（仅 Claude）; machine-icons: PATCH /machines/:id 同时接受 icon（词表校验，null/空串清除）
 hub/src/web/routes/sessions.test.ts	trunk-patch	#173	both refs changed; fork commits 51929072,9e76994b,c58622c2,bec12318,413e76cc
 hub/src/web/routes/sessions.ts	trunk-patch	#173	both refs changed; fork commits 51929072,9e76994b,c58622c2,bec12318,413e76cc,7e0010b8
 hub/src/web/server.ts	trunk-patch	#171,#256	closed authenticated Hono app mounts multi-user, session-fork, history-import, and hapi agent routes; claude-proxy-models: 挂 /api/claude-proxy-models（env 单例）
@@ -272,7 +276,7 @@ package.json	trunk-patch	#171	origin-only delta; fork commits a6f9e3f9
 scripts/dev/recompute-usage-prod.ts	fork-owned	usage-page	origin-only delta; 生产库副本离线复算 + 信封形状直方图 (2026-08-09)
 scripts/dev/sse-toast-leak-e2e.ts	fork-owned	sse-isolation	真 hub 进程复现跨账号提醒泄漏，改 SSE 可见性后前后各跑一次
 shared/package.json	trunk-patch	#176	origin-only delta; fork commits 3edb7db8
-shared/src/apiTypes.ts	trunk-patch	#173	both refs changed; fork commits 8d828436,51929072,92e8a6e1,3994ee9a,fc7d7b4a,b4c31e88,a8815d47,bfa252da,c853bcbf,413e76cc; claude-proxy-models: SpawnSessionRequestSchema.ccSwitchProviderId
+shared/src/apiTypes.ts	trunk-patch	#173	both refs changed; fork commits 8d828436,51929072,92e8a6e1,3994ee9a,fc7d7b4a,b4c31e88,a8815d47,bfa252da,c853bcbf,413e76cc; claude-proxy-models: SpawnSessionRequestSchema.ccSwitchProviderId; machine-icons: MACHINE_ICON_IDS 词表 + RenameMachineRequestSchema 加 icon
 shared/src/flavors.test.ts	trunk-patch	#172	origin-only delta; fork commits 3686370a
 shared/src/flavors.ts	trunk-patch	#172	origin-only delta; fork commits 3686370a
 shared/src/messages.test.ts	fork-owned	#179	origin-only delta; fork commits d1f9f394
@@ -284,7 +288,7 @@ shared/src/piThinkingLevel.ts	upstream-sync	#180	merge-base 87f5c78a; changed on
 shared/src/rpcMethods.test.ts	fork-owned	#170	origin-only delta; fork commits 2138d84b
 shared/src/rpcMethods.ts	trunk-patch	#170	both refs changed; fork commits 8d828436,51929072,3994ee9a,fc7d7b4a,b4c31e88,a8815d47,c853bcbf,2138d84b
 shared/src/schemas.test.ts	fork-owned	#170	origin-only delta; fork commits 17e79d08,ddd6927a
-shared/src/schemas.ts	trunk-patch	#170	origin-only delta; fork commits 17e79d08,51929072,3994ee9a,7dca6478,ddd6927a,413e76cc,3582e989,3686370a
+shared/src/schemas.ts	trunk-patch	#170	origin-only delta; fork commits 17e79d08,51929072,3994ee9a,7dca6478,ddd6927a,413e76cc,3582e989,3686370a; machine-icons: MachineMetadataSchema.icon
 shared/src/sessionSummary.ts	trunk-patch	#179	origin-only delta; fork commits 473d69b4,3582e989; disposition fork-specific #179: bob fork customization import; archive visibility and session attention feature
 shared/src/socketLimits.ts	fork-owned	#176	origin-only delta; fork commits 3edb7db8
 shared/src/types.ts	trunk-patch	#170	origin-only delta; fork commits e009becc,3686370a
@@ -311,7 +315,7 @@ web/package.json	trunk-patch	#177	origin-only delta; fork commits 4a0c5f0b,c36d2
 web/src/App.tsx	trunk-patch	#171	origin-only delta; fork commits a6f9e3f9
 web/src/api/client.generatedBlob.test.ts	fork-owned	fork.16	origin-only delta; fork commits 05710223（发送即上传 / hub blob 存储）
 web/src/api/client.test.ts	upstream-sync	#180	merge-base 87f5c78a; changed only on upstream/main
-web/src/api/client.ts	trunk-patch	#171	both refs changed; fork commits a6f9e3f9,51929072,9e76994b,3994ee9a,fc7d7b4a,b4c31e88,a8815d47,bfa252da,d28853c7,c853bcbf,c58622c2,5262a261,7dca6478,2ef4c618,413e76cc; claude-proxy-models: getClaudeProxyModels(refresh)
+web/src/api/client.ts	trunk-patch	#171	both refs changed; fork commits a6f9e3f9,51929072,9e76994b,3994ee9a,fc7d7b4a,b4c31e88,a8815d47,bfa252da,d28853c7,c853bcbf,c58622c2,5262a261,7dca6478,2ef4c618,413e76cc; claude-proxy-models: getClaudeProxyModels(refresh); machine-icons: updateMachine(patch)
 web/src/chat/agentTimestamp.test.ts	upstream-sync	#180	merge-base 87f5c78a; changed only on upstream/main
 web/src/chat/agentTimestamp.ts	upstream-sync	#180	merge-base 87f5c78a; changed only on upstream/main
 web/src/chat/modelConfig.test.ts	trunk-patch	ctx-window-proxy	钉死裸代理别名与空 model 走同一条保守回退（190k）；proxy-models 追加钉死带 [1m] 的别名走 990k; trunk hook for claude-proxy-models（见 trunk-patches.md 2026-09-06 节）
@@ -366,6 +370,9 @@ web/src/components/FileMarkdownView.tsx	fork-owned	#177	origin-only delta; fork 
 web/src/components/ImagePreview.tsx	upstream-fix	#179	origin-only delta; fork commits 0aba2643; disposition upstream-issue https://github.com/tiann/hapi/issues/1066: general fix reported against latest upstream main
 web/src/components/LoginPrompt.test.tsx	trunk-patch	#171	origin-only delta; fork commits ba37bcfb
 web/src/components/LoginPrompt.tsx	trunk-patch	#171	origin-only delta; fork commits a6f9e3f9
+web/src/components/MachineFilterBar.test.tsx	trunk-patch	machine-icons	machine-icons: 对话框选/清图标与 chip 渲染用例
+web/src/components/MachineFilterBar.tsx	trunk-patch	machine-icons	machine-icons: 右键对话框加图标选择，chip 画设备图标
+web/src/components/NewSession/MachineSelector.tsx	trunk-patch	machine-icons	machine-icons: 机器格画设备图标
 web/src/components/NewSession/index.test.tsx	trunk-patch	claude-proxy-models	trunk hook for claude-proxy-models（见 trunk-patches.md 2026-09-06 节）; mock useClaudeProxyModels + 5 例
 web/src/components/NewSession/index.tsx	trunk-patch	claude-proxy-models	trunk hook for claude-proxy-models（见 trunk-patches.md 2026-09-06 节）; 目录三态 + 校验提示 + 状态行
 web/src/components/NewSession/preferences.test.ts	trunk-patch	claude-proxy-models	trunk hook for claude-proxy-models（见 trunk-patches.md 2026-09-06 节）
@@ -381,12 +388,13 @@ web/src/components/SessionActionMenu.tsx	trunk-patch	#170	both refs changed; for
 web/src/components/SessionAttentionIndicator.tsx	trunk-patch	#179	origin-only delta; fork commits 3582e989; disposition fork-specific #179: archive visibility and session attention feature
 web/src/components/SessionChat.test.ts	upstream-sync	#180	merge-base 87f5c78a; changed only on upstream/main
 web/src/components/SessionChat.tsx	trunk-patch	#173,#181	both refs changed; fork commits 17fee65e,44f2bce5,51929072,78f3ffef,7faed2eb,85743eb7,a8815d47,c58622c2,d1f9f394,413e76cc,7e0010b8; claude-proxy-models: useClaudeProxyModels 喂 composer
-web/src/components/SessionHeader.tsx	trunk-patch	#170	both refs changed; fork commits 3994ee9a,fc7d7b4a,a8815d47,7dca6478,bf1a6b9a,291c8db0
+web/src/components/SessionHeader.tsx	trunk-patch	#170	both refs changed; fork commits 3994ee9a,fc7d7b4a,a8815d47,7dca6478,bf1a6b9a,291c8db0; machine-icons: 页头机器标签前的图标
 web/src/components/SessionIdDialog.test.tsx	fork-owned	#179	origin-only delta; fork commits 291c8db0
 web/src/components/SessionIdDialog.tsx	fork-owned	#179	origin-only delta; fork commits 291c8db0
 web/src/components/SessionList.directory-action.test.tsx	upstream-fix	#179	origin-only delta; fork commits 167af3dc; disposition upstream-issue https://github.com/tiann/hapi/issues/1068: general fix reported against latest upstream main
 web/src/components/SessionList.test.ts	upstream-sync	#180	merge-base 87f5c78a; changed only on upstream/main
-web/src/components/SessionList.tsx	trunk-patch	#170	both refs changed; fork commits 167af3dc,37fb5e9a,7dca6478,473d69b4,bf1a6b9a
+web/src/components/SessionList.tsx	trunk-patch	#170	both refs changed; fork commits 167af3dc,37fb5e9a,7dca6478,473d69b4,bf1a6b9a; machine-icons: 筛选格/分组标题/进行中行的机器图标
+web/src/components/SessionRowSummary.tsx	trunk-patch	machine-icons	machine-icons: 副标题行首 machineIcon
 web/src/components/SyncingBanner.tsx	upstream-fix	#179	origin-only delta; fork commits 0aba2643; disposition upstream-issue https://github.com/tiann/hapi/issues/1066: general fix reported against latest upstream main
 web/src/components/Terminal/TerminalView.tsx	trunk-patch	web-stability	CanvasAddon 仅桌面端加载：Android GPU 驱动崩浏览器、iOS canvas 计入 WebKit 内存预算，移动端走 DOM 渲染器
 web/src/components/ToastContainer.tsx	upstream-fix	#179	origin-only delta; fork commits d1f9f394; disposition upstream-issue https://github.com/tiann/hapi/issues/1077: general fix reported against latest upstream main
@@ -420,6 +428,7 @@ web/src/components/assistant-ui/reasoning.test.tsx	fork-owned	#179	origin-only d
 web/src/components/assistant-ui/reasoning.tsx	trunk-patch	#179	origin-only delta; fork commits 7b197fec; disposition fork-specific #179: reasoning collapse feature
 web/src/components/assistant-ui/shiki-highlighter.tsx	upstream-fix	#179	origin-only delta; fork commits a2d26372; disposition upstream-issue https://github.com/tiann/hapi/issues/1074: general fix reported against latest upstream main
 web/src/components/icons.tsx	trunk-patch	#179	origin-only delta; fork commits 7faed2eb,16321159; disposition fork-specific #179,https://github.com/tiann/hapi/issues/1076: Qwen summary speech feature; shared path also carries separately reported upstream fix
+web/src/components/machinePresentation.tsx	trunk-patch	machine-icons	machine-icons: MachineOsIcon/MachineChip 接受 icon，设了画设备外形
 web/src/components/ui/Toast.tsx	upstream-fix	#179	origin-only delta; fork commits d1f9f394; disposition upstream-issue https://github.com/tiann/hapi/issues/1077: general fix reported against latest upstream main
 web/src/fork-features/claude-proxy-models/CcSwitchProviderSelector.tsx	fork-owned	claude-proxy-models	fork-owned module: New Session 的 cc-switch 供应商选择器（按机器记忆，只对本会话注入 env）
 web/src/fork-features/claude-proxy-models/ClaudeProxyCatalogHint.tsx	fork-owned	claude-proxy-models	fork-owned module: Claude 代理模型目录动态发现（hub 从 HAPI_CLAUDE_PROXY_MODELS_URL 拉 cx2cc /v1/models，替代写死的 CLAUDE_PROXY_MODEL_LABELS）
@@ -429,6 +438,11 @@ web/src/fork-features/claude-proxy-models/claudeProxyModelOptions.test.ts	fork-o
 web/src/fork-features/claude-proxy-models/claudeProxyModelOptions.ts	fork-owned	claude-proxy-models	fork-owned module: Claude 代理模型目录动态发现（hub 从 HAPI_CLAUDE_PROXY_MODELS_URL 拉 cx2cc /v1/models，替代写死的 CLAUDE_PROXY_MODEL_LABELS）
 web/src/fork-features/claude-proxy-models/types.ts	fork-owned	claude-proxy-models	fork-owned module: Claude 代理模型目录动态发现（hub 从 HAPI_CLAUDE_PROXY_MODELS_URL 拉 cx2cc /v1/models，替代写死的 CLAUDE_PROXY_MODEL_LABELS）
 web/src/fork-features/claude-proxy-models/useClaudeProxyModels.ts	fork-owned	claude-proxy-models	fork-owned module: Claude 代理模型目录动态发现（hub 从 HAPI_CLAUDE_PROXY_MODELS_URL 拉 cx2cc /v1/models，替代写死的 CLAUDE_PROXY_MODEL_LABELS）
+web/src/fork-features/machine-icons/MachineDeviceIcon.tsx	fork-owned	machine-icons	fork-owned module: 设备外形图标线稿与词表排序
+web/src/fork-features/machine-icons/MachineIconPicker.tsx	fork-owned	machine-icons	fork-owned module: 设备图标选择网格
+web/src/fork-features/machine-icons/types.ts	fork-owned	machine-icons	fork-owned module: PATCH 请求体类型
+web/src/fork-features/machine-icons/useMachineIcons.test.ts	fork-owned	machine-icons	fork-owned module tests
+web/src/fork-features/machine-icons/useMachineIcons.ts	fork-owned	machine-icons	fork-owned module: machineId → 图标的粘性缓存
 web/src/fork-features/multi-user/AdminPage.tsx	fork-owned	#171	origin-only delta; fork commits ba37bcfb,8cae045d,b3922ef4,a6f9e3f9
 web/src/fork-features/multi-user/LoginPrompt.tsx	fork-owned	#171	origin-only delta; fork commits ba37bcfb,a6f9e3f9
 web/src/fork-features/omp-product/eventVisibility.test.ts	fork-owned	#203	origin-only delta; OMP event visibility policy coverage
@@ -437,7 +451,7 @@ web/src/fork-features/omp-product/nestedEventVisibility.test.tsx	fork-owned	#203
 web/src/fork-features/task-panel/TodoPanel.test.tsx	fork-owned	#181	origin-only delta; fork commits 97be5733,17fee65e
 web/src/fork-features/task-panel/TodoPanel.tsx	fork-owned	#181	origin-only delta; fork commits 17fee65e
 web/src/fork-features/usage/UsagePage.test.tsx	fork-owned	usage-page	origin-only delta; token usage stats page coverage (2026-07-28)
-web/src/fork-features/usage/UsagePage.tsx	fork-owned	usage-page	origin-only delta; token usage stats page (2026-07-28)
+web/src/fork-features/usage/UsagePage.tsx	fork-owned	usage-page	origin-only delta; token usage stats page (2026-07-28); machine-icons: 用量榜按 host 显示设备图标
 web/src/hooks/mutations/useCcSwitchProvider.test.tsx	fork-owned	#173	origin-only delta; fork commits 44f2bce5,51929072,9e76994b,faec872c
 web/src/hooks/mutations/useCcSwitchProvider.ts	fork-owned	#173	origin-only delta; fork commits 44f2bce5,51929072,9e76994b,faec872c,3994ee9a,fc7d7b4a,a8815d47
 web/src/hooks/mutations/useSessionActions.test.tsx	trunk-patch	#170	origin-only delta; fork commits 2ef4c618
@@ -459,6 +473,7 @@ web/src/hooks/useFileViewPrefs.ts	fork-owned	#177	origin-only delta; fork commit
 web/src/hooks/useHideArchivedSessions.ts	fork-owned	#179	origin-only delta; fork commits 3582e989
 web/src/hooks/useLongPress.test.tsx	fork-owned	#179	origin-only delta; fork commits 5e3d135a,1bbfcc20
 web/src/hooks/useLongPress.ts	upstream-fix	#179	origin-only delta; fork commits 5e3d135a,1bbfcc20; disposition upstream-issue https://github.com/tiann/hapi/issues/1065: general fix reported against latest upstream main
+web/src/hooks/useMachineLabels.ts	trunk-patch	machine-icons	machine-icons: 导出 localStorage 读写 helper 供 useMachineIcons 复用
 web/src/hooks/usePreserveSidebarScroll.ts	fork-owned	#179	origin-only delta; fork commits 0894d3d2
 web/src/hooks/useSSE.ts	trunk-patch	web-stability	handleSyncEvent 包 try/catch + reportCrash——畸形服务端事件不再炸穿整页
 web/src/hooks/useSessionBrowserTitle.test.tsx	upstream-sync	#180	merge-base 87f5c78a; changed only on upstream/main
@@ -480,8 +495,8 @@ web/src/lib/fork-restore.test.ts	fork-owned	#170	origin-only delta; fork commits
 web/src/lib/fork-restore.ts	fork-owned	#170	origin-only delta; fork commits 88f9dc20,fbfd26f5,5262a261
 web/src/lib/generatedInlineMedia.test.ts	fork-owned	#175	origin-only delta; fork commits d28853c7
 web/src/lib/generatedInlineMedia.ts	fork-owned	#175	origin-only delta; fork commits d28853c7
-web/src/lib/locales/en.ts	trunk-patch	#171	both refs changed; fork commits ba37bcfb,606c6579,302180e5,7faed2eb,85743eb7,4a0c5f0b,7b197fec,a8815d47,bfa252da,c853bcbf,aee648ee,d1f9f394,413e76cc,291c8db0,3582e989,d3199037; claude-proxy-models: newSession.model.proxyCatalog* 文案
-web/src/lib/locales/zh-CN.ts	trunk-patch	#171	both refs changed; fork commits ba37bcfb,606c6579,302180e5,7faed2eb,85743eb7,4a0c5f0b,7b197fec,a8815d47,bfa252da,c853bcbf,aee648ee,d1f9f394,413e76cc,291c8db0,3582e989,d3199037; claude-proxy-models: newSession.model.proxyCatalog* 文案
+web/src/lib/locales/en.ts	trunk-patch	#171	both refs changed; fork commits ba37bcfb,606c6579,302180e5,7faed2eb,85743eb7,4a0c5f0b,7b197fec,a8815d47,bfa252da,c853bcbf,aee648ee,d1f9f394,413e76cc,291c8db0,3582e989,d3199037; claude-proxy-models: newSession.model.proxyCatalog* 文案; machine-icons: machineIcon.* 文案
+web/src/lib/locales/zh-CN.ts	trunk-patch	#171	both refs changed; fork commits ba37bcfb,606c6579,302180e5,7faed2eb,85743eb7,4a0c5f0b,7b197fec,a8815d47,bfa252da,c853bcbf,aee648ee,d1f9f394,413e76cc,291c8db0,3582e989,d3199037; claude-proxy-models: newSession.model.proxyCatalog* 文案; machine-icons: machineIcon.* 文案
 web/src/lib/message-window-store.test.ts	upstream-fix	#179,mouriya#323	origin-only delta; fork commits 7a5232bf; disposition upstream-issue https://github.com/tiann/hapi/issues/1071: general fix reported against latest upstream main; mouriya-s-lab/hapi#323 mechanism 1: held-range revalidation cases (older page + tail sync while reading history)
 web/src/lib/message-window-store.ts	upstream-fix	#179,mouriya#323	origin-only delta; fork commits 7a5232bf; disposition upstream-issue https://github.com/tiann/hapi/issues/1071: general fix reported against latest upstream main; mouriya-s-lab/hapi#323 mechanism 1: epoch change while reading history re-reads the held interval (after+until) instead of replacing the window with latest — drop when upstream lands #326/#327
 web/src/lib/query-keys.ts	trunk-patch	#173	both refs changed; fork commits 3994ee9a,fc7d7b4a,a8815d47,c58622c2; claude-proxy-models: claudeProxyModels 键
@@ -508,11 +523,12 @@ web/src/lib/usageReportBackfill.ts	fork-owned	usage-footer	usage_report 帧差�
 web/src/main.tsx	trunk-patch	web-stability	installCrashGuard、AppErrorBoundary 包根、bootstrap().catch 静态兜底页
 web/src/realtime/messageSummarySpeaker.test.ts	fork-owned	#179	origin-only delta; fork commits 7faed2eb
 web/src/realtime/messageSummarySpeaker.ts	fork-owned	#179	origin-only delta; fork commits 7faed2eb
-web/src/router.tsx	trunk-patch	#171	both refs changed; fork commits a6f9e3f9,0894d3d2,3582e989
+web/src/router.tsx	trunk-patch	#171	both refs changed; fork commits a6f9e3f9,0894d3d2,3582e989; machine-icons: useMachineIcons 注入会话列表
 web/src/routes/sessions/file.test.tsx	trunk-patch	#179	origin-only delta; fork commits merge-resolution; disposition fork-specific #179: fork file viewer behavior merge resolution
 web/src/routes/sessions/file.tsx	trunk-patch	#177	origin-only delta; fork commits bfa252da,7a5232bf,e737b4b3,d3199037
 web/src/routes/settings/display.tsx	upstream-sync	#180	merge-base 87f5c78a; changed only on upstream/main
 web/src/routes/settings/index.test.tsx	upstream-sync	#180	merge-base 87f5c78a; changed only on upstream/main
+web/src/routes/settings/machines.tsx	trunk-patch	machine-icons	machine-icons: 设备页行首图标按钮 + 内联选择
 web/src/sw.ts	trunk-patch	web-stability	cleanupOutdatedCaches + NavigationRoute 精缓存 index.html；sw-scope: 导航匹配由 denylist 改为 allowlist（只认领 HAPI 自己的路由），同域下其他服务不再被喂 index.html
 web/src/types/api.ts	upstream-sync	#180	merge-base 87f5c78a; changed only on upstream/main
 web/src/types/global.d.ts	trunk-patch	#179	origin-only delta; fork commits 4a0c5f0b; disposition fork-specific #179: fork PWA changelog feature
