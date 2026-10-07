@@ -914,3 +914,21 @@ hub 侧调度器（`fork-features/session-digest/`）用 env `HAPI_DIGEST_API_UR
 | `web/src/components/SessionList.tsx`, `SessionRowSummary.tsx`, `SessionHeader.tsx`, `fork-features/settings/ForkSettingsPage.tsx`, `fork-features/usage/UsagePage.tsx`, locale files | No list-row badge slot, group-header action slot, header action slot, or settings section registry | Fold-archived toggle, completed check, project-overview button and session digest button have to live in the upstream-owned list/header renderers | session list header toggle → per-group "已归档 N" row; row ✓ from `/api/digests/sessions`; header digest dialog; group digest dialog; settings → AI 摘要; usage page trend card | In a real browser: fold archived, open a session digest and mark it completed (✓ appears in the list), open a project overview, change the model in settings, switch usage ranges and read the tooltip |
 
 上游若提供原生的会话摘要/标题生成或项目实体，先比语义再决定去留。
+
+## 工作总览 work-overview + 用量端点缓存 (2026-10-07)
+
+会话列表之上加一层「工作总览」：主线 → 支线 → 项目 → 目录 → 会话。归属数据（主线/支线、目录归哪条支线、
+家目录这类混合目录里逐个会话的归属）存在独立的 `<dataDir>/work-overview.sqlite`，每行带 account_id，
+不动 SCHEMA_VERSION。目前**只开放给 admin**：`/api/work/*` 对非 admin 返回 403，前端所有入口按
+`user.role === 'admin'` 渲染。统计全部在前端从已有的会话列表、机器列表、项目摘要缓存派生，不新增 hub 端扫描。
+同批修了用量页的速度：
+- 响应缓存按计算完成时刻打戳（原来按请求开始时刻，计算超过 TTL 的结果一写进去就过期），summary 也加了缓存；
+- 聚合改成一趟扫描喂多个视图：折线图原来整段 1 次 + 每桶 1 次（52 周 = 54 次完整聚合），总表原来 1 次 + 每台机器 1 次；跨会话去重、逐会话结算等与窗口/分组有关的状态每个视图各一份，与窗口无关的帧差值只算一次，结果与逐个调用逐位相同（生产库副本上旧实现与新实现全部视图逐位比对一致，52 周折线 13.0s → 0.8s）；
+- hub 启动 20s 后后台按时间片（25ms/步）预热用量事件缓存，重启后第一个打开统计页的人不再同步解码全部历史（生产约 2 分钟，期间 hub 停摆）。
+
+| Files | Missing upstream seam | Why it cannot move out | Runtime path | Sync verification |
+|---|---|---|---|---|
+| `hub/src/startHub.ts`, `hub/tsconfig.json`, `hub/package.json`, `hub/src/store/messageStore.ts`, `fork-features/multi-user/executionMount.ts` | No route or store registry for fork services | The routes need the gateway account resolver that lives in executionMount; the store needs `dataDir`, only known inside `startHub` | hub start → `startWorkStore` → `/api/work/map|lines|folders|sessions` (403 unless role=admin); `/api/usage/summary|timeseries` → `UsageResponseCache` | `bun test ../fork-features/work-overview ../fork-features/usage`（含多视图 ≡ 单视图、预热 ≡ 冷解码）; on a real hub: role=user gets 403 on every `/api/work/*`, admin PUT/GET round-trips; after restart wait for `[Usage] event cache warmed`, then `/api/usage/timeseries` for 52 weeks returns in about a second |
+| `web/src/router.tsx`, `web/src/lib/swNavigationScope.ts`, locale files | No sessions-index slot, list filter hook, header action slot, or top-level route registry | The overview lives in the sessions page's empty right pane, filters the list the page passes to `SessionList`, adds a header icon and the `/work` route; new top-level routes must be in the SW allowlist | admin: `/sessions` right pane → click line → left list filtered; header grid icon → `/work` (map / timeline / triage) → reassign folder → `PUT /api/work/folders` | In a real browser as admin: overview shows, filter chip filters the list, reassign a folder and reload; as a role=user account: no icon, no toggle, empty right pane, `/work` redirects to `/sessions` |
+
+上游若提供原生的项目/工作区实体或会话分组模型，先比语义再决定去留。
