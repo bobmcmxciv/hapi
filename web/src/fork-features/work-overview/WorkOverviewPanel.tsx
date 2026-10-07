@@ -13,6 +13,7 @@ import {
     latestSessionInFolder,
     latestSessionInLine,
     sessionFilterPredicate,
+    sessionsInLine,
     type MainlineView,
     type WorkFilter,
     type WorkModel,
@@ -22,6 +23,9 @@ import { useWorkModel, type WorkModelResult } from './useWorkModel'
 import { setWorkFilter, setWorkView, useWorkView } from './workViewStore'
 import { newLineId, useWorkActions } from './workApi'
 import { ArrowRightIcon, NeedBadge, RunDot, StatusBadge, WorkGridIcon, heatColor, shortDate, useRelativeDay } from './WorkParts'
+import { NeedCard } from './NeedCard'
+import { BriefingPanel } from './BriefingPanel'
+import { LineDetailPanel, useLineDetailOpen } from './LineDetailPanel'
 
 const STRIP_DAYS = 14
 const STATUS_BAR: Record<WorkStatus, string> = { push: 'var(--wo-push)', slow: 'var(--wo-slow)', stall: 'var(--wo-stall)' }
@@ -43,6 +47,9 @@ export function WorkOverviewPanel(props: { variant: 'desktop' | 'mobile' }) {
     const digestIndex = useDigestIndex()
     const { upsertLine } = useWorkActions()
     const [tab, setTab] = useState<CardTab>('all')
+    const [card, setCard] = useState<{ sessionId: string; title: string; sub: string } | null>(null)
+    const [showDismissed, setShowDismissed] = useState(false)
+    const { setDismissed } = useWorkActions()
     const needRef = useRef<HTMLDivElement>(null)
     const mobile = props.variant === 'mobile'
 
@@ -75,23 +82,37 @@ export function WorkOverviewPanel(props: { variant: 'desktop' | 'mobile' }) {
         )
     }
 
-    const pendingSessions = sessions.filter(session => session.pendingRequestsCount > 0).sort((a, b) => b.updatedAt - a.updatedAt)
-    const stalled = model.mainlines.filter(line => line.status === 'stall')
+    // 「需要你处理」：去掉用户忽略过的会话；左栏按主线/支线过滤时，这里也只看这条线。
+    const { dismissed } = result
+    const focusLine = view.filter?.lineId ? findLine(model, view.filter.lineId) : null
+    const focusSessions = focusLine ? sessionsInLine(model, (focusLine.sub ?? focusLine.main).id) : null
+    const pendingSessions = sessions
+        .filter(session => session.pendingRequestsCount > 0 && !dismissed.has(session.id) && (!focusSessions || focusSessions.has(session.id)))
+        .sort((a, b) => b.updatedAt - a.updatedAt)
+    const stalled = model.mainlines.filter(line => line.status === 'stall' && (!focusLine || focusLine.main.id === line.id))
+    const dismissedSessions = sessions.filter(session => dismissed.has(session.id)).sort((a, b) => b.updatedAt - a.updatedAt)
     const lineNameOfSession = (session: SessionSummary) => {
         const sub = model.sublineOfSession.get(session.id)
         const main = sub ? model.mainlineOfLine.get(sub) : undefined
         return main ? findLine(model, main)?.main.name ?? null : null
     }
     const machineLabelOf = (session: SessionSummary) => model.machines.find(machine => machine.id === (session.metadata?.machineId ?? null))?.label ?? session.metadata?.host ?? '?'
-    const needItems: Array<{ key: string; title: string; sub: string; tone: 'need' | 'slow' | 'stall'; onClick: () => void }> = [
-        ...pendingSessions.slice(0, 4).map(session => ({
+    const openCard = (session: SessionSummary) => setCard({
+        sessionId: session.id,
+        title: getSessionTitle(session) || t('work.untitled'),
+        sub: [machineLabelOf(session), lineNameOfSession(session)].filter(Boolean).join(' · ')
+    })
+    const needItems: Array<{ key: string; title: string; sub: string; tone: 'need' | 'slow' | 'stall'; onClick: () => void; onDismiss?: () => void; sessionId?: string }> = [
+        ...pendingSessions.slice(0, focusLine ? 12 : 6).map(session => ({
             key: `pending-${session.id}`,
             title: getSessionTitle(session) || t('work.untitled'),
-            sub: [machineLabelOf(session), t('work.need.approvals', { n: session.pendingRequestsCount }), lineNameOfSession(session)].filter(Boolean).join(' · '),
+            sub: [machineLabelOf(session), t('work.need.approvals', { n: session.pendingRequestsCount }), lineNameOfSession(session), shortDate(session.updatedAt)].filter(Boolean).join(' · '),
             tone: 'need' as const,
-            onClick: () => openSession(session.id)
+            sessionId: session.id,
+            onClick: () => openCard(session),
+            onDismiss: () => setDismissed.mutate({ sessionId: session.id, dismissed: true })
         })),
-        ...(model.unassignedFolders.length > 0 ? [{
+        ...(model.unassignedFolders.length > 0 && !focusLine ? [{
             key: 'folders',
             title: t('work.need.folders', { n: model.unassignedFolders.length }),
             sub: model.unassignedFolders.slice(0, 3).map(folder => folder.displayName).join('、'),
@@ -170,23 +191,75 @@ export function WorkOverviewPanel(props: { variant: 'desktop' | 'mobile' }) {
                     ))}
                 </div>
 
-                <div ref={needRef} className="mt-5 rounded-2xl px-5 py-4" style={{ background: 'var(--wo-soft)' }}>
-                    <div className="mb-2 text-[15px] font-bold text-[var(--wo-ink)]">{t('work.need.title')}</div>
+                <BriefingPanel
+                    result={result}
+                    digestIndex={digestIndex}
+                    mobile={mobile}
+                    onSession={(sessionId) => {
+                        const session = sessions.find(item => item.id === sessionId)
+                        if (session && session.pendingRequestsCount > 0) openCard(session)
+                        else openSession(sessionId)
+                    }}
+                    onLine={(lineId) => filterSessions({ lineId })}
+                />
+
+                <div ref={needRef} data-testid="work-need" className="mt-5 rounded-2xl px-5 py-4" style={{ background: 'var(--wo-soft)' }}>
+                    <div className="mb-2 flex items-center gap-2">
+                        <div className="text-[15px] font-bold text-[var(--wo-ink)]">{t('work.need.title')}</div>
+                        {focusLine ? (
+                            <button type="button" data-testid="work-need-focus" className="wo-chip flex items-center gap-1 rounded-md px-2 py-0.5 text-[11px] text-[var(--wo-ink)]" onClick={() => setWorkFilter(null)}>
+                                {t('work.need.only', { name: (focusLine.sub ?? focusLine.main).name })} ×
+                            </button>
+                        ) : null}
+                    </div>
                     {needItems.length === 0 ? <div className="py-2 text-xs text-[var(--wo-muted)]">{t('work.need.none')}</div> : (
                         <div className="space-y-0.5">
                             {needItems.map(item => (
-                                <button key={item.key} type="button" onClick={item.onClick} className="wo-clickable flex w-full items-center gap-3 px-2 py-2 text-left">
-                                    <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-[var(--wo-card)] text-sm font-bold" style={{ color: item.tone === 'need' ? 'var(--wo-need)' : item.tone === 'slow' ? 'var(--wo-slow)' : 'var(--wo-muted)' }}>!</span>
-                                    <span className="min-w-0 flex-1">
-                                        <span className="block truncate text-[13px] font-semibold text-[var(--wo-ink)]">{item.title}</span>
-                                        <span className="block truncate text-xs text-[var(--wo-muted)]">{item.sub}</span>
-                                    </span>
-                                    <ArrowRightIcon className="h-4 w-4 shrink-0 text-[var(--wo-push)]" />
-                                </button>
+                                <div key={item.key} className="flex items-center gap-1">
+                                    <button type="button" data-testid={item.onDismiss ? 'work-need-pending' : undefined} data-session-id={item.sessionId} onClick={item.onClick} className="wo-clickable flex min-w-0 flex-1 items-center gap-3 px-2 py-2 text-left">
+                                        <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-[var(--wo-card)] text-sm font-bold" style={{ color: item.tone === 'need' ? 'var(--wo-need)' : item.tone === 'slow' ? 'var(--wo-slow)' : 'var(--wo-muted)' }}>!</span>
+                                        <span className="min-w-0 flex-1">
+                                            <span className="block truncate text-[13px] font-semibold text-[var(--wo-ink)]">{item.title}</span>
+                                            <span className="block truncate text-xs text-[var(--wo-muted)]">{item.sub}</span>
+                                        </span>
+                                        <ArrowRightIcon className="h-4 w-4 shrink-0 text-[var(--wo-push)]" />
+                                    </button>
+                                    {item.onDismiss ? (
+                                        <button
+                                            type="button"
+                                            data-testid="work-need-dismiss"
+                                            onClick={item.onDismiss}
+                                            title={t('work.need.dismissHint')}
+                                            className="shrink-0 rounded-md px-2 py-1 text-[11px] text-[var(--wo-muted)] hover:bg-[var(--wo-card)] hover:text-[var(--wo-ink)]"
+                                        >
+                                            {t('work.need.dismiss')}
+                                        </button>
+                                    ) : null}
+                                </div>
                             ))}
                         </div>
                     )}
+                    {dismissedSessions.length > 0 ? (
+                        <div className="mt-2 border-t border-[var(--wo-border)] pt-2">
+                            <button type="button" data-testid="work-need-dismissed-toggle" className="text-[11px] text-[var(--wo-muted)] hover:text-[var(--wo-ink)]" onClick={() => setShowDismissed(open => !open)}>
+                                {t('work.need.dismissedCount', { n: dismissedSessions.length })} {showDismissed ? '▴' : '▾'}
+                            </button>
+                            {showDismissed ? (
+                                <div className="mt-1 space-y-0.5">
+                                    {dismissedSessions.slice(0, 30).map(session => (
+                                        <div key={session.id} className="flex items-center gap-2 px-2 py-1 text-xs">
+                                            <span className="min-w-0 flex-1 truncate text-[var(--wo-muted)]">{getSessionTitle(session) || t('work.untitled')}</span>
+                                            <button type="button" className="shrink-0 rounded px-1.5 py-0.5 text-[11px] text-[var(--wo-push-fg)] hover:bg-[var(--wo-card)]" onClick={() => setDismissed.mutate({ sessionId: session.id, dismissed: false })}>
+                                                {t('work.need.restore')}
+                                            </button>
+                                        </div>
+                                    ))}
+                                </div>
+                            ) : null}
+                        </div>
+                    ) : null}
                 </div>
+                {card ? <NeedCard sessionId={card.sessionId} title={card.title} sub={card.sub} dismissed={dismissed.has(card.sessionId)} onClose={() => setCard(null)} /> : null}
 
                 <div className={cn('mb-4 mt-7 flex flex-wrap items-center gap-3', mobile && 'mt-5')}>
                     <h2 className="text-[19px] font-bold tracking-tight text-[var(--wo-ink)]">{t('work.section.myLines')}</h2>
@@ -408,11 +481,13 @@ export function WorkLineFilterBar() {
     const { t } = useTranslation()
     const view = useWorkView()
     const { enabled, result } = useWorkModel()
+    const [detailOpen, toggleDetail] = useLineDetailOpen()
     if (!enabled || !result || isEmptyFilter(view.filter)) return null
     const filter = view.filter!
     const { model, sessions } = result
     const parts: ReactNode[] = []
     const found = filter.lineId ? findLine(model, filter.lineId) : null
+    const lineId = found ? (found.sub ?? found.main).id : null
     if (found) parts.push(<span key="line"><span className="opacity-80">{found.sub ? t('work.filter.sublineLabel', { main: found.main.name }) : t('work.filter.mainlineLabel')}</span> <b>{(found.sub ?? found.main).name}</b></span>)
     if (filter.machineId) parts.push(<b key="machine">{model.machines.find(machine => machine.id === filter.machineId)?.label ?? filter.machineId.slice(0, 8)}</b>)
     if (filter.projectKey) parts.push(<b key="folder">{model.folders.get(filter.projectKey)?.displayName ?? filter.projectKey.split('::')[1]}</b>)
@@ -421,15 +496,23 @@ export function WorkLineFilterBar() {
     const predicate = sessionFilterPredicate(model, filter)
     const count = sessions.filter(predicate).length
     return (
-        <div data-testid="work-line-filter" className="mx-3 mb-1.5 mt-1 flex items-center gap-2 rounded-xl px-3 py-2 text-xs" style={{ background: 'var(--wo-push-bg)', color: 'var(--wo-push-fg)' }}>
-            <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: 'var(--wo-push)' }} />
-            <span className="flex min-w-0 flex-1 flex-wrap items-center gap-x-1.5 truncate">
-                {parts.map((part, index) => <span key={index} className="flex items-center gap-1.5">{index > 0 ? <span className="opacity-50">·</span> : null}{part}</span>)}
-                <span className="opacity-80">· {t('work.sessionCount', { n: count })}</span>
-            </span>
-            <button type="button" className="shrink-0 rounded-md px-1.5 py-0.5 font-medium hover:bg-[var(--wo-push-bg)]" onClick={() => setWorkFilter(null)}>
-                {t('work.filter.clear')} ×
-            </button>
+        <div data-testid="work-line-filter" className="mx-3 mb-1.5 mt-1 rounded-xl px-3 py-2 text-xs" style={{ background: 'var(--wo-push-bg)', color: 'var(--wo-push-fg)' }}>
+            <div className="flex items-center gap-2">
+                <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: 'var(--wo-push)' }} />
+                <span className="flex min-w-0 flex-1 flex-wrap items-center gap-x-1.5 truncate">
+                    {parts.map((part, index) => <span key={index} className="flex items-center gap-1.5">{index > 0 ? <span className="opacity-50">·</span> : null}{part}</span>)}
+                    <span className="opacity-80">· {t('work.sessionCount', { n: count })}</span>
+                </span>
+                {lineId ? (
+                    <button type="button" data-testid="work-line-detail-toggle" aria-expanded={detailOpen} className="shrink-0 rounded-md px-1.5 py-0.5 font-medium hover:bg-[var(--wo-push-bg)]" onClick={toggleDetail}>
+                        {t('work.lineDetail.toggle')} {detailOpen ? '▴' : '▾'}
+                    </button>
+                ) : null}
+                <button type="button" className="shrink-0 rounded-md px-1.5 py-0.5 font-medium hover:bg-[var(--wo-push-bg)]" onClick={() => setWorkFilter(null)}>
+                    {t('work.filter.clear')} ×
+                </button>
+            </div>
+            {lineId && detailOpen ? <LineDetailPanel model={model} sessions={sessions} lineId={lineId} /> : null}
         </div>
     )
 }

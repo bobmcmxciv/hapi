@@ -82,6 +82,8 @@ export type WorkModel = {
     looseSessions: LooseSession[]
     /** 所有待整理会话（没归属、也没被忽略）。 */
     unassignedSessionIds: Set<string>
+    /** 用户在「需要你处理」里忽略的会话。 */
+    dismissed: ReadonlySet<string>
     /** 参与统计的机器（有「我的」目录的），按目录数降序。 */
     machines: Array<{ id: string | null; label: string; folderCount: number; platform: string | null; icon: string | null }>
     totals: {
@@ -125,11 +127,11 @@ function emptyStats(): Omit<LineStats, 'status'> {
     return { sessionCount: 0, activeCount: 0, thinkingCount: 0, pendingCount: 0, lastActivity: 0, machineLabels: [], machineIds: [] }
 }
 
-function addSession(stats: Omit<LineStats, 'status'>, session: SessionSummary, machineLabel: string, machineId: string | null): void {
+function addSession(stats: Omit<LineStats, 'status'>, session: SessionSummary, machineLabel: string, machineId: string | null, pending: boolean): void {
     stats.sessionCount += 1
     if (session.active) stats.activeCount += 1
     if (session.thinking) stats.thinkingCount += 1
-    if (session.pendingRequestsCount > 0) stats.pendingCount += 1
+    if (pending) stats.pendingCount += 1
     if (session.updatedAt > stats.lastActivity) stats.lastActivity = session.updatedAt
     if (!stats.machineLabels.includes(machineLabel)) {
         stats.machineLabels.push(machineLabel)
@@ -144,8 +146,11 @@ export function deriveWork(input: {
     username: string | null | undefined
     digests: Record<string, FolderDigest>
     now: number
+    /** 用户在「需要你处理」里忽略的会话：不再计入待审批。 */
+    dismissed?: ReadonlySet<string>
 }): WorkModel {
     const { map, sessions, now } = input
+    const dismissed = input.dismissed ?? new Set<string>()
     const machineById = new Map(input.machines.map(machine => [machine.id, machine]))
     const labelOf = (machineId: string | null) => (machineId ? machineById.get(machineId)?.label ?? machineId.slice(0, 8) : '?')
     const lineById = new Map(map.lines.map(line => [line.id, line]))
@@ -208,8 +213,9 @@ export function deriveWork(input: {
         const folderRow = folderRows.get(projectKey)
         if (!isMine(machineId) && !sessionRow && !folderRow) continue
         inScope += 1
+        const pending = session.pendingRequestsCount > 0 && !dismissed.has(session.id)
         if (session.active) active += 1
-        if (session.pendingRequestsCount > 0) needsApproval += 1
+        if (pending) needsApproval += 1
         const folder = folderOf(projectKey)
         const machineLabel = folder.machineLabel
 
@@ -227,11 +233,11 @@ export function deriveWork(input: {
         if (lineId) {
             sublineOfSession.set(session.id, lineId)
             const stats = statsOf(lineId)
-            addSession(stats, session, machineLabel, machineId)
+            addSession(stats, session, machineLabel, machineId, pending)
             if (folder.lineId === lineId) {
                 folder.sessionCount += 1
                 if (session.active) folder.activeCount += 1
-                if (session.pendingRequestsCount > 0) folder.pendingCount += 1
+                if (pending) folder.pendingCount += 1
                 if (session.updatedAt > folder.lastActivity) folder.lastActivity = session.updatedAt
             } else {
                 stats.loose += 1
@@ -344,6 +350,7 @@ export function deriveWork(input: {
         unassignedFolders,
         looseSessions,
         unassignedSessionIds,
+        dismissed,
         machines,
         totals: {
             sessions: inScope,
@@ -422,6 +429,11 @@ export type WorkFilter = {
     mode?: 'running' | 'pending'
 }
 
+/** 会话有待审批/待回答的请求，且用户没有忽略它。 */
+export function needsYou(model: WorkModel, session: SessionSummary): boolean {
+    return session.pendingRequestsCount > 0 && !model.dismissed.has(session.id)
+}
+
 export function isEmptyFilter(filter: WorkFilter | null | undefined): boolean {
     return !filter || (!filter.lineId && !filter.machineId && !filter.projectKey && filter.day === undefined && !filter.mode)
 }
@@ -435,7 +447,7 @@ export function sessionFilterPredicate(model: WorkModel, filter: WorkFilter): (s
         if (filter.projectKey && projectKeyOfSession(session) !== filter.projectKey) return false
         if (filter.day !== undefined && (session.updatedAt < filter.day || session.updatedAt >= filter.day + DAY_MS)) return false
         if (filter.mode === 'running' && !session.active) return false
-        if (filter.mode === 'pending' && session.pendingRequestsCount <= 0) return false
+        if (filter.mode === 'pending' && !needsYou(model, session)) return false
         return true
     }
 }

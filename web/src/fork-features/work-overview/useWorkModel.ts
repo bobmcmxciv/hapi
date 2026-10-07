@@ -13,6 +13,10 @@ export type WorkModelResult = {
     map: WorkMap
     /** 与左侧列表同口径（去重、隐藏空壳）的会话，时间泳道和详情面板用。 */
     sessions: ReturnType<typeof prepareSidebarSessions>
+    /** 「需要你处理」里被忽略的会话。 */
+    dismissed: ReadonlySet<string>
+    /** 项目摘要（按 projectKey），线详情与梳理待办用。 */
+    digests: Record<string, FolderDigest>
 }
 
 /**
@@ -46,9 +50,10 @@ export function useWorkModel(): { enabled: boolean; isLoading: boolean; error: s
             })),
             username: user.username,
             digests,
-            now: Date.now()
+            now: Date.now(),
+            dismissed: new Set(mapQuery.data.dismissed ?? [])
         })
-        return { model, map: mapQuery.data, sessions: prepared }
+        return { model, map: mapQuery.data, sessions: prepared, dismissed: model.dismissed, digests }
     }, [enabled, mapQuery.data, sessions, machines, digestQuery.data, user.username])
 
     return {

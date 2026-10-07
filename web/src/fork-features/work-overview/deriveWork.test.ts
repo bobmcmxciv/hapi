@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { SessionSummary } from '@/types/api'
-import { dailyActivity, deriveWork, latestSessionInFolder, latestSessionInLine, sessionFilterPredicate, sessionsInLine, statusOf } from './deriveWork'
+import { dailyActivity, deriveWork, latestSessionInFolder, latestSessionInLine, needsYou, sessionFilterPredicate, sessionsInLine, statusOf } from './deriveWork'
 import type { WorkMap } from './workApi'
 
 const NOW = new Date(2026, 9, 7, 12, 0, 0).getTime()
@@ -139,6 +139,16 @@ describe('deriveWork', () => {
         expect(pick({ mode: 'running' })).toEqual(['hapi-1', 'peter-1'])
         expect(pick({ lineId: 'm1', mode: 'pending' })).toEqual(['hapi-2'])
         expect(pick({ lineId: 'deleted-line' })).toHaveLength(sessions.length)
+    })
+
+    it('stops counting a dismissed session as waiting on you everywhere', () => {
+        const quiet = deriveWork({ map, sessions, machines, username: 'admin', digests, now: NOW, dismissed: new Set(['hapi-2']) })
+        expect(quiet.totals.needsApproval).toBe(0)
+        expect(quiet.mainlines.find(line => line.id === 'm1')!.pendingCount).toBe(0)
+        expect(quiet.folders.get('vircs::C:\\hapi')!.pendingCount).toBe(0)
+        expect(sessions.filter(sessionFilterPredicate(quiet, { lineId: 'm1', mode: 'pending' }))).toEqual([])
+        expect(needsYou(quiet, sessions.find(session => session.id === 'hapi-2')!)).toBe(false)
+        expect(needsYou(model, sessions.find(session => session.id === 'hapi-2')!)).toBe(true)
     })
 
     it('finds the latest session of a line or folder for "continue working"', () => {

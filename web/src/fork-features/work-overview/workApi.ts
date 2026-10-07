@@ -31,10 +31,30 @@ export type WorkMap = {
     lines: WorkLine[]
     folders: WorkFolder[]
     sessions: WorkSessionAssignment[]
+    /** 「需要你处理」里被忽略的会话（旧 hub 不带）。 */
+    dismissed?: string[]
+}
+
+/** 「梳理待办」：与 hub fork-features/work-overview/briefing.ts 同构。 */
+export type BriefingItem = { text: string; sessionId?: string; lineId?: string; priority?: 'high' | 'normal' }
+export type Briefing = {
+    summary: string
+    groups: Array<{ title: string; items: BriefingItem[] }>
+    generatedAt: number
+    model: string | null
+    error: string | null
+}
+export type BriefingContext = {
+    lines: Array<{ id: string; name: string; parentId: string | null; goal?: string; status?: string; lastActivity?: number; nextSteps?: string[] }>
+    pending: Array<{ sessionId: string; title: string; lineId?: string | null; machine?: string; updatedAt?: number; detail?: string }>
+    active: Array<{ sessionId: string; title: string; lineId?: string | null; machine?: string; thinking?: boolean; status?: string }>
+    recent: Array<{ sessionId: string; title: string; lineId?: string | null; updatedAt?: number; status?: string; completed?: boolean }>
+    dismissed: Array<{ sessionId: string; title: string }>
 }
 
 export const workQueryKeys = {
-    map: ['fork-work', 'map'] as const
+    map: ['fork-work', 'map'] as const,
+    briefing: ['fork-work', 'briefing'] as const
 }
 
 /** 工作总览目前只给 admin：非 admin 不发请求，hub 侧也会 403。 */
@@ -100,7 +120,35 @@ export function useWorkActions() {
         mutationFn: (id: string) => fetchJson(`/api/work/lines/${encodeURIComponent(id)}`, { method: 'DELETE' }),
         onSettled: refresh
     })
-    return { setFolder, setSession, upsertLine, deleteLine }
+    const setDismissed = useMutation({
+        mutationFn: (patch: { sessionId: string; dismissed: boolean }) => fetchJson<{ dismissed: string[] }>('/api/work/dismissed', { method: 'PUT', body: patch }),
+        onSuccess: (data) => {
+            queryClient.setQueryData<WorkMap>(workQueryKeys.map, previous => (previous ? { ...previous, dismissed: data.dismissed } : previous))
+        },
+        onSettled: refresh
+    })
+    return { setFolder, setSession, upsertLine, deleteLine, setDismissed }
+}
+
+/** 最新一份「梳理待办」；生成中每 3 秒轮询一次。 */
+export function useBriefing(enabled: boolean, fast = false) {
+    const fetchJson = useWorkFetch()
+    return useQuery({
+        queryKey: workQueryKeys.briefing,
+        queryFn: () => fetchJson<{ briefing: Briefing | null; running: boolean }>('/api/work/briefing'),
+        enabled,
+        retry: false,
+        refetchInterval: (query) => (fast || query.state.data?.running ? 3000 : false)
+    })
+}
+
+export function useRefreshBriefing() {
+    const fetchJson = useWorkFetch()
+    const queryClient = useQueryClient()
+    return useMutation({
+        mutationFn: (context: BriefingContext) => fetchJson<{ running: boolean }>('/api/work/briefing/refresh', { method: 'POST', body: context }),
+        onSuccess: () => { void queryClient.invalidateQueries({ queryKey: workQueryKeys.briefing }) }
+    })
 }
 
 export function newLineId(): string {
