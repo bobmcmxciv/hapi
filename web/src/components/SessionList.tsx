@@ -1663,7 +1663,9 @@ export function SessionList(props: {
                     ) : null}
                     {!(showSearch && searchExpanded) ? (
                         <>
-                            <div className="flex-1" />
+                            {/* fork：tiann 同 hunk 里的 MachineFilterMenu（漏斗二级菜单）不落回——
+                                fork 已用平铺的 MachineFilterBar（下方）取代（568692df），只取 Unread 按钮。
+                                fork(list-prefs)：右侧按钮组靠右、放不下时向右滑动露出左边的按钮（row-reverse，子元素倒序）。 */}
                             <div className="list-toolbar-scroll flex min-w-0 flex-1 flex-row-reverse items-center gap-1 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
                                 {props.headerActions}
                                 {renderHeader ? (

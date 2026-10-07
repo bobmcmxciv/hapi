@@ -33,7 +33,6 @@ See `src/router.tsx` for route definitions.
 - `/settings` - Settings category hub (mobile) and responsive master-detail shell.
 - `/settings/general` - Language preferences.
 - `/settings/display` - Appearance, typography, colors, and session list preferences.
-- `/settings/fork` - Toolbar visibility and machine chip layout preferences.
 - `/settings/chat` - Message input, tool card, and conversation color preferences.
 - `/settings/voice` - Everyday voice assistant preferences.
 - `/settings/voice/voices` - Full-page voice picker.
