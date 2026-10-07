@@ -407,6 +407,18 @@ class OmpEventProjection {
 
 }
 
+const CUSTOM_MESSAGE_MAX_CHARS = 200;
+
+/** First non-empty line of an OMP custom message with its wrapper tags removed, capped in length. */
+export function summarizeCustomMessage(content: string): string {
+    const line = content
+        .replace(/<\/?[a-z][a-z0-9-]*>/gi, '\n')
+        .split(/\r?\n/)
+        .map(part => part.trim())
+        .find(part => part.length > 0) ?? '';
+    return line.length > CUSTOM_MESSAGE_MAX_CHARS ? `${line.slice(0, CUSTOM_MESSAGE_MAX_CHARS - 1)}…` : line;
+}
+
 export class OmpRpcEventAdapter {
     private activeMessage: MainMessageAccumulator | null = null;
     private lastDisplayId: string | null = null;
@@ -729,9 +741,32 @@ export class OmpRpcEventAdapter {
         }
 
         const role = event.data.message.role;
+        if (role === 'custom') {
+            this.handleCustomMessage(output, event.data.message, raw);
+            return;
+        }
         if (role !== 'developer') {
             this.callbacks.onDiagnostic(`Unsupported OMP message_end role: ${String(role)}`);
         }
+    }
+
+    /**
+     * OMP injects its own messages with role "custom": background job results (async-result),
+     * todo nudges, resolve reminders. Only the ones OMP marks display:true are meant for the user;
+     * show their first sentence as a notice (the body can be a whole command output) and keep the
+     * rest out of the chat.
+     */
+    private handleCustomMessage(output: OmpEventProjection, message: JsonObject, raw: JsonObject): void {
+        if (message.display !== true) return;
+        const text = typeof message.content === 'string' ? summarizeCustomMessage(message.content) : '';
+        if (!text) return;
+        output.onStructuredEvent({
+            type: 'omp-notice',
+            level: 'info',
+            message: text,
+            source: typeof message.customType === 'string' ? message.customType : undefined,
+            frame: raw
+        });
     }
 
     private commitAssistant(output: OmpEventProjection, 
@@ -762,7 +797,8 @@ export class OmpRpcEventAdapter {
                     input: block.arguments
                 }];
             }
-            if (!['image', 'redactedThinking', 'fallback'].includes(String(block.type))) {
+            // Empty thinking blocks (encrypted provider reasoning) carry nothing to show.
+            if (!['image', 'redactedThinking', 'fallback', 'thinking'].includes(String(block.type))) {
                 this.callbacks.onDiagnostic(`Unknown OMP assistant content block: ${String(block.type)}`);
             }
             return [];

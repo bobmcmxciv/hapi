@@ -132,7 +132,7 @@ describe('OMP host presentation policy', () => {
         integration.handle({ type: 'extension_ui_request', raw: {
             type: 'extension_ui_request', id: 'native-title', method: 'setTitle', title: 'Native hidden title'
         } });
-        expect(metadata.summary?.text).toBe('Native hidden title');
+        expect(metadata.summary?.text).toBe('Hidden title');
         expect(state.requests).toEqual({});
         expect(sendAgentMessage).not.toHaveBeenCalled();
         expect(sendClaudeSessionMessage).not.toHaveBeenCalled();

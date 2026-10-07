@@ -770,4 +770,47 @@ describe('OmpRpcEventAdapter', () => {
         })]);
         expect(harness.structuredEvents).toEqual([]);
     });
+
+    it('shows OMP custom messages marked display:true as one-line notices and keeps the rest out of chat and logs', () => {
+        const harness = createHarness();
+        harness.adapter.handle(rpcEvent({
+            type: 'message_end',
+            message: {
+                role: 'custom',
+                customType: 'async-result',
+                display: true,
+                content: '<system-notice>\nBackground job bg_1 has completed. Resume your work using the result below.\n[Command timed out after 20 seconds]\n</system-notice>'
+            }
+        }));
+        harness.adapter.handle(rpcEvent({
+            type: 'message_end',
+            message: { role: 'custom', customType: 'mid-run-todo-nudge', display: false, content: '<system-reminder>\n4 todo items still open.' }
+        }));
+        expect(harness.structuredEvents).toEqual([expect.objectContaining({
+            type: 'omp-notice',
+            level: 'info',
+            message: 'Background job bg_1 has completed. Resume your work using the result below.',
+            source: 'async-result'
+        })]);
+        expect(harness.diagnostics.filter(line => line.includes('Unsupported OMP message_end role'))).toEqual([]);
+    });
+
+    it('skips empty thinking blocks (encrypted reasoning) without a diagnostic', () => {
+        const harness = createHarness();
+        harness.adapter.handle(rpcEvent({
+            type: 'message_end',
+            message: { ...assistantMessage('answer'), content: [{ type: 'thinking', thinking: '' }, { type: 'text', text: 'answer' }] }
+        }));
+        expect(harness.canonicalMessages).toEqual([expect.objectContaining({
+            type: 'assistant', message: expect.objectContaining({ content: [{ type: 'text', text: 'answer' }] })
+        })]);
+        expect(harness.diagnostics.filter(line => line.includes('Unknown OMP assistant content block'))).toEqual([]);
+    });
+
+    it('keeps tool_stream_update and future event types out of the chat', () => {
+        const harness = createHarness();
+        harness.adapter.handle(rpcEvent({ type: 'tool_stream_update', toolCallId: 't1', toolName: 'edit', preview: { diff: '+a' } }));
+        harness.adapter.handle(rpcEvent({ type: 'session_settled' }));
+        expect(harness.structuredEvents).toEqual([]);
+    });
 });
