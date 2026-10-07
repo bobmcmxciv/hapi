@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'bun:test'
-import { buildUsageTimeseries, MAX_BUCKETS, planBuckets } from './usageTimeseries'
+import { buildUsageTimeseries, MAX_BUCKETS, planBuckets, type AggregateUsageBucketsFn } from './usageTimeseries'
+import type { UsageAggregateRow } from './usageAggregate'
+
+/** 把「逐窗口」的假聚合包成批量接口：builder 只该依赖每个窗口各自的结果。 */
+const perWindow = (fn: (since: string, until: string) => UsageAggregateRow[]): AggregateUsageBucketsFn =>
+    (total, buckets) => ({ total: fn(total.sinceIso, total.untilIso), buckets: buckets.map(bucket => fn(bucket.sinceIso, bucket.untilIso)) })
 
 describe('planBuckets', () => {
     it('aligns day buckets to local midnight', () => {
@@ -37,10 +42,10 @@ describe('buildUsageTimeseries', () => {
         const buckets = [{ start: 0, end: 10 }, { start: 10, end: 20 }]
         const row = (model: string, input: number) => ({ model, requestCount: 1, inputTokens: input, outputTokens: 0, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 })
         // 逐桶结算各取了大值（60+60），整段结算只有 100。
-        const result = buildUsageTimeseries(buckets, 'day', (since, until) => {
+        const result = buildUsageTimeseries(buckets, 'day', perWindow((since, until) => {
             if (since === new Date(0).toISOString() && until === new Date(20).toISOString()) return [row('a', 100)]
             return [row('a', 60)]
-        })
+        }))
         expect(result.series[0]!.inputTokens).toEqual([50, 50])
         expect(result.series[0]!.requestCount.reduce((a, b) => a + b, 0)).toBe(1)
     })
@@ -53,7 +58,7 @@ describe('buildUsageTimeseries', () => {
                 { model: 'b', requestCount: 2, inputTokens: 10, outputTokens: 0, cacheCreationInputTokens: 0, cacheReadInputTokens: 5 },
                 { model: 'zero', requestCount: 0, inputTokens: 0, outputTokens: 0, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 }
             ]
-        const result = buildUsageTimeseries(buckets, 'day', (since, until) => {
+        const result = buildUsageTimeseries(buckets, 'day', perWindow((since, until) => {
             if (until === new Date(20).toISOString() && since === new Date(0).toISOString()) {
                 return [
                     { model: 'a', requestCount: 1, inputTokens: 1, outputTokens: 1, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 },
@@ -61,7 +66,7 @@ describe('buildUsageTimeseries', () => {
                 ]
             }
             return parts(since)
-        }, 99)
+        }), 99)
         expect(result.series.map(s => s.model)).toEqual(['b', 'a'])
         expect(result.series[0]!.inputTokens).toEqual([0, 10])
         expect(result.series[1]!.outputTokens).toEqual([1, 0])

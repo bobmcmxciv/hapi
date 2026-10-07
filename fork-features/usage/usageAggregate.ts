@@ -43,11 +43,11 @@ export type UsageSummaryResponse = {
     generatedAt: number
 }
 
-/** 会话投影：按 host 分桶算每台机器的统计。聚合本身由调用方注入，
- *  这里只管分桶与汇总，好让口径可单测。 */
+/** 会话投影：按 host 分桶算每台机器的统计。聚合由调用方注入（一次给出全部分组，
+ *  好让调用方把总表和各机器放进同一趟扫描），这里只管分桶与汇总，好让口径可单测。 */
 export function summarizeUsageHosts(
     sessions: Array<{ id: string; host: string | null; platform: string | null; owner: string | null }>,
-    aggregate: (sessionIds: string[]) => UsageAggregateRow[]
+    aggregateGroups: (groups: string[][]) => UsageAggregateRow[][]
 ): UsageHostSummary[] {
     const byHost = new Map<string, { ids: string[]; platform: string | null; owner: string | null }>()
     for (const session of sessions) {
@@ -63,9 +63,11 @@ export function summarizeUsageHosts(
         }
     }
 
-    return [...byHost.entries()]
-        .map(([host, bucket]) => {
-            const rows = aggregate(bucket.ids)
+    const entries = [...byHost.entries()]
+    const rowsByHost = entries.length > 0 ? aggregateGroups(entries.map(([, bucket]) => bucket.ids)) : []
+    return entries
+        .map(([host, bucket], index) => {
+            const rows = rowsByHost[index] ?? []
             let totalTokens = 0
             let requestCount = 0
             for (const row of rows) {
@@ -466,71 +468,125 @@ function loadSessionEvents(
     return result
 }
 
-export function aggregateUsageForSessions(
-    db: Database,
-    sessionIds: string[],
-    opts?: { sinceIso?: string | null; untilIso?: string | null }
-): UsageAggregateRow[] {
-    if (sessionIds.length === 0) {
-        return []
-    }
+export type UsageWindow = { sinceIso?: string | null; untilIso?: string | null }
 
-    const contexts = loadSessionContexts(db, sessionIds)
-    const eventsBySession = loadSessionEvents(db, sessionIds, contexts)
-
-    const sinceIso = opts?.sinceIso ?? null
-    const untilIso = opts?.untilIso ?? null
-    const inWindow = (ts: unknown): boolean => {
-        if (typeof ts !== 'string' || !ts) return false
-        if (sinceIso && ts < sinceIso) return false
-        if (untilIso && ts >= untilIso) return false
-        return true
-    }
-
-    // —— 两侧都按会话分桶后再结算：帧与 assistant 行只有在同一会话内才描述
-    //    同一批 API 轮，跨会话取 max 会把无关流量混在一起（见 settleSessionUsage）。
-    const seenTurn = new Set<string>()
-    const assistantBySession = new Map<string, Map<string, UsageAggregateRow>>()
-    type FrameNums = { inputTokens: number; outputTokens: number; cacheCreationInputTokens: number; cacheReadInputTokens: number }
-    const prevFrame = new Map<string, FrameNums>()
-    const frameBySession = new Map<string, Map<string, FrameNums>>()
-    /** Codex 累计流的前值，按 `sessionId::streamKey` 分组。 */
-    const prevAgentTotal = new Map<string, FrameNums>()
-    /** 同一轮累计快照的指纹，重复投递（导入重放）只计一次。 */
-    const seenAgentTurn = new Set<string>()
+/** 一条用量视图（一个时间窗 × 一组会话）的结算状态。
+ *
+ *  与窗口或会话子集有关的状态都在这里，每个视图各一份：跨会话的 assistant 轮去重
+ *  （窗外的行不占键，所以去重集合随窗口不同）、逐会话逐模型的两侧累计、以及之后的
+ *  归一与逐会话结算。与窗口无关的状态（帧差值、Codex 累计流前值、重放去重）只在
+ *  扫描里算一次，见 runUsageScan。这样一趟扫描可以同时喂多个视图，而每个视图的
+ *  结果与单独调用一次逐位相同。 */
+class UsageViewAccumulator {
+    private readonly seenTurn = new Set<string>()
+    private readonly assistantBySession = new Map<string, Map<string, UsageAggregateRow>>()
+    private readonly frameBySession = new Map<string, Map<string, UsageNums>>()
     /** `sessionId::model`：这一桶的 input 已经在 agentUsage 分支逐帧扣过缓存读，
      *  不能再被 normalizeInclusiveInput 扣第二遍。 */
-    const agentUsageBuckets = new Set<string>()
-    const bucket = <T>(store: Map<string, Map<string, T>>, sessionId: string): Map<string, T> => {
+    private readonly agentUsageBuckets = new Set<string>()
+
+    private bucket<T>(store: Map<string, Map<string, T>>, sessionId: string): Map<string, T> {
         let inner = store.get(sessionId)
         if (!inner) { inner = new Map<string, T>(); store.set(sessionId, inner) }
         return inner
     }
 
-    // seenTurn 是**跨会话**去重（键不含 sessionId），所以遍历顺序会影响归属：
-    // 按 sessionId 升序、会话内按 seq 升序，复刻原来 `ORDER BY session_id, seq`
-    // 的单次扫描顺序。
+    private addRow(sessionId: string, model: string, nums: UsageNums): void {
+        const perSession = this.bucket(this.assistantBySession, sessionId)
+        const agg = perSession.get(model) ?? {
+            model, requestCount: 0, inputTokens: 0, outputTokens: 0,
+            cacheCreationInputTokens: 0, cacheReadInputTokens: 0
+        }
+        agg.requestCount += 1
+        agg.inputTokens += nums.inputTokens
+        agg.outputTokens += nums.outputTokens
+        agg.cacheCreationInputTokens += nums.cacheCreationInputTokens
+        agg.cacheReadInputTokens += nums.cacheReadInputTokens
+        perSession.set(model, agg)
+    }
+
+    addAssistant(sessionId: string, event: Extract<UsageEvent, { kind: 'assistant' }>): void {
+        // Claude Code 同一 API 轮写多行、usage 逐行重复（实测 150,180 行只
+        // 有 69,935 个 distinct message.id），必须按轮去重否则整体虚高 ~2.15x。
+        // 键不含 sessionId：跨会话去重，归属取遍历顺序里先到的会话。
+        const turnKey = `${event.messageId}::${event.model}`
+        if (this.seenTurn.has(turnKey)) return
+        this.seenTurn.add(turnKey)
+        this.addRow(sessionId, event.model, event)
+    }
+
+    /** token_count 的一帧（已取差值、已扣缓存读）。 */
+    addAgentUsage(sessionId: string, model: string, nums: UsageNums): void {
+        this.addRow(sessionId, model, nums)
+        this.agentUsageBuckets.add(`${sessionId}::${model}`)
+    }
+
+    addFrame(sessionId: string, model: string, delta: UsageNums): void {
+        const perSession = this.bucket(this.frameBySession, sessionId)
+        const agg = perSession.get(model) ?? {
+            inputTokens: 0, outputTokens: 0, cacheCreationInputTokens: 0, cacheReadInputTokens: 0
+        }
+        agg.inputTokens += delta.inputTokens
+        agg.outputTokens += delta.outputTokens
+        agg.cacheCreationInputTokens += delta.cacheCreationInputTokens
+        agg.cacheReadInputTokens += delta.cacheReadInputTokens
+        perSession.set(model, agg)
+    }
+
+    settle(): UsageAggregateRow[] {
+        // —— 结算前把两侧统一到「input 不含缓存读」的口径 ——
+        // assistant 行与 usage_report 帧都可能来自 OpenAI 兼容中转，那边的 input 是**含**
+        // 缓存读的整段 prompt。逐桶归一（而不是逐行）：判据只有在整段累计上才可靠。
+        for (const [sessionId, perModel] of this.assistantBySession) {
+            for (const [model, agg] of perModel) {
+                if (this.agentUsageBuckets.has(`${sessionId}::${model}`)) continue
+                normalizeInclusiveInput(agg)
+            }
+        }
+        for (const perModel of this.frameBySession.values()) {
+            for (const agg of perModel.values()) normalizeInclusiveInput(agg)
+        }
+
+        const settled: UsageAggregateRow[][] = []
+        for (const sessionId of new Set([...this.assistantBySession.keys(), ...this.frameBySession.keys()])) {
+            settled.push(settleSessionUsage(
+                [...(this.assistantBySession.get(sessionId)?.values() ?? [])],
+                this.frameBySession.get(sessionId) ?? new Map()
+            ))
+        }
+        return combineSessionUsage(settled)
+    }
+}
+
+/** 给定会话，返回「这个时间戳的事件该进哪些视图」；会话不属于任何视图时返回 null。 */
+type SessionRouter = (sessionId: string) => ((ts: string) => readonly UsageViewAccumulator[]) | null
+
+const NO_VIEWS: readonly UsageViewAccumulator[] = []
+
+/** 一趟扫描：对这批会话的缓存事件按 会话 id 升序、会话内 seq 升序走一遍，
+ *  与窗口无关的差值/去重只算一次，再把事件分发给它所属的视图。 */
+function runUsageScan(db: Database, sessionIds: string[], route: SessionRouter): void {
+    const contexts = loadSessionContexts(db, sessionIds)
+    const eventsBySession = loadSessionEvents(db, sessionIds, contexts)
+
+    const prevFrame = new Map<string, UsageNums>()
+    /** Codex 累计流的前值，按 `sessionId::streamKey` 分组。 */
+    const prevAgentTotal = new Map<string, UsageNums>()
+    /** 同一轮累计快照的指纹，重复投递（导入重放）只计一次。 */
+    const seenAgentTurn = new Set<string>()
+
+    // assistant 的跨会话去重让遍历顺序影响归属：按 sessionId 升序、会话内按 seq 升序，
+    // 复刻原来 `ORDER BY session_id, seq` 的单次扫描顺序。其余状态的键都带 sessionId，
+    // 所以跳过不属于任何视图的会话不影响别的会话。
     for (const sessionId of [...eventsBySession.keys()].sort()) {
+        const viewsAt = route(sessionId)
+        if (!viewsAt) continue
+        const targets = (ts: string | null): readonly UsageViewAccumulator[] =>
+            typeof ts === 'string' && ts ? viewsAt(ts) : NO_VIEWS
         for (const event of eventsBySession.get(sessionId)!) {
             if (event.kind === 'assistant') {
                 // 窗口过滤在去重之前：窗外的行不该占用 turnKey，否则窗内同轮的行会被吞。
-                if (!inWindow(event.ts)) continue
-                // Claude Code 同一 API 轮写多行、usage 逐行重复（实测 150,180 行只
-                // 有 69,935 个 distinct message.id），必须按轮去重否则整体虚高 ~2.15x。
-                const turnKey = `${event.messageId}::${event.model}`
-                if (seenTurn.has(turnKey)) continue
-                seenTurn.add(turnKey)
-                const perSession = bucket(assistantBySession, sessionId)
-                const agg = perSession.get(event.model) ?? {
-                    model: event.model, requestCount: 0, inputTokens: 0, outputTokens: 0,
-                    cacheCreationInputTokens: 0, cacheReadInputTokens: 0
-                }
-                agg.requestCount += 1
-                agg.inputTokens += event.inputTokens
-                agg.outputTokens += event.outputTokens
-                agg.cacheCreationInputTokens += event.cacheCreationInputTokens
-                agg.cacheReadInputTokens += event.cacheReadInputTokens
-                perSession.set(event.model, agg)
+                for (const view of targets(event.ts)) view.addAssistant(sessionId, event)
                 continue
             }
 
@@ -538,7 +594,7 @@ export function aggregateUsageForSessions(
                 // 这些会话没有 assistant 行也没有 usage_report 帧，token_count
                 // 是唯一来源，所以直接记进 assistant 侧：settleSessionUsage 见到
                 // 空的帧侧会原样放行，不会与任何东西取 max。
-                let nums: FrameNums = {
+                let nums: UsageNums = {
                     inputTokens: event.inputTokens,
                     outputTokens: event.outputTokens,
                     cacheCreationInputTokens: event.cacheCreationInputTokens,
@@ -573,29 +629,24 @@ export function aggregateUsageForSessions(
                 }
 
                 // 时间窗在差值之后：先窗后差会让窗内首帧把整段线程累计算进来。
-                if (!inWindow(event.ts)) continue
                 if (usageTotal(nums) <= 0) continue
+                const views = targets(event.ts)
+                if (views.length === 0) continue
 
                 // Codex/Kimi 的 inputTokens **已经含**缓存读，而本页把
                 // input / cacheRead 当四段并列相加。不扣掉的话缓存读会被计两遍。
-                const uncachedInput = Math.max(0, nums.inputTokens - nums.cacheReadInputTokens)
-                const model = event.model ?? contexts.get(sessionId)?.model ?? 'unknown'
-                const perSession = bucket(assistantBySession, sessionId)
-                const agg = perSession.get(model) ?? {
-                    model, requestCount: 0, inputTokens: 0, outputTokens: 0,
-                    cacheCreationInputTokens: 0, cacheReadInputTokens: 0
+                const uncached: UsageNums = {
+                    inputTokens: Math.max(0, nums.inputTokens - nums.cacheReadInputTokens),
+                    outputTokens: nums.outputTokens,
+                    cacheCreationInputTokens: nums.cacheCreationInputTokens,
+                    cacheReadInputTokens: nums.cacheReadInputTokens
                 }
-                agg.requestCount += 1
-                agg.inputTokens += uncachedInput
-                agg.outputTokens += nums.outputTokens
-                agg.cacheCreationInputTokens += nums.cacheCreationInputTokens
-                agg.cacheReadInputTokens += nums.cacheReadInputTokens
-                perSession.set(model, agg)
-                agentUsageBuckets.add(`${sessionId}::${model}`)
+                const model = event.model ?? contexts.get(sessionId)?.model ?? 'unknown'
+                for (const view of views) view.addAgentUsage(sessionId, model, uncached)
                 continue
             }
 
-            const nums: FrameNums = {
+            const nums: UsageNums = {
                 inputTokens: event.inputTokens,
                 outputTokens: event.outputTokens,
                 cacheCreationInputTokens: event.cacheCreationInputTokens,
@@ -605,47 +656,160 @@ export function aggregateUsageForSessions(
             const prev = prevFrame.get(key)
             prevFrame.set(key, nums)
             // modelUsage 是常驻进程运行总计：帧对前一帧取差值；回落=进程重启按全额。
-            const delta: FrameNums = prev ? {
+            const delta: UsageNums = prev ? {
                 inputTokens: nums.inputTokens < prev.inputTokens ? nums.inputTokens : nums.inputTokens - prev.inputTokens,
                 outputTokens: nums.outputTokens < prev.outputTokens ? nums.outputTokens : nums.outputTokens - prev.outputTokens,
                 cacheCreationInputTokens: nums.cacheCreationInputTokens < prev.cacheCreationInputTokens ? nums.cacheCreationInputTokens : nums.cacheCreationInputTokens - prev.cacheCreationInputTokens,
                 cacheReadInputTokens: nums.cacheReadInputTokens < prev.cacheReadInputTokens ? nums.cacheReadInputTokens : nums.cacheReadInputTokens - prev.cacheReadInputTokens
             } : nums
             // 时间窗在差值之后过滤：先窗后差会让窗内首帧把整段运行总计算进来。
-            if (!inWindow(event.ts)) continue
-            const perSession = bucket(frameBySession, sessionId)
-            const agg = perSession.get(event.model) ?? {
-                inputTokens: 0, outputTokens: 0, cacheCreationInputTokens: 0, cacheReadInputTokens: 0
+            for (const view of targets(event.ts)) view.addFrame(sessionId, event.model, delta)
+        }
+    }
+}
+
+function windowContains(window: UsageWindow, ts: string): boolean {
+    if (window.sinceIso && ts < window.sinceIso) return false
+    if (window.untilIso && ts >= window.untilIso) return false
+    return true
+}
+
+export function aggregateUsageForSessions(
+    db: Database,
+    sessionIds: string[],
+    opts?: UsageWindow
+): UsageAggregateRow[] {
+    return aggregateUsageGroups(db, sessionIds, opts ?? {}, [sessionIds])[0]!
+}
+
+/** 同一时间窗、多组会话（总表 + 每台机器）一趟算完。groups 里的会话必须都在 sessionIds 里；
+ *  一个会话可以属于多组。每组的结果与 aggregateUsageForSessions(组内会话, 窗口) 相同。 */
+export function aggregateUsageGroups(
+    db: Database,
+    sessionIds: string[],
+    window: UsageWindow,
+    groups: string[][]
+): UsageAggregateRow[][] {
+    const views = groups.map(() => new UsageViewAccumulator())
+    const viewsBySession = new Map<string, UsageViewAccumulator[]>()
+    groups.forEach((ids, index) => {
+        for (const id of ids) {
+            const list = viewsBySession.get(id)
+            if (list) { if (!list.includes(views[index]!)) list.push(views[index]!) } else viewsBySession.set(id, [views[index]!])
+        }
+    })
+    const scanIds = sessionIds.filter(id => viewsBySession.has(id))
+    if (scanIds.length > 0) {
+        runUsageScan(db, scanIds, sessionId => {
+            const sessionViews = viewsBySession.get(sessionId)
+            if (!sessionViews) return null
+            return ts => (windowContains(window, ts) ? sessionViews : NO_VIEWS)
+        })
+    }
+    return views.map(view => view.settle())
+}
+
+/** 整段窗口 + 一串首尾相接的时间桶一趟算完（折线图）。buckets 必须按时间升序、互不重叠，
+ *  且都有起止；每桶与整段的结果分别与单独调用 aggregateUsageForSessions 相同。 */
+export function aggregateUsageBuckets(
+    db: Database,
+    sessionIds: string[],
+    total: UsageWindow,
+    buckets: Array<{ sinceIso: string; untilIso: string }>
+): { total: UsageAggregateRow[]; buckets: UsageAggregateRow[][] } {
+    for (let i = 0; i < buckets.length; i += 1) {
+        const bucket = buckets[i]!
+        if (!(bucket.sinceIso < bucket.untilIso) || (i > 0 && buckets[i - 1]!.untilIso > bucket.sinceIso)) {
+            throw new Error('aggregateUsageBuckets: buckets must be ascending and non-overlapping')
+        }
+    }
+    const totalView = new UsageViewAccumulator()
+    const bucketViews = buckets.map(() => new UsageViewAccumulator())
+    if (sessionIds.length > 0) {
+        const scratch: UsageViewAccumulator[] = []
+        runUsageScan(db, sessionIds, () => ts => {
+            scratch.length = 0
+            if (windowContains(total, ts)) scratch.push(totalView)
+            // 最后一个起点 <= ts 的桶。
+            let lo = 0
+            let hi = buckets.length - 1
+            let found = -1
+            while (lo <= hi) {
+                const mid = (lo + hi) >> 1
+                if (buckets[mid]!.sinceIso <= ts) { found = mid; lo = mid + 1 } else { hi = mid - 1 }
             }
-            agg.inputTokens += delta.inputTokens
-            agg.outputTokens += delta.outputTokens
-            agg.cacheCreationInputTokens += delta.cacheCreationInputTokens
-            agg.cacheReadInputTokens += delta.cacheReadInputTokens
-            perSession.set(event.model, agg)
+            if (found >= 0 && ts < buckets[found]!.untilIso) scratch.push(bucketViews[found]!)
+            return scratch
+        })
+    }
+    return { total: totalView.settle(), buckets: bucketViews.map(view => view.settle()) }
+}
+
+/** 预热的一步：从缓存的 maxSeq 之后开始流式解码这个会话的消息，用满 budgetMs 就停，
+ *  返回本步解码行数与是否已到末尾。缓存的 maxSeq 语义是「seq 不大于它的行都已解码」，
+ *  所以停在任何一行之后都成立，之后 loadSessionEvents 会从这里增量接着补。
+ *  flavor 变了与 loadSessionEvents 一样整段重来。 */
+function warmSessionEventsStep(db: Database, sessionId: string, agent: string, budgetMs: number): { rows: number; done: boolean } {
+    const cached = sessionEventCache.get(sessionId)
+    const reusable = cached !== undefined && cached.agent === agent
+    const fromSeq = reusable ? cached.maxSeq : 0
+    // 预热期间没有别的地方持有这个数组（聚合是同步的），原地追加，免得大会话逐段整份复制。
+    const events = reusable ? cached.events : []
+    const started = performance.now()
+    let rows = 0
+    let lastSeq = fromSeq
+    let done = true
+    const scan = db.prepare(`
+        SELECT seq, content, created_at AS createdAt
+        FROM messages
+        WHERE session_id = ? AND seq > ?
+        ORDER BY seq
+    `)
+    for (const row of scan.iterate(sessionId, fromSeq) as IterableIterator<{ seq: number; content: string | Uint8Array; createdAt: number }>) {
+        for (const event of extractUsageEvents(row.content, row.seq, agent, row.createdAt)) events.push(event)
+        lastSeq = row.seq
+        rows += 1
+        if (performance.now() - started >= budgetMs) {
+            done = false
+            break
         }
     }
+    if (rows > 0) sessionEventCache.set(sessionId, { maxSeq: lastSeq, agent, events })
+    return { rows, done }
+}
 
-    // —— 结算前把两侧统一到「input 不含缓存读」的口径 ——
-    // assistant 行与 usage_report 帧都可能来自 OpenAI 兼容中转，那边的 input 是**含**
-    // 缓存读的整段 prompt。逐桶归一（而不是逐行）：判据只有在整段累计上才可靠。
-    for (const [sessionId, perModel] of assistantBySession) {
-        for (const [model, agg] of perModel) {
-            if (agentUsageBuckets.has(`${sessionId}::${model}`)) continue
-            normalizeInclusiveInput(agg)
+/** 启动后在后台把用量事件缓存预热好，免得重启后第一个打开统计页的人同步解码全部历史
+ *  （生产 100 万行消息，冷解码约 2 分钟，期间整个 hub 停摆）。每一步最多占用 budgetMs 就让出
+ *  事件循环；缓存按 maxSeq 增量补齐，所以分段预热与一次性解码得到同一份缓存。最近更新的会话先热。 */
+export async function warmUsageEventCache(
+    db: Database,
+    options: { budgetMs?: number; pauseMs?: number; shouldStop?: () => boolean } = {}
+): Promise<{ sessions: number; rows: number }> {
+    const budgetMs = options.budgetMs ?? 25
+    const pauseMs = options.pauseMs ?? 10
+    const ids = (db.prepare('SELECT id FROM sessions ORDER BY updated_at DESC').all() as Array<{ id: string }>).map(row => row.id)
+    let rows = 0
+    let sessions = 0
+    let sinceYield = performance.now()
+    for (const sessionId of ids) {
+        if (options.shouldStop?.()) break
+        const agent = loadSessionContexts(db, [sessionId]).get(sessionId)?.agent ?? 'unknown'
+        for (;;) {
+            if (options.shouldStop?.()) break
+            const step = warmSessionEventsStep(db, sessionId, agent, budgetMs)
+            rows += step.rows
+            if (step.done) break
+            await new Promise(resolve => setTimeout(resolve, pauseMs))
+            sinceYield = performance.now()
+        }
+        sessions += 1
+        // 小会话很多：攒够一个时间片再让出，免得一千多个 setTimeout 把预热拖得很长。
+        if (performance.now() - sinceYield >= budgetMs) {
+            await new Promise(resolve => setTimeout(resolve, pauseMs))
+            sinceYield = performance.now()
         }
     }
-    for (const perModel of frameBySession.values()) {
-        for (const agg of perModel.values()) normalizeInclusiveInput(agg)
-    }
-
-    const settled: UsageAggregateRow[][] = []
-    for (const sessionId of new Set([...assistantBySession.keys(), ...frameBySession.keys()])) {
-        settled.push(settleSessionUsage(
-            [...(assistantBySession.get(sessionId)?.values() ?? [])],
-            frameBySession.get(sessionId) ?? new Map()
-        ))
-    }
-    return combineSessionUsage(settled)
+    return { sessions, rows }
 }
 
 /** Strip a trailing context-window variant suffix: `gpt-5.6-sol[1m]` → `gpt-5.6-sol`.

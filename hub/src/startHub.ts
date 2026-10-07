@@ -368,6 +368,16 @@ export async function startHub(options: StartHubOptions = {}): Promise<HubInstan
     })
     console.log(`[Digest] session digest scheduler started (${digestService.status().configured ? 'model configured' : 'HAPI_DIGEST_API_URL/KEY unset: model calls disabled'})`)
 
+    // fork(usage): 后台分段预热用量事件缓存。不预热的话，重启后第一个打开统计页的请求要
+    // 同步解码全部历史消息，整个 hub 停摆几十秒。延后启动，避开启动高峰。
+    let usageWarmupStopped = false
+    const usageWarmupTimer = setTimeout(() => {
+        const startedAt = Date.now()
+        store.messages.warmUsageCache({ shouldStop: () => usageWarmupStopped })
+            .then(result => console.log(`[Usage] event cache warmed: ${result.sessions} sessions, ${result.rows} rows in ${((Date.now() - startedAt) / 1000).toFixed(1)}s`))
+            .catch(error => console.error('[Usage] event cache warm-up failed:', error instanceof Error ? error.message : error))
+    }, 20_000)
+
     console.log('')
     console.log('[Web] Hub listening on :' + config.listenPort)
     console.log('[Web] Local:  http://localhost:' + config.listenPort)
@@ -470,6 +480,8 @@ export async function startHub(options: StartHubOptions = {}): Promise<HubInstan
             sseManager?.stop()
             webServer?.stop()
             cx2ccPoller?.stop()
+            usageWarmupStopped = true
+            clearTimeout(usageWarmupTimer)
             subscriptionStore.close()
             multiUserGatewayStore.close()
         }

@@ -39,7 +39,10 @@ import {
     type MessagePosition,
 } from './messages'
 import {
+    aggregateUsageBuckets,
     aggregateUsageForSessions,
+    aggregateUsageGroups,
+    warmUsageEventCache,
     type UsageAggregateRow,
 } from '../../../fork-features/usage/usageAggregate'
 
@@ -57,6 +60,28 @@ export class MessageStore {
         opts?: { sinceIso?: string | null; untilIso?: string | null }
     ): UsageAggregateRow[] {
         return aggregateUsageForSessions(this.db, sessionIds, opts)
+    }
+
+    // 同一时间窗多组会话 / 整段 + 多个时间桶，一趟扫描算完（结果与逐个调用相同）。
+    aggregateUsageGroups(
+        sessionIds: string[],
+        window: { sinceIso?: string | null; untilIso?: string | null },
+        groups: string[][]
+    ): UsageAggregateRow[][] {
+        return aggregateUsageGroups(this.db, sessionIds, window, groups)
+    }
+
+    aggregateUsageBuckets(
+        sessionIds: string[],
+        total: { sinceIso?: string | null; untilIso?: string | null },
+        buckets: Array<{ sinceIso: string; untilIso: string }>
+    ): { total: UsageAggregateRow[]; buckets: UsageAggregateRow[][] } {
+        return aggregateUsageBuckets(this.db, sessionIds, total, buckets)
+    }
+
+    /** hub 启动后在后台分段预热用量事件缓存。 */
+    warmUsageCache(options?: { shouldStop?: () => boolean }): Promise<{ sessions: number; rows: number }> {
+        return warmUsageEventCache(this.db, options)
     }
 
     addMessage(sessionId: string, content: unknown, localId?: string, scheduledAt?: number | null, createdAt?: number): StoredMessage {

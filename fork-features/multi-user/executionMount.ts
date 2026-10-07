@@ -10,6 +10,7 @@ import { ExecutionDispatcher } from './executionDispatcher'
 import type { Account, Capability, ResourceType } from './domain'
 import { buildUsageSummaryResponse, parseIsoParam, summarizeUsageHosts } from '../usage/usageAggregate'
 import { buildUsageTimeseries, parseBucketUnit, planBuckets, type UsageTimeseriesResponse } from '../usage/usageTimeseries'
+import { UsageResponseCache, USAGE_SUMMARY_TTL_MS, USAGE_TIMESERIES_TTL_MS } from '../usage/usageResponseCache'
 import { mountDigestRoutes } from '../session-digest/routes'
 import type { DigestSessionView } from '../session-digest/digestService'
 import { createSessionMachineResolver, createSessionPathResolver, pathWithinScope } from './machineInheritance'
@@ -339,6 +340,8 @@ export function mountExecutionRoutes(app: Hono<WebAppEnv>, deps: {
     // 可见集与上面 GET /api/sessions 完全同构：admin 看整个 namespace，普通
     // 用户只统计自己拥有的 + 被授权的会话 —— 不泄漏他人用量。与列表不同的是
     // 这里**不做** bind-on-view 副作用（只读端点不该改写资源归属）。
+    const summaryCache = new UsageResponseCache<ReturnType<typeof buildUsageSummaryResponse>>(USAGE_SUMMARY_TTL_MS)
+    const timeseriesCache = new UsageResponseCache<UsageTimeseriesResponse>(USAGE_TIMESERIES_TTL_MS)
     app.get('/api/usage/summary', async (c) => {
         const accountId = await gatewayAccountId(c.req.raw, deps.jwtSecret)
         const account = accountId === null ? null : deps.store.getAccount(accountId)
@@ -346,50 +349,61 @@ export function mountExecutionRoutes(app: Hono<WebAppEnv>, deps: {
         const store = deps.getStore()
         if (!account || !engine || !store) return c.json({ error: 'Not connected' }, account ? 503 : 401)
 
-        // 与 GET /api/sessions 共用同一个可见集解析器（含机器授权继承的那一支），
-        // 区别只有这里不认领未绑定会话 —— 只读端点不该改写资源归属。
-        const visible = collectVisibleSessions(deps.store, engine, account, { claimUnbound: false })
-
         const hostParam = c.req.query('host')?.trim() || null
-        const scoped = hostParam ? visible.filter(session => session.metadata?.host === hostParam) : visible
         const sinceIso = parseIsoParam(c.req.query('since'))
         const untilIso = parseIsoParam(c.req.query('until'))
-        const rows = store.messages.aggregateUsageForSessions(
-            scoped.map(session => session.id),
-            { sinceIso, untilIso }
-        )
+        const cacheKey = [account.id, sinceIso ?? '', untilIso ?? '', hostParam ?? ''].join('|')
+        return c.json(summaryCache.compute(cacheKey, () => {
+            // 与 GET /api/sessions 共用同一个可见集解析器（含机器授权继承的那一支），
+            // 区别只有这里不认领未绑定会话 —— 只读端点不该改写资源归属。
+            const visible = collectVisibleSessions(deps.store, engine, account, { claimUnbound: false })
+            const scopedIds = (hostParam ? visible.filter(session => session.metadata?.host === hostParam) : visible)
+                .map(session => session.id)
+            // 总表与机器榜放进同一趟扫描：原来是总表 1 次 + 每台机器各 1 次完整聚合。
+            let rows: ReturnType<typeof store.messages.aggregateUsageForSessions> = []
 
-        // 机器榜基于鉴权后的会话集合，不会泄漏用户无权访问的机器。归属与
-        // /api/machines 同源（gateway_resources.owner_account_id）——生产上所有
-        // 账号共用一个 namespace，机器对象自带的 namespace 区分不了人。
-        const ownerByMachineId = new Map<string, string | null>()
-        const usernameByAccountId = new Map<number, string | null>()
-        for (const binding of deps.store.listAccessibleResources('machine', account.id)) {
-            if (!usernameByAccountId.has(binding.ownerAccountId)) {
-                usernameByAccountId.set(binding.ownerAccountId, deps.store.getAccount(binding.ownerAccountId)?.username ?? null)
+            // 机器榜基于鉴权后的会话集合，不会泄漏用户无权访问的机器。归属与
+            // /api/machines 同源（gateway_resources.owner_account_id）——生产上所有
+            // 账号共用一个 namespace，机器对象自带的 namespace 区分不了人。
+            const ownerByMachineId = new Map<string, string | null>()
+            const usernameByAccountId = new Map<number, string | null>()
+            for (const binding of deps.store.listAccessibleResources('machine', account.id)) {
+                if (!usernameByAccountId.has(binding.ownerAccountId)) {
+                    usernameByAccountId.set(binding.ownerAccountId, deps.store.getAccount(binding.ownerAccountId)?.username ?? null)
+                }
+                ownerByMachineId.set(binding.resourceId, usernameByAccountId.get(binding.ownerAccountId) ?? null)
             }
-            ownerByMachineId.set(binding.resourceId, usernameByAccountId.get(binding.ownerAccountId) ?? null)
-        }
-        // 统计对全部可见会话算，**不套 host 筛选**：选中一台之后其余机器也要
-        // 还能比较，否则这张榜在筛选态下全是零。
-        const hosts = summarizeUsageHosts(
-            visible.map(session => ({
-                id: session.id,
-                host: session.metadata?.host ?? null,
-                platform: session.metadata?.os ?? null,
-                owner: session.metadata?.machineId
-                    ? ownerByMachineId.get(session.metadata.machineId) ?? null
-                    : null
-            })),
-            sessionIds => store.messages.aggregateUsageForSessions(sessionIds, { sinceIso, untilIso })
-        )
-        return c.json(buildUsageSummaryResponse(rows, hosts, { since: sinceIso, until: untilIso, host: hostParam }, Date.now()))
+            // 统计对全部可见会话算，**不套 host 筛选**：选中一台之后其余机器也要
+            // 还能比较，否则这张榜在筛选态下全是零。
+            const hosts = summarizeUsageHosts(
+                visible.map(session => ({
+                    id: session.id,
+                    host: session.metadata?.host ?? null,
+                    platform: session.metadata?.os ?? null,
+                    owner: session.metadata?.machineId
+                        ? ownerByMachineId.get(session.metadata.machineId) ?? null
+                        : null
+                })),
+                groups => {
+                    const [scopedRows = [], ...hostRows] = store.messages.aggregateUsageGroups(
+                        visible.map(session => session.id),
+                        { sinceIso, untilIso },
+                        [scopedIds, ...groups]
+                    )
+                    rows = scopedRows
+                    return hostRows
+                }
+            )
+            // 没有任何带 host 的会话时上面的回调不会被调用，总表单独算。
+            if (!visible.some(session => session.metadata?.host)) {
+                rows = store.messages.aggregateUsageForSessions(scopedIds, { sinceIso, untilIso })
+            }
+            return buildUsageSummaryResponse(rows, hosts, { since: sinceIso, until: untilIso, host: hostParam }, Date.now())
+        }))
     })
 
     // fork-features/usage：用量随时间的折线数据。可见集与 /api/usage/summary 同构
-    // （只读、不认领）；每桶复用同一聚合口径。结果按账号+参数缓存 60s——统计页
-    // 每分钟轮询，而每桶都要跑一遍聚合。
-    const timeseriesCache = new Map<string, { at: number; body: UsageTimeseriesResponse }>()
+    // （只读、不认领）；每桶复用同一聚合口径，所以结果按账号+参数缓存（见 usageResponseCache）。
     app.get('/api/usage/timeseries', async (c) => {
         const accountId = await gatewayAccountId(c.req.raw, deps.jwtSecret)
         const account = accountId === null ? null : deps.store.getAccount(accountId)
@@ -407,23 +421,17 @@ export function mountExecutionRoutes(app: Hono<WebAppEnv>, deps: {
         const untilMs = untilIso ? Date.parse(untilIso) : now
         const sinceMs = sinceIso ? Date.parse(sinceIso) : untilMs - 30 * 24 * 3600_000
         const cacheKey = [account.id, sinceIso ?? '', untilIso ?? '', unit, tz, hostParam ?? ''].join('|')
-        const cached = timeseriesCache.get(cacheKey)
-        if (cached && now - cached.at < 60_000) return c.json(cached.body)
-
-        const visible = collectVisibleSessions(deps.store, engine, account, { claimUnbound: false })
-        const ids = (hostParam ? visible.filter(session => session.metadata?.host === hostParam) : visible)
-            .map(session => session.id)
-        const body = buildUsageTimeseries(
-            planBuckets(sinceMs, untilMs, unit, tz),
-            unit,
-            (since, until) => store.messages.aggregateUsageForSessions(ids, { sinceIso: since, untilIso: until }),
-            now
-        )
-        for (const [key, entry] of timeseriesCache) {
-            if (now - entry.at >= 60_000) timeseriesCache.delete(key)
-        }
-        timeseriesCache.set(cacheKey, { at: now, body })
-        return c.json(body)
+        return c.json(timeseriesCache.compute(cacheKey, () => {
+            const visible = collectVisibleSessions(deps.store, engine, account, { claimUnbound: false })
+            const ids = (hostParam ? visible.filter(session => session.metadata?.host === hostParam) : visible)
+                .map(session => session.id)
+            return buildUsageTimeseries(
+                planBuckets(sinceMs, untilMs, unit, tz),
+                unit,
+                (total, windows) => store.messages.aggregateUsageBuckets(ids, total, windows),
+                now
+            )
+        }))
     })
 
     // fork-features/session-digest：会话/项目 AI 摘要。可见集同 /api/sessions（只读，不认领）。

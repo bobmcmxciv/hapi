@@ -3,7 +3,8 @@ import type { UsageAggregateRow } from './usageAggregate'
 /**
  * 用量随时间的折线数据。
  *
- * 每个时间桶复用 `aggregateUsageForSessions` 的窗口口径取「形状」，再按模型
+ * 每个时间桶复用 `aggregateUsageForSessions` 的窗口口径取「形状」（各桶与整段在
+ * `aggregateUsageBuckets` 里一趟扫描算完，结果与逐桶单独调用相同），再按模型
  * 逐项缩放到整段窗口的结算值上：结算（帧与 assistant 取大、代理会话改挂、
  * 含缓存读归一）只在整段累计上成立，逐桶各自结算再相加会偏大（生产 7 天实测
  * +11%，gpt-6.1-sol +48%）。缩放后各桶之和与用量表同窗合计逐模型相等。
@@ -88,15 +89,25 @@ function rescale(values: number[], target: number): number[] {
     return scaled
 }
 
+export type UsageBucketWindow = { sinceIso: string; untilIso: string }
+
+/** 整段窗口与各桶一次给出，由调用方一趟扫描算完（见 aggregateUsageBuckets）。 */
+export type AggregateUsageBucketsFn = (
+    total: UsageBucketWindow,
+    buckets: UsageBucketWindow[]
+) => { total: UsageAggregateRow[]; buckets: UsageAggregateRow[][] }
+
 export function buildUsageTimeseries(
     buckets: Array<{ start: number; end: number }>,
     unit: UsageBucketUnit,
-    aggregate: (sinceIso: string, untilIso: string) => UsageAggregateRow[],
+    aggregate: AggregateUsageBucketsFn,
     now: number = Date.now()
 ): UsageTimeseriesResponse {
-    const totals = buckets.length > 0
-        ? aggregate(new Date(buckets[0]!.start).toISOString(), new Date(buckets[buckets.length - 1]!.end).toISOString())
-        : []
+    const windows = buckets.map(bucket => ({ sinceIso: new Date(bucket.start).toISOString(), untilIso: new Date(bucket.end).toISOString() }))
+    const computed = windows.length > 0
+        ? aggregate({ sinceIso: windows[0]!.sinceIso, untilIso: windows[windows.length - 1]!.untilIso }, windows)
+        : { total: [], buckets: [] }
+    const totals = computed.total
     const byModel = new Map<string, UsageTimeseriesSeries>()
     const series = (model: string): UsageTimeseriesSeries => {
         let entry = byModel.get(model)
@@ -114,9 +125,8 @@ export function buildUsageTimeseries(
         }
         return entry
     }
-    buckets.forEach((bucket, index) => {
-        const rows = aggregate(new Date(bucket.start).toISOString(), new Date(bucket.end).toISOString())
-        for (const row of rows) {
+    buckets.forEach((_bucket, index) => {
+        for (const row of computed.buckets[index] ?? []) {
             const entry = series(row.model)
             entry.inputTokens[index]! += row.inputTokens
             entry.outputTokens[index]! += row.outputTokens

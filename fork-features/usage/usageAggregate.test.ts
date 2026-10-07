@@ -692,8 +692,8 @@ describe('summarizeUsageHosts', () => {
             { id: 'b1', host: 'peter-mac', platform: 'darwin', owner: 'peter' }
         ]
         const perSession: Record<string, number> = { a1: 30, a2: 70, b1: 500 }
-        const hosts = summarizeUsageHosts(sessions, ids =>
-            ids.map(id => row('m', 1, perSession[id])))
+        const hosts = summarizeUsageHosts(sessions, groups =>
+            groups.map(ids => ids.map(id => row('m', 1, perSession[id]))))
 
         expect(hosts.map(h => h.host)).toEqual(['peter-mac', 'vircs'])
         expect(hosts[0]).toEqual({ host: 'peter-mac', sessionCount: 1, totalTokens: 500, requestCount: 1, owner: 'peter', platform: 'darwin' })
@@ -713,7 +713,7 @@ describe('summarizeUsageHosts', () => {
         const hosts = summarizeUsageHosts([
             { id: 'a1', host: null, platform: null, owner: null },
             { id: 'a2', host: 'vircs', platform: 'win32', owner: 'admin' }
-        ], ids => ids.map(() => row('m', 1, 5)))
+        ], groups => groups.map(ids => ids.map(() => row('m', 1, 5))))
 
         expect(hosts.map(h => h.host)).toEqual(['vircs'])
         expect(hosts[0].sessionCount).toBe(1)
@@ -723,7 +723,7 @@ describe('summarizeUsageHosts', () => {
         const hosts = summarizeUsageHosts([
             { id: 'b', host: 'zeta', platform: null, owner: null },
             { id: 'a', host: 'alpha', platform: null, owner: null }
-        ], ids => ids.map(() => row('m', 1, 10)))
+        ], groups => groups.map(ids => ids.map(() => row('m', 1, 10))))
 
         expect(hosts.map(h => h.host)).toEqual(['alpha', 'zeta'])
     })
