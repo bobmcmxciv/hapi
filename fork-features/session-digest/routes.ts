@@ -57,8 +57,10 @@ export function mountDigestRoutes(app: Hono<WebAppEnv>, resolveViewer: ResolveDi
         if (!viewer.ok) return viewer.response
         const id = c.req.param('id')
         if (!viewer.sessions.some(session => session.id === id)) return c.json({ error: 'Session not found' }, 404)
+        // 回传入队时刻的处理时间：前端以它变化为完成信号，不依赖自己手里可能还没加载到的旧数据。
+        const lastAttemptAt = service.store.getSession(id)?.lastAttemptAt ?? null
         service.requestSession(id)
-        return c.json({ ok: true })
+        return c.json({ ok: true, lastAttemptAt })
     })
 
     app.post('/api/digests/sessions/:id/complete', async (c) => {
@@ -98,8 +100,9 @@ export function mountDigestRoutes(app: Hono<WebAppEnv>, resolveViewer: ResolveDi
         if (!key || !viewer.sessions.some(session => projectKeyOf(session).key === key)) {
             return c.json({ error: 'Project not found' }, 404)
         }
+        const lastAttemptAt = service.store.getProject(key)?.lastAttemptAt ?? null
         service.requestProject(key)
-        return c.json({ ok: true })
+        return c.json({ ok: true, lastAttemptAt })
     })
 
     // 「全部项目重新梳理」（admin）：把可见会话涉及的全部项目按最近活动排进强制队列。

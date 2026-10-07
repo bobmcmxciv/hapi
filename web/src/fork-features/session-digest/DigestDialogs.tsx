@@ -1,8 +1,8 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, type Dispatch, type SetStateAction } from 'react'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Button } from '@/components/ui/button'
 import { useTranslation } from '@/lib/use-translation'
-import { useDigestActions, useProjectDigests, useSessionDigest, type DigestJobState } from './digestApi'
+import { useDigestActions, useProjectDigests, useSessionDigest, type DigestJobState, type RefreshAccepted } from './digestApi'
 import { refreshPhase, type RefreshBaseline } from './refreshProgress'
 
 function formatTime(ms: number | null): string {
@@ -31,7 +31,7 @@ function Section(props: { title: string; items?: string[]; text?: string; empty:
  * 「重新总结」的进度：从点下按钮到服务端记下新的一次处理为止都算进行中（含排队），
  * 结束后短暂显示「已更新」，等太久显示超时说明。等待期间每 3 秒重算一次，超时判断不依赖数据变化。
  */
-function useRefreshProgress(baseline: RefreshBaseline | null, setBaseline: (next: RefreshBaseline | null) => void, attempt: number | null, serverState: DigestJobState) {
+function useRefreshProgress(baseline: RefreshBaseline | null, setBaseline: Dispatch<SetStateAction<RefreshBaseline | null>>, attempt: number | null, serverState: DigestJobState) {
     const [now, setNow] = useState(() => Date.now())
     const [outcome, setOutcome] = useState<'updated' | 'timeout' | null>(null)
     const phase = refreshPhase(baseline, attempt, serverState, now)
@@ -58,7 +58,15 @@ function useRefreshProgress(baseline: RefreshBaseline | null, setBaseline: (next
         start: () => {
             setOutcome(null)
             setNow(Date.now())
-            setBaseline({ attempt, startedAt: Date.now() })
+            setBaseline({ attempt, startedAt: Date.now(), confirmed: false })
+        },
+        /** 服务端受理后改用它给的基准（旧版 hub 没有就沿用点击时的值）。 */
+        accepted: (result: RefreshAccepted | undefined) => {
+            setBaseline(current => current && {
+                ...current,
+                attempt: result && 'lastAttemptAt' in result ? result.lastAttemptAt ?? null : current.attempt,
+                confirmed: true
+            })
         }
     }
 }
@@ -118,7 +126,7 @@ export function SessionDigestDialog(props: { sessionId: string; onClose: () => v
     const running = progress.busy || refreshSession.isPending
     const refresh = () => {
         progress.start()
-        refreshSession.mutate(props.sessionId, { onError: () => setBaseline(null) })
+        refreshSession.mutate(props.sessionId, { onSuccess: progress.accepted, onError: () => setBaseline(null) })
     }
 
     return (
@@ -157,7 +165,7 @@ export function SessionDigestDialog(props: { sessionId: string; onClose: () => v
                         type="button"
                         variant="secondary"
                         data-testid="digest-refresh"
-                        disabled={running}
+                        disabled={running || query.data === undefined}
                         onClick={refresh}
                     >
                         {progress.queued ? t('digest.queued') : running ? t('digest.generating') : t('digest.refresh')}
@@ -206,7 +214,7 @@ export function ProjectDigestDialog(props: { projectKey: string; title: string; 
     const running = progress.busy || refreshProject.isPending
     const refresh = () => {
         progress.start()
-        refreshProject.mutate(props.projectKey, { onError: () => setBaseline(null) })
+        refreshProject.mutate(props.projectKey, { onSuccess: progress.accepted, onError: () => setBaseline(null) })
     }
 
     return (
@@ -246,7 +254,7 @@ export function ProjectDigestDialog(props: { projectKey: string; title: string; 
                         type="button"
                         variant="secondary"
                         data-testid="digest-refresh"
-                        disabled={running}
+                        disabled={running || query.data === undefined}
                         onClick={refresh}
                     >
                         {progress.queued ? t('digest.queued') : running ? t('digest.generating') : t('digest.refresh')}

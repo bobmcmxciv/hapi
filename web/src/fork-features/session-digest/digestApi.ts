@@ -21,6 +21,9 @@ export type SessionDigest = {
 /** 手动「重新总结」在服务端的进度。 */
 export type DigestJobState = 'running' | 'queued' | null
 
+/** 「重新总结」请求被受理：lastAttemptAt 是入队时刻服务端记录的最近一次处理时间（旧版 hub 不带）。 */
+export type RefreshAccepted = { ok: boolean; lastAttemptAt?: number | null }
+
 export type ProjectDigest = {
     projectKey: string
     machineId: string | null
@@ -138,7 +141,7 @@ export function useDigestActions() {
     const fetchJson = useDigestFetch()
     const queryClient = useQueryClient()
     const refreshSession = useMutation({
-        mutationFn: (sessionId: string) => fetchJson(`/api/digests/sessions/${encodeURIComponent(sessionId)}/refresh`, { method: 'POST', body: {} }),
+        mutationFn: (sessionId: string) => fetchJson<RefreshAccepted>(`/api/digests/sessions/${encodeURIComponent(sessionId)}/refresh`, { method: 'POST', body: {} }),
         onSuccess: (_data, sessionId) => {
             void queryClient.invalidateQueries({ queryKey: digestQueryKeys.session(sessionId) })
         }
@@ -152,7 +155,7 @@ export function useDigestActions() {
         }
     })
     const refreshProject = useMutation({
-        mutationFn: (key: string) => fetchJson('/api/digests/projects/refresh', { method: 'POST', body: { key } }),
+        mutationFn: (key: string) => fetchJson<RefreshAccepted>('/api/digests/projects/refresh', { method: 'POST', body: { key } }),
         onSuccess: () => {
             void queryClient.invalidateQueries({ queryKey: digestQueryKeys.projects })
         }
