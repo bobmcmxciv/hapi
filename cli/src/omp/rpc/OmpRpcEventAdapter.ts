@@ -355,7 +355,11 @@ export type OmpRpcEventAdapterCallbacks = {
     onUserMessageCommitted: (steering: boolean) => void;
     onTurnStarted: () => void;
     onTurnFinished: () => void;
-    onPromptResult: (agentInvoked: boolean) => void;
+    /**
+     * `failure` is set only when OMP accepted the prompt but it failed before reaching the agent
+     * (`agentInvoked: false`, `status: "error"`): no run, no transcript entry, nothing else surfaces it.
+     */
+    onPromptResult: (agentInvoked: boolean, failure?: string) => void;
     onSessionInfoUpdate: () => void;
     onAvailableCommandsChanged: (commands: OmpAvailableCommand[]) => void;
     onThinkingStateChanged: (state: {
@@ -573,9 +577,18 @@ export class OmpRpcEventAdapter {
                 this.handleToolEnd(output, event.raw);
                 return;
             case 'prompt_result': {
-                const parsed = z.object({ agentInvoked: z.boolean() }).safeParse(event.raw);
+                const parsed = z.object({
+                    agentInvoked: z.boolean(),
+                    status: z.string().optional(),
+                    error: z.object({ message: z.string().optional() }).passthrough().optional()
+                }).safeParse(event.raw);
                 if (parsed.success) {
-                    this.callbacks.onPromptResult(parsed.data.agentInvoked);
+                    const { agentInvoked, status, error } = parsed.data;
+                    // Runs that reached the agent report provider errors in their own assistant message.
+                    const failure = !agentInvoked && status === 'error'
+                        ? (error?.message?.trim() || 'OMP reported an error without a message')
+                        : undefined;
+                    this.callbacks.onPromptResult(agentInvoked, failure);
                 } else {
                     this.invalidEvent(event.type, parsed.error);
                 }

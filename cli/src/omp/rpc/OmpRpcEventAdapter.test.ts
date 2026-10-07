@@ -79,6 +79,25 @@ function createHarness(eventAllowlist?: ReadonlySet<OmpKnownEventType>) {
 }
 
 describe('OmpRpcEventAdapter', () => {
+    it('passes the failure text only for prompts that failed before reaching the agent', () => {
+        const harness = createHarness();
+        harness.adapter.handle(rpcEvent({
+            type: 'prompt_result', id: 'hapi_12', agentInvoked: false, status: 'error',
+            error: { message: 'Session file is locked', retryable: false }, sessionSettled: true
+        }));
+        harness.adapter.handle(rpcEvent({ type: 'prompt_result', id: 'hapi_13', agentInvoked: false, status: 'error' }));
+        harness.adapter.handle(rpcEvent({
+            type: 'prompt_result', id: 'hapi_14', agentInvoked: true, status: 'error', error: { message: '429 from provider' }
+        }));
+        harness.adapter.handle(rpcEvent({ type: 'prompt_result', id: 'hapi_15', agentInvoked: false, status: 'completed' }));
+        expect(vi.mocked(harness.callbacks.onPromptResult).mock.calls).toEqual([
+            [false, 'Session file is locked'],
+            [false, 'OMP reported an error without a message'],
+            [true, undefined],
+            [false, undefined]
+        ]);
+    });
+
     it('forwards the complete dynamic command catalog through a typed callback', () => {
         const harness = createHarness();
         harness.adapter.handle(rpcEvent({
@@ -613,7 +632,7 @@ describe('OmpRpcEventAdapter', () => {
         expect(harness.callbacks.onTurnStarted).toHaveBeenCalledTimes(2);
         expect(harness.callbacks.onTurnFinished).toHaveBeenCalledTimes(2);
         expect(harness.callbacks.onUserMessageCommitted).toHaveBeenCalledTimes(2);
-        expect(harness.callbacks.onPromptResult).toHaveBeenCalledWith(false);
+        expect(harness.callbacks.onPromptResult).toHaveBeenCalledWith(false, undefined);
         expect(harness.callbacks.onThinkingStateChanged).toHaveBeenCalledWith({ thinkingLevel: 'high' });
         expect(harness.callbacks.onSessionInfoUpdate).toHaveBeenCalledOnce();
         expect(harness.availableCommands).toEqual([[{ name: 'review', source: 'extension' }]]);

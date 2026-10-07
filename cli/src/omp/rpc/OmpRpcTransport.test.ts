@@ -199,6 +199,29 @@ describe('OmpRpcTransport', () => {
         await transport.close();
     });
 
+    it('reports a second response for an answered id with its error text, not as an unknown id', async () => {
+        const { child, frames } = createFakeProcess();
+        const transport = await connectFake(child);
+        const diagnostics: string[] = [];
+        transport.onDiagnostic((message) => diagnostics.push(message));
+
+        const stateRequest = transport.request({ type: 'get_state' }, { discovery: true });
+        await waitForFrames(frames, 1);
+        const id = frames[0].id;
+        child.stdout.write(`${JSON.stringify({ type: 'response', id, command: 'get_state', success: true, data: {} })}\n`);
+        await expect(stateRequest).resolves.toMatchObject({ success: true });
+
+        child.stdout.write(`${JSON.stringify({ type: 'response', id, command: 'get_state', success: false, error: 'late failure' })}\n`);
+        child.stdout.write(`${JSON.stringify({ type: 'response', id: 'hapi_999', command: 'prompt', success: false, error: 'stray' })}\n`);
+        await vi.waitFor(() => expect(diagnostics).toHaveLength(2));
+        expect(diagnostics).toEqual([
+            `OMP RPC sent a second response for ${id} (get_state): late failure`,
+            'OMP RPC response has unknown id hapi_999 (prompt): stray'
+        ]);
+        expect(transport.state).toBe('discovering');
+        await transport.close();
+    });
+
     it('writes host control frames without creating a correlated request', async () => {
         const { child, frames } = createFakeProcess();
         const transport = await connectFake(child);

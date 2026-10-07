@@ -207,7 +207,13 @@ class OmpRemoteLauncher extends RemoteLauncherBase {
                 });
                 void this.sendReadyIfIdle();
             },
-            onPromptResult: (agentInvoked) => {
+            onPromptResult: (agentInvoked, failure) => {
+                if (failure) {
+                    // OMP acknowledged the prompt, then failed it before any run: without this the
+                    // message silently disappears and the session just goes idle.
+                    logger.warn(`[omp-remote] OMP prompt failed before reaching the agent: ${failure}`);
+                    this.reportInputFailure(failure);
+                }
                 if (!agentInvoked) {
                     this.clearCurrentPrompt();
                     this.signalChange();

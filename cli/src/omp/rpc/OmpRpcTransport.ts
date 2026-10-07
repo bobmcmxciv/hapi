@@ -19,6 +19,10 @@ const DEFAULT_READY_TIMEOUT_MS = 30_000;
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 const DEFAULT_CLOSE_GRACE_MS = 1_500;
 const MAX_STDERR_CHARS = 100_000;
+/** HAPI_OMP_RPC_TRACE=1：把收发的 RPC 帧（message_update 除外）截断后写进 debug 日志，排查协议问题用。 */
+const TRACE_FRAMES = process.env.HAPI_OMP_RPC_TRACE === '1';
+const TRACE_MAX_CHARS = 600;
+const SETTLED_ID_MEMORY = 256;
 
 const DISCOVERY_COMMANDS: ReadonlySet<OmpCommandType> = new Set([
     'get_state',
@@ -112,6 +116,8 @@ export class OmpRpcTransport {
     private readonly child: ChildProcessWithoutNullStreams;
     private readonly dependencies: OmpRpcTransportDependencies;
     private readonly pending = new Map<string, PendingRequest>();
+    /** Ids answered recently (insertion order), to tell a duplicate response from a truly unknown id. */
+    private readonly settledIds = new Set<string>();
     private readonly eventListeners = new Set<(event: OmpInboundEvent) => void>();
     // Native startup events can precede ready/discovery and the first subscriber.
     private startupEvents: OmpInboundEvent[] | null = [];
@@ -342,6 +348,9 @@ export class OmpRpcTransport {
     }
 
     private handleLine(line: string): void {
+        if (TRACE_FRAMES && !line.startsWith('{"type":"message_update"')) {
+            logger.debug(`[omp-rpc] <= ${line.slice(0, TRACE_MAX_CHARS)}`);
+        }
         let parsed: ReturnType<typeof parseOmpInboundLine>;
         try {
             parsed = parseOmpInboundLine(line);
@@ -390,7 +399,12 @@ export class OmpRpcTransport {
         }
         const pending = this.pending.get(response.id);
         if (!pending) {
-            this.emitDiagnostic(`OMP RPC response has unknown id ${response.id} (${response.command})`);
+            const detail = response.success ? '' : `: ${response.error}`;
+            // OMP answers `prompt` at admission and may send a second, error response for the same id
+            // when the prompt then fails before the run; keep its error text instead of "unknown id".
+            this.emitDiagnostic(this.settledIds.has(response.id)
+                ? `OMP RPC sent a second response for ${response.id} (${response.command})${detail}`
+                : `OMP RPC response has unknown id ${response.id} (${response.command})${detail}`);
             return;
         }
         if (pending.command !== response.command) {
@@ -404,9 +418,18 @@ export class OmpRpcTransport {
         }
 
         this.pending.delete(response.id);
+        this.rememberSettled(response.id);
         clearTimeout(pending.timeout);
         pending.removeAbortListener();
         pending.resolve(response);
+    }
+
+    private rememberSettled(id: string): void {
+        this.settledIds.add(id);
+        if (this.settledIds.size > SETTLED_ID_MEMORY) {
+            const oldest = this.settledIds.values().next().value;
+            if (oldest !== undefined) this.settledIds.delete(oldest);
+        }
     }
 
     private assertCommandAllowed(command: OmpCommandType, discovery: boolean): void {
@@ -466,6 +489,9 @@ export class OmpRpcTransport {
             return Promise.reject(new OmpRpcStateError('Cannot write to a closing OMP RPC transport'));
         }
         const line = `${JSON.stringify(frame)}\n`;
+        if (TRACE_FRAMES) {
+            logger.debug(`[omp-rpc] => ${line.trimEnd().slice(0, TRACE_MAX_CHARS)}`);
+        }
         return new Promise<void>((resolve, reject) => {
             const stdin: Writable = this.child.stdin;
             let callbackDone = false;

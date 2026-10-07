@@ -1211,6 +1211,27 @@ describe('ompRemoteLauncher RPC lifecycle', () => {
         expect(sessionEvents.some((event) => event.type === 'ready')).toBe(true);
     });
 
+    it('surfaces a prompt that OMP admitted and then failed before reaching the agent', async () => {
+        harness.autoFinishPrompt = false;
+        harness.promptResponse = undefined;
+        const { session, sessionEvents } = createSessionStub([
+            { message: 'are you there?', mode: createMode() }
+        ]);
+        const launch = ompRemoteLauncher(session as never);
+        await waitForRequest('prompt');
+        emitEvent('prompt_result', {
+            agentInvoked: false,
+            status: 'error',
+            error: { message: 'Session file is locked by another OMP process', retryable: false }
+        });
+        await launch;
+        expect(sessionEvents).toContainEqual({
+            type: 'message',
+            message: 'Oh My Pi RPC input failed: Session file is locked by another OMP process'
+        });
+        expect(sessionEvents.some((event) => event.type === 'ready')).toBe(true);
+    });
+
     it('suppresses ready while OMP reports streaming or queued native work', async () => {
         harness.autoFinishPrompt = false;
         const { session, sessionEvents } = createSessionStub([
