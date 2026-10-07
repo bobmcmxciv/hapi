@@ -1394,6 +1394,7 @@ export default {
   'work.filter.running': "Running",
   'work.filter.pending': "Awaiting approval",
   'tabs.label': "Open sessions",
+  'tabs.home': "Overview",
   'tabs.close': "Close",
   'tabs.pin': "Pin tab",
   'tabs.unpin': "Unpin tab",

@@ -45,7 +45,13 @@ export function useHasSessionTabs(): boolean {
 
 type Menu = { id: string; x: number; y: number } | null
 
-export function SessionTabsBar(props: { sessions: SessionSummary[]; selectedSessionId: string | null; machineLabel: (session: SessionSummary) => string }) {
+export function SessionTabsBar(props: {
+    sessions: SessionSummary[]
+    selectedSessionId: string | null
+    machineLabel: (session: SessionSummary) => string
+    /** 有总览可回时（admin）在最左放一个固定的首页标签。 */
+    home?: { active: boolean; onOpen: () => void }
+}) {
     const { t } = useTranslation()
     const navigate = useNavigate()
     const scope = useSessionTabsScope()
@@ -95,8 +101,32 @@ export function SessionTabsBar(props: { sessions: SessionSummary[]; selectedSess
     }
 
     return (
-        <div className="session-tabs-bar shrink-0 border-b border-[var(--app-divider)] bg-[var(--app-secondary-bg)] pt-[env(safe-area-inset-top)]" role="tablist" aria-label={t('tabs.label')}>
-            <div ref={scroller} className="session-tabs-scroll flex items-end gap-0.5 overflow-x-auto px-1.5 pt-1.5">
+        <div className="session-tabs-bar flex shrink-0 items-end border-b border-[var(--app-divider)] bg-[var(--app-secondary-bg)] pt-[env(safe-area-inset-top)]" role="tablist" aria-label={t('tabs.label')}>
+            {props.home ? (
+                // 首页标签：固定在最左，不参与拖拽/关闭/滚动，点了回到工作总览。
+                <div className="shrink-0 pl-1.5 pt-1.5">
+                    <div
+                        role="tab"
+                        aria-selected={props.home.active}
+                        tabIndex={0}
+                        data-testid="session-tab-home"
+                        title={t('tabs.home')}
+                        aria-label={t('tabs.home')}
+                        onClick={props.home.onOpen}
+                        onKeyDown={event => { if (event.key === 'Enter') props.home?.onOpen() }}
+                        className={cn(
+                            'session-tab flex h-8 cursor-pointer select-none items-center gap-1.5 rounded-t-lg px-2.5 text-xs transition-colors',
+                            props.home.active
+                                ? 'bg-[var(--app-bg)] font-medium text-[var(--app-fg)] shadow-[0_-1px_0_var(--app-border),1px_0_0_var(--app-border),-1px_0_0_var(--app-border)]'
+                                : 'text-[var(--app-hint)] hover:bg-[var(--app-subtle-bg)] hover:text-[var(--app-fg)]'
+                        )}
+                    >
+                        <HomeGlyph className="h-3.5 w-3.5 shrink-0" />
+                        <span className="hidden split:inline">{t('tabs.home')}</span>
+                    </div>
+                </div>
+            ) : null}
+            <div ref={scroller} className="session-tabs-scroll flex min-w-0 flex-1 items-end gap-0.5 overflow-x-auto px-1.5 pt-1.5">
                 {tabs.map(tab => {
                     const session = byId.get(tab.id)
                     const active = tab.id === props.selectedSessionId
@@ -184,6 +214,15 @@ function StatusDot(props: { session: SessionSummary | undefined; unread: boolean
     if (session?.active) return <span className="h-2 w-2 shrink-0 rounded-full bg-[#22c55e]" />
     if (props.unread) return <span className="h-2 w-2 shrink-0 rounded-full bg-[#3b82f6]" />
     return <span className="h-2 w-2 shrink-0 rounded-full border border-[var(--app-border)]" />
+}
+
+function HomeGlyph(props: { className?: string }) {
+    return (
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={props.className}>
+            <path d="M3 10.5 12 3l9 7.5" />
+            <path d="M5 9.5V21h5v-6h4v6h5V9.5" />
+        </svg>
+    )
 }
 
 function PinGlyph(props: { className?: string }) {

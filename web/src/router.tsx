@@ -42,7 +42,7 @@ import { WorkLineFilterBar, WorkMobileToggle, WorkOverviewPanel, useWorkLineSess
 import { WorkMapPage, type WorkSearch } from '@/fork-features/work-overview/WorkMapPage'
 import { WorkGridIcon } from '@/fork-features/work-overview/WorkParts'
 import { useIsWorkOverviewEnabled } from '@/fork-features/work-overview/workApi'
-import { useWorkView } from '@/fork-features/work-overview/workViewStore'
+import { setWorkView, useWorkView } from '@/fork-features/work-overview/workViewStore'
 import { SessionTabsBar, useHasSessionTabs, useSessionTabsSync } from '@/fork-features/session-tabs/SessionTabsBar'
 import type { SessionSummary } from '@/types/api'
 import { buildSessionReferenceText, matchSessionsForMention } from '@/lib/sessionReference'
@@ -268,6 +268,10 @@ function SessionsPage() {
         markSessionSeen(selectedSessionId, selectedSession.updatedAt)
     }, [selectedSessionId, selectedSession?.updatedAt])
     const isSessionsIndex = pathname === '/sessions' || pathname === '/sessions/'
+    // session-tabs：admin 有工作总览，标签条最左放首页标签回总览（手机上切到「工作」视图）。
+    const tabsHome = useMemo(() => (workEnabled
+        ? { active: isSessionsIndex, onOpen: () => { setWorkView({ mobileView: 'work' }); navigate({ to: '/sessions' }) } }
+        : undefined), [workEnabled, isSessionsIndex, navigate])
     const sidebar = useSidebarResize()
     // fork-features/session-tabs：打开过的会话固定排在右侧顶部，不随列表上浮下沉。
     useSessionTabsSync(selectedSessionId, sessions, !isLoading && !error)
@@ -389,7 +393,7 @@ function SessionsPage() {
             />
 
             <div data-session-tabs={hasSessionTabs || undefined} className={`${isSessionsIndex ? 'hidden split:flex' : 'flex'} min-w-0 flex-1 flex-col bg-[var(--app-bg)]`}>
-                <SessionTabsBar sessions={sessions} selectedSessionId={selectedSessionId} machineLabel={tabMachineLabel} />
+                <SessionTabsBar sessions={sessions} selectedSessionId={selectedSessionId} machineLabel={tabMachineLabel} home={tabsHome} />
                 <div className="flex-1 min-h-0">
                     <Outlet />
                 </div>
