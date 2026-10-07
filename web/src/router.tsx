@@ -38,6 +38,11 @@ import { useSessions } from '@/hooks/queries/useSessions'
 import { useSlashCommands } from '@/hooks/queries/useSlashCommands'
 import { useSkills } from '@/hooks/queries/useSkills'
 import { getSessionTitle } from '@/lib/sessionTitle'
+import { WorkLineFilterBar, WorkMobileToggle, WorkOverviewPanel, useWorkLineSessionFilter } from '@/fork-features/work-overview/WorkOverviewPanel'
+import { WorkMapPage, type WorkTab } from '@/fork-features/work-overview/WorkMapPage'
+import { WorkGridIcon } from '@/fork-features/work-overview/WorkParts'
+import { useIsWorkOverviewEnabled } from '@/fork-features/work-overview/workApi'
+import { useWorkView } from '@/fork-features/work-overview/workViewStore'
 import { buildSessionReferenceText, matchSessionsForMention } from '@/lib/sessionReference'
 import type { Suggestion } from '@/hooks/useActiveSuggestions'
 import { useSendMessage, type SendErrorInfo } from '@/hooks/mutations/useSendMessage'
@@ -202,6 +207,12 @@ function SessionsPage() {
         () => filterVisibleSessions(sessions, hideArchivedSessions),
         [sessions, hideArchivedSessions]
     )
+    // fork-features/work-overview：admin 才有工作总览；选中主线/支线时左栏只列这条线的会话。
+    const workEnabled = useIsWorkOverviewEnabled()
+    const workView = useWorkView()
+    const filterByWorkLine = useWorkLineSessionFilter()
+    const listSessions = useMemo(() => filterByWorkLine(visibleSessions), [filterByWorkLine, visibleSessions])
+    const showMobileWork = workEnabled && workView.mobileView === 'work'
     const [initializedHub, setInitializedHub] = useState<string | null>(null)
     const { machines } = useMachines(api, true)
     const handleRefresh = useCallback(() => {
@@ -278,9 +289,17 @@ function SessionsPage() {
                             <div className="text-sm text-red-600">{error}</div>
                         </div>
                     ) : null}
+                    {workEnabled ? <WorkMobileToggle /> : null}
+                    {showMobileWork ? (
+                        <div className="flex min-h-0 flex-1 flex-col overflow-y-auto split:hidden">
+                            <WorkOverviewPanel variant="mobile" />
+                        </div>
+                    ) : null}
+                    <div className={`${showMobileWork ? 'hidden split:flex' : 'flex'} min-h-0 flex-1 flex-col`}>
+                    {workEnabled ? <WorkLineFilterBar /> : null}
                     <SessionList
                         key={initializedHub === baseUrl ? 'last-seen-ready' : 'last-seen-pending'}
-                        sessions={visibleSessions}
+                        sessions={listSessions}
                         selectedSessionId={selectedSessionId}
                         scrollStability={sessionListScrollStability}
                         onSelect={(sessionId) => navigate({
@@ -295,6 +314,17 @@ function SessionsPage() {
                         renderHeader={false}
                         headerActions={(
                             <div className="flex items-center gap-2">
+                                {workEnabled && (
+                                    <button
+                                        type="button"
+                                        onClick={() => navigate({ to: '/work' })}
+                                        className="p-1.5 rounded-full text-[var(--app-hint)] hover:text-[var(--app-fg)] hover:bg-[var(--app-subtle-bg)] transition-colors"
+                                        title={t('work.map.title')}
+                                        aria-label={t('work.map.title')}
+                                    >
+                                        <WorkGridIcon className="h-5 w-5" />
+                                    </button>
+                                )}
                                 {canBrowse && (
                                     <button
                                         type="button"
@@ -338,6 +368,7 @@ function SessionsPage() {
                         machinesById={machinesById}
                         machineOwnersById={machineOwnersById}
                     />
+                    </div>
                 </div>
             </div>
 
@@ -359,7 +390,16 @@ function SessionsPage() {
 }
 
 function SessionsIndexPage() {
-    return null
+    // fork-features/work-overview：桌面端没选会话时右栏是空的，admin 在这里看工作总览。
+    const workEnabled = useIsWorkOverviewEnabled()
+    return workEnabled ? <WorkOverviewPanel variant="desktop" /> : null
+}
+
+// fork-features/work-overview：工作地图 / 时间线 / 待整理（admin only）。
+function WorkRoutePage() {
+    const navigate = useNavigate()
+    const search = workRoute.useSearch()
+    return <WorkMapPage tab={search.tab ?? 'map'} onTabChange={tab => navigate({ to: '/work', search: tab === 'map' ? {} : { tab } })} />
 }
 
 /**
@@ -1281,6 +1321,15 @@ const settingsStorageRoute = createRoute({
     // 且它期望的 /api/usage/summary 响应形状（daily/byAgent/byModel）已被 fork 的
     // 账号可见集端点（models/totals/hosts）取代。fork 自己的 /usage 页是唯一入口。
 
+const workRoute = createRoute({
+    getParentRoute: () => rootRoute,
+    path: '/work',
+    validateSearch: (search: Record<string, unknown>): { tab?: WorkTab } => (
+        search.tab === 'timeline' || search.tab === 'triage' || search.tab === 'map' ? { tab: search.tab } : {}
+    ),
+    component: WorkRoutePage,
+})
+
 // fork-features/usage：Token 用量统计页。
 const usageRoute = createRoute({
     getParentRoute: () => rootRoute,
@@ -1337,6 +1386,7 @@ export const routeTree = rootRoute.addChildren([
         settingsUserRoute,
     ]),
     usageRoute,
+    workRoute,
     shareRoute,
 ])
 

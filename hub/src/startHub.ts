@@ -35,6 +35,7 @@ import { resolveGatewayCliNamespace } from '../../fork-features/multi-user/cliAd
 import { createGatewayMemoryDelivery } from '../../fork-features/multi-user/memoryAdapter'
 import { startCx2ccPoller, type Cx2ccPollerHandle } from '../../fork-features/subscription/cx2ccPoller'
 import { startDigestService } from '../../fork-features/session-digest/digestService'
+import { startWorkStore, stopWorkStore } from '../../fork-features/work-overview/workStore'
 
 /** Format config source for logging */
 function formatSource(source: ConfigSource | 'generated'): string {
@@ -368,6 +369,9 @@ export async function startHub(options: StartHubOptions = {}): Promise<HubInstan
     })
     console.log(`[Digest] session digest scheduler started (${digestService.status().configured ? 'model configured' : 'HAPI_DIGEST_API_URL/KEY unset: model calls disabled'})`)
 
+    // fork(work-overview): 工作总览的主线/支线归属，独立 sqlite，路由在 executionMount。
+    startWorkStore(config.dataDir)
+
     // fork(usage): 后台分段预热用量事件缓存。不预热的话，重启后第一个打开统计页的请求要
     // 同步解码全部历史消息，整个 hub 停摆几十秒。延后启动，避开启动高峰。
     let usageWarmupStopped = false
@@ -482,6 +486,7 @@ export async function startHub(options: StartHubOptions = {}): Promise<HubInstan
             cx2ccPoller?.stop()
             usageWarmupStopped = true
             clearTimeout(usageWarmupTimer)
+            stopWorkStore()
             subscriptionStore.close()
             multiUserGatewayStore.close()
         }

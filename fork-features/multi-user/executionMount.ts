@@ -12,6 +12,7 @@ import { buildUsageSummaryResponse, parseIsoParam, summarizeUsageHosts } from '.
 import { buildUsageTimeseries, parseBucketUnit, planBuckets, type UsageTimeseriesResponse } from '../usage/usageTimeseries'
 import { UsageResponseCache, USAGE_SUMMARY_TTL_MS, USAGE_TIMESERIES_TTL_MS } from '../usage/usageResponseCache'
 import { mountDigestRoutes } from '../session-digest/routes'
+import { mountWorkRoutes } from '../work-overview/routes'
 import type { DigestSessionView } from '../session-digest/digestService'
 import { createSessionMachineResolver, createSessionPathResolver, pathWithinScope } from './machineInheritance'
 import { createSseEventFilterFactory } from './sseVisibility'
@@ -444,6 +445,14 @@ export function mountExecutionRoutes(app: Hono<WebAppEnv>, deps: {
         }
         const sessions = collectVisibleSessions(deps.store, engine, account, { claimUnbound: false })
         return { ok: true, sessions: sessions as unknown as DigestSessionView[], isAdmin: account.role === 'admin' }
+    })
+
+    // fork-features/work-overview：工作总览的主线/支线归属。目前只给 admin（非 admin 403）。
+    mountWorkRoutes(app, async (c) => {
+        const accountId = await gatewayAccountId(c.req.raw, deps.jwtSecret)
+        const account = accountId === null ? null : deps.store.getAccount(accountId)
+        if (!account || account.disabledAt) return { ok: false, response: c.json({ error: 'Invalid gateway identity' }, 401) }
+        return { ok: true, accountId: account.id, isAdmin: account.role === 'admin' }
     })
 
     app.get('/api/machines', async (c) => {

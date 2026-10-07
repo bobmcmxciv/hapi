@@ -31,7 +31,8 @@ export const APP_TOP_LEVEL_SEGMENTS = [
     'sessions',
     'settings',
     'share',
-    'usage'
+    'usage',
+    'work'
 ] as const
 
 function escapeRegExp(value: string): string {

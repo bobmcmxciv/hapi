@@ -1,0 +1,105 @@
+/* fork-features/work-overview：工作总览的配色。跟随 HAPI 的 data-theme（light / dark / oled）。 */
+:root {
+    --wo-push: #2563eb;
+    --wo-push-bg: rgba(37, 99, 235, 0.1);
+    --wo-push-fg: #1d4ed8;
+    --wo-slow: #d97706;
+    --wo-slow-bg: rgba(245, 158, 11, 0.14);
+    --wo-slow-fg: #b45309;
+    --wo-stall: #94a3b8;
+    --wo-stall-bg: rgba(100, 116, 139, 0.12);
+    --wo-stall-fg: #64748b;
+    --wo-run: #22c55e;
+    --wo-run-glow: rgba(34, 197, 94, 0.25);
+    --wo-need: #dc2626;
+    --wo-need-bg: rgba(239, 68, 68, 0.1);
+    --wo-heat-0: rgba(15, 23, 42, 0.05);
+    --wo-heat-1: #dbeafe;
+    --wo-heat-2: #93c5fd;
+    --wo-heat-3: #3b82f6;
+    --wo-heat-4: #1d4ed8;
+    --wo-card: var(--app-bg);
+    --wo-card-shadow: 0 1px 2px rgba(15, 23, 42, 0.04), 0 2px 10px rgba(15, 23, 42, 0.04);
+    --wo-card-shadow-hover: 0 2px 4px rgba(15, 23, 42, 0.06), 0 8px 24px rgba(15, 23, 42, 0.08);
+    --wo-page: #f7f8fa;
+    --wo-chip: rgba(15, 23, 42, 0.05);
+    --wo-chip-hover: rgba(15, 23, 42, 0.09);
+    --wo-cross: #60a5fa;
+}
+
+[data-theme="dark"],
+[data-theme="oled"] {
+    --wo-push: #60a5fa;
+    --wo-push-bg: rgba(96, 165, 250, 0.16);
+    --wo-push-fg: #93c5fd;
+    --wo-slow: #fbbf24;
+    --wo-slow-bg: rgba(251, 191, 36, 0.16);
+    --wo-slow-fg: #fcd34d;
+    --wo-stall: #6b7280;
+    --wo-stall-bg: rgba(148, 163, 184, 0.14);
+    --wo-stall-fg: #9ca3af;
+    --wo-run: #4ade80;
+    --wo-run-glow: rgba(74, 222, 128, 0.25);
+    --wo-need: #f87171;
+    --wo-need-bg: rgba(248, 113, 113, 0.16);
+    --wo-heat-0: rgba(255, 255, 255, 0.06);
+    --wo-heat-1: #1e3a5f;
+    --wo-heat-2: #1e40af;
+    --wo-heat-3: #3b82f6;
+    --wo-heat-4: #93c5fd;
+    --wo-card: var(--app-secondary-bg);
+    --wo-card-shadow: none;
+    --wo-card-shadow-hover: none;
+    --wo-page: var(--app-bg);
+    --wo-chip: rgba(255, 255, 255, 0.07);
+    --wo-chip-hover: rgba(255, 255, 255, 0.12);
+    --wo-cross: #3b82f6;
+}
+
+.wo-card {
+    background: var(--wo-card);
+    border: 1px solid var(--app-border);
+    border-radius: 14px;
+    box-shadow: var(--wo-card-shadow);
+    transition: box-shadow 0.15s ease, border-color 0.15s ease, transform 0.15s ease;
+}
+
+.wo-card-interactive {
+    cursor: pointer;
+}
+
+.wo-card-interactive:hover {
+    box-shadow: var(--wo-card-shadow-hover);
+    border-color: color-mix(in srgb, var(--app-fg) 14%, transparent);
+}
+
+.wo-card-selected {
+    border-color: var(--wo-push);
+    box-shadow: 0 0 0 1px var(--wo-push), var(--wo-card-shadow-hover);
+}
+
+.wo-accent {
+    position: relative;
+    overflow: hidden;
+}
+
+.wo-accent::before {
+    content: '';
+    position: absolute;
+    inset: 0 auto 0 0;
+    width: 3px;
+    background: var(--wo-accent, var(--wo-stall));
+}
+
+.wo-chip {
+    background: var(--wo-chip);
+    transition: background 0.12s ease;
+}
+
+.wo-chip:hover {
+    background: var(--wo-chip-hover);
+}
+
+.wo-scroll {
+    scrollbar-width: thin;
+}
