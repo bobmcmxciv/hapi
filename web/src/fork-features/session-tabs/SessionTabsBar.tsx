@@ -17,6 +17,7 @@ import {
     updateSessionTabs,
     useSessionTabsState
 } from './sessionTabsStore'
+import { isTerminalTarget, matchTabShortcut } from './tabShortcuts'
 import './sessionTabs.css'
 
 /** 标签按 hub + 账号分开存：同一浏览器切账号不会串。 */
@@ -37,6 +38,47 @@ export function useSessionTabsSync(selectedSessionId: string | null, sessions: S
         if (selectedSessionId) existing.add(selectedSessionId)
         updateSessionTabs(scope, state => pruneTabs(state, existing))
     }, [scope, loaded, sessions, selectedSessionId])
+    useSessionTabShortcuts(scope, selectedSessionId)
+}
+
+/** 关掉一个标签；关的是当前会话时跳到相邻标签，没有就回会话首页。 */
+function closeSessionTab(scope: string, id: string, selectedSessionId: string | null, go: (id: string | null) => void): void {
+    let neighbor: string | null = null
+    updateSessionTabs(scope, state => {
+        const result = closeTab(state, id)
+        neighbor = result.neighbor
+        return result.state
+    })
+    if (id === selectedSessionId) go(neighbor)
+}
+
+/** 见 matchTabShortcut：关闭当前标签、新建会话。当前会话不在标签里时 Ctrl/⌘+W 交还给浏览器。 */
+function useSessionTabShortcuts(scope: string, selectedSessionId: string | null): void {
+    const navigate = useNavigate()
+    const { tabs } = useSessionTabsState(scope)
+    const latest = useRef({ selectedSessionId, tabs })
+    latest.current = { selectedSessionId, tabs }
+    useEffect(() => {
+        const go = (id: string | null) => {
+            if (id) navigate({ to: '/sessions/$sessionId', params: { sessionId: id } })
+            else navigate({ to: '/sessions' })
+        }
+        const onKeyDown = (event: KeyboardEvent) => {
+            const shortcut = matchTabShortcut(event)
+            if (!shortcut || event.defaultPrevented || isTerminalTarget(event.target)) return
+            if (shortcut === 'new') {
+                event.preventDefault()
+                navigate({ to: '/sessions/new' })
+                return
+            }
+            const { selectedSessionId: current, tabs: open } = latest.current
+            if (!current || !open.some(tab => tab.id === current)) return
+            event.preventDefault()
+            closeSessionTab(scope, current, current, go)
+        }
+        window.addEventListener('keydown', onKeyDown)
+        return () => window.removeEventListener('keydown', onKeyDown)
+    }, [navigate, scope])
 }
 
 export function useHasSessionTabs(): boolean {
@@ -84,15 +126,7 @@ export function SessionTabsBar(props: {
         if (id) navigate({ to: '/sessions/$sessionId', params: { sessionId: id } })
         else navigate({ to: '/sessions' })
     }
-    const close = (id: string) => {
-        let neighbor: string | null = null
-        updateSessionTabs(scope, state => {
-            const result = closeTab(state, id)
-            neighbor = result.neighbor
-            return result.state
-        })
-        if (id === props.selectedSessionId) go(neighbor)
-    }
+    const close = (id: string) => closeSessionTab(scope, id, props.selectedSessionId, go)
     const onAuxClick = (event: ReactMouseEvent, id: string) => {
         if (event.button === 1) {
             event.preventDefault()
@@ -167,6 +201,7 @@ export function SessionTabsBar(props: {
                             <button
                                 type="button"
                                 aria-label={t('tabs.close')}
+                                title={t('tabs.closeShortcut')}
                                 onClick={event => { event.stopPropagation(); close(tab.id) }}
                                 className={cn(
                                     'flex h-5 w-5 shrink-0 items-center justify-center rounded-md text-[var(--app-hint)] hover:bg-[var(--app-subtle-bg)] hover:text-[var(--app-fg)]',

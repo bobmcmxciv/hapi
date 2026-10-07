@@ -1406,6 +1406,7 @@ export default {
   'tabs.label': "已打开的会话",
   'tabs.home': "总览",
   'tabs.close': "关闭",
+  'tabs.closeShortcut': "关闭（Alt+W；安装成应用后也可用 Ctrl/⌘+W）",
   'tabs.pin': "固定标签",
   'tabs.unpin': "取消固定",
   'tabs.closeOthers': "关闭其他标签",

@@ -1408,6 +1408,7 @@ export default {
   'tabs.label': "Open sessions",
   'tabs.home': "Overview",
   'tabs.close': "Close",
+  'tabs.closeShortcut': "Close (Alt+W; Ctrl/⌘+W also works in the installed app)",
   'tabs.pin': "Pin tab",
   'tabs.unpin': "Unpin tab",
   'tabs.closeOthers': "Close other tabs",
