@@ -4,7 +4,7 @@ import { writeFileSync, mkdirSync, unlinkSync, existsSync, readFileSync } from '
 import { configuration } from '@/configuration';
 import { logger } from '@/ui/logger';
 import { getHappyCliCommand } from '@/utils/spawnHappyCLI';
-import { shellJoin } from '@/modules/common/shellQuote';
+import { claudeHookCommandJoin } from '@/modules/common/shellQuote';
 
 type HookCommandConfig = {
     matcher?: string;
@@ -191,7 +191,7 @@ export function generateHookSettingsFile(
         '--token',
         token
     ]);
-    const hookCommand = shellJoin([command, ...args]);
+    const hookCommand = claudeHookCommandJoin([command, ...args]);
 
     const settings = buildHookSettings(
         readMachineClaudeSettings(),

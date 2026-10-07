@@ -45,6 +45,31 @@ export function windowsCommandQuote(value: string): string {
     return result + '\\'.repeat(backslashes * 2) + '"';
 }
 
+/**
+ * Join a command for Claude Code hook settings.
+ *
+ * Claude Code on Windows executes hook commands through Git Bash, so the cmd-style
+ * `C:\Users\...\hapi.exe` form loses every backslash (`C:UsersAdministrator...`, exit 127).
+ * Drive-letter paths are rewritten with forward slashes, which Windows accepts; left
+ * unquoted they run unchanged under bash, cmd and PowerShell. Only parts with spaces or
+ * shell metacharacters are double-quoted (bash semantics). Other platforms keep shellJoin.
+ */
+export function claudeHookCommandJoin(parts: string[], platform: NodeJS.Platform = process.platform): string {
+    if (platform !== 'win32') {
+        return shellJoin(parts, platform);
+    }
+    return parts.map((part) => {
+        if (/[%!\r\n]/.test(part)) {
+            throw new Error('Windows hook command paths and arguments cannot contain %, !, CR, or LF');
+        }
+        const value = /^[A-Za-z]:[\\/]/.test(part) ? part.replace(/\\/g, '/') : part;
+        if (value.length > 0 && /^[A-Za-z0-9_\/:=@.+,-]+$/.test(value)) {
+            return value;
+        }
+        return '"' + value.replace(/(["\\$`])/g, '\\$1') + '"';
+    }).join(' ');
+}
+
 /** Quote each part for AGY's documented `sh -c` / `cmd /c` hook runner. */
 export function shellJoin(parts: string[], platform: NodeJS.Platform = process.platform): string {
     const quote = platform === 'win32' ? windowsCommandQuote : shellQuote;
