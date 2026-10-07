@@ -446,11 +446,11 @@ export function useWorkLineSessionFilter(): (sessions: SessionSummary[]) => Sess
 }
 
 /** 手机端会话列表顶部的「工作 | 会话」切换。 */
-export function WorkMobileToggle() {
+export function WorkMobileToggle(props: { compact?: boolean }) {
     const { t } = useTranslation()
     const view = useWorkView()
     return (
-        <div className="flex justify-center px-3 pb-2 pt-1 split:hidden">
+        <div className={cn('flex split:hidden', props.compact ? 'justify-start' : 'justify-center', props.compact ? '' : 'px-3 pb-2 pt-1')}>
             <div className="inline-flex rounded-xl p-[3px]" style={{ background: 'var(--wo-chip)' }}>
                 {(['work', 'sessions'] as const).map(key => (
                     <button
@@ -458,7 +458,8 @@ export function WorkMobileToggle() {
                         type="button"
                         onClick={() => setWorkView({ mobileView: key })}
                         className={cn(
-                            'rounded-[10px] px-5 py-1 text-sm transition-colors',
+                            'rounded-[10px] transition-colors',
+                            props.compact ? 'px-3 py-0.5 text-xs' : 'px-5 py-1 text-sm',
                             view.mobileView === key ? 'bg-[var(--app-bg)] font-semibold shadow-sm' : 'text-[var(--app-hint)]'
                         )}
                     >

@@ -88,6 +88,7 @@ import { deleteShareTransfer } from '@/lib/shareTransfer'
 import UsersSettingsPage from '@/fork-features/multi-user/UsersSettingsPage'
 import UserSettingsPage from '@/fork-features/multi-user/UserSettingsPage'
 import AccountSettingsPage from '@/fork-features/multi-user/AccountSettingsPage'
+import { isToolbarButtonHidden, useListPrefs } from '@/fork-features/list-prefs/listPrefs'
 
 
 function BackIcon(props: { className?: string }) {
@@ -288,6 +289,16 @@ function SessionsPage() {
                 : { directory: args.directory }
         })
     }, [navigate])
+    const listPrefs = useListPrefs()
+    const headerActions = (
+        <div className="flex shrink-0 flex-row-reverse items-center gap-2">
+            {!isToolbarButtonHidden(listPrefs, 'new') && <button type="button" onClick={() => navigate({ to: '/sessions/new' })} className="session-list-new-button flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-[var(--app-link)] transition-colors" title={t('sessions.new')}><PlusIcon className="h-5 w-5" /></button>}
+            <button type="button" onClick={() => navigate({ to: '/settings' })} className="p-1.5 rounded-full text-[var(--app-hint)] hover:text-[var(--app-fg)] hover:bg-[var(--app-subtle-bg)] transition-colors" title={t('settings.title')}><SettingsIcon className="h-5 w-5" /></button>
+            {!isToolbarButtonHidden(listPrefs, 'usage') && <button type="button" onClick={() => navigate({ to: '/usage' })} className="p-1.5 rounded-full text-[var(--app-hint)] hover:text-[var(--app-fg)] hover:bg-[var(--app-subtle-bg)] transition-colors" title={t('usage.nav')} aria-label={t('usage.nav')}><BarChartIcon className="h-5 w-5" /></button>}
+            {canBrowse && !isToolbarButtonHidden(listPrefs, 'browse') && <button type="button" onClick={() => navigate({ to: '/browse' })} className="p-1.5 rounded-full text-[var(--app-hint)] hover:text-[var(--app-fg)] hover:bg-[var(--app-subtle-bg)] transition-colors" title={t('browse.nav')}><FolderOpenIcon className="h-5 w-5" /></button>}
+            {workEnabled && !isToolbarButtonHidden(listPrefs, 'work') && <button type="button" onClick={() => navigate({ to: '/work' })} className="p-1.5 rounded-full text-[var(--app-hint)] hover:text-[var(--app-fg)] hover:bg-[var(--app-subtle-bg)] transition-colors" title={t('work.bench.title')} aria-label={t('work.bench.title')}><WorkGridIcon className="h-5 w-5" /></button>}
+        </div>
+    )
 
     return (
         <>
@@ -302,79 +313,33 @@ function SessionsPage() {
                             <div className="text-sm text-red-600">{error}</div>
                         </div>
                     ) : null}
-                    {workEnabled ? <WorkMobileToggle /> : null}
                     {showMobileWork ? (
-                        <div className="flex min-h-0 flex-1 flex-col overflow-y-auto split:hidden">
-                            <WorkOverviewPanel variant="mobile" />
-                        </div>
+                        <>
+                            <div className="flex min-h-0 shrink-0 items-center gap-1 px-2 py-1 split:hidden">
+                                <WorkMobileToggle compact />
+                                <div className="list-toolbar-scroll flex min-w-0 flex-1 flex-row-reverse items-center gap-2 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">{headerActions}</div>
+                            </div>
+                            <div className="flex min-h-0 flex-1 flex-col overflow-y-auto split:hidden">
+                                <WorkOverviewPanel variant="mobile" />
+                            </div>
+                        </>
                     ) : null}
                     <div className={`${showMobileWork ? 'hidden split:flex' : 'flex'} min-h-0 flex-1 flex-col`}>
-                    {workEnabled ? <WorkLineFilterBar /> : null}
+                    {workEnabled && !showMobileWork ? <WorkLineFilterBar /> : null}
                     <SessionList
                         key={initializedHub === baseUrl ? 'last-seen-ready' : 'last-seen-pending'}
                         sessions={listSessions}
                         selectedSessionId={selectedSessionId}
                         scrollStability={sessionListScrollStability}
-                        onSelect={(sessionId) => navigate({
-                            to: '/sessions/$sessionId',
-                            params: { sessionId },
-                        })}
+                        onSelect={(sessionId) => navigate({ to: '/sessions/$sessionId', params: { sessionId } })}
                         onNewSession={() => navigate({ to: '/sessions/new' })}
                         onNewSessionInDirectory={handleNewSessionInDirectory}
                         onBrowse={canBrowse ? () => navigate({ to: '/browse' }) : undefined}
                         onRefresh={handleRefresh}
                         isLoading={isLoading}
                         renderHeader={false}
-                        headerActions={(
-                            <div className="flex items-center gap-2">
-                                {workEnabled && (
-                                    <button
-                                        type="button"
-                                        onClick={() => navigate({ to: '/work' })}
-                                        className="p-1.5 rounded-full text-[var(--app-hint)] hover:text-[var(--app-fg)] hover:bg-[var(--app-subtle-bg)] transition-colors"
-                                        title={t('work.bench.title')}
-                                        aria-label={t('work.bench.title')}
-                                    >
-                                        <WorkGridIcon className="h-5 w-5" />
-                                    </button>
-                                )}
-                                {canBrowse && (
-                                    <button
-                                        type="button"
-                                        onClick={() => navigate({ to: '/browse' })}
-                                        className="p-1.5 rounded-full text-[var(--app-hint)] hover:text-[var(--app-fg)] hover:bg-[var(--app-subtle-bg)] transition-colors"
-                                        title={t('browse.nav')}
-                                    >
-                                        <FolderOpenIcon className="h-5 w-5" />
-                                    </button>
-                                )}
-                                <button
-                                    type="button"
-                                    onClick={() => navigate({ to: '/usage' })}
-                                    className="p-1.5 rounded-full text-[var(--app-hint)] hover:text-[var(--app-fg)] hover:bg-[var(--app-subtle-bg)] transition-colors"
-                                    title={t('usage.nav')}
-                                    aria-label={t('usage.nav')}
-                                >
-                                    <BarChartIcon className="h-5 w-5" />
-                                </button>
-                                <button
-                                    type="button"
-                                    onClick={() => navigate({ to: '/settings' })}
-                                    className="p-1.5 rounded-full text-[var(--app-hint)] hover:text-[var(--app-fg)] hover:bg-[var(--app-subtle-bg)] transition-colors"
-                                    title={t('settings.title')}
-                                >
-                                    <SettingsIcon className="h-5 w-5" />
-                                </button>
-                                <button
-                                    type="button"
-                                    onClick={() => navigate({ to: '/sessions/new' })}
-                                    className="session-list-new-button flex h-9 w-9 items-center justify-center rounded-full text-[var(--app-link)] transition-colors"
-                                    title={t('sessions.new')}
-                                >
-                                    <PlusIcon className="h-5 w-5" />
-                                </button>
-                            </div>
-                        )}
+                        headerLeading={workEnabled ? <WorkMobileToggle compact /> : undefined}
+                        headerActions={headerActions}
                         api={api}
                         machineLabelsById={machineLabelsById}
                         machineIconsById={machineIconsById}

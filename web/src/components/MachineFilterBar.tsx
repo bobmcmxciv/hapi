@@ -21,6 +21,8 @@ import {
 import { cn } from '@/lib/utils'
 import { useTranslation } from '@/lib/use-translation'
 import { MachineIconPicker } from '@/fork-features/machine-icons/MachineIconPicker'
+import { useListPrefs } from '@/fork-features/list-prefs/listPrefs'
+import type { MachineLayout } from '@/fork-features/list-prefs/listPrefs'
 import { machineIconLabelKey } from '@/fork-features/machine-icons/MachineDeviceIcon'
 import type { MachinePresentationPatch } from '@/fork-features/machine-icons/types'
 
@@ -77,6 +79,7 @@ function MachineFilterChip(props: {
     selected: boolean
     onSelect: (id: string) => void
     onRenameRequest?: (machine: MachineFilterItem) => void
+    layout: MachineLayout
 }) {
     const { t } = useTranslation()
     const { machine, selected, onSelect, onRenameRequest } = props
@@ -99,7 +102,7 @@ function MachineFilterChip(props: {
     const content = (
         <>
             <MachineOsIcon platform={machine.platform} icon={machine.icon} />
-            <span className="min-w-0 flex-1 truncate text-left">{machine.label}</span>
+            {props.layout !== 'icons' ? <span className="min-w-0 flex-1 truncate text-left">{machine.label}</span> : null}
             <span className="shrink-0 tabular-nums opacity-70">{machine.sessionCount}</span>
         </>
     )
@@ -112,7 +115,7 @@ function MachineFilterChip(props: {
                 onContextMenu={handleContextMenu}
                 aria-pressed={selected}
                 title={title}
-                className={cn(chipShellClass, chipContentClass, selected ? chipSelectedClass : chipIdleClass)}
+                className={cn(chipShellClass, chipContentClass, props.layout !== 'grid' && 'w-auto px-2', selected ? chipSelectedClass : chipIdleClass)}
             >
                 {content}
             </button>
@@ -129,7 +132,7 @@ function MachineFilterChip(props: {
             aria-pressed={selected}
             aria-describedby={tooltipId}
             title={title}
-            className={cn(chipContentClass, 'rounded-lg px-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--app-link)]')}
+            className={cn(chipContentClass, props.layout !== 'grid' && 'w-auto', 'rounded-lg px-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--app-link)]')}
         >
             {content}
         </button>
@@ -146,7 +149,7 @@ function MachineFilterChip(props: {
             target={button}
             side="bottom"
             align="start"
-            className={cn(chipShellClass, '[&>span:first-child]:w-full [&>span:first-child]:min-w-0', selected ? chipSelectedClass : chipIdleClass)}
+            className={cn(chipShellClass, props.layout !== 'grid' && 'w-auto', '[&>span:first-child]:w-full [&>span:first-child]:min-w-0', selected ? chipSelectedClass : chipIdleClass)}
             tooltipClassName="pointer-events-auto before:absolute before:inset-x-0 before:-top-1 before:h-1 before:content-[''] px-3 py-2 min-w-[16rem] max-md:hidden"
         >
             <MachineHealthTooltipBody presentation={machine.healthPresentation!} />
@@ -270,6 +273,7 @@ export function MachineFilterBar(props: {
     const { t } = useTranslation()
     const [renameTarget, setRenameTarget] = useState<MachineFilterItem | null>(null)
     const { grouped, sections } = useMemo(() => groupMachinesByOwner(props.machines), [props.machines])
+    const { machineLayout } = useListPrefs()
     const onRenameRequest = props.onRenameMachine
         ? (machine: MachineFilterItem) => setRenameTarget(machine)
         : undefined
@@ -287,12 +291,13 @@ export function MachineFilterBar(props: {
     )
 
     const renderGrid = (machines: MachineFilterItem[], leading?: ReactNode) => (
-        <div className={chipGridClass}>
+        <div className={machineLayout === 'grid' ? chipGridClass : 'flex flex-wrap items-center gap-1.5'}>
             {leading}
             {machines.map((machine) => (
                 <MachineFilterChip
                     key={machine.id}
                     machine={machine}
+                    layout={machineLayout}
                     selected={props.value === machine.id}
                     onSelect={props.onChange}
                     onRenameRequest={onRenameRequest}

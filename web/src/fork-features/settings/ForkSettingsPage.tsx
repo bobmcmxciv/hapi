@@ -5,6 +5,7 @@ import { SettingsLinkRow, SettingsPageContent, SettingsSection } from '@/compone
 import { HistoryImportSettingsRow } from '../history-import/HistoryImportSettingsRow'
 import { OmpProviderSettingsRow } from '../omp-host-integration/OmpProviderSettingsRow'
 import { DigestSettingsSection } from '../session-digest/DigestSettingsSection'
+import { ListPrefsSettings } from '../list-prefs/ListPrefsSettings'
 
 export default function ForkSettingsPage() {
     const navigate = useNavigate()
@@ -13,6 +14,8 @@ export default function ForkSettingsPage() {
 
     return (
         <SettingsPageContent title={t('settings.fork.title')} description={t('settings.fork.description')}>
+            <ListPrefsSettings />
+
             <SettingsSection>
                 <HistoryImportSettingsRow />
                 {user.role === 'admin' ? (

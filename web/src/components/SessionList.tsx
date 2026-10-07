@@ -40,6 +40,7 @@ import { useCursorChatStoreStatus } from '@/hooks/queries/useCursorChatStoreStat
 import { SessionRowSummary } from '@/components/SessionRowSummary'
 import { Spinner } from '@/components/Spinner'
 import { transferComposerDraftThenNavigate } from '@/lib/composer-draft-transfer'
+import { isToolbarButtonHidden, useListPrefs } from '@/fork-features/list-prefs/listPrefs'
 
 export { getWorktreeSessionLabel } from '@/lib/sessionWorktreeLabel'
 
@@ -709,6 +710,7 @@ function SessionListSearch(props: {
     onDateRangeChange: (start: string, end: string) => void
     expanded: boolean
     onExpandedChange: (expanded: boolean) => void
+    hideCalendar: boolean
 }) {
     const { t } = useTranslation()
     const [datePickerOpen, setDatePickerOpen] = useState(false)
@@ -815,7 +817,7 @@ function SessionListSearch(props: {
                         <span className="min-w-0 truncate text-xs font-medium">{props.value}</span>
                     ) : null}
                 </button>
-                {renderDateFilter('standalone')}
+                {!props.hideCalendar ? renderDateFilter('standalone') : null}
             </div>
         )
     }
@@ -856,7 +858,7 @@ function SessionListSearch(props: {
                 </button>
             ) : null}
             <div className="absolute inset-y-0 right-0 flex items-stretch">
-                {renderDateFilter('embedded')}
+                {!props.hideCalendar ? renderDateFilter('embedded') : null}
             </div>
         </div>
     )
@@ -1141,6 +1143,7 @@ export function SessionList(props: {
     isLoading: boolean
     renderHeader?: boolean
     headerActions?: React.ReactNode
+    headerLeading?: React.ReactNode
     api: ApiClient | null
     machineLabelsById?: Record<string, string>
     /** fork(machine-icons)：machineId → 设备图标的粘性映射，见 useMachineIcons。 */
@@ -1153,6 +1156,7 @@ export function SessionList(props: {
     scrollStability: SessionListScrollStability
 }) {
     const { t } = useTranslation()
+    const listPrefs = useListPrefs()
     const {
         renderHeader = true,
         api,
@@ -1639,7 +1643,8 @@ export function SessionList(props: {
         <div className="flex min-h-0 w-full flex-1 flex-col">
             <div className="session-list-scrollbar-offset mx-auto w-full max-w-content shrink-0">
             {showHeaderRow ? (
-                <div className="flex items-center gap-1 px-2 py-1">
+                <div className="flex min-w-0 items-center gap-1 px-2 py-1">
+                    {props.headerLeading}
                     {showSearch ? (
                         <SessionListSearch
                             value={searchQuery}
@@ -1653,63 +1658,30 @@ export function SessionList(props: {
                             }}
                             expanded={searchExpanded}
                             onExpandedChange={setSearchExpanded}
+                            hideCalendar={isToolbarButtonHidden(listPrefs, 'calendar')}
                         />
                     ) : null}
                     {!(showSearch && searchExpanded) ? (
                         <>
                             <div className="flex-1" />
-                            {/* fork：tiann 同 hunk 里的 MachineFilterMenu（漏斗二级菜单）不落回——
-                                fork 已用平铺的 MachineFilterBar（下方）取代（568692df），只取 Unread 按钮。 */}
-                            <button
-                                type="button"
-                                onClick={toggleFoldArchived}
-                                aria-pressed={foldArchived}
-                                title={foldArchived ? t('sessions.foldArchived.off') : t('sessions.foldArchived.on')}
-                                aria-label={t('sessions.foldArchived.on')}
-                                className={cn(
-                                    'flex h-9 w-9 items-center justify-center rounded-full text-[var(--app-hint)] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--app-link)]',
-                                    foldArchived
-                                        ? 'bg-[var(--app-subtle-bg)] text-[var(--app-link)]'
-                                        : 'hover:bg-[var(--app-subtle-bg)] hover:text-[var(--app-fg)]'
-                                )}
-                            >
-                                <ArchiveFoldIcon className="h-[18px] w-[18px]" />
-                            </button>
-                            <button
-                                type="button"
-                                onClick={() => setShowUnreadOnly(!showUnreadOnly)}
-                                aria-pressed={showUnreadOnly}
-                                title={t('sessions.unreadFilter.toggle')}
-                                aria-label={t('sessions.unreadFilter.toggle')}
-                                className={cn(
-                                    'flex h-9 w-9 items-center justify-center rounded-full transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--app-link)]',
-                                    showUnreadOnly
-                                        ? 'bg-[var(--app-subtle-bg)]'
-                                        : 'hover:bg-[var(--app-subtle-bg)]'
-                                )}
-                            >
-                                {/* Same shape/color language as session-row unread dots (SessionAttentionIndicator). */}
-                                <span
-                                    aria-hidden
-                                    className={cn(
-                                        'inline-flex h-2.5 w-2.5 shrink-0 rounded-full',
-                                        showUnreadOnly
-                                            ? 'bg-[var(--app-link)]'
-                                            : 'bg-[var(--app-hint)]'
-                                    )}
-                                />
-                            </button>
-                            {renderHeader ? (
-                                <button
-                                    type="button"
-                                    onClick={props.onNewSession}
-                                    className="session-list-new-button flex h-9 w-9 items-center justify-center rounded-full text-[var(--app-link)] transition-colors"
-                                    title={t('sessions.new')}
-                                >
-                                    <PlusIcon className="h-5 w-5" />
-                                </button>
-                            ) : null}
-                            {props.headerActions}
+                            <div className="list-toolbar-scroll flex min-w-0 flex-1 flex-row-reverse items-center gap-1 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+                                {props.headerActions}
+                                {renderHeader ? (
+                                    <button type="button" onClick={props.onNewSession} className="session-list-new-button flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-[var(--app-link)] transition-colors" title={t('sessions.new')}>
+                                        <PlusIcon className="h-5 w-5" />
+                                    </button>
+                                ) : null}
+                                {!isToolbarButtonHidden(listPrefs, 'unread') ? (
+                                    <button type="button" onClick={() => setShowUnreadOnly(!showUnreadOnly)} aria-pressed={showUnreadOnly} title={t('sessions.unreadFilter.toggle')} aria-label={t('sessions.unreadFilter.toggle')} className={cn('flex h-9 w-9 shrink-0 items-center justify-center rounded-full transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--app-link)]', showUnreadOnly ? 'bg-[var(--app-subtle-bg)]' : 'hover:bg-[var(--app-subtle-bg)]')}>
+                                        <span aria-hidden className={cn('inline-flex h-2.5 w-2.5 shrink-0 rounded-full', showUnreadOnly ? 'bg-[var(--app-link)]' : 'bg-[var(--app-hint)]')} />
+                                    </button>
+                                ) : null}
+                                {!isToolbarButtonHidden(listPrefs, 'archive') ? (
+                                    <button type="button" onClick={toggleFoldArchived} aria-pressed={foldArchived} title={foldArchived ? t('sessions.foldArchived.off') : t('sessions.foldArchived.on')} aria-label={t('sessions.foldArchived.on')} className={cn('flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-[var(--app-hint)] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--app-link)]', foldArchived ? 'bg-[var(--app-subtle-bg)] text-[var(--app-link)]' : 'hover:bg-[var(--app-subtle-bg)] hover:text-[var(--app-fg)]')}>
+                                        <ArchiveFoldIcon className="h-[18px] w-[18px]" />
+                                    </button>
+                                ) : null}
+                            </div>
                         </>
                     ) : null}
                 </div>
