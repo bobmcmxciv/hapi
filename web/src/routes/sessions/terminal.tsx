@@ -565,7 +565,7 @@ export default function TerminalPage() {
 
     return (
         <div className="flex h-full min-h-0 flex-col">
-            <div className="bg-[var(--app-bg)] pt-[env(safe-area-inset-top)]">
+            <div data-safe-top className="bg-[var(--app-bg)] pt-[env(safe-area-inset-top)]">
                 <div className="mx-auto w-full max-w-content flex items-center gap-2 p-3 border-b border-[var(--app-border)]">
                     <button
                         type="button"

@@ -43,6 +43,8 @@ import { WorkMapPage, type WorkSearch } from '@/fork-features/work-overview/Work
 import { WorkGridIcon } from '@/fork-features/work-overview/WorkParts'
 import { useIsWorkOverviewEnabled } from '@/fork-features/work-overview/workApi'
 import { useWorkView } from '@/fork-features/work-overview/workViewStore'
+import { SessionTabsBar, useHasSessionTabs, useSessionTabsSync } from '@/fork-features/session-tabs/SessionTabsBar'
+import type { SessionSummary } from '@/types/api'
 import { buildSessionReferenceText, matchSessionsForMention } from '@/lib/sessionReference'
 import type { Suggestion } from '@/hooks/useActiveSuggestions'
 import { useSendMessage, type SendErrorInfo } from '@/hooks/mutations/useSendMessage'
@@ -267,6 +269,13 @@ function SessionsPage() {
     }, [selectedSessionId, selectedSession?.updatedAt])
     const isSessionsIndex = pathname === '/sessions' || pathname === '/sessions/'
     const sidebar = useSidebarResize()
+    // fork-features/session-tabs：打开过的会话固定排在右侧顶部，不随列表上浮下沉。
+    useSessionTabsSync(selectedSessionId, sessions, !isLoading && !error)
+    const hasSessionTabs = useHasSessionTabs()
+    const tabMachineLabel = useCallback((session: SessionSummary) => {
+        const machineId = session.metadata?.machineId
+        return (machineId && machineLabelsById[machineId]) || session.metadata?.host || ''
+    }, [machineLabelsById])
     const handleNewSessionInDirectory = useCallback((args: { machineId: string | null; directory: string }) => {
         navigate({
             to: '/sessions/new',
@@ -379,7 +388,8 @@ function SessionsPage() {
                 onPointerDown={sidebar.onPointerDown}
             />
 
-            <div className={`${isSessionsIndex ? 'hidden split:flex' : 'flex'} min-w-0 flex-1 flex-col bg-[var(--app-bg)]`}>
+            <div data-session-tabs={hasSessionTabs || undefined} className={`${isSessionsIndex ? 'hidden split:flex' : 'flex'} min-w-0 flex-1 flex-col bg-[var(--app-bg)]`}>
+                <SessionTabsBar sessions={sessions} selectedSessionId={selectedSessionId} machineLabel={tabMachineLabel} />
                 <div className="flex-1 min-h-0">
                     <Outlet />
                 </div>
@@ -1007,7 +1017,7 @@ function NewSessionPage() {
 
     return (
         <div className="flex h-full min-h-0 flex-col">
-            <div className="flex items-center gap-2 border-b border-[var(--app-border)] bg-[var(--app-bg)] p-3 pt-[calc(0.75rem+env(safe-area-inset-top))]">
+            <div data-safe-top="calc" className="flex items-center gap-2 border-b border-[var(--app-border)] bg-[var(--app-bg)] p-3 pt-[calc(0.75rem+env(safe-area-inset-top))]">
                 {!isTelegramApp() && (
                     <button
                         type="button"
