@@ -131,10 +131,16 @@ export function buildSessionPrompt(params: {
     path: string | null
     transcript: string
     previous: { title: string; done: string[]; status: string; todo: string[] } | null
+    /** 手动重新总结：转录是开头 + 最近的整段对话，旧摘要只作参考。 */
+    rewrite?: boolean
 }): string {
     const parts: string[] = []
     if (params.path) parts.push(`工作目录：${params.path}`)
-    if (params.previous) {
+    if (params.previous && params.rewrite) {
+        parts.push('此前的摘要（仅供参考，可能已过时；请以下面的对话为准重新总结，仍然成立的已完成事项保留）：')
+        parts.push(JSON.stringify(params.previous))
+        parts.push('对话转录（开头与最近部分）：')
+    } else if (params.previous) {
         parts.push('此前的摘要（在此基础上更新，已完成事项保留）：')
         parts.push(JSON.stringify(params.previous))
         parts.push('之后新增的对话：')

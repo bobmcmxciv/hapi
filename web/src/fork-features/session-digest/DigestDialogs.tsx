@@ -1,8 +1,9 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Button } from '@/components/ui/button'
 import { useTranslation } from '@/lib/use-translation'
-import { useDigestActions, useProjectDigests, useSessionDigest } from './digestApi'
+import { useDigestActions, useProjectDigests, useSessionDigest, type DigestJobState } from './digestApi'
+import { refreshPhase, type RefreshBaseline } from './refreshProgress'
 
 function formatTime(ms: number | null): string {
     return ms ? new Date(ms).toLocaleString() : ''
@@ -24,6 +25,66 @@ function Section(props: { title: string; items?: string[]; text?: string; empty:
             )}
         </section>
     )
+}
+
+/**
+ * 「重新总结」的进度：从点下按钮到服务端记下新的一次处理为止都算进行中（含排队），
+ * 结束后短暂显示「已更新」，等太久显示超时说明。等待期间每 3 秒重算一次，超时判断不依赖数据变化。
+ */
+function useRefreshProgress(baseline: RefreshBaseline | null, setBaseline: (next: RefreshBaseline | null) => void, attempt: number | null, serverState: DigestJobState) {
+    const [now, setNow] = useState(() => Date.now())
+    const [outcome, setOutcome] = useState<'updated' | 'timeout' | null>(null)
+    const phase = refreshPhase(baseline, attempt, serverState, now)
+    useEffect(() => {
+        if (!baseline) return
+        const timer = setInterval(() => setNow(Date.now()), 3000)
+        return () => clearInterval(timer)
+    }, [baseline])
+    useEffect(() => {
+        if (phase === 'done' || phase === 'timeout') {
+            setBaseline(null)
+            setOutcome(phase === 'done' ? 'updated' : 'timeout')
+        }
+    }, [phase, setBaseline])
+    useEffect(() => {
+        if (outcome !== 'updated') return
+        const timer = setTimeout(() => setOutcome(null), 6000)
+        return () => clearTimeout(timer)
+    }, [outcome])
+    return {
+        busy: phase === 'queued' || phase === 'running',
+        queued: phase === 'queued',
+        outcome,
+        start: () => {
+            setOutcome(null)
+            setNow(Date.now())
+            setBaseline({ attempt, startedAt: Date.now() })
+        }
+    }
+}
+
+function RefreshNotice(props: { busy: boolean; queued: boolean }) {
+    const { t } = useTranslation()
+    if (!props.busy) return null
+    return (
+        <p data-testid="digest-refresh-progress" className="rounded-md bg-[var(--app-subtle-bg)] px-3 py-2 text-xs text-[var(--app-fg)]">
+            {props.queued ? t('digest.refreshQueued') : t('digest.refreshing')}
+        </p>
+    )
+}
+
+function RefreshOutcome(props: { outcome: 'updated' | 'timeout' | null; hasError: boolean; requestError: Error | null }) {
+    const { t } = useTranslation()
+    if (props.requestError) {
+        return <span role="alert" className="mr-auto self-center text-xs text-red-600 dark:text-red-400">{t('digest.refreshFailed', { error: props.requestError.message })}</span>
+    }
+    if (props.outcome === 'updated' && !props.hasError) {
+        return <span data-testid="digest-refresh-updated" className="mr-auto self-center text-xs text-[var(--app-badge-success-text)]">{t('digest.updated')}</span>
+    }
+    if (props.outcome === 'timeout') {
+        return <span className="mr-auto self-center text-xs text-[var(--app-hint)]">{t('digest.refreshTimeout')}</span>
+    }
+    return null
 }
 
 export function DigestIcon(props: { className?: string }) {
@@ -48,11 +109,17 @@ export function CompletedMark(props: { className?: string; title?: string }) {
 
 export function SessionDigestDialog(props: { sessionId: string; onClose: () => void }) {
     const { t } = useTranslation()
-    const query = useSessionDigest(props.sessionId, true)
+    const [baseline, setBaseline] = useState<RefreshBaseline | null>(null)
+    const query = useSessionDigest(props.sessionId, true, baseline !== null)
     const { refreshSession, setCompleted } = useDigestActions()
-    const [requested, setRequested] = useState(false)
     const digest = query.data?.digest ?? null
-    const running = query.data?.running || refreshSession.isPending
+    const serverState: DigestJobState = query.data?.state ?? (query.data?.running ? 'running' : null)
+    const progress = useRefreshProgress(baseline, setBaseline, digest?.lastAttemptAt ?? null, serverState)
+    const running = progress.busy || refreshSession.isPending
+    const refresh = () => {
+        progress.start()
+        refreshSession.mutate(props.sessionId, { onError: () => setBaseline(null) })
+    }
 
     return (
         <Dialog open onOpenChange={(open) => { if (!open) props.onClose() }}>
@@ -67,9 +134,10 @@ export function SessionDigestDialog(props: { sessionId: string; onClose: () => v
                     {query.isLoading ? (
                         <p className="text-sm text-[var(--app-hint)]">{t('misc.loading')}</p>
                     ) : !digest?.generatedAt ? (
-                        <p className="text-sm text-[var(--app-hint)]">{requested || running ? t('digest.generating') : t('digest.none')}</p>
+                        running ? <RefreshNotice busy queued={progress.queued} /> : <p className="text-sm text-[var(--app-hint)]">{t('digest.none')}</p>
                     ) : (
                         <>
+                            <RefreshNotice busy={running} queued={progress.queued} />
                             <Section title={t('digest.done')} items={digest.done} empty={t('digest.emptyList')} />
                             <Section title={t('digest.status')} text={digest.status} empty={t('digest.emptyList')} />
                             <Section title={t('digest.todo')} items={digest.todo} empty={t('digest.noTodo')} />
@@ -84,13 +152,15 @@ export function SessionDigestDialog(props: { sessionId: string; onClose: () => v
                     ) : null}
                 </div>
                 <div className="mt-4 flex flex-wrap justify-end gap-2">
+                    <RefreshOutcome outcome={progress.outcome} hasError={Boolean(digest?.error)} requestError={refreshSession.error} />
                     <Button
                         type="button"
                         variant="secondary"
+                        data-testid="digest-refresh"
                         disabled={running}
-                        onClick={() => { setRequested(true); refreshSession.mutate(props.sessionId) }}
+                        onClick={refresh}
                     >
-                        {running ? t('digest.generating') : t('digest.refresh')}
+                        {progress.queued ? t('digest.queued') : running ? t('digest.generating') : t('digest.refresh')}
                     </Button>
                     <Button
                         type="button"
@@ -128,10 +198,16 @@ export function SessionDigestButton(props: { sessionId: string; className: strin
 
 export function ProjectDigestDialog(props: { projectKey: string; title: string; onClose: () => void }) {
     const { t } = useTranslation()
-    const query = useProjectDigests(true)
+    const [baseline, setBaseline] = useState<RefreshBaseline | null>(null)
+    const query = useProjectDigests(true, baseline !== null)
     const { refreshProject } = useDigestActions()
-    const [requested, setRequested] = useState(false)
     const digest = query.data?.projects.find(project => project.projectKey === props.projectKey) ?? null
+    const progress = useRefreshProgress(baseline, setBaseline, digest?.lastAttemptAt ?? null, query.data?.pending?.[props.projectKey] ?? null)
+    const running = progress.busy || refreshProject.isPending
+    const refresh = () => {
+        progress.start()
+        refreshProject.mutate(props.projectKey, { onError: () => setBaseline(null) })
+    }
 
     return (
         <Dialog open onOpenChange={(open) => { if (!open) props.onClose() }}>
@@ -143,9 +219,10 @@ export function ProjectDigestDialog(props: { projectKey: string; title: string; 
                     {query.isLoading ? (
                         <p className="text-sm text-[var(--app-hint)]">{t('misc.loading')}</p>
                     ) : !digest?.generatedAt ? (
-                        <p className="text-sm text-[var(--app-hint)]">{requested ? t('digest.generating') : t('digest.project.none')}</p>
+                        running ? <RefreshNotice busy queued={progress.queued} /> : <p className="text-sm text-[var(--app-hint)]">{t('digest.project.none')}</p>
                     ) : (
                         <>
+                            <RefreshNotice busy={running} queued={progress.queued} />
                             {digest.stage ? (
                                 <div className="flex flex-wrap items-baseline gap-2">
                                     <StageBadge stage={digest.stage} />
@@ -163,14 +240,16 @@ export function ProjectDigestDialog(props: { projectKey: string; title: string; 
                     )}
                     {digest?.error ? <p role="alert" className="text-xs text-red-600 dark:text-red-400">{digest.error}</p> : null}
                 </div>
-                <div className="mt-4 flex justify-end">
+                <div className="mt-4 flex flex-wrap justify-end gap-2">
+                    <RefreshOutcome outcome={progress.outcome} hasError={Boolean(digest?.error)} requestError={refreshProject.error} />
                     <Button
                         type="button"
                         variant="secondary"
-                        disabled={refreshProject.isPending}
-                        onClick={() => { setRequested(true); refreshProject.mutate(props.projectKey) }}
+                        data-testid="digest-refresh"
+                        disabled={running}
+                        onClick={refresh}
                     >
-                        {t('digest.refresh')}
+                        {progress.queued ? t('digest.queued') : running ? t('digest.generating') : t('digest.refresh')}
                     </Button>
                 </div>
             </DialogContent>

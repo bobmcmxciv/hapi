@@ -60,6 +60,7 @@ export type DigestDeps = {
 export const UNKNOWN_MACHINE_ID = '__unknown__'
 /** 最后一条活动后至少静默这么久才总结，避免对正在跑的会话反复花 token。 */
 export const IDLE_MS = 3 * 60_000
+export const NOTHING_TO_SUMMARIZE = '这个会话里还没有可总结的文字对话。'
 /** 项目摘要在会话摘要变化后至少隔这么久才重算，把一阵连续更新合并成一次。 */
 export const PROJECT_DEBOUNCE_MS = 15 * 60_000
 const ERROR_BACKOFF_MS = 30 * 60_000
@@ -171,6 +172,17 @@ export class DigestService {
         return this.forcedProjects.size
     }
 
+    /** 手动请求的进度：正在跑 / 排队中 / 无。界面据此显示「生成中」并持续轮询。 */
+    sessionState(sessionId: string): 'running' | 'queued' | null {
+        if (this.running === `session:${sessionId}`) return 'running'
+        return this.forcedSessions.has(sessionId) ? 'queued' : null
+    }
+
+    projectState(projectKey: string): 'running' | 'queued' | null {
+        if (this.running === `project:${projectKey}`) return 'running'
+        return this.forcedProjects.has(projectKey) ? 'queued' : null
+    }
+
     setCompleted(sessionId: string, completed: boolean): SessionDigest {
         const digest = this.deps.store.getSession(sessionId) ?? emptySessionDigest(sessionId)
         const next = { ...digest, completed, completedAt: completed ? this.now() : null }
@@ -218,7 +230,7 @@ export class DigestService {
         this.running = job.label
         try {
             const didCallModel = job.kind === 'session'
-                ? await this.runSession(job.session, settings)
+                ? await this.runSession(job.session, settings, job.forced)
                 : await this.runProject(job.key, settings)
             if (didCallModel) {
                 this.deps.store.recordRun(this.now())
@@ -227,6 +239,8 @@ export class DigestService {
             return job.label
         } finally {
             this.running = null
+            // 排在后面的手动请求不等下一拍（30s），接着跑。
+            if (this.forcedSessions.size > 0 || this.forcedProjects.size > 0) this.kick()
         }
     }
 
@@ -234,7 +248,7 @@ export class DigestService {
         for (const sessionId of this.forcedSessions) {
             this.forcedSessions.delete(sessionId)
             const session = this.deps.getSession(sessionId)
-            if (session) return { kind: 'session', session, label: `session:${sessionId}` }
+            if (session) return { kind: 'session', session, label: `session:${sessionId}`, forced: true }
         }
         for (const key of this.forcedProjects) {
             this.forcedProjects.delete(key)
@@ -266,7 +280,7 @@ export class DigestService {
                 })
                 continue
             }
-            return { kind: 'session', session, label: `session:${session.id}` }
+            return { kind: 'session', session, label: `session:${session.id}`, forced: false }
         }
         return null
     }
@@ -307,27 +321,34 @@ export class DigestService {
         return messages.map(extractTranscriptLine).filter((line): line is TranscriptLine => line !== null)
     }
 
-    /** 返回是否真的调用了模型（计入限速）。 */
-    async runSession(session: DigestSessionView, settings: DigestSettings): Promise<boolean> {
+    /**
+     * 返回是否真的调用了模型（计入限速）。
+     * 自动总结是增量的：只看上次摘要之后的新消息，没有新消息就不调模型。
+     * 手动「重新总结」（rewrite）不看水位，按开头 + 最近的对话整段重写，旧摘要只作参考。
+     */
+    async runSession(session: DigestSessionView, settings: DigestSettings, rewrite = false): Promise<boolean> {
         const now = this.now()
         const existing = this.deps.store.getSession(session.id) ?? emptySessionDigest(session.id)
         const newest = this.deps.getRecentMessages(session.id, 1)[0]?.seq ?? 0
         const previous = existing.generatedAt
             ? { title: existing.title, done: existing.done, status: existing.status, todo: existing.todo }
             : null
-        const afterSeq = previous ? existing.sourceSeq : 0
+        const afterSeq = previous && !rewrite ? existing.sourceSeq : 0
         const messages = this.collectMessages(session.id, afterSeq)
         const lines = this.toLines(messages)
         const artifacts = mergeArtifacts(existing.artifacts, extractArtifacts(messages))
         if (lines.length === 0) {
-            this.deps.store.saveSession({ ...existing, artifacts, sourceSeq: Math.max(existing.sourceSeq, newest), sourceUpdatedAt: session.updatedAt })
+            const base = { ...existing, artifacts, sourceSeq: Math.max(existing.sourceSeq, newest), sourceUpdatedAt: session.updatedAt }
+            // 手动请求要有个结果让界面停下来：记一次尝试并说明原因（不计错误次数，不影响自动总结的退避）。
+            this.deps.store.saveSession(rewrite ? { ...base, error: NOTHING_TO_SUMMARIZE, lastAttemptAt: now } : base)
             return false
         }
 
         const prompt = buildSessionPrompt({
             path: session.metadata?.path ?? null,
             transcript: renderTranscript(lines, SESSION_BUDGET_CHARS),
-            previous
+            previous,
+            rewrite
         })
         try {
             const text = await this.deps.llm!({ model: settings.model, system: SESSION_SYSTEM_PROMPT, prompt, maxTokens: 1500 })
@@ -460,7 +481,7 @@ export class DigestService {
 }
 
 type Job =
-    | { kind: 'session'; session: DigestSessionView; label: string }
+    | { kind: 'session'; session: DigestSessionView; label: string; forced: boolean }
     | { kind: 'project'; key: string; label: string }
 
 let instance: DigestService | null = null

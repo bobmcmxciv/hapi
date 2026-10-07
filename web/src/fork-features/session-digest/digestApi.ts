@@ -14,7 +14,12 @@ export type SessionDigest = {
     model: string | null
     generatedAt: number | null
     error: string | null
+    /** 最近一次真正处理的时间（成功或失败都会更新）；「重新总结」以它变化为完成信号。 */
+    lastAttemptAt?: number | null
 }
+
+/** 手动「重新总结」在服务端的进度。 */
+export type DigestJobState = 'running' | 'queued' | null
 
 export type ProjectDigest = {
     projectKey: string
@@ -31,6 +36,7 @@ export type ProjectDigest = {
     model: string | null
     generatedAt: number | null
     error: string | null
+    lastAttemptAt?: number | null
 }
 
 export type DigestIndexEntry = { completed: boolean; suggestComplete: boolean; hasDigest: boolean; status: string }
@@ -104,26 +110,27 @@ export function useDigestIndex(): Record<string, DigestIndexEntry> {
     return query.data?.digests ?? {}
 }
 
-export function useSessionDigest(sessionId: string, enabled: boolean) {
+/** fast：刚点了「重新总结」、还没等到结果，短间隔轮询。 */
+export function useSessionDigest(sessionId: string, enabled: boolean, fast = false) {
     const fetchJson = useDigestFetch()
     return useQuery({
         queryKey: digestQueryKeys.session(sessionId),
-        queryFn: () => fetchJson<{ digest: SessionDigest | null; running: boolean }>(`/api/digests/sessions/${encodeURIComponent(sessionId)}`),
+        queryFn: () => fetchJson<{ digest: SessionDigest | null; running: boolean; state?: DigestJobState }>(`/api/digests/sessions/${encodeURIComponent(sessionId)}`),
         enabled,
-        // 刷新请求发出后摘要在后台生成，打开期间短间隔轮询直到出结果。
-        refetchInterval: (query) => (query.state.data?.running ? 4000 : 30_000)
+        // 刷新请求发出后摘要在后台生成（可能先排队），打开期间短间隔轮询直到出结果。
+        refetchInterval: (query) => (fast || query.state.data?.running ? 3000 : 30_000)
     })
 }
 
-export function useProjectDigests(enabled: boolean) {
+export function useProjectDigests(enabled: boolean, fast = false) {
     const connected = useOptionalConnection() !== null
     const fetchJson = useDigestFetch()
     return useQuery({
         queryKey: digestQueryKeys.projects,
-        queryFn: () => fetchJson<{ projects: ProjectDigest[] }>('/api/digests/projects'),
+        queryFn: () => fetchJson<{ projects: ProjectDigest[]; pending?: Record<string, 'running' | 'queued'> }>('/api/digests/projects'),
         enabled: enabled && connected,
         retry: false,
-        refetchInterval: 60_000
+        refetchInterval: fast ? 4000 : 60_000
     })
 }
 

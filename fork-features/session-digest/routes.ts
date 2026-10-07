@@ -41,9 +41,12 @@ export function mountDigestRoutes(app: Hono<WebAppEnv>, resolveViewer: ResolveDi
         const id = c.req.param('id')
         if (!viewer.sessions.some(session => session.id === id)) return c.json({ error: 'Session not found' }, 404)
         const digest = service.store.getSession(id)
+        // state：手动「重新总结」排队中或正在跑；running 保留给旧前端（排队也算，界面才会持续轮询）。
+        const state = service.sessionState(id)
         return c.json({
             digest: digest && (digest.generatedAt || digest.completed || digest.error) ? digest : null,
-            running: service.status().running === `session:${id}`
+            running: state !== null,
+            state
         })
     })
 
@@ -77,7 +80,12 @@ export function mountDigestRoutes(app: Hono<WebAppEnv>, resolveViewer: ResolveDi
         if (!viewer.ok) return viewer.response
         const keys = new Set(viewer.sessions.map(session => projectKeyOf(session).key))
         const projects = service.store.listProjects().filter(project => keys.has(project.projectKey))
-        return c.json({ projects })
+        const pending: Record<string, 'running' | 'queued'> = {}
+        for (const key of keys) {
+            const state = service.projectState(key)
+            if (state) pending[key] = state
+        }
+        return c.json({ projects, pending })
     })
 
     app.post('/api/digests/projects/refresh', async (c) => {

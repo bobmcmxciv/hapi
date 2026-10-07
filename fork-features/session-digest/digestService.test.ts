@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test'
 import { DigestStore } from './digestStore'
-import { DigestService, IDLE_MS, PROJECT_DEBOUNCE_MS, projectKeyOf, type DigestSessionView } from './digestService'
+import { DigestService, IDLE_MS, NOTHING_TO_SUMMARIZE, PROJECT_DEBOUNCE_MS, projectKeyOf, type DigestSessionView } from './digestService'
 import { extractArtifacts, extractTranscriptLine, mergeArtifacts, parseSessionDigest, renderTranscript, type TranscriptMessage } from './transcript'
 
 const user = (seq: number, text: string): TranscriptMessage => ({ seq, content: { role: 'user', content: { type: 'text', text } } })
@@ -15,7 +15,7 @@ const toolResult = (seq: number): TranscriptMessage => ({
 
 const REPLY = JSON.stringify({ title: '机器图标', done: ['加了图标选择'], status: '已上线', todo: [], suggestComplete: true })
 
-function setup(options: { sessions: DigestSessionView[]; messages: Record<string, TranscriptMessage[]>; reply?: string; now?: number }) {
+function setup(options: { sessions: DigestSessionView[]; messages: Record<string, TranscriptMessage[]>; reply?: string; now?: number; holdFirstCall?: Promise<unknown> }) {
     const store = new DigestStore(':memory:')
     const calls: Array<{ model: string; prompt: string; system: string }> = []
     const renames: Array<{ id: string; name: string }> = []
@@ -34,6 +34,7 @@ function setup(options: { sessions: DigestSessionView[]; messages: Record<string
         },
         llm: async (params) => {
             calls.push(params)
+            if (options.holdFirstCall && calls.length === 1) await options.holdFirstCall
             return options.reply ?? REPLY
         },
         defaults: { enabled: true, model: 'gpt-6-luna', autoRename: true, maxPerHour: 60 },
@@ -157,6 +158,55 @@ describe('DigestService', () => {
         expect(await service.tick()).toBeNull()
         advance(PROJECT_DEBOUNCE_MS)
         expect(await service.tick()).toBe(`project:${projectKeyOf(a).key}`)
+    })
+
+    it('manual refresh rewrites an up-to-date digest from the whole conversation', async () => {
+        const session = idleSession('s')
+        const messages = { s: [user(1, '第一件事'), assistant(2, '完成第一件')] }
+        const { service, calls, store } = setup({ sessions: [session], messages })
+        await service.tick()
+        const first = store.getSession('s')!
+        service.requestSession('s')
+        expect(service.sessionState('s')).toBe('queued')
+        expect(await service.tick()).toBe('session:s')
+        expect(calls).toHaveLength(2)
+        expect(calls[1]!.prompt).toContain('仅供参考')
+        expect(calls[1]!.prompt).toContain('第一件事')
+        expect(service.sessionState('s')).toBeNull()
+        expect(store.getSession('s')!.sourceSeq).toBe(first.sourceSeq)
+    })
+
+    it('reports a manual refresh as queued while another job runs, then starts it without waiting for the next beat', async () => {
+        let release!: () => void
+        const hold = new Promise<void>(resolve => { release = resolve })
+        const a = { ...idleSession('a'), updatedAt: 2000 }
+        const b = idleSession('b')
+        const { service, calls, store } = setup({ sessions: [a, b], messages: { a: [user(1, '甲')], b: [user(1, '乙')] }, holdFirstCall: hold })
+        const running = service.tick()
+        expect(service.sessionState('a')).toBe('running')
+        service.requestSession('b')
+        service.requestProject(projectKeyOf(b).key)
+        expect(service.sessionState('b')).toBe('queued')
+        expect(service.projectState(projectKeyOf(b).key)).toBe('queued')
+        release()
+        expect(await running).toBe('session:a')
+        await new Promise(resolve => setTimeout(resolve, 50))
+        expect(calls[1]!.prompt).toContain('乙')
+        expect(store.getSession('b')!.generatedAt).not.toBeNull()
+        expect(service.sessionState('b')).toBeNull()
+        expect(service.projectState(projectKeyOf(b).key)).toBeNull()
+        expect(calls).toHaveLength(3)
+    })
+
+    it('manual refresh of a session with no text records why instead of leaving the button spinning', async () => {
+        const { service, store, calls } = setup({ sessions: [idleSession('s')], messages: { s: [toolResult(1)] } })
+        service.requestSession('s')
+        expect(await service.tick()).toBe('session:s')
+        expect(calls).toHaveLength(0)
+        const digest = store.getSession('s')!
+        expect(digest.error).toBe(NOTHING_TO_SUMMARIZE)
+        expect(digest.lastAttemptAt).not.toBeNull()
+        expect(digest.errorCount).toBe(0)
     })
 
     it('marks and unmarks completion without touching the digest text', async () => {
