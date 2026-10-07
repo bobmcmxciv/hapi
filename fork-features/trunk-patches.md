@@ -962,3 +962,20 @@ localStorage，按 hub 地址 + 账号分区，**所有账号都可用**（不�
 | `web/src/router.tsx`, `web/src/components/SessionHeader.tsx`, `web/src/routes/sessions/file.tsx`, `web/src/routes/sessions/terminal.tsx`, locale files | No slot above the session pane's outlet, no hook on route→selected-session changes, no shared safe-area owner | The tab bar must sit above every right-pane page (chat, files, terminal) and own the top safe area, so the pages below have to give theirs up | `/sessions/:id` → `useSessionTabsSync` opens a tab → `SessionTabsBar` above `<Outlet/>` → click a tab → navigate to that session | In a real browser (desktop and 390px mobile), as admin and as a role=user account: open three sessions, the tab order stays fixed while the list reorders; pin / close / close others / drag reorder; reload keeps the tabs; delete a session and its tab disappears; on an iPhone-size viewport the header below the tab bar has no extra top padding |
 
 上游若提供原生的多会话标签或固定会话功能，先比交互再决定去留。
+
+## 会话列表外观 list-prefs + 总览待办卡片 (2026-10-07)
+
+会话列表工具栏的按钮（日历筛选、折叠已归档、只看未读、工作台、浏览目录、用量统计、新建会话）可在
+「设置 → fork」里逐个显隐；按钮组靠右排列，放不下时向右滑动露出左侧按钮；手机端「工作 | 会话」切换缩短后
+并入同一行。机器标签可选两列 / 紧凑 / 仅图标三种布局。偏好存 localStorage（`hapi-list-prefs`），所有账号可用。
+
+同批工作总览（仍只开放给 admin）：「需要你处理」可忽略/恢复（存 `work_dismissed`，忽略时顺手把会话摘要标为
+已完成，恢复时只撤销自己标的）；点条目弹卡片看最新消息、直接批准/拒绝/回答选项/回复，不跳会话页；
+点主线后「需要你处理」只看这条线；顶部「梳理待办」调用摘要模型整理全部待办（结果存 `work_briefing`）；
+会话列表按主线/支线过滤时，过滤条下可折叠显示这条线的正在进行、下一步、最近进展与项目阶段。
+
+| Files | Missing upstream seam | Why it cannot move out | Runtime path | Sync verification |
+|---|---|---|---|---|
+| `web/src/components/SessionList.tsx`, `web/src/components/MachineFilterBar.tsx`, `web/src/router.tsx`, locale files | No toolbar-item registry or per-button visibility hook; no layout prop on the machine chips; no leading slot in the list header | Button visibility and order live inside the list header markup, and the mobile work/sessions toggle must share that row | Settings → fork → 会话列表外观 → toggle a button / pick a layout → `/sessions` header re-renders from `useListPrefs()` | In a real browser at 390px: hide 日历筛选 and 只看未读, pick 紧凑; the list toolbar no longer shows those buttons, the 工作/会话 toggle sits on the toolbar row, machine chips wrap on one line |
+
+上游若提供工具栏自定义或机器筛选布局，先比交互再决定去留。

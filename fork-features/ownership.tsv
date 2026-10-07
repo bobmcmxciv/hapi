@@ -193,7 +193,7 @@ fork-features/multi-user/sseVisibility.ts	fork-owned	sse-isolation	SSE 事件账
 fork-features/multi-user/token.ts	fork-owned	#171	origin-only delta; fork commits a6f9e3f9
 fork-features/ownership.tsv	fork-owned	#169	#169 closing PR inventory implementation
 fork-features/session-digest/digestService.test.ts	fork-owned	session-digest	fork-owned module tests
-fork-features/session-digest/digestService.ts	fork-owned	session-digest	fork-owned module: 摘要调度、自动重命名、项目汇总
+fork-features/session-digest/digestService.ts	fork-owned	session-digest	fork-owned module: 摘要调度、自动重命名、项目汇总; work-overview: complete() 供「梳理待办」复用摘要模型
 fork-features/session-digest/digestStore.ts	fork-owned	session-digest	fork-owned module: 会话/项目摘要独立 sqlite（session-digests.sqlite）
 fork-features/session-digest/llmClient.ts	fork-owned	session-digest	fork-owned module: Anthropic Messages 调用（cx2cc 网关）
 fork-features/session-digest/routes.ts	fork-owned	session-digest	fork-owned module: /api/digests/* 路由
@@ -235,10 +235,12 @@ fork-features/usage/usageResponseCache.test.ts	fork-owned	usage-page	fork-owned 
 fork-features/usage/usageResponseCache.ts	fork-owned	usage-page	fork-owned module: 用量端点响应缓存（按计算完成时刻打戳，TTL 长于前端轮询）
 fork-features/usage/usageTimeseries.test.ts	fork-owned	usage-page	fork-owned module tests
 fork-features/usage/usageTimeseries.ts	fork-owned	usage-page	fork-owned module: 用量按时间分桶
+fork-features/work-overview/briefing.test.ts	fork-owned	work-overview	fork-owned module tests
+fork-features/work-overview/briefing.ts	fork-owned	work-overview	fork-owned module: 「梳理待办」提示词与结果解析（剔除已忽略/未知会话）
 fork-features/work-overview/routes.test.ts	fork-owned	work-overview	fork-owned module tests（经真实 mountExecutionRoutes 验 admin 闸门）
-fork-features/work-overview/routes.ts	fork-owned	work-overview	fork-owned module: /api/work/* 路由（admin-only）
+fork-features/work-overview/routes.ts	fork-owned	work-overview	fork-owned module: /api/work/* 路由（admin-only）; /api/work/dismissed、/api/work/briefing(+/refresh)
 fork-features/work-overview/workStore.test.ts	fork-owned	work-overview	fork-owned module tests
-fork-features/work-overview/workStore.ts	fork-owned	work-overview	fork-owned module: 主线/支线与目录、会话归属的独立 sqlite（work-overview.sqlite）
+fork-features/work-overview/workStore.ts	fork-owned	work-overview	fork-owned module: 主线/支线与目录、会话归属的独立 sqlite（work-overview.sqlite）; work_dismissed、work_briefing 两张表
 hub/package.json	trunk-patch	claude-proxy-models	trunk hook for claude-proxy-models（见 trunk-patches.md 2026-09-06 节）; test script 加 ../fork-features/claude-proxy-models; work-overview: test script 加 ../fork-features/work-overview
 hub/src/blobs/blobFetcher.test.ts	fork-owned	fork.16	origin-only delta; fork commits 05710223（发送即上传 / hub blob 存储）
 hub/src/blobs/blobFetcher.ts	fork-owned	fork.16	origin-only delta; fork commits 05710223（发送即上传 / hub blob 存储）
@@ -388,7 +390,7 @@ web/src/components/ImagePreview.tsx	upstream-fix	#179	origin-only delta; fork co
 web/src/components/LoginPrompt.test.tsx	trunk-patch	#171	origin-only delta; fork commits ba37bcfb
 web/src/components/LoginPrompt.tsx	trunk-patch	#171	origin-only delta; fork commits a6f9e3f9
 web/src/components/MachineFilterBar.test.tsx	trunk-patch	machine-icons	machine-icons: 对话框选/清图标与 chip 渲染用例
-web/src/components/MachineFilterBar.tsx	trunk-patch	machine-icons	machine-icons: 右键对话框加图标选择，chip 画设备图标
+web/src/components/MachineFilterBar.tsx	trunk-patch	machine-icons	machine-icons: 右键对话框加图标选择，chip 画设备图标; list-prefs: 机器标签 grid/compact/icons 三种布局
 web/src/components/NewSession/MachineSelector.tsx	trunk-patch	machine-icons	machine-icons: 机器格画设备图标
 web/src/components/NewSession/index.test.tsx	trunk-patch	claude-proxy-models	trunk hook for claude-proxy-models（见 trunk-patches.md 2026-09-06 节）; mock useClaudeProxyModels + 5 例
 web/src/components/NewSession/index.tsx	trunk-patch	claude-proxy-models	trunk hook for claude-proxy-models（见 trunk-patches.md 2026-09-06 节）; 目录三态 + 校验提示 + 状态行
@@ -410,7 +412,7 @@ web/src/components/SessionIdDialog.test.tsx	fork-owned	#179	origin-only delta; f
 web/src/components/SessionIdDialog.tsx	fork-owned	#179	origin-only delta; fork commits 291c8db0
 web/src/components/SessionList.directory-action.test.tsx	upstream-fix	#179	origin-only delta; fork commits 167af3dc; disposition upstream-issue https://github.com/tiann/hapi/issues/1068: general fix reported against latest upstream main
 web/src/components/SessionList.test.ts	upstream-sync	#180	merge-base 87f5c78a; changed only on upstream/main
-web/src/components/SessionList.tsx	trunk-patch	#170	both refs changed; fork commits 167af3dc,37fb5e9a,7dca6478,473d69b4,bf1a6b9a; machine-icons: 筛选格/分组标题/进行中行的机器图标; session-digest: 折叠已归档、完结对勾、项目概况按钮
+web/src/components/SessionList.tsx	trunk-patch	#170	both refs changed; fork commits 167af3dc,37fb5e9a,7dca6478,473d69b4,bf1a6b9a; machine-icons: 筛选格/分组标题/进行中行的机器图标; session-digest: 折叠已归档、完结对勾、项目概况按钮; list-prefs: 工具栏按钮按偏好显隐、按钮组 row-reverse 可横滑、headerLeading 插槽
 web/src/components/SessionRowSummary.tsx	trunk-patch	machine-icons	machine-icons: 副标题行首 machineIcon; session-digest: completed 对勾
 web/src/components/SyncingBanner.tsx	upstream-fix	#179	origin-only delta; fork commits 0aba2643; disposition upstream-issue https://github.com/tiann/hapi/issues/1066: general fix reported against latest upstream main
 web/src/components/Terminal/TerminalView.tsx	trunk-patch	web-stability	CanvasAddon 仅桌面端加载：Android GPU 驱动崩浏览器、iOS canvas 计入 WebKit 内存预算，移动端走 DOM 渲染器
@@ -455,6 +457,9 @@ web/src/fork-features/claude-proxy-models/claudeProxyModelOptions.test.ts	fork-o
 web/src/fork-features/claude-proxy-models/claudeProxyModelOptions.ts	fork-owned	claude-proxy-models	fork-owned module: Claude 代理模型目录动态发现（hub 从 HAPI_CLAUDE_PROXY_MODELS_URL 拉 cx2cc /v1/models，替代写死的 CLAUDE_PROXY_MODEL_LABELS）
 web/src/fork-features/claude-proxy-models/types.ts	fork-owned	claude-proxy-models	fork-owned module: Claude 代理模型目录动态发现（hub 从 HAPI_CLAUDE_PROXY_MODELS_URL 拉 cx2cc /v1/models，替代写死的 CLAUDE_PROXY_MODEL_LABELS）
 web/src/fork-features/claude-proxy-models/useClaudeProxyModels.ts	fork-owned	claude-proxy-models	fork-owned module: Claude 代理模型目录动态发现（hub 从 HAPI_CLAUDE_PROXY_MODELS_URL 拉 cx2cc /v1/models，替代写死的 CLAUDE_PROXY_MODEL_LABELS）
+web/src/fork-features/list-prefs/ListPrefsSettings.tsx	fork-owned	list-prefs	fork-owned module: 设置页「会话列表外观」节（工具栏按钮显隐、机器标签布局）
+web/src/fork-features/list-prefs/listPrefs.test.ts	fork-owned	list-prefs	fork-owned module tests
+web/src/fork-features/list-prefs/listPrefs.ts	fork-owned	list-prefs	fork-owned module: 列表偏好 localStorage store（hapi-list-prefs）
 web/src/fork-features/machine-icons/MachineDeviceIcon.tsx	fork-owned	machine-icons	fork-owned module: 设备外形图标线稿与词表排序
 web/src/fork-features/machine-icons/MachineIconPicker.tsx	fork-owned	machine-icons	fork-owned module: 设备图标选择网格
 web/src/fork-features/machine-icons/types.ts	fork-owned	machine-icons	fork-owned module: PATCH 请求体类型
@@ -475,19 +480,26 @@ web/src/fork-features/session-tabs/sessionTabs.css	fork-owned	session-tabs	fork-
 web/src/fork-features/session-tabs/sessionTabsStore.test.ts	fork-owned	session-tabs	fork-owned module tests
 web/src/fork-features/session-tabs/sessionTabsStore.ts	fork-owned	session-tabs	fork-owned module: 标签规则（纯函数）与按 hub+账号分区的 localStorage store
 web/src/fork-features/settings/ForkSettingsPage.test.tsx	fork-owned	session-digest	session-digest: mock 设置节
-web/src/fork-features/settings/ForkSettingsPage.tsx	fork-owned	session-digest	session-digest: AI 摘要设置节
+web/src/fork-features/settings/ForkSettingsPage.tsx	fork-owned	session-digest	session-digest: AI 摘要设置节; list-prefs: 挂「会话列表外观」节
 web/src/fork-features/task-panel/TodoPanel.test.tsx	fork-owned	#181	origin-only delta; fork commits 97be5733,17fee65e
 web/src/fork-features/task-panel/TodoPanel.tsx	fork-owned	#181	origin-only delta; fork commits 17fee65e
 web/src/fork-features/usage/UsagePage.test.tsx	fork-owned	usage-page	origin-only delta; token usage stats page coverage (2026-07-28); usage: mock 折线图
 web/src/fork-features/usage/UsagePage.tsx	fork-owned	usage-page	origin-only delta; token usage stats page (2026-07-28); machine-icons: 用量榜按 host 显示设备图标; usage: 折线图卡片
 web/src/fork-features/usage/UsageTrendChart.test.ts	fork-owned	usage-page	fork-owned module tests
 web/src/fork-features/usage/UsageTrendChart.tsx	fork-owned	usage-page	fork-owned module: 用量折线图
+web/src/fork-features/work-overview/BriefingPanel.tsx	fork-owned	work-overview	fork-owned module: 总览顶部「梳理待办」按钮与结果
+web/src/fork-features/work-overview/LineDetailPanel.tsx	fork-owned	work-overview	fork-owned module: 会话列表按主线/支线过滤时的可折叠详情
+web/src/fork-features/work-overview/NeedCard.tsx	fork-owned	work-overview	fork-owned module: 「需要你处理」弹出卡片（最新消息、审批/选项、回复、忽略）
 web/src/fork-features/work-overview/WorkBench.tsx	fork-owned	work-overview	fork-owned module: /work 主线工作台（脉络树、线详情、相关会话）
 web/src/fork-features/work-overview/WorkMapPage.tsx	fork-owned	work-overview	fork-owned module: /work 工作地图、时间泳道、待整理与详情面板
 web/src/fork-features/work-overview/WorkOverviewPanel.tsx	fork-owned	work-overview	fork-owned module: 会话页右栏总览、手机「工作|会话」切换、左栏主线过滤
 web/src/fork-features/work-overview/WorkParts.tsx	fork-owned	work-overview	fork-owned module: 状态徽章、归属下拉等共用件
 web/src/fork-features/work-overview/deriveWork.test.ts	fork-owned	work-overview	fork-owned module tests
 web/src/fork-features/work-overview/deriveWork.ts	fork-owned	work-overview	fork-owned module: 归属规则与统计派生（纯函数）
+web/src/fork-features/work-overview/lineDetail.test.ts	fork-owned	work-overview	fork-owned module tests
+web/src/fork-features/work-overview/lineDetail.ts	fork-owned	work-overview	fork-owned module: 线详情派生（正在进行、下一步、最近进展、项目阶段）
+web/src/fork-features/work-overview/needCardModel.test.ts	fork-owned	work-overview	fork-owned module tests
+web/src/fork-features/work-overview/needCardModel.ts	fork-owned	work-overview	fork-owned module: 卡片消息/请求解析与答案格式（与聊天页同口径）
 web/src/fork-features/work-overview/useWorkModel.ts	fork-owned	work-overview	fork-owned module: 复用会话/机器/项目摘要缓存组装模型
 web/src/fork-features/work-overview/workApi.ts	fork-owned	work-overview	fork-owned module: /api/work hooks 与 admin 判定
 web/src/fork-features/work-overview/workOverview.css	fork-owned	work-overview	fork-owned module: 工作总览配色（跟随 data-theme 浅色/深色/oled）
@@ -535,8 +547,8 @@ web/src/lib/fork-restore.test.ts	fork-owned	#170	origin-only delta; fork commits
 web/src/lib/fork-restore.ts	fork-owned	#170	origin-only delta; fork commits 88f9dc20,fbfd26f5,5262a261
 web/src/lib/generatedInlineMedia.test.ts	fork-owned	#175	origin-only delta; fork commits d28853c7
 web/src/lib/generatedInlineMedia.ts	fork-owned	#175	origin-only delta; fork commits d28853c7
-web/src/lib/locales/en.ts	trunk-patch	#171	both refs changed; fork commits ba37bcfb,606c6579,302180e5,7faed2eb,85743eb7,4a0c5f0b,7b197fec,a8815d47,bfa252da,c853bcbf,aee648ee,d1f9f394,413e76cc,291c8db0,3582e989,d3199037; claude-proxy-models: newSession.model.proxyCatalog* 文案; machine-icons: machineIcon.* 文案; session-digest/usage trend 文案; work-overview: work.* 文案; session-tabs: tabs.* 文案; session-digest: 重新总结的排队/进度/已更新/超时文案; session-tabs: tabs.home
-web/src/lib/locales/zh-CN.ts	trunk-patch	#171	both refs changed; fork commits ba37bcfb,606c6579,302180e5,7faed2eb,85743eb7,4a0c5f0b,7b197fec,a8815d47,bfa252da,c853bcbf,aee648ee,d1f9f394,413e76cc,291c8db0,3582e989,d3199037; claude-proxy-models: newSession.model.proxyCatalog* 文案; machine-icons: machineIcon.* 文案; session-digest/usage trend 文案; work-overview: work.* 文案; session-tabs: tabs.* 文案; session-digest: 重新总结的排队/进度/已更新/超时文案; session-tabs: tabs.home
+web/src/lib/locales/en.ts	trunk-patch	#171	both refs changed; fork commits ba37bcfb,606c6579,302180e5,7faed2eb,85743eb7,4a0c5f0b,7b197fec,a8815d47,bfa252da,c853bcbf,aee648ee,d1f9f394,413e76cc,291c8db0,3582e989,d3199037; claude-proxy-models: newSession.model.proxyCatalog* 文案; machine-icons: machineIcon.* 文案; session-digest/usage trend 文案; work-overview: work.* 文案; session-tabs: tabs.* 文案; session-digest: 重新总结的排队/进度/已更新/超时文案; session-tabs: tabs.home; list-prefs: settings.listPrefs.*; work-overview: work.card2.*、work.briefing.*、work.lineDetail.*、work.need 忽略/恢复/只看
+web/src/lib/locales/zh-CN.ts	trunk-patch	#171	both refs changed; fork commits ba37bcfb,606c6579,302180e5,7faed2eb,85743eb7,4a0c5f0b,7b197fec,a8815d47,bfa252da,c853bcbf,aee648ee,d1f9f394,413e76cc,291c8db0,3582e989,d3199037; claude-proxy-models: newSession.model.proxyCatalog* 文案; machine-icons: machineIcon.* 文案; session-digest/usage trend 文案; work-overview: work.* 文案; session-tabs: tabs.* 文案; session-digest: 重新总结的排队/进度/已更新/超时文案; session-tabs: tabs.home; list-prefs: settings.listPrefs.*; work-overview: work.card2.*、work.briefing.*、work.lineDetail.*、work.need 忽略/恢复/只看
 web/src/lib/message-window-store.test.ts	upstream-fix	#179,mouriya#323	origin-only delta; fork commits 7a5232bf; disposition upstream-issue https://github.com/tiann/hapi/issues/1071: general fix reported against latest upstream main; mouriya-s-lab/hapi#323 mechanism 1: held-range revalidation cases (older page + tail sync while reading history)
 web/src/lib/message-window-store.ts	upstream-fix	#179,mouriya#323	origin-only delta; fork commits 7a5232bf; disposition upstream-issue https://github.com/tiann/hapi/issues/1071: general fix reported against latest upstream main; mouriya-s-lab/hapi#323 mechanism 1: epoch change while reading history re-reads the held interval (after+until) instead of replacing the window with latest — drop when upstream lands #326/#327
 web/src/lib/query-keys.ts	trunk-patch	#173	both refs changed; fork commits 3994ee9a,fc7d7b4a,a8815d47,c58622c2; claude-proxy-models: claudeProxyModels 键
@@ -563,7 +575,7 @@ web/src/lib/usageReportBackfill.ts	fork-owned	usage-footer	usage_report 帧差�
 web/src/main.tsx	trunk-patch	web-stability	installCrashGuard、AppErrorBoundary 包根、bootstrap().catch 静态兜底页
 web/src/realtime/messageSummarySpeaker.test.ts	fork-owned	#179	origin-only delta; fork commits 7faed2eb
 web/src/realtime/messageSummarySpeaker.ts	fork-owned	#179	origin-only delta; fork commits 7faed2eb
-web/src/router.tsx	trunk-patch	#171	both refs changed; fork commits a6f9e3f9,0894d3d2,3582e989; machine-icons: useMachineIcons 注入会话列表; work-overview: 会话页右栏总览、左栏主线过滤、手机切换、页头入口、/work 路由; session-tabs: 右栏挂标签条与同步 hook、新建会话页头标 data-safe-top="calc"; work-overview v2: /work 搜索参数 tab/line/folder; session-tabs: 首页标签 tabsHome（回 /sessions 并切手机「工作」视图）
+web/src/router.tsx	trunk-patch	#171	both refs changed; fork commits a6f9e3f9,0894d3d2,3582e989; machine-icons: useMachineIcons 注入会话列表; work-overview: 会话页右栏总览、左栏主线过滤、手机切换、页头入口、/work 路由; session-tabs: 右栏挂标签条与同步 hook、新建会话页头标 data-safe-top="calc"; work-overview v2: /work 搜索参数 tab/line/folder; session-tabs: 首页标签 tabsHome（回 /sessions 并切手机「工作」视图）; list-prefs: 页头按钮倒序进 row-reverse 容器、手机「工作|会话」切换并入工具栏行
 web/src/routes/sessions/file.test.tsx	trunk-patch	#179	origin-only delta; fork commits merge-resolution; disposition fork-specific #179: fork file viewer behavior merge resolution
 web/src/routes/sessions/file.tsx	trunk-patch	#177	origin-only delta; fork commits bfa252da,7a5232bf,e737b4b3,d3199037; session-tabs: 页头安全区容器标 data-safe-top
 web/src/routes/sessions/terminal.tsx	trunk-patch	session-tabs	session-tabs: 页头安全区容器标 data-safe-top，标签条在上方时由其接管安全区
