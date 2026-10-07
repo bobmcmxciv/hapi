@@ -62,7 +62,10 @@ describe('/api/work/* (admin only)', () => {
             ['PUT', '/api/work/lines', { id: 'm1', parentId: null, name: 'x' }],
             ['DELETE', '/api/work/lines/m1'],
             ['PUT', '/api/work/folders', { projectKey: 'k', mode: null }],
-            ['PUT', '/api/work/sessions', { sessionId: 's', state: 'follow' }]
+            ['PUT', '/api/work/sessions', { sessionId: 's', state: 'follow' }],
+            ['PUT', '/api/work/dismissed', { sessionId: 's', dismissed: true }],
+            ['GET', '/api/work/briefing'],
+            ['POST', '/api/work/briefing/refresh', { lines: [], pending: [], active: [], recent: [], dismissed: [] }]
         ]
         for (const [method, path, body] of requests) {
             expect((await call(method, path, userToken, body)).status).toBe(403)
@@ -91,11 +94,42 @@ describe('/api/work/* (admin only)', () => {
         expect(map.status).toBe(200)
         expect(map.body.lines.map((line: { id: string }) => line.id)).toEqual(['m1', 'm1.s1', 'm1.s2'])
         expect(map.body.sessions).toEqual([expect.objectContaining({ sessionId: 'home-1', lineId: 'm1.s2' })])
+        expect(map.body.dismissed).toEqual([])
+    })
+
+    test('admin dismisses a session from "needs you" and restores it', async () => {
+        const dismissed = await call('PUT', '/api/work/dismissed', adminToken, { sessionId: 'old-question', dismissed: true })
+        expect(dismissed.status).toBe(200)
+        expect(dismissed.body.dismissed).toEqual(['old-question'])
+        expect((await call('GET', '/api/work/map', adminToken)).body.dismissed).toEqual(['old-question'])
+        const restored = await call('PUT', '/api/work/dismissed', adminToken, { sessionId: 'old-question', dismissed: false })
+        expect(restored.body.dismissed).toEqual([])
+    })
+
+    test('briefing starts empty and refresh is accepted (model is not configured in tests)', async () => {
+        const empty = await call('GET', '/api/work/briefing', adminToken)
+        expect(empty.status).toBe(200)
+        expect(empty.body.briefing).toBeNull()
+        const started = await call('POST', '/api/work/briefing/refresh', adminToken, { lines: [], pending: [], active: [], recent: [], dismissed: [] })
+        expect(started.status).toBe(200)
+        expect(started.body.running).toBe(true)
+        for (let i = 0; i < 50; i += 1) {
+            const state = await call('GET', '/api/work/briefing', adminToken)
+            if (!state.body.running) {
+                // 测试里没有摘要服务：记一次失败（带原因），不让按钮一直转。
+                expect(state.body.briefing.error).toContain('Digest service')
+                return
+            }
+            await new Promise(resolve => setTimeout(resolve, 20))
+        }
+        throw new Error('briefing did not finish')
     })
 
     test('invalid payloads are 400, not 500', async () => {
         expect((await call('PUT', '/api/work/map', adminToken, { lines: 'nope' })).status).toBe(400)
         expect((await call('PUT', '/api/work/sessions', adminToken, { sessionId: 's', state: 'line' })).status).toBe(400)
         expect((await call('DELETE', '/api/work/lines/missing', adminToken)).status).toBe(400)
+        expect((await call('PUT', '/api/work/dismissed', adminToken, { sessionId: 's' })).status).toBe(400)
+        expect((await call('POST', '/api/work/briefing/refresh', adminToken, { lines: 'x' })).status).toBe(400)
     })
 })

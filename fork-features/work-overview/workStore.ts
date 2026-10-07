@@ -49,6 +49,20 @@ export type WorkMap = {
     lines: WorkLine[]
     folders: WorkFolder[]
     sessions: WorkSessionAssignment[]
+    /** 用户在「需要你处理」里忽略掉的会话（不再提醒，梳理待办时也不再列）。 */
+    dismissed: string[]
+}
+
+export type DismissedRecord = {
+    sessionId: string
+    dismissedAt: number
+    /** 忽略时是我们把会话摘要标成了已完结（恢复时据此撤回）。 */
+    markedCompleted: boolean
+}
+
+export type StoredBriefing = {
+    json: string
+    generatedAt: number
 }
 
 export class WorkMapError extends Error {}
@@ -89,6 +103,18 @@ export class WorkStore {
                 updated_at INTEGER NOT NULL,
                 PRIMARY KEY (account_id, session_id)
             );
+            CREATE TABLE IF NOT EXISTS work_dismissed (
+                account_id INTEGER NOT NULL,
+                session_id TEXT NOT NULL,
+                dismissed_at INTEGER NOT NULL,
+                marked_completed INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (account_id, session_id)
+            );
+            CREATE TABLE IF NOT EXISTS work_briefing (
+                account_id INTEGER PRIMARY KEY,
+                json TEXT NOT NULL,
+                generated_at INTEGER NOT NULL
+            );
         `)
     }
 
@@ -109,7 +135,42 @@ export class WorkStore {
             SELECT session_id AS sessionId, line_id AS lineId, updated_at AS updatedAt
             FROM work_sessions WHERE account_id = ? ORDER BY session_id
         `).all(accountId) as WorkSessionAssignment[])
-        return { lines, folders, sessions }
+        const dismissed = this.listDismissed(accountId).map(record => record.sessionId)
+        return { lines, folders, sessions, dismissed }
+    }
+
+    listDismissed(accountId: number): DismissedRecord[] {
+        return (this.db.query(`
+            SELECT session_id AS sessionId, dismissed_at AS dismissedAt, marked_completed AS markedCompleted
+            FROM work_dismissed WHERE account_id = ? ORDER BY dismissed_at DESC
+        `).all(accountId) as Array<{ sessionId: string; dismissedAt: number; markedCompleted: number }>)
+            .map(row => ({ sessionId: row.sessionId, dismissedAt: row.dismissedAt, markedCompleted: row.markedCompleted === 1 }))
+    }
+
+    /** 忽略 / 取消忽略一个会话。返回取消前的记录（取消时调用方据此决定是否撤回完结标记）。 */
+    setDismissed(accountId: number, sessionId: string, dismissed: boolean, markedCompleted = false, now: number = Date.now()): DismissedRecord | null {
+        const previous = this.listDismissed(accountId).find(record => record.sessionId === sessionId) ?? null
+        if (dismissed) {
+            this.db.query(`
+                INSERT INTO work_dismissed (account_id, session_id, dismissed_at, marked_completed) VALUES (?, ?, ?, ?)
+                ON CONFLICT(account_id, session_id) DO UPDATE SET dismissed_at = excluded.dismissed_at
+            `).run(accountId, sessionId, now, markedCompleted ? 1 : 0)
+        } else {
+            this.db.query('DELETE FROM work_dismissed WHERE account_id = ? AND session_id = ?').run(accountId, sessionId)
+        }
+        return previous
+    }
+
+    getBriefing(accountId: number): StoredBriefing | null {
+        const row = this.db.query('SELECT json, generated_at AS generatedAt FROM work_briefing WHERE account_id = ?').get(accountId) as StoredBriefing | null
+        return row ?? null
+    }
+
+    saveBriefing(accountId: number, json: string, generatedAt: number): void {
+        this.db.query(`
+            INSERT INTO work_briefing (account_id, json, generated_at) VALUES (?, ?, ?)
+            ON CONFLICT(account_id) DO UPDATE SET json = excluded.json, generated_at = excluded.generated_at
+        `).run(accountId, json, generatedAt)
     }
 
     /** 整份替换（初次导入 / 备份恢复）。任何一条不合法就整体拒绝，不落半份。 */

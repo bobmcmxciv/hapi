@@ -29,7 +29,7 @@ describe('WorkStore', () => {
             { sessionId: 's-home-1', lineId: 'm1.s2', updatedAt: 1000 },
             { sessionId: 's-home-2', lineId: null, updatedAt: 1000 }
         ])
-        expect(store.getMap(2)).toEqual({ lines: [], folders: [], sessions: [] })
+        expect(store.getMap(2)).toEqual({ lines: [], folders: [], sessions: [], dismissed: [] })
         store.close()
     })
 
@@ -85,6 +85,28 @@ describe('WorkStore', () => {
         const map = store.getMap(1)
         expect(map.lines.some(line => line.id === 'm1.s1')).toBe(false)
         expect(map.folders.some(folder => folder.lineId === 'm1.s1')).toBe(false)
+        store.close()
+    })
+    test('dismissed sessions are per account, listed newest first, and report what the dismissal changed', () => {
+        const store = new WorkStore(':memory:')
+        expect(store.setDismissed(1, 'a', true, true, 1000)).toBeNull()
+        store.setDismissed(1, 'b', true, false, 2000)
+        store.setDismissed(2, 'a', true, false, 3000)
+        expect(store.getMap(1).dismissed).toEqual(['b', 'a'])
+        expect(store.getMap(2).dismissed).toEqual(['a'])
+        const previous = store.setDismissed(1, 'a', false)
+        expect(previous).toEqual({ sessionId: 'a', dismissedAt: 1000, markedCompleted: true })
+        expect(store.getMap(1).dismissed).toEqual(['b'])
+        store.close()
+    })
+
+    test('keeps the latest briefing per account', () => {
+        const store = new WorkStore(':memory:')
+        expect(store.getBriefing(1)).toBeNull()
+        store.saveBriefing(1, '{"summary":"一"}', 1000)
+        store.saveBriefing(1, '{"summary":"二"}', 2000)
+        expect(store.getBriefing(1)).toEqual({ json: '{"summary":"二"}', generatedAt: 2000 })
+        expect(store.getBriefing(2)).toBeNull()
         store.close()
     })
 })

@@ -2,6 +2,8 @@ import type { Context, Hono } from 'hono'
 import { z } from 'zod'
 import type { WebAppEnv } from '../../hub/src/web/middleware/auth'
 import { getWorkStore, WorkMapError, type WorkStore } from './workStore'
+import { getDigestService } from '../session-digest/digestService'
+import { BRIEFING_SYSTEM_PROMPT, buildBriefingPrompt, knownIds, parseBriefing, type Briefing, type BriefingContext } from './briefing'
 
 /**
  * `/api/work/*`：工作总览的归属数据。目前 **admin-only**——由 executionMount 注入的
@@ -42,6 +44,43 @@ const folderPatchSchema = z.object({
     lineId: z.string().nullable().optional(),
     project: z.string().nullable().optional()
 })
+const dismissSchema = z.object({
+    sessionId: z.string().min(1),
+    dismissed: z.boolean()
+})
+const idTitle = z.object({ sessionId: z.string().min(1), title: z.string().max(200).default('') })
+const briefingContextSchema = z.object({
+    lines: z.array(z.object({
+        id: z.string(), name: z.string().max(120), parentId: z.string().nullable(), goal: z.string().max(400).optional(),
+        status: z.string().max(20).optional(), lastActivity: z.number().optional(), nextSteps: z.array(z.string().max(300)).max(10).optional()
+    })).max(300),
+    pending: z.array(idTitle.extend({ lineId: z.string().nullable().optional(), machine: z.string().max(60).optional(), updatedAt: z.number().optional(), detail: z.string().max(400).optional() })).max(200),
+    active: z.array(idTitle.extend({ lineId: z.string().nullable().optional(), machine: z.string().max(60).optional(), thinking: z.boolean().optional(), status: z.string().max(300).optional() })).max(200),
+    recent: z.array(idTitle.extend({ lineId: z.string().nullable().optional(), updatedAt: z.number().optional(), status: z.string().max(300).optional(), completed: z.boolean().optional() })).max(300),
+    dismissed: z.array(idTitle).max(500)
+})
+
+/** 每个账号同时只跑一份梳理；结果落库，前端轮询 running 直到结束。 */
+const briefingRunning = new Set<number>()
+
+async function runBriefing(store: WorkStore, accountId: number, context: BriefingContext): Promise<void> {
+    const digest = getDigestService()
+    const now = Date.now()
+    let result: Briefing
+    try {
+        if (!digest) throw new Error('Digest service not started')
+        const { text, model } = await digest.complete(BRIEFING_SYSTEM_PROMPT, buildBriefingPrompt({ ...context, now }), 3000)
+        const parsed = parseBriefing(text, knownIds(context))
+        if (!parsed) throw new Error(`unparseable briefing: ${text.slice(0, 120)}`)
+        result = { ...parsed, generatedAt: now, model, error: null }
+    } catch (error) {
+        const previous = store.getBriefing(accountId)
+        const old = previous ? JSON.parse(previous.json) as Briefing : null
+        result = { summary: old?.summary ?? '', groups: old?.groups ?? [], generatedAt: now, model: old?.model ?? null, error: error instanceof Error ? error.message : String(error) }
+    }
+    store.saveBriefing(accountId, JSON.stringify(result), now)
+}
+
 const sessionPatchSchema = z.object({
     sessionId: z.string().min(1),
     /** 'line' 归到 lineId；'ignored' 明确忽略；'follow' 删掉会话行，跟随目录 / 回到待整理。 */
@@ -114,6 +153,46 @@ export function mountWorkRoutes(app: Hono<WebAppEnv>, resolveAccount: ResolveWor
         } catch (error) {
             return fail(c, error)
         }
+    })
+
+    // 「需要你处理」里忽略一个会话：不再提醒；同时把它的会话摘要标成已完结，让后续的项目概况 / 梳理待办
+    // 也得出「不需要再关注」的结论。取消忽略时，若当初是我们标的完结就撤回。
+    app.put('/api/work/dismissed', async (c) => {
+        const access = await guard(c)
+        if (!access.ok) return access.response
+        const parsed = dismissSchema.safeParse(await c.req.json().catch(() => null))
+        if (!parsed.success) return c.json({ error: 'Invalid dismissal' }, 400)
+        const { sessionId, dismissed } = parsed.data
+        const digest = getDigestService()
+        if (dismissed) {
+            const wasCompleted = digest?.store.getSession(sessionId)?.completed ?? false
+            if (digest && !wasCompleted) digest.setCompleted(sessionId, true)
+            access.store.setDismissed(access.accountId, sessionId, true, Boolean(digest) && !wasCompleted)
+        } else {
+            const previous = access.store.setDismissed(access.accountId, sessionId, false)
+            if (digest && previous?.markedCompleted) digest.setCompleted(sessionId, false)
+        }
+        return c.json({ dismissed: access.store.getMap(access.accountId).dismissed })
+    })
+
+    app.get('/api/work/briefing', async (c) => {
+        const access = await guard(c)
+        if (!access.ok) return access.response
+        const stored = access.store.getBriefing(access.accountId)
+        return c.json({ briefing: stored ? JSON.parse(stored.json) as Briefing : null, running: briefingRunning.has(access.accountId) })
+    })
+
+    app.post('/api/work/briefing/refresh', async (c) => {
+        const access = await guard(c)
+        if (!access.ok) return access.response
+        const parsed = briefingContextSchema.safeParse(await c.req.json().catch(() => null))
+        if (!parsed.success) return c.json({ error: 'Invalid briefing context', issues: parsed.error.issues.slice(0, 3) }, 400)
+        if (!briefingRunning.has(access.accountId)) {
+            briefingRunning.add(access.accountId)
+            const { store, accountId } = access
+            void runBriefing(store, accountId, parsed.data).finally(() => briefingRunning.delete(accountId))
+        }
+        return c.json({ running: true })
     })
 
     app.put('/api/work/sessions', async (c) => {

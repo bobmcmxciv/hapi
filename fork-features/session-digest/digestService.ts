@@ -172,6 +172,13 @@ export class DigestService {
         return this.forcedProjects.size
     }
 
+    /** 给别的 fork 功能（工作总览「梳理待办」）用同一个摘要模型做一次性调用；不进摘要队列。 */
+    async complete(system: string, prompt: string, maxTokens: number): Promise<{ text: string; model: string }> {
+        if (!this.deps.llm) throw new Error('Digest model is not configured (HAPI_DIGEST_API_URL / HAPI_DIGEST_API_KEY)')
+        const model = this.settings().model
+        return { text: await this.deps.llm({ model, system, prompt, maxTokens }), model }
+    }
+
     /** 手动请求的进度：正在跑 / 排队中 / 无。界面据此显示「生成中」并持续轮询。 */
     sessionState(sessionId: string): 'running' | 'queued' | null {
         if (this.running === `session:${sessionId}`) return 'running'
