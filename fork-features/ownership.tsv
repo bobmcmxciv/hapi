@@ -403,7 +403,7 @@ web/src/components/SessionActionMenu.tsx	trunk-patch	#170	both refs changed; for
 web/src/components/SessionAttentionIndicator.tsx	trunk-patch	#179	origin-only delta; fork commits 3582e989; disposition fork-specific #179: archive visibility and session attention feature
 web/src/components/SessionChat.test.ts	upstream-sync	#180	merge-base 87f5c78a; changed only on upstream/main
 web/src/components/SessionChat.tsx	trunk-patch	#173,#181	both refs changed; fork commits 17fee65e,44f2bce5,51929072,78f3ffef,7faed2eb,85743eb7,a8815d47,c58622c2,d1f9f394,413e76cc,7e0010b8; claude-proxy-models: useClaudeProxyModels 喂 composer
-web/src/components/SessionHeader.tsx	trunk-patch	#170	both refs changed; fork commits 3994ee9a,fc7d7b4a,a8815d47,7dca6478,bf1a6b9a,291c8db0; machine-icons: 页头机器标签前的图标; session-digest: 页头摘要按钮
+web/src/components/SessionHeader.tsx	trunk-patch	#170	both refs changed; fork commits 3994ee9a,fc7d7b4a,a8815d47,7dca6478,bf1a6b9a,291c8db0; machine-icons: 页头机器标签前的图标; session-digest: 页头摘要按钮; session-tabs: 安全区容器标 data-safe-top，标签条在上方时由其接管安全区
 web/src/components/SessionIdDialog.test.tsx	fork-owned	#179	origin-only delta; fork commits 291c8db0
 web/src/components/SessionIdDialog.tsx	fork-owned	#179	origin-only delta; fork commits 291c8db0
 web/src/components/SessionList.directory-action.test.tsx	upstream-fix	#179	origin-only delta; fork commits 167af3dc; disposition upstream-issue https://github.com/tiann/hapi/issues/1068: general fix reported against latest upstream main
@@ -466,6 +466,10 @@ web/src/fork-features/omp-product/nestedEventVisibility.test.tsx	fork-owned	#203
 web/src/fork-features/session-digest/DigestDialogs.tsx	fork-owned	session-digest	fork-owned module: 会话/项目摘要对话框与对勾
 web/src/fork-features/session-digest/DigestSettingsSection.tsx	fork-owned	session-digest	fork-owned module: 摘要设置节
 web/src/fork-features/session-digest/digestApi.ts	fork-owned	session-digest	fork-owned module: 摘要 API hooks
+web/src/fork-features/session-tabs/SessionTabsBar.tsx	fork-owned	session-tabs	fork-owned module: 会话页右栏顶部的会话标签条（打开即入、固定、拖拽排序、右键菜单）
+web/src/fork-features/session-tabs/sessionTabs.css	fork-owned	session-tabs	fork-owned module: 标签条样式；有标签条时让下方页头放弃安全区内边距
+web/src/fork-features/session-tabs/sessionTabsStore.test.ts	fork-owned	session-tabs	fork-owned module tests
+web/src/fork-features/session-tabs/sessionTabsStore.ts	fork-owned	session-tabs	fork-owned module: 标签规则（纯函数）与按 hub+账号分区的 localStorage store
 web/src/fork-features/settings/ForkSettingsPage.test.tsx	fork-owned	session-digest	session-digest: mock 设置节
 web/src/fork-features/settings/ForkSettingsPage.tsx	fork-owned	session-digest	session-digest: AI 摘要设置节
 web/src/fork-features/task-panel/TodoPanel.test.tsx	fork-owned	#181	origin-only delta; fork commits 97be5733,17fee65e
@@ -474,6 +478,7 @@ web/src/fork-features/usage/UsagePage.test.tsx	fork-owned	usage-page	origin-only
 web/src/fork-features/usage/UsagePage.tsx	fork-owned	usage-page	origin-only delta; token usage stats page (2026-07-28); machine-icons: 用量榜按 host 显示设备图标; usage: 折线图卡片
 web/src/fork-features/usage/UsageTrendChart.test.ts	fork-owned	usage-page	fork-owned module tests
 web/src/fork-features/usage/UsageTrendChart.tsx	fork-owned	usage-page	fork-owned module: 用量折线图
+web/src/fork-features/work-overview/WorkBench.tsx	fork-owned	work-overview	fork-owned module: /work 主线工作台（脉络树、线详情、相关会话）
 web/src/fork-features/work-overview/WorkMapPage.tsx	fork-owned	work-overview	fork-owned module: /work 工作地图、时间泳道、待整理与详情面板
 web/src/fork-features/work-overview/WorkOverviewPanel.tsx	fork-owned	work-overview	fork-owned module: 会话页右栏总览、手机「工作|会话」切换、左栏主线过滤
 web/src/fork-features/work-overview/WorkParts.tsx	fork-owned	work-overview	fork-owned module: 状态徽章、归属下拉等共用件
@@ -526,8 +531,8 @@ web/src/lib/fork-restore.test.ts	fork-owned	#170	origin-only delta; fork commits
 web/src/lib/fork-restore.ts	fork-owned	#170	origin-only delta; fork commits 88f9dc20,fbfd26f5,5262a261
 web/src/lib/generatedInlineMedia.test.ts	fork-owned	#175	origin-only delta; fork commits d28853c7
 web/src/lib/generatedInlineMedia.ts	fork-owned	#175	origin-only delta; fork commits d28853c7
-web/src/lib/locales/en.ts	trunk-patch	#171	both refs changed; fork commits ba37bcfb,606c6579,302180e5,7faed2eb,85743eb7,4a0c5f0b,7b197fec,a8815d47,bfa252da,c853bcbf,aee648ee,d1f9f394,413e76cc,291c8db0,3582e989,d3199037; claude-proxy-models: newSession.model.proxyCatalog* 文案; machine-icons: machineIcon.* 文案; session-digest/usage trend 文案; work-overview: work.* 文案
-web/src/lib/locales/zh-CN.ts	trunk-patch	#171	both refs changed; fork commits ba37bcfb,606c6579,302180e5,7faed2eb,85743eb7,4a0c5f0b,7b197fec,a8815d47,bfa252da,c853bcbf,aee648ee,d1f9f394,413e76cc,291c8db0,3582e989,d3199037; claude-proxy-models: newSession.model.proxyCatalog* 文案; machine-icons: machineIcon.* 文案; session-digest/usage trend 文案; work-overview: work.* 文案
+web/src/lib/locales/en.ts	trunk-patch	#171	both refs changed; fork commits ba37bcfb,606c6579,302180e5,7faed2eb,85743eb7,4a0c5f0b,7b197fec,a8815d47,bfa252da,c853bcbf,aee648ee,d1f9f394,413e76cc,291c8db0,3582e989,d3199037; claude-proxy-models: newSession.model.proxyCatalog* 文案; machine-icons: machineIcon.* 文案; session-digest/usage trend 文案; work-overview: work.* 文案; session-tabs: tabs.* 文案
+web/src/lib/locales/zh-CN.ts	trunk-patch	#171	both refs changed; fork commits ba37bcfb,606c6579,302180e5,7faed2eb,85743eb7,4a0c5f0b,7b197fec,a8815d47,bfa252da,c853bcbf,aee648ee,d1f9f394,413e76cc,291c8db0,3582e989,d3199037; claude-proxy-models: newSession.model.proxyCatalog* 文案; machine-icons: machineIcon.* 文案; session-digest/usage trend 文案; work-overview: work.* 文案; session-tabs: tabs.* 文案
 web/src/lib/message-window-store.test.ts	upstream-fix	#179,mouriya#323	origin-only delta; fork commits 7a5232bf; disposition upstream-issue https://github.com/tiann/hapi/issues/1071: general fix reported against latest upstream main; mouriya-s-lab/hapi#323 mechanism 1: held-range revalidation cases (older page + tail sync while reading history)
 web/src/lib/message-window-store.ts	upstream-fix	#179,mouriya#323	origin-only delta; fork commits 7a5232bf; disposition upstream-issue https://github.com/tiann/hapi/issues/1071: general fix reported against latest upstream main; mouriya-s-lab/hapi#323 mechanism 1: epoch change while reading history re-reads the held interval (after+until) instead of replacing the window with latest — drop when upstream lands #326/#327
 web/src/lib/query-keys.ts	trunk-patch	#173	both refs changed; fork commits 3994ee9a,fc7d7b4a,a8815d47,c58622c2; claude-proxy-models: claudeProxyModels 键
@@ -554,9 +559,10 @@ web/src/lib/usageReportBackfill.ts	fork-owned	usage-footer	usage_report 帧差�
 web/src/main.tsx	trunk-patch	web-stability	installCrashGuard、AppErrorBoundary 包根、bootstrap().catch 静态兜底页
 web/src/realtime/messageSummarySpeaker.test.ts	fork-owned	#179	origin-only delta; fork commits 7faed2eb
 web/src/realtime/messageSummarySpeaker.ts	fork-owned	#179	origin-only delta; fork commits 7faed2eb
-web/src/router.tsx	trunk-patch	#171	both refs changed; fork commits a6f9e3f9,0894d3d2,3582e989; machine-icons: useMachineIcons 注入会话列表; work-overview: 会话页右栏总览、左栏主线过滤、手机切换、页头入口、/work 路由
+web/src/router.tsx	trunk-patch	#171	both refs changed; fork commits a6f9e3f9,0894d3d2,3582e989; machine-icons: useMachineIcons 注入会话列表; work-overview: 会话页右栏总览、左栏主线过滤、手机切换、页头入口、/work 路由; session-tabs: 右栏挂标签条与同步 hook、新建会话页头标 data-safe-top="calc"; work-overview v2: /work 搜索参数 tab/line/folder
 web/src/routes/sessions/file.test.tsx	trunk-patch	#179	origin-only delta; fork commits merge-resolution; disposition fork-specific #179: fork file viewer behavior merge resolution
-web/src/routes/sessions/file.tsx	trunk-patch	#177	origin-only delta; fork commits bfa252da,7a5232bf,e737b4b3,d3199037
+web/src/routes/sessions/file.tsx	trunk-patch	#177	origin-only delta; fork commits bfa252da,7a5232bf,e737b4b3,d3199037; session-tabs: 页头安全区容器标 data-safe-top
+web/src/routes/sessions/terminal.tsx	trunk-patch	session-tabs	session-tabs: 页头安全区容器标 data-safe-top，标签条在上方时由其接管安全区
 web/src/routes/settings/display.tsx	upstream-sync	#180	merge-base 87f5c78a; changed only on upstream/main
 web/src/routes/settings/index.test.tsx	upstream-sync	#180	merge-base 87f5c78a; changed only on upstream/main
 web/src/routes/settings/machines.tsx	trunk-patch	machine-icons	machine-icons: 设备页行首图标按钮 + 内联选择

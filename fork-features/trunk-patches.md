@@ -932,3 +932,22 @@ hub 侧调度器（`fork-features/session-digest/`）用 env `HAPI_DIGEST_API_UR
 | `web/src/router.tsx`, `web/src/lib/swNavigationScope.ts`, locale files | No sessions-index slot, list filter hook, header action slot, or top-level route registry | The overview lives in the sessions page's empty right pane, filters the list the page passes to `SessionList`, adds a header icon and the `/work` route; new top-level routes must be in the SW allowlist | admin: `/sessions` right pane → click line → left list filtered; header grid icon → `/work` (map / timeline / triage) → reassign folder → `PUT /api/work/folders` | In a real browser as admin: overview shows, filter chip filters the list, reassign a folder and reload; as a role=user account: no icon, no toggle, empty right pane, `/work` redirects to `/sessions` |
 
 上游若提供原生的项目/工作区实体或会话分组模型，先比语义再决定去留。
+
+## 会话标签 session-tabs + 工作总览 v2 (2026-10-07)
+
+会话列表按活动时间排序，多个会话同时在跑时条目不停上浮下沉，很难找回刚才那个会话。会话页右栏顶部加一条
+标签条：打开过的会话按打开顺序留在上面，不随活动时间重排；可固定、拖拽排序、中键/× 关闭、右键菜单
+（关闭其他 / 关闭右侧），上限 12 个，满了挤掉最久没看的未固定标签；会话被删除后自动移除。标签状态存在
+localStorage，按 hub 地址 + 账号分区，**所有账号都可用**（不受工作总览的 admin 闸门限制）。
+手机上同一条标签条显示在聊天页顶部。标签条接管顶部安全区，下方页头（会话页头——文件列表页也用它、单文件页、终端页、新建会话页）标
+`data-safe-top` 后由 `sessionTabs.css` 去掉自己的安全区内边距，避免刘海屏上空出两段。
+
+同批工作总览 v2（仍只开放给 admin）：总览改为「需要你处理 + 我的主线」卡片布局，卡片上的项目、支线、
+下一步、热力格、机器图标、继续工作都落到真实的会话或过滤结果；`/work` 新增「主线」工作台
+（脉络树 / 线详情 / 相关会话），搜索参数 `tab`、`line`、`folder` 可直接深链。
+
+| Files | Missing upstream seam | Why it cannot move out | Runtime path | Sync verification |
+|---|---|---|---|---|
+| `web/src/router.tsx`, `web/src/components/SessionHeader.tsx`, `web/src/routes/sessions/file.tsx`, `web/src/routes/sessions/terminal.tsx`, locale files | No slot above the session pane's outlet, no hook on route→selected-session changes, no shared safe-area owner | The tab bar must sit above every right-pane page (chat, files, terminal) and own the top safe area, so the pages below have to give theirs up | `/sessions/:id` → `useSessionTabsSync` opens a tab → `SessionTabsBar` above `<Outlet/>` → click a tab → navigate to that session | In a real browser (desktop and 390px mobile), as admin and as a role=user account: open three sessions, the tab order stays fixed while the list reorders; pin / close / close others / drag reorder; reload keeps the tabs; delete a session and its tab disappears; on an iPhone-size viewport the header below the tab bar has no extra top padding |
+
+上游若提供原生的多会话标签或固定会话功能，先比交互再决定去留。
