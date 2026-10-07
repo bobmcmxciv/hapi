@@ -39,7 +39,7 @@ import { useSlashCommands } from '@/hooks/queries/useSlashCommands'
 import { useSkills } from '@/hooks/queries/useSkills'
 import { getSessionTitle } from '@/lib/sessionTitle'
 import { WorkLineFilterBar, WorkMobileToggle, WorkOverviewPanel, useWorkLineSessionFilter } from '@/fork-features/work-overview/WorkOverviewPanel'
-import { WorkMapPage, type WorkTab } from '@/fork-features/work-overview/WorkMapPage'
+import { WorkMapPage, type WorkSearch } from '@/fork-features/work-overview/WorkMapPage'
 import { WorkGridIcon } from '@/fork-features/work-overview/WorkParts'
 import { useIsWorkOverviewEnabled } from '@/fork-features/work-overview/workApi'
 import { useWorkView } from '@/fork-features/work-overview/workViewStore'
@@ -319,8 +319,8 @@ function SessionsPage() {
                                         type="button"
                                         onClick={() => navigate({ to: '/work' })}
                                         className="p-1.5 rounded-full text-[var(--app-hint)] hover:text-[var(--app-fg)] hover:bg-[var(--app-subtle-bg)] transition-colors"
-                                        title={t('work.map.title')}
-                                        aria-label={t('work.map.title')}
+                                        title={t('work.bench.title')}
+                                        aria-label={t('work.bench.title')}
                                     >
                                         <WorkGridIcon className="h-5 w-5" />
                                     </button>
@@ -399,7 +399,7 @@ function SessionsIndexPage() {
 function WorkRoutePage() {
     const navigate = useNavigate()
     const search = workRoute.useSearch()
-    return <WorkMapPage tab={search.tab ?? 'map'} onTabChange={tab => navigate({ to: '/work', search: tab === 'map' ? {} : { tab } })} />
+    return <WorkMapPage search={search} onNavigate={next => navigate({ to: '/work', search: next })} />
 }
 
 /**
@@ -1324,9 +1324,13 @@ const settingsStorageRoute = createRoute({
 const workRoute = createRoute({
     getParentRoute: () => rootRoute,
     path: '/work',
-    validateSearch: (search: Record<string, unknown>): { tab?: WorkTab } => (
-        search.tab === 'timeline' || search.tab === 'triage' || search.tab === 'map' ? { tab: search.tab } : {}
-    ),
+    validateSearch: (search: Record<string, unknown>): WorkSearch => {
+        const result: WorkSearch = {}
+        if (search.tab === 'lines' || search.tab === 'map' || search.tab === 'timeline' || search.tab === 'triage') result.tab = search.tab
+        if (typeof search.line === 'string' && search.line) result.line = search.line
+        if (typeof search.folder === 'string' && search.folder) result.folder = search.folder
+        return result
+    },
     component: WorkRoutePage,
 })
 

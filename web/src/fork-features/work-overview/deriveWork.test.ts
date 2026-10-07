@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { SessionSummary } from '@/types/api'
-import { dailyActivity, deriveWork, sessionsInLine, statusOf } from './deriveWork'
+import { dailyActivity, deriveWork, latestSessionInFolder, latestSessionInLine, sessionFilterPredicate, sessionsInLine, statusOf } from './deriveWork'
 import type { WorkMap } from './workApi'
 
 const NOW = new Date(2026, 9, 7, 12, 0, 0).getTime()
@@ -114,7 +114,7 @@ describe('deriveWork', () => {
         expect(platform.projects[0]).toMatchObject({ name: 'HAPI', sessionCount: 3, stage: '维护中', machines: ['VIRCS', 'Mac173Index'] })
         const gateway = hapiLine.sublines.find(sub => sub.id === 'm1.s2')!
         expect(gateway).toMatchObject({ sessionCount: 3, looseSessionCount: 2, status: 'push' })
-        expect(hapiLine.nextStep).toEqual({ text: '继续验证文件传输', project: 'HAPI' })
+        expect(hapiLine.nextStep).toEqual({ text: '继续验证文件传输', project: 'HAPI', projectKey: 'vircs::C:\\hapi' })
     })
 
     it('orders mainlines push → slow → stall and marks stale lines', () => {
@@ -127,6 +127,25 @@ describe('deriveWork', () => {
     it('filters sessions by mainline or subline', () => {
         expect([...sessionsInLine(model, 'm1')].sort()).toEqual(['cx-1', 'hapi-1', 'hapi-2', 'hapi-mac', 'hapi-moved', 'home-cx'])
         expect([...sessionsInLine(model, 'm1.s2')].sort()).toEqual(['cx-1', 'hapi-moved', 'home-cx'])
+    })
+
+    it('filters sessions by line, machine, folder, day and mode, in any combination', () => {
+        const pick = (filter: Parameters<typeof sessionFilterPredicate>[1]) => sessions.filter(sessionFilterPredicate(model, filter)).map(session => session.id).sort()
+        expect(pick({ lineId: 'm1', machineId: 'mac' })).toEqual(['hapi-mac'])
+        expect(pick({ projectKey: 'vircs::C:\\hapi' })).toEqual(['hapi-1', 'hapi-2', 'hapi-moved'])
+        const today = new Date(NOW)
+        today.setHours(0, 0, 0, 0)
+        expect(pick({ lineId: 'm1', day: today.getTime() })).toEqual(['hapi-1'])
+        expect(pick({ mode: 'running' })).toEqual(['hapi-1', 'peter-1'])
+        expect(pick({ lineId: 'm1', mode: 'pending' })).toEqual(['hapi-2'])
+        expect(pick({ lineId: 'deleted-line' })).toHaveLength(sessions.length)
+    })
+
+    it('finds the latest session of a line or folder for "continue working"', () => {
+        expect(latestSessionInLine(model, sessions, 'm1')?.id).toBe('hapi-1')
+        expect(latestSessionInLine(model, sessions, 'm2')?.id).toBe('novel-1')
+        expect(latestSessionInFolder(sessions, 'vircs::C:\\cx2cc')?.id).toBe('cx-1')
+        expect(latestSessionInFolder(sessions, 'nowhere')).toBeNull()
     })
 
     it('builds the daily timeline and counts only triage sessions as unmapped', () => {

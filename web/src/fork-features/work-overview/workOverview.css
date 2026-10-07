@@ -1,65 +1,78 @@
 /* fork-features/work-overview：工作总览的配色。跟随 HAPI 的 data-theme（light / dark / oled）。 */
 :root {
-    --wo-push: #2563eb;
-    --wo-push-bg: rgba(37, 99, 235, 0.1);
-    --wo-push-fg: #1d4ed8;
-    --wo-slow: #d97706;
-    --wo-slow-bg: rgba(245, 158, 11, 0.14);
-    --wo-slow-fg: #b45309;
+    /* 参照 GPT 方案图的配色：靛蓝主色、深墨字、灰蓝底、柔和描边。 */
+    --wo-ink: #202c3d;
+    --wo-muted: #7a8597;
+    --wo-border: #e6eaf1;
+    --wo-push: #5169e8;
+    --wo-push-bg: rgba(81, 105, 232, 0.1);
+    --wo-push-fg: #4357d6;
+    --wo-soft: #eef1ff;
+    --wo-next-bg: #f2f5fc;
+    --wo-slow: #d99737;
+    --wo-slow-bg: rgba(217, 151, 55, 0.14);
+    --wo-slow-fg: #b7791f;
     --wo-stall: #94a3b8;
     --wo-stall-bg: rgba(100, 116, 139, 0.12);
     --wo-stall-fg: #64748b;
-    --wo-run: #22c55e;
-    --wo-run-glow: rgba(34, 197, 94, 0.25);
-    --wo-need: #dc2626;
-    --wo-need-bg: rgba(239, 68, 68, 0.1);
+    --wo-run: #28a183;
+    --wo-run-bg: rgba(40, 161, 131, 0.12);
+    --wo-run-glow: rgba(40, 161, 131, 0.25);
+    --wo-need: #d9534f;
+    --wo-need-bg: rgba(217, 83, 79, 0.1);
     --wo-heat-0: rgba(15, 23, 42, 0.05);
-    --wo-heat-1: #dbeafe;
-    --wo-heat-2: #93c5fd;
-    --wo-heat-3: #3b82f6;
-    --wo-heat-4: #1d4ed8;
-    --wo-card: var(--app-bg);
-    --wo-card-shadow: 0 1px 2px rgba(15, 23, 42, 0.04), 0 2px 10px rgba(15, 23, 42, 0.04);
-    --wo-card-shadow-hover: 0 2px 4px rgba(15, 23, 42, 0.06), 0 8px 24px rgba(15, 23, 42, 0.08);
-    --wo-page: #f7f8fa;
-    --wo-chip: rgba(15, 23, 42, 0.05);
-    --wo-chip-hover: rgba(15, 23, 42, 0.09);
-    --wo-cross: #60a5fa;
+    --wo-heat-1: #dfe4fd;
+    --wo-heat-2: #aab6f5;
+    --wo-heat-3: #7186ee;
+    --wo-heat-4: #4357d6;
+    --wo-card: #ffffff;
+    --wo-card-shadow: 0 1px 2px rgba(32, 44, 61, 0.04);
+    --wo-card-shadow-hover: 0 6px 20px rgba(32, 44, 61, 0.08);
+    --wo-page: #f5f7fb;
+    --wo-chip: rgba(32, 44, 61, 0.05);
+    --wo-chip-hover: rgba(32, 44, 61, 0.09);
+    --wo-cross: #7186ee;
 }
 
 [data-theme="dark"],
 [data-theme="oled"] {
-    --wo-push: #60a5fa;
-    --wo-push-bg: rgba(96, 165, 250, 0.16);
-    --wo-push-fg: #93c5fd;
-    --wo-slow: #fbbf24;
-    --wo-slow-bg: rgba(251, 191, 36, 0.16);
-    --wo-slow-fg: #fcd34d;
+    --wo-ink: #f1f3f7;
+    --wo-muted: #9aa3b2;
+    --wo-border: rgba(255, 255, 255, 0.09);
+    --wo-push: #8b9cf5;
+    --wo-push-bg: rgba(139, 156, 245, 0.16);
+    --wo-push-fg: #aab6f8;
+    --wo-soft: rgba(139, 156, 245, 0.1);
+    --wo-next-bg: rgba(255, 255, 255, 0.05);
+    --wo-slow: #f0b35a;
+    --wo-slow-bg: rgba(240, 179, 90, 0.16);
+    --wo-slow-fg: #f5c77e;
     --wo-stall: #6b7280;
     --wo-stall-bg: rgba(148, 163, 184, 0.14);
     --wo-stall-fg: #9ca3af;
-    --wo-run: #4ade80;
-    --wo-run-glow: rgba(74, 222, 128, 0.25);
-    --wo-need: #f87171;
-    --wo-need-bg: rgba(248, 113, 113, 0.16);
+    --wo-run: #4cc9a6;
+    --wo-run-bg: rgba(76, 201, 166, 0.14);
+    --wo-run-glow: rgba(76, 201, 166, 0.25);
+    --wo-need: #f28b87;
+    --wo-need-bg: rgba(242, 139, 135, 0.15);
     --wo-heat-0: rgba(255, 255, 255, 0.06);
-    --wo-heat-1: #1e3a5f;
-    --wo-heat-2: #1e40af;
-    --wo-heat-3: #3b82f6;
-    --wo-heat-4: #93c5fd;
+    --wo-heat-1: #2a3263;
+    --wo-heat-2: #3a4bb0;
+    --wo-heat-3: #6378e6;
+    --wo-heat-4: #aab6f8;
     --wo-card: var(--app-secondary-bg);
     --wo-card-shadow: none;
     --wo-card-shadow-hover: none;
     --wo-page: var(--app-bg);
     --wo-chip: rgba(255, 255, 255, 0.07);
     --wo-chip-hover: rgba(255, 255, 255, 0.12);
-    --wo-cross: #3b82f6;
+    --wo-cross: #6378e6;
 }
 
 .wo-card {
     background: var(--wo-card);
-    border: 1px solid var(--app-border);
-    border-radius: 14px;
+    border: 1px solid var(--wo-border);
+    border-radius: 16px;
     box-shadow: var(--wo-card-shadow);
     transition: box-shadow 0.15s ease, border-color 0.15s ease, transform 0.15s ease;
 }
@@ -102,4 +115,36 @@
 
 .wo-scroll {
     scrollbar-width: thin;
+}
+
+.wo-link {
+    color: var(--wo-push-fg);
+    font-weight: 600;
+    transition: opacity 0.12s ease;
+}
+
+.wo-link:hover {
+    opacity: 0.8;
+}
+
+.wo-btn-primary {
+    background: var(--wo-push);
+    color: #ffffff;
+    border-radius: 12px;
+    font-weight: 600;
+    transition: filter 0.12s ease;
+}
+
+.wo-btn-primary:hover {
+    filter: brightness(1.06);
+}
+
+.wo-clickable {
+    cursor: pointer;
+    transition: background 0.12s ease;
+    border-radius: 8px;
+}
+
+.wo-clickable:hover {
+    background: var(--wo-chip);
 }

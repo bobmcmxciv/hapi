@@ -1,4 +1,4 @@
-import { useMemo, useState, type ReactNode } from 'react'
+import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { Navigate, useNavigate } from '@tanstack/react-router'
 import type { SessionSummary } from '@/types/api'
 import { useTranslation } from '@/lib/use-translation'
@@ -8,11 +8,13 @@ import { MachineOsIcon } from '@/components/machinePresentation'
 import { dailyActivity, findLine, projectKeyOfSession, type FolderStat, type MainlineView, type WorkModel } from './deriveWork'
 import { useWorkModel } from './useWorkModel'
 import { newLineId, useWorkActions } from './workApi'
-import { setWorkView } from './workViewStore'
+import { setWorkFilter } from './workViewStore'
+import { WorkBench } from './WorkBench'
 import {
     AssignSelect,
     CalendarIcon,
     CrossMachineIcon,
+    InboxIcon,
     ListTodoIcon,
     MapIcon,
     NeedBadge,
@@ -27,7 +29,8 @@ import {
     type AssignChoice
 } from './WorkParts'
 
-export type WorkTab = 'map' | 'timeline' | 'triage'
+export type WorkTab = 'lines' | 'map' | 'timeline' | 'triage'
+export type WorkSearch = { tab?: WorkTab; line?: string; folder?: string }
 
 type Selection = { kind: 'folder'; projectKey: string } | { kind: 'line'; lineId: string } | null
 
@@ -35,11 +38,16 @@ type Selection = { kind: 'folder'; projectKey: string } | { kind: 'line'; lineId
  * /work：方案 B（主线 × 机器的工作地图）+ 方案 C（时间泳道，作为同页的一个视图）+ 待整理。
  * 只有 admin 能进；其他账号直接回会话页。
  */
-export function WorkMapPage(props: { tab: WorkTab; onTabChange: (tab: WorkTab) => void }) {
+export function WorkMapPage(props: { search: WorkSearch; onNavigate: (search: WorkSearch) => void }) {
     const { t } = useTranslation()
     const navigate = useNavigate()
     const { enabled, isLoading, error, result } = useWorkModel()
-    const [selection, setSelection] = useState<Selection>(null)
+    const tab: WorkTab = props.search.tab ?? 'lines'
+    const [selection, setSelection] = useState<Selection>(() => (props.search.folder ? { kind: 'folder', projectKey: props.search.folder } : null))
+    // 从总览点项目进来时带 folder=…：打开地图并展开这个目录的详情。
+    useEffect(() => {
+        if (props.search.folder) setSelection({ kind: 'folder', projectKey: props.search.folder })
+    }, [props.search.folder])
     const [expanded, setExpanded] = useState<Set<string>>(() => new Set())
     const { upsertLine } = useWorkActions()
 
@@ -48,16 +56,17 @@ export function WorkMapPage(props: { tab: WorkTab; onTabChange: (tab: WorkTab) =
     const model = result?.model
     const triageCount = model?.totals.unassignedSessions ?? 0
     const tabs: Array<{ key: WorkTab; label: string; icon: ReactNode; badge?: number }> = [
+        { key: 'lines', label: t('work.tab.lines'), icon: <ListTodoIcon className="h-3.5 w-3.5" /> },
         { key: 'map', label: t('work.tab.map'), icon: <MapIcon className="h-3.5 w-3.5" /> },
         { key: 'timeline', label: t('work.tab.timeline'), icon: <CalendarIcon className="h-3.5 w-3.5" /> },
-        { key: 'triage', label: t('work.tab.triage'), icon: <ListTodoIcon className="h-3.5 w-3.5" />, badge: triageCount }
+        { key: 'triage', label: t('work.tab.triage'), icon: <InboxIcon className="h-3.5 w-3.5" />, badge: triageCount }
     ]
     const addMainline = async () => {
         const name = window.prompt(t('work.prompt.newMainline'))?.trim()
         if (!name || !model) return
         const id = newLineId()
         await upsertLine.mutateAsync({ id, parentId: null, name, goal: '', sort: model.mainlines.length })
-        setSelection({ kind: 'line', lineId: id })
+        props.onNavigate({ tab: 'lines', line: id })
     }
 
     return (
@@ -66,21 +75,21 @@ export function WorkMapPage(props: { tab: WorkTab; onTabChange: (tab: WorkTab) =
                 <button type="button" className="rounded-full p-1.5 text-[var(--app-hint)] hover:bg-[var(--app-subtle-bg)] hover:text-[var(--app-fg)]" onClick={() => navigate({ to: '/sessions' })} aria-label={t('work.back')}>
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-5 w-5"><path d="M15 18l-6-6 6-6" /></svg>
                 </button>
-                <h1 className="hidden text-[17px] font-semibold tracking-tight sm:block">{t('work.map.title')}</h1>
+                <h1 className="hidden text-[17px] font-semibold tracking-tight sm:block">{t('work.bench.title')}</h1>
                 <div className="mx-auto inline-flex rounded-xl p-[3px] sm:mx-4" style={{ background: 'var(--wo-chip)' }}>
-                    {tabs.map(tab => (
+                    {tabs.map(item => (
                         <button
-                            key={tab.key}
+                            key={item.key}
                             type="button"
-                            onClick={() => { props.onTabChange(tab.key); setSelection(null) }}
+                            onClick={() => { props.onNavigate({ tab: item.key }); setSelection(null) }}
                             className={cn(
                                 'flex items-center gap-1.5 whitespace-nowrap rounded-[10px] px-3 py-1 text-xs transition-colors sm:text-sm',
-                                props.tab === tab.key ? 'bg-[var(--app-bg)] font-semibold shadow-sm' : 'text-[var(--app-hint)] hover:text-[var(--app-fg)]'
+                                tab === item.key ? 'bg-[var(--app-bg)] font-semibold shadow-sm' : 'text-[var(--app-hint)] hover:text-[var(--app-fg)]'
                             )}
                         >
-                            {tab.icon}
-                            {tab.label}
-                            {tab.badge ? <span className="rounded-full px-1.5 text-[10px] font-semibold tabular-nums" style={{ background: 'var(--wo-slow-bg)', color: 'var(--wo-slow-fg)' }}>{tab.badge}</span> : null}
+                            {item.icon}
+                            {item.label}
+                            {item.badge ? <span className="rounded-full px-1.5 text-[10px] font-semibold tabular-nums" style={{ background: 'var(--wo-slow-bg)', color: 'var(--wo-slow-fg)' }}>{item.badge}</span> : null}
                         </button>
                     ))}
                 </div>
@@ -94,20 +103,29 @@ export function WorkMapPage(props: { tab: WorkTab; onTabChange: (tab: WorkTab) =
             {result && model ? (
                 <div className="flex min-h-0 flex-1">
                     <div className="wo-scroll min-w-0 flex-1 overflow-auto p-3 split:p-6">
-                        {props.tab === 'map' ? (
+                        {tab === 'lines' ? (
+                            <WorkBench
+                                model={model}
+                                sessions={result.sessions}
+                                lineId={props.search.line ?? null}
+                                onSelectLine={lineId => props.onNavigate({ tab: 'lines', line: lineId })}
+                                onOpenFolder={projectKey => props.onNavigate({ tab: 'map', folder: projectKey })}
+                                onTriage={() => props.onNavigate({ tab: 'triage' })}
+                            />
+                        ) : tab === 'map' ? (
                             <WorkMatrix model={model} expanded={expanded} setExpanded={setExpanded} selection={selection} onSelect={setSelection} />
-                        ) : props.tab === 'timeline' ? (
+                        ) : tab === 'timeline' ? (
                             <WorkTimeline model={model} sessions={result.sessions} selection={selection} onSelect={setSelection} />
                         ) : (
                             <WorkTriage model={model} onSelect={setSelection} />
                         )}
                     </div>
-                    {selection ? (
+                    {selection && tab !== 'lines' ? (
                         <aside className="wo-scroll fixed inset-x-0 bottom-0 z-30 max-h-[78vh] overflow-y-auto rounded-t-2xl border-t border-[var(--app-border)] bg-[var(--app-bg)] p-5 shadow-[0_-8px_24px_rgba(0,0,0,0.12)] split:static split:z-auto split:max-h-none split:w-[400px] split:shrink-0 split:rounded-none split:border-l split:border-t-0 split:shadow-none">
                             <button type="button" className="float-right -mr-1 -mt-1 flex h-7 w-7 items-center justify-center rounded-full text-lg leading-none text-[var(--app-hint)] hover:bg-[var(--app-subtle-bg)] hover:text-[var(--app-fg)]" onClick={() => setSelection(null)} aria-label={t('work.close')}>×</button>
                             {selection.kind === 'folder'
-                                ? <FolderDetail model={model} sessions={result.sessions} projectKey={selection.projectKey} onSelectLine={lineId => setSelection({ kind: 'line', lineId })} />
-                                : <LineDetail model={model} sessions={result.sessions} lineId={selection.lineId} onSelectFolder={projectKey => setSelection({ kind: 'folder', projectKey })} onDeleted={() => setSelection(null)} />}
+                                ? <FolderDetail model={model} sessions={result.sessions} projectKey={selection.projectKey} onSelectLine={lineId => props.onNavigate({ tab: 'lines', line: lineId })} />
+                                : <LineDetail model={model} sessions={result.sessions} lineId={selection.lineId} onSelectFolder={projectKey => setSelection({ kind: 'folder', projectKey })} onDeleted={() => setSelection(null)} onOpenBench={lineId => props.onNavigate({ tab: 'lines', line: lineId })} />}
                         </aside>
                     ) : null}
                 </div>
@@ -120,8 +138,14 @@ export function WorkMapPage(props: { tab: WorkTab; onTabChange: (tab: WorkTab) =
 
 function MachineHead(props: { machine: WorkModel['machines'][number] }) {
     const { t } = useTranslation()
+    const navigate = useNavigate()
     return (
-        <div className="flex items-center gap-2">
+        <button
+            type="button"
+            title={t('work.map.machineSessions', { name: props.machine.label })}
+            onClick={() => { if (props.machine.id) { setWorkFilter({ machineId: props.machine.id }, { showSessions: true }); navigate({ to: '/sessions' }) } }}
+            className="wo-clickable -mx-1.5 flex items-center gap-2 px-1.5 py-1 text-left"
+        >
             <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg" style={{ background: 'var(--wo-chip)' }}>
                 <MachineOsIcon platform={props.machine.platform} icon={props.machine.icon} className="h-3.5 w-3.5" />
             </span>
@@ -129,7 +153,7 @@ function MachineHead(props: { machine: WorkModel['machines'][number] }) {
                 <div className="truncate text-xs font-semibold">{props.machine.label}</div>
                 <div className="text-[10px] font-normal text-[var(--app-hint)]">{t('work.folderCount', { n: props.machine.folderCount })}</div>
             </div>
-        </div>
+        </button>
     )
 }
 
@@ -312,6 +336,7 @@ const RANGES = [14, 42, 90] as const
 
 function WorkTimeline(props: { model: WorkModel; sessions: SessionSummary[]; selection: Selection; onSelect: (selection: Selection) => void }) {
     const { t } = useTranslation()
+    const navigate = useNavigate()
     const relative = useRelativeDay()
     const [days, setDays] = useState<number>(() => (typeof window !== 'undefined' && window.matchMedia?.('(min-width: 920px)').matches ? 42 : 14))
     const timeline = useMemo(() => dailyActivity(props.model, props.sessions, days, Date.now()), [props.model, props.sessions, days])
@@ -350,16 +375,19 @@ function WorkTimeline(props: { model: WorkModel; sessions: SessionSummary[]; sel
                                 <div className="flex items-center gap-1.5"><span className="truncate text-xs font-semibold">{main.name}</span><StatusBadge status={main.status} /></div>
                                 <div className="mt-0.5 text-[10px] text-[var(--app-hint)]">{t('work.timeline.rowMeta', { last: relative(main.lastActivity), n: total })}</div>
                             </button>,
-                            <button key={`${main.id}-cells`} type="button" onClick={() => props.onSelect({ kind: 'line', lineId: main.id })} className={cn('grid rounded-lg p-1 hover:bg-[var(--app-subtle-bg)]', selected && 'bg-[var(--wo-push-bg)]')} style={{ gridTemplateColumns: `repeat(${days}, minmax(0, 1fr))`, gap: days > 60 ? 2 : 3 }}>
+                            <div key={`${main.id}-cells`} className={cn('grid rounded-lg p-1', selected && 'bg-[var(--wo-push-bg)]')} style={{ gridTemplateColumns: `repeat(${days}, minmax(0, 1fr))`, gap: days > 60 ? 2 : 3 }}>
                                 {counts.map((n, index) => (
-                                    <span
+                                    <button
                                         key={index}
-                                        title={`${shortDate(timeline.days[index]!)}: ${n}`}
-                                        className={cn('aspect-square max-h-[18px] w-full rounded-[4px]', index === days - 1 && 'ring-1 ring-[var(--wo-push)] ring-offset-1 ring-offset-[var(--wo-card)]')}
+                                        type="button"
+                                        disabled={n === 0}
+                                        title={t('work.timeline.cellTitle', { day: shortDate(timeline.days[index]!), n })}
+                                        onClick={() => { setWorkFilter({ lineId: main.id, day: timeline.days[index]! }, { showSessions: true }); navigate({ to: '/sessions' }) }}
+                                        className={cn('aspect-square max-h-[18px] w-full rounded-[4px] enabled:cursor-pointer enabled:hover:ring-2 enabled:hover:ring-[var(--wo-push)]', index === days - 1 && 'ring-1 ring-[var(--wo-push)] ring-offset-1 ring-offset-[var(--wo-card)]')}
                                         style={{ background: heatColor(n) }}
                                     />
                                 ))}
-                            </button>
+                            </div>
                         ]
                     })}
                 </div>
@@ -377,6 +405,7 @@ function WorkTimeline(props: { model: WorkModel; sessions: SessionSummary[]; sel
 
 function WorkTriage(props: { model: WorkModel; onSelect: (selection: Selection) => void }) {
     const { t } = useTranslation()
+    const navigate = useNavigate()
     const { setFolder, setSession } = useWorkActions()
     const [limit, setLimit] = useState(50)
     const { model } = props
@@ -433,10 +462,10 @@ function WorkTriage(props: { model: WorkModel; onSelect: (selection: Selection) 
                         {model.looseSessions.slice(0, limit).map(({ session, machineLabel }) => (
                             <div key={session.id} className="flex flex-wrap items-center gap-3 px-4 py-2.5 transition-colors hover:bg-[var(--app-subtle-bg)]">
                                 {machineIcon(session.metadata?.machineId ?? null)}
-                                <div className="min-w-0 flex-1">
-                                    <div className="flex items-center gap-2"><RunDot active={session.active} thinking={session.thinking} /><span className="truncate text-sm">{getSessionTitle(session) || t('work.untitled')}</span></div>
+                                <button type="button" className="min-w-0 flex-1 text-left" onClick={() => navigate({ to: '/sessions/$sessionId', params: { sessionId: session.id } })}>
+                                    <div className="flex items-center gap-2"><RunDot active={session.active} thinking={session.thinking} /><span className="truncate text-sm hover:underline">{getSessionTitle(session) || t('work.untitled')}</span></div>
                                     <div className="text-[11px] text-[var(--app-hint)]">{machineLabel} · {shortDate(session.updatedAt)}</div>
-                                </div>
+                                </button>
                                 <AssignSelect mainlines={model.mainlines} value={null} disabled={busy} onChoose={choice => chooseSession(session.id, choice)} className="w-44" />
                             </div>
                         ))}
@@ -544,15 +573,16 @@ function FolderDetail(props: { model: WorkModel; sessions: SessionSummary[]; pro
                 <AssignSelect mainlines={props.model.mainlines} value={folder.lineId} allowUnassign={folder.mode !== 'unassigned'} disabled={setFolder.isPending} onChoose={choose} className="min-w-0 flex-1" />
                 {folder.lineId ? <GhostButton onClick={renameProject}>{t('work.detail.renameProject')}</GhostButton> : null}
             </div>
-            <div className="mt-5 flex gap-2">
-                {folder.lineId ? <PrimaryButton onClick={() => { setWorkView({ lineId: folder.lineId, mobileView: 'sessions' }); navigate({ to: '/sessions' }) }}>{t('work.detail.openSessions')}</PrimaryButton> : null}
+            <div className="mt-5 flex flex-wrap gap-2">
+                <PrimaryButton onClick={() => { setWorkFilter({ projectKey: folder.projectKey }, { showSessions: true }); navigate({ to: '/sessions' }) }}>{t('work.detail.openFolderSessions')}</PrimaryButton>
+                <GhostButton onClick={() => navigate({ to: '/sessions/new', search: folder.machineId ? { directory: folder.path, machineId: folder.machineId } : { directory: folder.path } })}>{t('work.detail.newSessionHere')}</GhostButton>
                 {line ? <GhostButton onClick={() => props.onSelectLine(line.sub?.id ?? line.main.id)}>{t('work.detail.viewLine')}</GhostButton> : null}
             </div>
         </div>
     )
 }
 
-function LineDetail(props: { model: WorkModel; sessions: SessionSummary[]; lineId: string; onSelectFolder: (projectKey: string) => void; onDeleted: () => void }) {
+function LineDetail(props: { model: WorkModel; sessions: SessionSummary[]; lineId: string; onSelectFolder: (projectKey: string) => void; onDeleted: () => void; onOpenBench: (lineId: string) => void }) {
     const { t } = useTranslation()
     const navigate = useNavigate()
     const relative = useRelativeDay()
@@ -653,7 +683,8 @@ function LineDetail(props: { model: WorkModel; sessions: SessionSummary[]; lineI
             <SectionTitle>{t('work.detail.recentLine')}</SectionTitle>
             <RecentSessions sessions={recent} machineLabel={machineLabelOf} />
             <div className="mt-5 flex gap-2">
-                <PrimaryButton onClick={() => { setWorkView({ lineId: line.id, mobileView: 'sessions' }); navigate({ to: '/sessions' }) }}>{t('work.detail.openLineSessions')}</PrimaryButton>
+                <PrimaryButton onClick={() => { setWorkFilter({ lineId: line.id }, { showSessions: true }); navigate({ to: '/sessions' }) }}>{t('work.detail.openLineSessions')}</PrimaryButton>
+                <GhostButton onClick={() => props.onOpenBench(line.id)}>{t('work.detail.openBench')}</GhostButton>
             </div>
             <div className="mt-2 flex flex-wrap gap-2">
                 <GhostButton onClick={rename}>{t('work.line.rename')}</GhostButton>

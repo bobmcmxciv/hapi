@@ -32,7 +32,7 @@ export function useWorkModel(): { enabled: boolean; isLoading: boolean; error: s
         const prepared = prepareSidebarSessions(sessions, null)
         const digests: Record<string, FolderDigest> = {}
         for (const digest of digestQuery.data?.projects ?? []) {
-            digests[digest.projectKey] = { stage: digest.stage, overview: digest.overview, todo: digest.todo, status: digest.status }
+            digests[digest.projectKey] = { stage: digest.stage, overview: digest.overview, todo: digest.todo, status: digest.status, artifacts: digest.artifacts }
         }
         const model = deriveWork({
             map: mapQuery.data,

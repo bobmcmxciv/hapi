@@ -17,7 +17,7 @@ const DAY_MS = 86_400_000
 export type MachineInfo = { id: string; label: string; ownerUsername?: string | null; platform?: string | null; icon?: string | null }
 
 /** 项目阶段等摘要信息，来自 /api/digests/projects。 */
-export type FolderDigest = { stage: string; overview: string; todo: string[]; status: string }
+export type FolderDigest = { stage: string; overview: string; todo: string[]; status: string; artifacts?: string[] }
 
 export type FolderStat = {
     projectKey: string
@@ -65,7 +65,7 @@ export type SublineView = WorkLine & LineStats & {
 
 export type MainlineView = WorkLine & LineStats & {
     sublines: SublineView[]
-    nextStep: { text: string; project: string } | null
+    nextStep: { text: string; project: string; projectKey: string } | null
 }
 
 export type LooseSession = { session: SessionSummary; projectKey: string; machineLabel: string }
@@ -257,7 +257,7 @@ export function deriveWork(input: {
     const sortLines = (a: WorkLine, b: WorkLine) => a.sort - b.sort || a.id.localeCompare(b.id)
     for (const main of map.lines.filter(line => line.parentId === null).sort(sortLines)) {
         const mainStats = emptyStats()
-        const todoCandidates: Array<{ text: string; project: string; at: number }> = []
+        const todoCandidates: Array<{ text: string; project: string; projectKey: string; at: number }> = []
         const sublines: SublineView[] = []
         mainlineOfLine.set(main.id, main.id)
         for (const sub of map.lines.filter(line => line.parentId === main.id).sort(sortLines)) {
@@ -281,7 +281,7 @@ export function deriveWork(input: {
                 list.push(folder)
                 byProject.set(folder.project, list)
                 const todo = folder.digest?.todo?.[0]
-                if (todo) todoCandidates.push({ text: todo, project: folder.project, at: folder.lastActivity })
+                if (todo) todoCandidates.push({ text: todo, project: folder.project, projectKey: folder.projectKey, at: folder.lastActivity })
             }
             const projects: ProjectStat[] = [...byProject.entries()].map(([name, list]) => {
                 list.sort((a, b) => b.lastActivity - a.lastActivity)
@@ -316,7 +316,7 @@ export function deriveWork(input: {
             status: statusOf(mainStats.lastActivity, now),
             sublines,
             nextStep: todoCandidates.length > 0
-                ? (({ text, project }) => ({ text, project }))(todoCandidates.reduce((best, item) => (item.at > best.at ? item : best)))
+                ? (({ text, project, projectKey }) => ({ text, project, projectKey }))(todoCandidates.reduce((best, item) => (item.at > best.at ? item : best)))
                 : null
         })
     }
@@ -410,4 +410,51 @@ export function dailyActivity(model: WorkModel, sessions: SessionSummary[], days
         else if (model.unassignedSessionIds.has(session.id)) unmapped += 1
     }
     return { days: dayStarts, byMainline, unmapped }
+}
+
+/** 会话列表的过滤条件：主线/支线、机器、目录、某一天、只看运行中/待审批，可以组合。 */
+export type WorkFilter = {
+    lineId?: string
+    machineId?: string
+    projectKey?: string
+    /** 本地日零点（毫秒）。 */
+    day?: number
+    mode?: 'running' | 'pending'
+}
+
+export function isEmptyFilter(filter: WorkFilter | null | undefined): boolean {
+    return !filter || (!filter.lineId && !filter.machineId && !filter.projectKey && filter.day === undefined && !filter.mode)
+}
+
+/** 返回过滤谓词；线已被删除时那一项忽略。 */
+export function sessionFilterPredicate(model: WorkModel, filter: WorkFilter): (session: SessionSummary) => boolean {
+    const lineIds = filter.lineId && findLine(model, filter.lineId) ? sessionsInLine(model, filter.lineId) : null
+    return session => {
+        if (lineIds && !lineIds.has(session.id)) return false
+        if (filter.machineId && session.metadata?.machineId !== filter.machineId) return false
+        if (filter.projectKey && projectKeyOfSession(session) !== filter.projectKey) return false
+        if (filter.day !== undefined && (session.updatedAt < filter.day || session.updatedAt >= filter.day + DAY_MS)) return false
+        if (filter.mode === 'running' && !session.active) return false
+        if (filter.mode === 'pending' && session.pendingRequestsCount <= 0) return false
+        return true
+    }
+}
+
+/** 一条线（主线或支线）里最近更新的会话——「继续工作」打开它。 */
+export function latestSessionInLine(model: WorkModel, sessions: SessionSummary[], lineId: string): SessionSummary | null {
+    const ids = sessionsInLine(model, lineId)
+    let best: SessionSummary | null = null
+    for (const session of sessions) {
+        if (ids.has(session.id) && (!best || session.updatedAt > best.updatedAt)) best = session
+    }
+    return best
+}
+
+/** 一个目录里最近更新的会话。 */
+export function latestSessionInFolder(sessions: SessionSummary[], projectKey: string): SessionSummary | null {
+    let best: SessionSummary | null = null
+    for (const session of sessions) {
+        if (projectKeyOfSession(session) === projectKey && (!best || session.updatedAt > best.updatedAt)) best = session
+    }
+    return best
 }
