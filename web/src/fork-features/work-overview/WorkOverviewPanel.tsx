@@ -210,6 +210,9 @@ export function WorkOverviewPanel(props: { variant: 'desktop' | 'mobile' }) {
                                 <span className="ml-2">{t('work.summaryLine', { machines: model.machines.length, lines: model.mainlines.length, sessions: model.totals.sessions })}</span>
                             </p>
                         </div>
+                        <button type="button" data-testid="work-help" className="wo-card wo-card-interactive mt-1 flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium" onClick={() => navigate({ to: '/settings/help' })}>
+                            <span aria-hidden className="flex h-3.5 w-3.5 items-center justify-center rounded-full border border-current text-[9px] font-bold leading-none">?</span>{t('settings.help.title')}
+                        </button>
                         <button type="button" className="wo-card wo-card-interactive mt-1 flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium" onClick={() => navigate({ to: '/work' })}>
                             <WorkGridIcon className="h-3.5 w-3.5" />{t('work.bench.open')}
                         </button>

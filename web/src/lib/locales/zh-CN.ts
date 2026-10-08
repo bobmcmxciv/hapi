@@ -1111,6 +1111,8 @@ export default {
   'settings.fork.title': 'HAPI 扩展',
   'settings.fork.summary': '提供商登录、会话导入',
   'settings.fork.description': '管理当前 HAPI fork 提供的功能。',
+  'settings.help.title': "使用指南",
+  'settings.help.summary': "示例截图与操作说明",
   'settings.listPrefs.title': '会话列表外观',
   'settings.listPrefs.toolbar.calendar': '日历筛选',
   'settings.listPrefs.toolbar.archive': '折叠已归档',

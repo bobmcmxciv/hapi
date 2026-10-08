@@ -1108,6 +1108,8 @@ export default {
   'settings.fork.title': 'HAPI Extensions',
   'settings.fork.summary': 'Provider sign-in, session import',
   'settings.fork.description': 'Manage features provided by this HAPI fork.',
+  'settings.help.title': "User guide",
+  'settings.help.summary': "Screenshots and how things work",
   'settings.listPrefs.title': 'Session list appearance',
   'settings.listPrefs.toolbar.calendar': 'Calendar filter',
   'settings.listPrefs.toolbar.archive': 'Fold archived',

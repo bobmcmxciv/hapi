@@ -80,6 +80,7 @@ import SettingsMachinesPage from '@/routes/settings/machines'
 import SettingsAboutPage from '@/routes/settings/about'
 import SettingsStoragePage from '@/routes/settings/storage'
 import ForkSettingsPage from '@/fork-features/settings/ForkSettingsPage'
+import HelpPage from '@/fork-features/help/HelpPage'
 import UsagePage from '@/fork-features/usage/UsagePage'
 import { ResourceGrantsSettingsPage } from '@/fork-features/multi-user/ResourceGrantsSettingsSection'
 import SharePage from '@/routes/share'
@@ -1285,6 +1286,13 @@ const settingsStorageRoute = createRoute({
         component: ForkSettingsPage,
     })
 
+    // fork(help)：使用指南（示例数据截图 + 操作说明）。
+    const settingsHelpRoute = createRoute({
+        getParentRoute: () => settingsRoute,
+        path: 'help',
+        component: HelpPage,
+    })
+
     const settingsForkGrantsRoute = createRoute({
         getParentRoute: () => settingsRoute,
         path: 'fork/grants',
@@ -1363,6 +1371,7 @@ export const routeTree = rootRoute.addChildren([
         settingsStorageRoute,
         settingsAboutRoute,
         settingsForkRoute,
+        settingsHelpRoute,
         settingsForkGrantsRoute,
         settingsAccountRoute,
         settingsUsersRoute,

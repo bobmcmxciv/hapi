@@ -40,6 +40,7 @@ export function SettingsNav(props: { activeId?: string; mobile?: boolean }) {
         users: t('settings.fork.users.description'),
         fork: t('settings.fork.summary'),
         usage: t('settings.usage.summary'),
+        help: t('settings.help.summary'),
         about: `v${__APP_VERSION__}`,
     }
     const namespace = getNamespace(token)
