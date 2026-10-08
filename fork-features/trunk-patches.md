@@ -979,3 +979,12 @@ localStorage，按 hub 地址 + 账号分区，**所有账号都可用**（不�
 | `web/src/components/SessionList.tsx`, `web/src/components/MachineFilterBar.tsx`, `web/src/router.tsx`, locale files | No toolbar-item registry or per-button visibility hook; no layout prop on the machine chips; no leading slot in the list header | Button visibility and order live inside the list header markup, and the mobile work/sessions toggle must share that row | Settings → fork → 会话列表外观 → toggle a button / pick a layout → `/sessions` header re-renders from `useListPrefs()` | In a real browser at 390px: hide 日历筛选 and 只看未读, pick 紧凑; the list toolbar no longer shows those buttons, the 工作/会话 toggle sits on the toolbar row, machine chips wrap on one line |
 
 上游若提供工具栏自定义或机器筛选布局，先比交互再决定去留。
+
+## 使用指南 help (2026-10-08)
+
+设置里新增「使用指南」页（`/settings/help`），用一套示例数据的截图说明总览、梳理待办、待办卡片、需要你处理与忽略、
+按主线聚焦、会话标签与快捷键、会话列表外观、手机端和工作台。截图是 WebP，不在 PWA 预缓存的扩展名里，打开页面时才加载。
+
+| Files | Missing upstream seam | Why it cannot move out | Runtime path | Sync verification |
+|---|---|---|---|---|
+| `web/src/router.tsx`, `web/src/routes/settings/categories.ts`, `web/src/components/settings/SettingsNav.tsx`, locale files | No registry for extra settings pages | The settings layout and its navigation are built from the static category list and route tree | Settings → 使用指南, or the overview's 使用指南 button → `/settings/help` | In a real browser: the settings navigation lists 使用指南, the page shows nine sections with ten loaded screenshots, and the overview button opens it |

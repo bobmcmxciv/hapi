@@ -452,6 +452,7 @@ web/src/components/assistant-ui/reasoning.tsx	trunk-patch	#179	origin-only delta
 web/src/components/assistant-ui/shiki-highlighter.tsx	upstream-fix	#179	origin-only delta; fork commits a2d26372; disposition upstream-issue https://github.com/tiann/hapi/issues/1074: general fix reported against latest upstream main
 web/src/components/icons.tsx	trunk-patch	#179	origin-only delta; fork commits 7faed2eb,16321159; disposition fork-specific #179,https://github.com/tiann/hapi/issues/1076: Qwen summary speech feature; shared path also carries separately reported upstream fix
 web/src/components/machinePresentation.tsx	trunk-patch	machine-icons	machine-icons: MachineOsIcon/MachineChip 接受 icon，设了画设备外形
+web/src/components/settings/SettingsNav.tsx	trunk-patch	help	help: 使用指南的分类摘要
 web/src/components/ui/Toast.tsx	upstream-fix	#179	origin-only delta; fork commits d1f9f394; disposition upstream-issue https://github.com/tiann/hapi/issues/1077: general fix reported against latest upstream main
 web/src/fork-features/claude-proxy-models/CcSwitchProviderSelector.tsx	fork-owned	claude-proxy-models	fork-owned module: New Session 的 cc-switch 供应商选择器（按机器记忆，只对本会话注入 env）
 web/src/fork-features/claude-proxy-models/ClaudeProxyCatalogHint.tsx	fork-owned	claude-proxy-models	fork-owned module: Claude 代理模型目录动态发现（hub 从 HAPI_CLAUDE_PROXY_MODELS_URL 拉 cx2cc /v1/models，替代写死的 CLAUDE_PROXY_MODEL_LABELS）
@@ -461,6 +462,18 @@ web/src/fork-features/claude-proxy-models/claudeProxyModelOptions.test.ts	fork-o
 web/src/fork-features/claude-proxy-models/claudeProxyModelOptions.ts	fork-owned	claude-proxy-models	fork-owned module: Claude 代理模型目录动态发现（hub 从 HAPI_CLAUDE_PROXY_MODELS_URL 拉 cx2cc /v1/models，替代写死的 CLAUDE_PROXY_MODEL_LABELS）
 web/src/fork-features/claude-proxy-models/types.ts	fork-owned	claude-proxy-models	fork-owned module: Claude 代理模型目录动态发现（hub 从 HAPI_CLAUDE_PROXY_MODELS_URL 拉 cx2cc /v1/models，替代写死的 CLAUDE_PROXY_MODEL_LABELS）
 web/src/fork-features/claude-proxy-models/useClaudeProxyModels.ts	fork-owned	claude-proxy-models	fork-owned module: Claude 代理模型目录动态发现（hub 从 HAPI_CLAUDE_PROXY_MODELS_URL 拉 cx2cc /v1/models，替代写死的 CLAUDE_PROXY_MODEL_LABELS）
+web/src/fork-features/help/HelpPage.tsx	fork-owned	help	fork-owned module: 设置 → 使用指南页面
+web/src/fork-features/help/helpContent.ts	fork-owned	help	fork-owned module: 使用指南正文（中/英）与截图引用
+web/src/fork-features/help/screens/briefing.webp	fork-owned	help	使用指南截图（示例数据）
+web/src/fork-features/help/screens/card.webp	fork-owned	help	使用指南截图（示例数据）
+web/src/fork-features/help/screens/focus.webp	fork-owned	help	使用指南截图（示例数据）
+web/src/fork-features/help/screens/list-prefs.webp	fork-owned	help	使用指南截图（示例数据）
+web/src/fork-features/help/screens/mobile-list.webp	fork-owned	help	使用指南截图（示例数据）
+web/src/fork-features/help/screens/mobile-work.webp	fork-owned	help	使用指南截图（示例数据）
+web/src/fork-features/help/screens/need.webp	fork-owned	help	使用指南截图（示例数据）
+web/src/fork-features/help/screens/overview.webp	fork-owned	help	使用指南截图（示例数据）
+web/src/fork-features/help/screens/tabs.webp	fork-owned	help	使用指南截图（示例数据）
+web/src/fork-features/help/screens/workbench.webp	fork-owned	help	使用指南截图（示例数据）
 web/src/fork-features/list-prefs/ListPrefsSettings.tsx	fork-owned	list-prefs	fork-owned module: 设置页「会话列表外观」节（工具栏按钮显隐、机器标签布局）
 web/src/fork-features/list-prefs/listPrefs.test.ts	fork-owned	list-prefs	fork-owned module tests
 web/src/fork-features/list-prefs/listPrefs.ts	fork-owned	list-prefs	fork-owned module: 列表偏好 localStorage store（hapi-list-prefs）
@@ -553,8 +566,8 @@ web/src/lib/fork-restore.test.ts	fork-owned	#170	origin-only delta; fork commits
 web/src/lib/fork-restore.ts	fork-owned	#170	origin-only delta; fork commits 88f9dc20,fbfd26f5,5262a261
 web/src/lib/generatedInlineMedia.test.ts	fork-owned	#175	origin-only delta; fork commits d28853c7
 web/src/lib/generatedInlineMedia.ts	fork-owned	#175	origin-only delta; fork commits d28853c7
-web/src/lib/locales/en.ts	trunk-patch	#171	both refs changed; fork commits ba37bcfb,606c6579,302180e5,7faed2eb,85743eb7,4a0c5f0b,7b197fec,a8815d47,bfa252da,c853bcbf,aee648ee,d1f9f394,413e76cc,291c8db0,3582e989,d3199037; claude-proxy-models: newSession.model.proxyCatalog* 文案; machine-icons: machineIcon.* 文案; session-digest/usage trend 文案; work-overview: work.* 文案; session-tabs: tabs.* 文案; session-digest: 重新总结的排队/进度/已更新/超时文案; session-tabs: tabs.home; list-prefs: settings.listPrefs.*; work-overview: work.card2.*、work.briefing.*、work.lineDetail.*、work.need 忽略/恢复/只看; session-tabs: tabs.closeShortcut
-web/src/lib/locales/zh-CN.ts	trunk-patch	#171	both refs changed; fork commits ba37bcfb,606c6579,302180e5,7faed2eb,85743eb7,4a0c5f0b,7b197fec,a8815d47,bfa252da,c853bcbf,aee648ee,d1f9f394,413e76cc,291c8db0,3582e989,d3199037; claude-proxy-models: newSession.model.proxyCatalog* 文案; machine-icons: machineIcon.* 文案; session-digest/usage trend 文案; work-overview: work.* 文案; session-tabs: tabs.* 文案; session-digest: 重新总结的排队/进度/已更新/超时文案; session-tabs: tabs.home; list-prefs: settings.listPrefs.*; work-overview: work.card2.*、work.briefing.*、work.lineDetail.*、work.need 忽略/恢复/只看; session-tabs: tabs.closeShortcut
+web/src/lib/locales/en.ts	trunk-patch	#171	both refs changed; fork commits ba37bcfb,606c6579,302180e5,7faed2eb,85743eb7,4a0c5f0b,7b197fec,a8815d47,bfa252da,c853bcbf,aee648ee,d1f9f394,413e76cc,291c8db0,3582e989,d3199037; claude-proxy-models: newSession.model.proxyCatalog* 文案; machine-icons: machineIcon.* 文案; session-digest/usage trend 文案; work-overview: work.* 文案; session-tabs: tabs.* 文案; session-digest: 重新总结的排队/进度/已更新/超时文案; session-tabs: tabs.home; list-prefs: settings.listPrefs.*; work-overview: work.card2.*、work.briefing.*、work.lineDetail.*、work.need 忽略/恢复/只看; session-tabs: tabs.closeShortcut; work-overview: work.card2.todo/sessions、work.briefing.openCard; help: settings.help.*
+web/src/lib/locales/zh-CN.ts	trunk-patch	#171	both refs changed; fork commits ba37bcfb,606c6579,302180e5,7faed2eb,85743eb7,4a0c5f0b,7b197fec,a8815d47,bfa252da,c853bcbf,aee648ee,d1f9f394,413e76cc,291c8db0,3582e989,d3199037; claude-proxy-models: newSession.model.proxyCatalog* 文案; machine-icons: machineIcon.* 文案; session-digest/usage trend 文案; work-overview: work.* 文案; session-tabs: tabs.* 文案; session-digest: 重新总结的排队/进度/已更新/超时文案; session-tabs: tabs.home; list-prefs: settings.listPrefs.*; work-overview: work.card2.*、work.briefing.*、work.lineDetail.*、work.need 忽略/恢复/只看; session-tabs: tabs.closeShortcut; work-overview: work.card2.todo/sessions、work.briefing.openCard; help: settings.help.*
 web/src/lib/message-window-store.test.ts	upstream-fix	#179,mouriya#323	origin-only delta; fork commits 7a5232bf; disposition upstream-issue https://github.com/tiann/hapi/issues/1071: general fix reported against latest upstream main; mouriya-s-lab/hapi#323 mechanism 1: held-range revalidation cases (older page + tail sync while reading history)
 web/src/lib/message-window-store.ts	upstream-fix	#179,mouriya#323	origin-only delta; fork commits 7a5232bf; disposition upstream-issue https://github.com/tiann/hapi/issues/1071: general fix reported against latest upstream main; mouriya-s-lab/hapi#323 mechanism 1: epoch change while reading history re-reads the held interval (after+until) instead of replacing the window with latest — drop when upstream lands #326/#327
 web/src/lib/query-keys.ts	trunk-patch	#173	both refs changed; fork commits 3994ee9a,fc7d7b4a,a8815d47,c58622c2; claude-proxy-models: claudeProxyModels 键
@@ -581,10 +594,11 @@ web/src/lib/usageReportBackfill.ts	fork-owned	usage-footer	usage_report 帧差�
 web/src/main.tsx	trunk-patch	web-stability	installCrashGuard、AppErrorBoundary 包根、bootstrap().catch 静态兜底页
 web/src/realtime/messageSummarySpeaker.test.ts	fork-owned	#179	origin-only delta; fork commits 7faed2eb
 web/src/realtime/messageSummarySpeaker.ts	fork-owned	#179	origin-only delta; fork commits 7faed2eb
-web/src/router.tsx	trunk-patch	#171	both refs changed; fork commits a6f9e3f9,0894d3d2,3582e989; machine-icons: useMachineIcons 注入会话列表; work-overview: 会话页右栏总览、左栏主线过滤、手机切换、页头入口、/work 路由; session-tabs: 右栏挂标签条与同步 hook、新建会话页头标 data-safe-top="calc"; work-overview v2: /work 搜索参数 tab/line/folder; session-tabs: 首页标签 tabsHome（回 /sessions 并切手机「工作」视图）; list-prefs: 页头按钮倒序进 row-reverse 容器、手机「工作|会话」切换并入工具栏行
+web/src/router.tsx	trunk-patch	#171	both refs changed; fork commits a6f9e3f9,0894d3d2,3582e989; machine-icons: useMachineIcons 注入会话列表; work-overview: 会话页右栏总览、左栏主线过滤、手机切换、页头入口、/work 路由; session-tabs: 右栏挂标签条与同步 hook、新建会话页头标 data-safe-top="calc"; work-overview v2: /work 搜索参数 tab/line/folder; session-tabs: 首页标签 tabsHome（回 /sessions 并切手机「工作」视图）; list-prefs: 页头按钮倒序进 row-reverse 容器、手机「工作|会话」切换并入工具栏行; help: /settings/help 路由
 web/src/routes/sessions/file.test.tsx	trunk-patch	#179	origin-only delta; fork commits merge-resolution; disposition fork-specific #179: fork file viewer behavior merge resolution
 web/src/routes/sessions/file.tsx	trunk-patch	#177	origin-only delta; fork commits bfa252da,7a5232bf,e737b4b3,d3199037; session-tabs: 页头安全区容器标 data-safe-top
 web/src/routes/sessions/terminal.tsx	trunk-patch	session-tabs	session-tabs: 页头安全区容器标 data-safe-top，标签条在上方时由其接管安全区
+web/src/routes/settings/categories.ts	trunk-patch	help	help: 设置导航加「使用指南」分类
 web/src/routes/settings/display.tsx	upstream-sync	#180	merge-base 87f5c78a; changed only on upstream/main
 web/src/routes/settings/index.test.tsx	upstream-sync	#180	merge-base 87f5c78a; changed only on upstream/main
 web/src/routes/settings/machines.tsx	trunk-patch	machine-icons	machine-icons: 设备页行首图标按钮 + 内联选择
