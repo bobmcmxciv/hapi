@@ -53,8 +53,8 @@ export function BriefingPanel(props: {
     result: WorkModelResult
     digestIndex: Record<string, DigestIndexEntry>
     mobile: boolean
-    onSession: (sessionId: string) => void
-    onLine: (lineId: string) => void
+    /** 点一条待办：打开待办卡片（指向会话或主线）。 */
+    onItem: (item: BriefingItem) => void
 }) {
     const { t } = useTranslation()
     /** 点击时刻；非空表示在等这一次梳理的结果（期间 3 秒轮询）。 */
@@ -108,19 +108,33 @@ export function BriefingPanel(props: {
             {briefing && (briefing.summary || briefing.groups.length > 0) ? (
                 <div className={cn('mt-3', running && 'opacity-60')}>
                     {briefing.summary ? <p className="text-[13px] leading-relaxed text-[var(--wo-ink)]">{briefing.summary}</p> : null}
-                    <div className={cn('mt-2 grid gap-3', props.mobile ? 'grid-cols-1' : 'grid-cols-2')}>
-                        {briefing.groups.map(group => (
-                            <div key={group.title}>
-                                <div className="mb-1 text-xs font-semibold text-[var(--wo-muted)]">{group.title}</div>
-                                <ul className="space-y-0.5">
-                                    {group.items.map((item, index) => (
-                                        <li key={index}>
-                                            <BriefingRow item={item} lineName={item.lineId ? lineName(item.lineId) : null} onSession={props.onSession} onLine={props.onLine} />
-                                        </li>
-                                    ))}
-                                </ul>
-                            </div>
-                        ))}
+                    <div className={cn('mt-3 grid items-start gap-3', props.mobile ? 'grid-cols-1' : 'grid-cols-2')}>
+                        {briefing.groups.map((group, index) => {
+                            const tone = groupTone(group.title, index)
+                            return (
+                                <section
+                                    key={group.title}
+                                    data-testid="work-briefing-group"
+                                    className="rounded-xl border border-[var(--wo-border)] bg-[var(--wo-soft)] px-3 pb-2 pt-2.5"
+                                    style={{ boxShadow: `inset 3px 0 0 ${tone}` }}
+                                >
+                                    <header className="mb-1.5 flex items-center gap-2 border-b border-[var(--wo-border)] pb-2 pl-1">
+                                        <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ background: tone }} />
+                                        <h4 className="min-w-0 flex-1 truncate text-[14px] font-bold text-[var(--wo-ink)]">{group.title}</h4>
+                                        <span className="shrink-0 rounded-full px-2 py-px text-[11px] font-semibold" style={{ background: `color-mix(in srgb, ${tone} 15%, transparent)`, color: tone }}>
+                                            {group.items.length}
+                                        </span>
+                                    </header>
+                                    <ul className="space-y-0.5">
+                                        {group.items.map((item, itemIndex) => (
+                                            <li key={itemIndex}>
+                                                <BriefingRow item={item} lineName={item.lineId ? lineName(item.lineId) : null} onItem={props.onItem} openHint={t('work.briefing.openCard')} />
+                                            </li>
+                                        ))}
+                                    </ul>
+                                </section>
+                            )
+                        })}
                     </div>
                 </div>
             ) : null}
@@ -128,7 +142,20 @@ export function BriefingPanel(props: {
     )
 }
 
-function BriefingRow(props: { item: BriefingItem; lineName: string | null; onSession: (id: string) => void; onLine: (id: string) => void }) {
+const GROUP_TONES: Array<[RegExp, string]> = [
+    [/拍板|回复|决定|decide|reply|answer/i, 'var(--wo-need)'],
+    [/推进|今天|today|move/i, 'var(--wo-push)'],
+    [/收尾|归档|完成|wrap|archive|close/i, 'var(--wo-run)'],
+    [/停滞|提醒|stall|idle/i, 'var(--wo-stall)']
+]
+const FALLBACK_TONES = ['var(--wo-need)', 'var(--wo-push)', 'var(--wo-run)', 'var(--wo-stall)']
+
+/** 分组标题由模型给出：按关键词定色，认不出就按顺序轮换。 */
+function groupTone(title: string, index: number): string {
+    return GROUP_TONES.find(([pattern]) => pattern.test(title))?.[1] ?? FALLBACK_TONES[index % FALLBACK_TONES.length]!
+}
+
+function BriefingRow(props: { item: BriefingItem; lineName: string | null; onItem: (item: BriefingItem) => void; openHint: string }) {
     const { item } = props
     const clickable = Boolean(item.sessionId || item.lineId)
     const body = (
@@ -144,10 +171,13 @@ function BriefingRow(props: { item: BriefingItem; lineName: string | null; onSes
     return (
         <button
             type="button"
-            className="wo-clickable flex w-full items-start gap-2 px-1.5 py-1 text-left"
-            onClick={() => (item.sessionId ? props.onSession(item.sessionId) : props.onLine(item.lineId!))}
+            data-testid="work-briefing-item"
+            title={props.openHint}
+            className="wo-clickable group flex w-full items-start gap-2 px-1.5 py-1 text-left"
+            onClick={() => props.onItem(item)}
         >
             {body}
+            <span aria-hidden className="mt-0.5 shrink-0 text-[var(--wo-muted)] opacity-0 transition-opacity group-hover:opacity-100">›</span>
         </button>
     )
 }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { cardRequestsOf, latestCardLines, questionAnswers, summarizeRequestArguments } from './needCardModel'
+import { cardRequestsOf, latestCardLines, pickCardSessions, questionAnswers, summarizeRequestArguments } from './needCardModel'
 
 const user = (seq: number, text: string) => ({ seq, content: { role: 'user', content: { type: 'text', text } } })
 const assistant = (seq: number, text: string) => ({
@@ -33,6 +33,17 @@ describe('need card helpers', () => {
         const question = requests[1]!
         if (question.kind !== 'question') throw new Error('expected question')
         expect(question.questions[0]!.options.map(option => option.label)).toEqual(['A', 'B'])
+    })
+
+    it('orders the sessions a to-do card can switch between and keeps the named one', () => {
+        const s = (id: string, active: boolean, pending: number, updatedAt: number) => ({ id, active, pendingRequestsCount: pending, updatedAt })
+        const pool = [s('old', false, 0, 1), s('run', true, 0, 5), s('wait', false, 2, 2), s('new', false, 0, 9), s('run', true, 0, 5)]
+        expect(pickCardSessions(pool, null).list.map(x => x.id)).toEqual(['wait', 'run', 'new', 'old'])
+        expect(pickCardSessions(pool, null).initial).toBe('wait')
+        expect(pickCardSessions(pool, 'old').initial).toBe('old')
+        const capped = pickCardSessions(pool, 'old', 2)
+        expect(capped.list.map(x => x.id)).toEqual(['wait', 'old'])
+        expect(pickCardSessions([], 'gone')).toEqual({ initial: null, list: [] })
     })
 
     it('builds answers keyed by question index like the chat footer, and refuses unanswered questions', () => {

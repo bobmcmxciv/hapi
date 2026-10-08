@@ -87,6 +87,25 @@ export function cardRequestsOf(requests: Record<string, { tool: string; argument
     return out.sort((a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0))
 }
 
+type CardSessionLike = { id: string; active: boolean; pendingRequestsCount: number; updatedAt: number }
+
+/**
+ * 待办卡片里可切换的会话：等你处理的在前，其次在线的，其余按最近更新；超出上限时也保留待办指名的那个会话。
+ * initial 是打开卡片时显示的会话：待办指名的优先，否则取排在最前的。
+ */
+export function pickCardSessions<T extends CardSessionLike>(pool: T[], preferredId: string | null, limit = 8): { initial: string | null; list: T[] } {
+    const unique = [...new Map(pool.map(session => [session.id, session])).values()]
+    unique.sort((a, b) => (
+        Number(b.pendingRequestsCount > 0) - Number(a.pendingRequestsCount > 0)
+        || Number(b.active) - Number(a.active)
+        || b.updatedAt - a.updatedAt
+    ))
+    const list = unique.slice(0, limit)
+    const preferred = preferredId ? unique.find(session => session.id === preferredId) : undefined
+    if (preferred && !list.includes(preferred)) list[list.length - 1] = preferred
+    return { initial: preferred?.id ?? list[0]?.id ?? null, list }
+}
+
 /** 问题答案的提交格式与会话页 AskUserQuestionFooter 一致：按题目序号为键，值是选中选项的 label。 */
 export function questionAnswers(questions: AskUserQuestionQuestion[], selected: number[][], other: string[]): Record<string, string[]> | null {
     const answers: Record<string, string[]> = {}

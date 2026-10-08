@@ -23,7 +23,9 @@ import { useWorkModel, type WorkModelResult } from './useWorkModel'
 import { setWorkFilter, setWorkView, useWorkView } from './workViewStore'
 import { newLineId, useWorkActions } from './workApi'
 import { ArrowRightIcon, NeedBadge, RunDot, StatusBadge, WorkGridIcon, heatColor, shortDate, useRelativeDay } from './WorkParts'
-import { NeedCard } from './NeedCard'
+import { NeedCard, type CardCandidate } from './NeedCard'
+import { pickCardSessions } from './needCardModel'
+import type { BriefingItem } from './workApi'
 import { BriefingPanel } from './BriefingPanel'
 import { LineDetailPanel, useLineDetailOpen } from './LineDetailPanel'
 
@@ -47,7 +49,13 @@ export function WorkOverviewPanel(props: { variant: 'desktop' | 'mobile' }) {
     const digestIndex = useDigestIndex()
     const { upsertLine } = useWorkActions()
     const [tab, setTab] = useState<CardTab>('all')
-    const [card, setCard] = useState<{ sessionId: string; title: string; sub: string } | null>(null)
+    const [card, setCard] = useState<{
+        sessionId: string
+        title: string
+        sub: string
+        context?: { text: string; line: string | null }
+        candidates?: CardCandidate[]
+    } | null>(null)
     const [showDismissed, setShowDismissed] = useState(false)
     const { setDismissed } = useWorkActions()
     const needRef = useRef<HTMLDivElement>(null)
@@ -102,6 +110,35 @@ export function WorkOverviewPanel(props: { variant: 'desktop' | 'mobile' }) {
         title: getSessionTitle(session) || t('work.untitled'),
         sub: [machineLabelOf(session), lineNameOfSession(session)].filter(Boolean).join(' · ')
     })
+    const toCandidate = (session: SessionSummary): CardCandidate => ({
+        id: session.id,
+        title: getSessionTitle(session) || t('work.untitled'),
+        sub: [machineLabelOf(session), lineNameOfSession(session), shortDate(session.updatedAt)].filter(Boolean).join(' · '),
+        active: session.active,
+        pending: session.pendingRequestsCount
+    })
+    // 梳理待办里的一条：指名会话的直接开它的卡片；只指到主线/支线的，开这条线里最该看的会话，卡片里可切换。
+    const openBriefingItem = (item: BriefingItem) => {
+        const target = item.sessionId ? sessions.find(session => session.id === item.sessionId) ?? null : null
+        const lineId = item.lineId ?? (target ? model.sublineOfSession.get(target.id) ?? null : null)
+        const lineIds = lineId && findLine(model, lineId) ? sessionsInLine(model, lineId) : null
+        const pool = [...(lineIds ? sessions.filter(session => lineIds.has(session.id)) : []), ...(target ? [target] : [])]
+        const { initial, list } = pickCardSessions(pool, target?.id ?? null)
+        const first = list.find(session => session.id === initial)
+        if (!first) {
+            if (lineId) filterSessions({ lineId })
+            return
+        }
+        const found = lineId ? findLine(model, lineId) : null
+        const candidate = toCandidate(first)
+        setCard({
+            sessionId: first.id,
+            title: candidate.title,
+            sub: candidate.sub,
+            context: { text: item.text, line: found ? (found.sub ?? found.main).name : null },
+            candidates: list.map(toCandidate)
+        })
+    }
     const needItems: Array<{ key: string; title: string; sub: string; tone: 'need' | 'slow' | 'stall'; onClick: () => void; onDismiss?: () => void; sessionId?: string }> = [
         ...pendingSessions.slice(0, focusLine ? 12 : 6).map(session => ({
             key: `pending-${session.id}`,
@@ -195,12 +232,7 @@ export function WorkOverviewPanel(props: { variant: 'desktop' | 'mobile' }) {
                     result={result}
                     digestIndex={digestIndex}
                     mobile={mobile}
-                    onSession={(sessionId) => {
-                        const session = sessions.find(item => item.id === sessionId)
-                        if (session && session.pendingRequestsCount > 0) openCard(session)
-                        else openSession(sessionId)
-                    }}
-                    onLine={(lineId) => filterSessions({ lineId })}
+                    onItem={openBriefingItem}
                 />
 
                 <div ref={needRef} data-testid="work-need" className="mt-5 rounded-2xl px-5 py-4" style={{ background: 'var(--wo-soft)' }}>
@@ -259,7 +291,7 @@ export function WorkOverviewPanel(props: { variant: 'desktop' | 'mobile' }) {
                         </div>
                     ) : null}
                 </div>
-                {card ? <NeedCard sessionId={card.sessionId} title={card.title} sub={card.sub} dismissed={dismissed.has(card.sessionId)} onClose={() => setCard(null)} /> : null}
+                {card ? <NeedCard sessionId={card.sessionId} title={card.title} sub={card.sub} dismissedIds={dismissed} context={card.context} candidates={card.candidates} onClose={() => setCard(null)} /> : null}
 
                 <div className={cn('mb-4 mt-7 flex flex-wrap items-center gap-3', mobile && 'mt-5')}>
                     <h2 className="text-[19px] font-bold tracking-tight text-[var(--wo-ink)]">{t('work.section.myLines')}</h2>

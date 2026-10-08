@@ -10,11 +10,77 @@ import type { AskUserQuestionQuestion } from '@/components/ToolCard/askUserQuest
 import { cardRequestsOf, latestCardLines, questionAnswers, type CardRequest } from './needCardModel'
 import { useWorkActions } from './workApi'
 
+export type CardCandidate = { id: string; title: string; sub: string; active: boolean; pending: number }
+
 /**
- * 「需要你处理」的处理卡片：不跳到会话页，直接看最近几条消息、批准/拒绝审批、回答提问、回复，
+ * 待办卡片：不跳到会话页，直接看最近几条消息、批准/拒绝审批、回答提问、给会话发消息，
  * 或者把这条会话忽略掉（不再提醒，梳理待办与项目概况也会当作不需要再关注）。
+ * 从「梳理待办」打开时顶部显示这条待办，并可在同一条线的几个会话之间切换。
  */
-export function NeedCard(props: { sessionId: string; title: string; sub: string; dismissed: boolean; onClose: () => void }) {
+export function NeedCard(props: {
+    sessionId: string
+    title: string
+    sub: string
+    dismissedIds: ReadonlySet<string>
+    onClose: () => void
+    context?: { text: string; line: string | null }
+    candidates?: CardCandidate[]
+}) {
+    const { t } = useTranslation()
+    const [selected, setSelected] = useState(props.sessionId)
+    const candidates = props.candidates ?? []
+    const current = candidates.find(candidate => candidate.id === selected)
+    const title = current?.title ?? props.title
+    const sub = current?.sub ?? props.sub
+
+    return (
+        <Dialog open onOpenChange={open => { if (!open) props.onClose() }}>
+            <DialogContent className="max-w-xl">
+                <DialogHeader className="pr-8">
+                    <DialogTitle className="truncate">{title}</DialogTitle>
+                    <div className="mt-0.5 truncate text-xs text-[var(--app-hint)]">{sub}</div>
+                </DialogHeader>
+                {props.context ? (
+                    <div data-testid="need-card-context" className="mt-2 rounded-xl border border-[var(--app-border)] bg-[var(--app-subtle-bg)] px-3 py-2">
+                        <div className="flex items-center gap-2 text-[11px] text-[var(--app-hint)]">
+                            <span className="font-semibold text-[var(--app-fg)]">{t('work.card2.todo')}</span>
+                            {props.context.line ? <span className="truncate">· {props.context.line}</span> : null}
+                        </div>
+                        <div className="mt-0.5 text-[13px] leading-relaxed">{props.context.text}</div>
+                    </div>
+                ) : null}
+                {candidates.length > 1 ? (
+                    <div data-testid="need-card-switch" className="mt-2">
+                        <div className="mb-1 text-[11px] text-[var(--app-hint)]">{t('work.card2.sessions', { n: candidates.length })}</div>
+                        <div className="flex gap-1.5 overflow-x-auto pb-1 [scrollbar-width:thin]">
+                            {candidates.map(candidate => (
+                                <button
+                                    key={candidate.id}
+                                    type="button"
+                                    data-session-id={candidate.id}
+                                    aria-pressed={candidate.id === selected}
+                                    onClick={() => setSelected(candidate.id)}
+                                    className={cn(
+                                        'flex max-w-[220px] shrink-0 items-center gap-1.5 rounded-lg border px-2.5 py-1 text-left text-xs transition-colors',
+                                        candidate.id === selected ? 'border-[var(--app-link)] bg-[var(--app-chat-user-chip-bg)]' : 'border-[var(--app-border)] hover:bg-[var(--app-subtle-bg)]'
+                                    )}
+                                >
+                                    <span className={cn('h-1.5 w-1.5 shrink-0 rounded-full', candidate.active ? 'bg-[#22c55e]' : 'border border-[var(--app-border)]')} />
+                                    <span className="truncate">{candidate.title}</span>
+                                    {candidate.pending > 0 ? <span className="shrink-0 rounded-full bg-[var(--app-badge-error-bg)] px-1.5 text-[10px] font-semibold text-[var(--app-badge-error-text)]">{candidate.pending}</span> : null}
+                                </button>
+                            ))}
+                        </div>
+                    </div>
+                ) : null}
+                <NeedCardBody key={selected} sessionId={selected} dismissed={props.dismissedIds.has(selected)} onClose={props.onClose} />
+            </DialogContent>
+        </Dialog>
+    )
+}
+
+/** 一个会话的卡片内容；切换会话时整块重建，回复框与提示随之清空。 */
+function NeedCardBody(props: { sessionId: string; dismissed: boolean; onClose: () => void }) {
     const { t } = useTranslation()
     const { api } = useAppContext()
     const navigate = useNavigate()
@@ -61,92 +127,86 @@ export function NeedCard(props: { sessionId: string; title: string; sub: string;
     }
 
     return (
-        <Dialog open onOpenChange={open => { if (!open) props.onClose() }}>
-            <DialogContent className="max-w-xl">
-                <DialogHeader className="pr-8">
-                    <DialogTitle className="truncate">{props.title}</DialogTitle>
-                    <div className="mt-0.5 flex items-center gap-2 text-xs text-[var(--app-hint)]">
-                        <span className={cn('h-2 w-2 rounded-full', active ? 'bg-[#22c55e]' : 'border border-[var(--app-border)]')} />
-                        <span className="truncate">{props.sub}</span>
-                        <span>· {active ? t('work.card2.online') : t('work.card2.offline')}</span>
-                    </div>
-                </DialogHeader>
-                <div data-testid="need-card" className="mt-2 flex max-h-[62vh] flex-col gap-4 overflow-y-auto pr-1">
-                    <section>
-                        <h3 className="mb-1.5 text-xs font-medium text-[var(--app-hint)]">{t('work.card2.latest')}</h3>
-                        {detail.isLoading ? <p className="text-xs text-[var(--app-hint)]">{t('loading')}</p> : lines.length === 0 ? (
-                            <p className="text-xs text-[var(--app-hint)]">{t('work.card2.noText')}</p>
-                        ) : (
-                            <div className="flex flex-col gap-1.5">
-                                {lines.map(line => (
-                                    <div key={line.seq} className={cn('max-w-[92%] whitespace-pre-wrap break-words rounded-xl px-3 py-2 text-[13px] leading-relaxed', line.role === 'user' ? 'self-end bg-[var(--app-chat-user-chip-bg)] text-[var(--app-chat-user-chip-fg)]' : 'self-start bg-[var(--app-subtle-bg)] text-[var(--app-fg)]')}>
-                                        {line.text}
-                                    </div>
-                                ))}
-                            </div>
-                        )}
-                    </section>
-
-                    <section data-testid="need-card-requests">
-                        <h3 className="mb-1.5 text-xs font-medium text-[var(--app-hint)]">{t('work.card2.requests', { n: requests.length })}</h3>
-                        {!active && requests.length > 0 ? <p className="mb-2 rounded-md bg-[var(--app-subtle-bg)] px-3 py-2 text-xs">{t('work.card2.offlineHint')}</p> : null}
-                        {requests.length === 0 ? <p className="text-xs text-[var(--app-hint)]">{t('work.card2.noRequests')}</p> : (
-                            <div className="flex flex-col gap-2">
-                                {requests.map(request => (
-                                    <RequestBlock
-                                        key={request.id}
-                                        request={request}
-                                        disabled={!active || busy !== null}
-                                        busyKey={busy}
-                                        onApprove={(decision) => run(`${request.id}:${decision}`, () => api.approvePermission(props.sessionId, request.id, { decision }), t('work.card2.done'))}
-                                        onDeny={() => run(`${request.id}:deny`, () => api.denyPermission(props.sessionId, request.id, { decision: 'denied' }), t('work.card2.done'))}
-                                        onAnswer={(answers) => run(`${request.id}:answer`, () => api.approvePermission(props.sessionId, request.id, { answers }), t('work.card2.done'))}
-                                    />
-                                ))}
-                            </div>
-                        )}
-                    </section>
-
-                    <section>
-                        <h3 className="mb-1.5 text-xs font-medium text-[var(--app-hint)]">{t('work.card2.reply')}</h3>
-                        <textarea
-                            data-testid="need-card-reply"
-                            value={reply}
-                            onChange={event => setReply(event.target.value)}
-                            rows={3}
-                            placeholder={t('work.card2.replyPlaceholder')}
-                            className="w-full resize-y rounded-lg border border-[var(--app-border)] bg-[var(--app-bg)] px-3 py-2 text-sm outline-none focus:border-[var(--app-link)]"
-                        />
-                        <div className="mt-1.5 flex justify-end">
-                            <Button
-                                type="button"
-                                size="sm"
-                                disabled={!reply.trim() || busy !== null}
-                                onClick={() => run('reply', async () => { await api.sendMessage(props.sessionId, reply.trim(), `need-card-${Date.now()}`); setReply('') }, t('work.card2.sent'))}
-                            >
-                                {busy === 'reply' ? t('work.card2.sending') : t('work.card2.send')}
-                            </Button>
+        <>
+            <div data-testid="need-card" className="mt-2 flex max-h-[56vh] flex-col gap-4 overflow-y-auto pr-1">
+                <div className="flex items-center gap-2 text-xs text-[var(--app-hint)]">
+                    <span className={cn('h-2 w-2 rounded-full', active ? 'bg-[#22c55e]' : 'border border-[var(--app-border)]')} />
+                    <span>{active ? t('work.card2.online') : t('work.card2.offline')}</span>
+                </div>
+                <section>
+                    <h3 className="mb-1.5 text-xs font-medium text-[var(--app-hint)]">{t('work.card2.latest')}</h3>
+                    {detail.isLoading ? <p className="text-xs text-[var(--app-hint)]">{t('loading')}</p> : lines.length === 0 ? (
+                        <p className="text-xs text-[var(--app-hint)]">{t('work.card2.noText')}</p>
+                    ) : (
+                        <div className="flex flex-col gap-1.5">
+                            {lines.map(line => (
+                                <div key={line.seq} className={cn('max-w-[92%] whitespace-pre-wrap break-words rounded-xl px-3 py-2 text-[13px] leading-relaxed', line.role === 'user' ? 'self-end bg-[var(--app-chat-user-chip-bg)] text-[var(--app-chat-user-chip-fg)]' : 'self-start bg-[var(--app-subtle-bg)] text-[var(--app-fg)]')}>
+                                    {line.text}
+                                </div>
+                            ))}
                         </div>
-                    </section>
-                    {notice ? <p className="text-xs text-[var(--app-badge-success-text)]">{notice}</p> : null}
-                    {error ? <p role="alert" className="text-xs text-red-600 dark:text-red-400">{error}</p> : null}
-                </div>
-                <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-[var(--app-divider)] pt-3">
-                    <Button
-                        type="button"
-                        variant="secondary"
-                        size="sm"
-                        data-testid="need-card-dismiss"
-                        disabled={setDismissed.isPending}
-                        onClick={() => setDismissed.mutate({ sessionId: props.sessionId, dismissed: !props.dismissed }, { onSuccess: () => { if (!props.dismissed) props.onClose() } })}
-                    >
-                        {props.dismissed ? t('work.need.restore') : t('work.need.dismiss')}
-                    </Button>
-                    <span className="flex-1" />
-                    <Button type="button" size="sm" onClick={openSession}>{t('work.card2.open')} →</Button>
-                </div>
-            </DialogContent>
-        </Dialog>
+                    )}
+                </section>
+
+                <section data-testid="need-card-requests">
+                    <h3 className="mb-1.5 text-xs font-medium text-[var(--app-hint)]">{t('work.card2.requests', { n: requests.length })}</h3>
+                    {!active && requests.length > 0 ? <p className="mb-2 rounded-md bg-[var(--app-subtle-bg)] px-3 py-2 text-xs">{t('work.card2.offlineHint')}</p> : null}
+                    {requests.length === 0 ? <p className="text-xs text-[var(--app-hint)]">{t('work.card2.noRequests')}</p> : (
+                        <div className="flex flex-col gap-2">
+                            {requests.map(request => (
+                                <RequestBlock
+                                    key={request.id}
+                                    request={request}
+                                    disabled={!active || busy !== null}
+                                    busyKey={busy}
+                                    onApprove={(decision) => run(`${request.id}:${decision}`, () => api.approvePermission(props.sessionId, request.id, { decision }), t('work.card2.done'))}
+                                    onDeny={() => run(`${request.id}:deny`, () => api.denyPermission(props.sessionId, request.id, { decision: 'denied' }), t('work.card2.done'))}
+                                    onAnswer={(answers) => run(`${request.id}:answer`, () => api.approvePermission(props.sessionId, request.id, { answers }), t('work.card2.done'))}
+                                />
+                            ))}
+                        </div>
+                    )}
+                </section>
+
+                <section>
+                    <h3 className="mb-1.5 text-xs font-medium text-[var(--app-hint)]">{t('work.card2.reply')}</h3>
+                    <textarea
+                        data-testid="need-card-reply"
+                        value={reply}
+                        onChange={event => setReply(event.target.value)}
+                        rows={3}
+                        placeholder={t('work.card2.replyPlaceholder')}
+                        className="w-full resize-y rounded-lg border border-[var(--app-border)] bg-[var(--app-bg)] px-3 py-2 text-sm outline-none focus:border-[var(--app-link)]"
+                    />
+                    <div className="mt-1.5 flex justify-end">
+                        <Button
+                            type="button"
+                            size="sm"
+                            disabled={!reply.trim() || busy !== null}
+                            onClick={() => run('reply', async () => { await api.sendMessage(props.sessionId, reply.trim(), `need-card-${Date.now()}`); setReply('') }, t('work.card2.sent'))}
+                        >
+                            {busy === 'reply' ? t('work.card2.sending') : t('work.card2.send')}
+                        </Button>
+                    </div>
+                </section>
+                {notice ? <p className="text-xs text-[var(--app-badge-success-text)]">{notice}</p> : null}
+                {error ? <p role="alert" className="text-xs text-red-600 dark:text-red-400">{error}</p> : null}
+            </div>
+            <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-[var(--app-divider)] pt-3">
+                <Button
+                    type="button"
+                    variant="secondary"
+                    size="sm"
+                    data-testid="need-card-dismiss"
+                    disabled={setDismissed.isPending}
+                    onClick={() => setDismissed.mutate({ sessionId: props.sessionId, dismissed: !props.dismissed }, { onSuccess: () => { if (!props.dismissed) props.onClose() } })}
+                >
+                    {props.dismissed ? t('work.need.restore') : t('work.need.dismiss')}
+                </Button>
+                <span className="flex-1" />
+                <Button type="button" size="sm" onClick={openSession}>{t('work.card2.open')} →</Button>
+            </div>
+        </>
     )
 }
 
