@@ -988,3 +988,35 @@ localStorage，按 hub 地址 + 账号分区，**所有账号都可用**（不�
 | Files | Missing upstream seam | Why it cannot move out | Runtime path | Sync verification |
 |---|---|---|---|---|
 | `web/src/router.tsx`, `web/src/routes/settings/categories.ts`, `web/src/components/settings/SettingsNav.tsx`, locale files | No registry for extra settings pages | The settings layout and its navigation are built from the static category list and route tree | Settings → 使用指南, or the overview's 使用指南 button → `/settings/help` | In a real browser: the settings navigation lists 使用指南, the page shows nine sections with ten loaded screenshots, and the overview button opens it |
+
+## 运行时加固 runtime-hardening (2026-10-10)
+
+2026-10-09 的 hub 停摆和随后打崩机群 runner 的两起事故的修复：hub 心跳热路径不再扫全表（fork.26）、启动不再同步回填 todo、
+缺 SQLite 统计时自动重建、事件循环延迟可见、访问日志不再记 token；runner 不再被写已关闭管道的错误打崩，真崩溃会自己拉起替身。
+
+| Files | Missing upstream seam | Why it cannot move out | Runtime path | Sync verification |
+|---|---|---|---|---|
+| `hub/src/store/messages.ts`, `hub/src/sync/messageService.ts` | No query-plan or hot-path hook | The queued/uninvoked lookups and the opencode clear gate are inline in the upstream message store and service | session-alive heartbeat → replayImmediateQueuedMessages → indexed lookup | `EXPLAIN QUERY PLAN` on a production copy without `sqlite_stat1` still uses `idx_messages_local_id`; heartbeat p99 stays in milliseconds |
+| `hub/src/sync/sessionCache.ts`, `hub/src/sync/syncEngine.ts` | No startup-task scheduler | The todo backfill lives inside `refreshSession`, which `reloadAll` calls for every session before the hub listens | hub start → reloadAll (no message reads) → background slices → todos filled | Restart against a production copy: `[Hub] startup: listening` no longer waits for the backfill; `[SessionCache] todo backfill:` line appears afterwards |
+| `hub/src/startHub.ts`, `hub/src/store/index.ts`, `hub/src/web/server.ts` | No store-maintenance, health-payload or access-log hook | Store pragmas, the bootstrap sequence, `/health` and the Hono logger are all built inline | hub start → planner statistics check → listen; `/health` → eventLoop; every request → redacted log line | `/health` has `eventLoop`; a request with `?token=` logs `[redacted]`; a DB copy with `sqlite_stat1` deleted logs `planner statistics were missing; rebuilt` once |
+| `cli/src/runner/run.ts`, `cli/src/agent/runnerLifecycle.ts`, `cli/src/modules/common/copilotModels.ts` | No process-supervision or probe-transport hook | The process-level exception handlers and the Copilot probe are inline in the runner entry and the probe module | model probe → spawn guard; unhandled rejection → benign filter or replacement runner + exit 1 | On a machine without `copilot`: open New Session with the Copilot agent; the runner stays up. Inject an unhandled rejection into a runner: a replacement starts and the machine is back online |
+
+## New Session 守卫 new-session-guard (2026-10-10)
+
+创建按钮"一直灰"的修复：不自动选离线机器、离线机器不可选、按钮下说明不能创建的原因、模型/目录校验最多等 8 秒、spawn 请求 60 秒时限、
+路径存在性检查不再随每次会话列表更新重发。
+
+| Files | Missing upstream seam | Why it cannot move out | Runtime path | Sync verification |
+|---|---|---|---|---|
+| `web/src/components/NewSession/index.tsx`, `MachineSelector.tsx`, `index.test.tsx`, `web/src/hooks/useMachinePathsExists.ts`, `web/src/api/client.ts`, locale files | No New Session gating or machine-filter registry | Machine auto-selection, the Create gate and the spawn request are inline in the upstream form and API client | New Session → online machine picked → status line → Create | In a real browser with an offline machine listed first: an online machine is selected; choosing a model whose probe never answers enables Create after 8 s with the warning line |
+
+## 会话接力 session-relay (2026-10-10)
+
+超长周期的游戏自动化会话（maa-agent、fgo-agent）上下文满了不再原地压缩继续，而是由 HAPI 新开会话交接：
+项目里放 `.hapi/session-relay.json` 即开启。到阈值或 OMP 刚自动压缩后，先用 steer 消息让当前会话写交接文件，
+运行结束（或交接文件写完后静置、或等满上限）再用同样的机器 / 目录 / 模型 / 思考档位 / 权限模式新开会话，发交接说明，归档旧会话。
+新会话最多拉起一次；拉起后的步骤失败只重发交接说明和归档请求。
+
+| Files | Missing upstream seam | Why it cannot move out | Runtime path | Sync verification |
+|---|---|---|---|---|
+| `cli/src/omp/ompRemoteLauncher.ts` | No OMP launcher lifecycle hook for context usage, compaction or turn end | The relay needs the live RPC client (`get_state`), the abort handler, compaction events and turn-end events, all owned by the launcher | OMP session → relay tick (60 s) → steer → handover file → spawn successor → kickoff → archive | Real hub + runner + OMP session in a project with a low threshold: the steer message, the handover file, the successor's kickoff and the archived original all appear |
