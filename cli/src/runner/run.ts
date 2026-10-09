@@ -14,6 +14,7 @@ import { getEnvironmentInfo } from '@/ui/doctor';
 import { spawnHappyCLI } from '@/utils/spawnHappyCLI';
 import { writeRunnerState, RunnerLocallyPersistedState, readRunnerState, readSettings, acquireRunnerLock, releaseRunnerLock } from '@/persistence';
 import { getCliArgs } from '@/utils/cliArgs';
+import { isBenignChildPipeError } from '@/utils/benignPipeErrors';
 import { getProcessStartMarker, isProcessAlive, isWindows, killProcess, killProcessByChildProcess, killProcessTreeByPid } from '@/utils/process';
 import { getCcSwitchProviderLaunchEnv } from '@/modules/common/ccSwitch';
 import { PERMISSION_MODES } from '@hapi/protocol/modes';
@@ -117,6 +118,11 @@ export function releaseRecoveredSpawnDedupe(
   existingSessionIdByChildPid.delete(pid);
 }
 
+/** Set on a runner spawned to replace one that crashed; holds the crashed runner's PID. */
+const RESTART_AFTER_CRASH_OF_PID_ENV = 'HAPI_RUNNER_RESTART_AFTER_CRASH_OF_PID';
+/** A crash replacement that crashes again within this window is not respawned again. */
+const CRASH_LOOP_WINDOW_SECONDS = 600;
+
 export async function startRunner(options: { workspaceRoots?: string[] } = {}): Promise<void> {
   // We don't have cleanup function at the time of server construction
   // Control flow is:
@@ -165,17 +171,63 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
     });
   }
 
+  // The Windows scheduled tasks and launchd jobs that start runners do not
+  // restart one that exits, so a crashed runner left its machine offline until
+  // someone noticed. A genuine crash now spawns a replacement runner (which
+  // waits for this process to exit) and exits with code 1.
+  const crashedRunnerPid = Number(process.env[RESTART_AFTER_CRASH_OF_PID_ENV]);
+  const isCrashReplacement = Number.isInteger(crashedRunnerPid) && crashedRunnerPid > 0;
+  delete process.env[RESTART_AFTER_CRASH_OF_PID_ENV];
+  let shutdownExitCode = 0;
+  let crashRestartAttempted = false;
+  const restartAfterCrash = () => {
+    shutdownExitCode = 1;
+    if (crashRestartAttempted) {
+      return;
+    }
+    crashRestartAttempted = true;
+    if (isCrashReplacement && process.uptime() < CRASH_LOOP_WINDOW_SECONDS) {
+      logger.debug(`[RUNNER RUN] Crashed again ${Math.round(process.uptime())}s after replacing crashed runner PID ${crashedRunnerPid}; not respawning`);
+      return;
+    }
+    const argv = getCliArgs();
+    const restartArgv = argv[0] === 'runner' ? argv : ['runner', 'start-sync'];
+    try {
+      spawnHappyCLI(restartArgv, {
+        detached: true,
+        stdio: 'ignore',
+        env: {
+          ...process.env,
+          [RESTART_AFTER_CRASH_OF_PID_ENV]: String(process.pid)
+        }
+      }).unref();
+      logger.debug(`[RUNNER RUN] Spawned replacement runner after crash with argv: ${JSON.stringify(restartArgv)}`);
+    } catch (error) {
+      logger.debug('[RUNNER RUN] Failed to spawn replacement runner after crash', error);
+    }
+  };
+
   process.on('uncaughtException', (error) => {
+    if (isBenignChildPipeError(error)) {
+      logger.debug('[RUNNER RUN] Ignoring write to a closed child process pipe', error);
+      return;
+    }
     logger.debug('[RUNNER RUN] FATAL: Uncaught exception', error);
     logger.debug(`[RUNNER RUN] Stack trace: ${error.stack}`);
+    restartAfterCrash();
     requestShutdown('exception', error.message);
   });
 
   process.on('unhandledRejection', (reason, promise) => {
+    if (isBenignChildPipeError(reason)) {
+      logger.debug('[RUNNER RUN] Ignoring rejected write to a closed child process pipe', reason);
+      return;
+    }
     logger.debug('[RUNNER RUN] FATAL: Unhandled promise rejection', reason);
     logger.debug(`[RUNNER RUN] Rejected promise:`, promise);
     const error = reason instanceof Error ? reason : new Error(`Unhandled promise rejection: ${reason}`);
     logger.debug(`[RUNNER RUN] Stack trace: ${error.stack}`);
+    restartAfterCrash();
     requestShutdown('exception', error.message);
   });
 
@@ -189,6 +241,16 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
 
   logger.debug('[RUNNER RUN] Starting runner process...');
   logger.debugLargeJson('[RUNNER RUN] Environment', getEnvironmentInfo());
+
+  if (isCrashReplacement) {
+    // Let the crashed runner finish its cleanup so the lock and state file are
+    // free (or stale) before the normal startup checks below look at them.
+    const deadline = Date.now() + 30_000;
+    while (isProcessAlive(crashedRunnerPid) && Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, 250));
+    }
+    logger.debug(`[RUNNER RUN] Replacing crashed runner PID ${crashedRunnerPid} (still alive: ${isProcessAlive(crashedRunnerPid)})`);
+  }
 
   // Detect authorized handoff from a parent runner doing the
   // mtime-drift self-restart (see heartbeat block below). The parent sets
@@ -1485,8 +1547,8 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
       await cleanupRunnerState();
       await releaseRunnerLock(runnerLockHandle);
 
-      logger.debug('[RUNNER RUN] Cleanup completed, exiting process');
-      process.exit(0);
+      logger.debug(`[RUNNER RUN] Cleanup completed, exiting process with code ${shutdownExitCode}`);
+      process.exit(shutdownExitCode);
     };
 
     logger.debug('[RUNNER RUN] Runner started successfully, waiting for shutdown request');

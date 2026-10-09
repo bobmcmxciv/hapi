@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import { createMessageConnection, StreamMessageReader, StreamMessageWriter } from 'vscode-jsonrpc/node';
 import { asString, isObject } from '@hapi/protocol';
 import type { CopilotModelsResponse, CopilotModelSummary } from '@hapi/protocol/apiTypes';
@@ -89,6 +89,21 @@ function extractModelsFromAcpResponse(response: unknown): {
  * permissions). The SDK headless protocol exposes subscription-aware models
  * via `models.list` — Student plans typically return only `auto`.
  */
+function waitForSpawn(child: ChildProcess): Promise<void> {
+    return new Promise((resolve, reject) => {
+        const onSpawn = () => {
+            child.off('error', onError);
+            resolve();
+        };
+        const onError = (error: Error) => {
+            child.off('spawn', onSpawn);
+            reject(error);
+        };
+        child.once('spawn', onSpawn);
+        child.once('error', onError);
+    });
+}
+
 async function listModelsViaSdkHeadless(): Promise<CopilotModelSummary[]> {
     const command = process.env.COPILOT_CLI_PATH ?? 'copilot';
     const child = spawn(command, ['--headless', '--stdio', '--no-auto-update'], {
@@ -100,6 +115,14 @@ async function listModelsViaSdkHeadless(): Promise<CopilotModelSummary[]> {
         child.kill();
         throw new Error('Failed to open Copilot headless stdio pipes');
     }
+
+    // A late write failure (the CLI exits right after starting) must not escape
+    // as an unhandled stream error; the exit listener below fails the probe.
+    child.stdin.on('error', () => {});
+    // Connect only once the CLI really started. When `copilot` is not installed
+    // the spawn fails, and a request written to the destroyed stdin is rethrown
+    // by vscode-jsonrpc as an unhandled rejection that used to stop the runner.
+    await waitForSpawn(child);
 
     const connection = createMessageConnection(
         new StreamMessageReader(child.stdout),

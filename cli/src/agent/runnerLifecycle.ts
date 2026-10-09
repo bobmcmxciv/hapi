@@ -2,6 +2,7 @@ import type { ApiSessionClient } from '@/api/apiSession'
 import type { SessionEndReason } from '@hapi/protocol'
 import { logger } from '@/ui/logger'
 import { restoreTerminalState } from '@/ui/terminalState'
+import { isBenignChildPipeError } from '@/utils/benignPipeErrors'
 
 type RunnerLifecycleOptions = {
     session: ApiSessionClient
@@ -198,11 +199,19 @@ export function createRunnerLifecycle(options: RunnerLifecycleOptions): RunnerLi
         })
 
         process.on('uncaughtException', (error) => {
+            if (isBenignChildPipeError(error)) {
+                logger.debug(`${logPrefix} Ignoring write to a closed child process pipe`, error)
+                return
+            }
             markCrash(error)
             void cleanupAndExit(1)
         })
 
         process.on('unhandledRejection', (reason) => {
+            if (isBenignChildPipeError(reason)) {
+                logger.debug(`${logPrefix} Ignoring rejected write to a closed child process pipe`, reason)
+                return
+            }
             markCrash(reason)
             void cleanupAndExit(1)
         })
