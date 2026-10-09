@@ -190,6 +190,9 @@ export function generatedBlobRequestsInFlight(): number {
     return blobGate.inFlight()
 }
 
+/** Upper bound for POST /machines/:id/spawn (hub RPC timeout is 30 s). */
+const SPAWN_REQUEST_TIMEOUT_MS = 60_000
+
 export class ApiClient {
     private token: string
     private readonly baseUrl: string | null
@@ -1024,25 +1027,36 @@ export class ApiClient {
         // fork(claude-proxy-models)：为这一个 Claude 会话指定 cc-switch 供应商。
         ccSwitchProviderId?: string
     ): Promise<SpawnResponse> {
-        return await this.request<SpawnResponse>(`/api/machines/${encodeURIComponent(machineId)}/spawn`, {
-            method: 'POST',
-            body: JSON.stringify({
-                directory,
-                agent,
-                model,
-                modelReasoningEffort,
-                yolo,
-                sessionType,
-                worktreeName,
-                effort,
-                permissionMode,
-                serviceTier,
-                collaborationMode,
-                copilotAgentMode,
-                startingMode,
-                ccSwitchProviderId
+        // The hub gives the runner 30 s to answer a spawn. Without a client-side
+        // limit a stalled hub left the form on "Creating…" forever.
+        const signal = AbortSignal.timeout(SPAWN_REQUEST_TIMEOUT_MS)
+        try {
+            return await this.request<SpawnResponse>(`/api/machines/${encodeURIComponent(machineId)}/spawn`, {
+                method: 'POST',
+                body: JSON.stringify({
+                    directory,
+                    agent,
+                    model,
+                    modelReasoningEffort,
+                    yolo,
+                    sessionType,
+                    worktreeName,
+                    effort,
+                    permissionMode,
+                    serviceTier,
+                    collaborationMode,
+                    copilotAgentMode,
+                    startingMode,
+                    ccSwitchProviderId
+                }),
+                signal
             })
-        })
+        } catch (error) {
+            if (signal.aborted) {
+                throw new Error(`No response from the hub after ${SPAWN_REQUEST_TIMEOUT_MS / 1000} s. The session may still start; check the session list before trying again.`)
+            }
+            throw error
+        }
     }
 
     async getMachineAgyModels(machineId: string): Promise<AgyModelsResponse> {

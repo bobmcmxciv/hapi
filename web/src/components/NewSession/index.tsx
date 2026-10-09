@@ -86,6 +86,8 @@ import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { formatRunnerSpawnError } from '../../utils/formatRunnerSpawnError'
 import { markCodexSessionsImported } from '@/lib/codexImportedSessions'
 import { useToast } from '@/lib/toast-context'
+import { useHeldTrueFor } from '@/hooks/useHeldTrueFor'
+import { LAUNCH_VALIDATION_WAIT_MS, describeCreateStatus, isMachineOnline } from './createStatus'
 
 
 
@@ -213,6 +215,7 @@ export function NewSession(props: {
 
     useEffect(() => {
         if (props.initialMachineId !== undefined) {
+            machinePickedByUserRef.current = true
             setMachineId(props.initialMachineId)
         }
     }, [props.initialMachineId])
@@ -281,26 +284,41 @@ export function NewSession(props: {
         [agent, props.machines]
     )
 
+    const onlineSelectableMachines = useMemo(
+        () => selectableMachines.filter(isMachineOnline),
+        [selectableMachines]
+    )
+    // A machine chosen by the user (or passed in by the caller) stays selected
+    // while it is offline so the form can say why Create is disabled. An
+    // automatic pick never lands on an offline machine: /api/machines lists
+    // every accessible machine, and the first one used to be a long-offline host.
+    const machinePickedByUserRef = useRef(props.initialMachineId !== undefined)
+
     useEffect(() => {
         if (selectableMachines.length === 0) {
             if (machineId !== null) setMachineId(null)
             return
         }
-        if (selectableMachines.some((machine) => machine.id === machineId)) return
+        const current = selectableMachines.find((machine) => machine.id === machineId)
+        if (current && (isMachineOnline(current) || machinePickedByUserRef.current)) return
+        if (onlineSelectableMachines.length === 0) {
+            if (!current && machineId !== null) setMachineId(null)
+            return
+        }
 
         const lastUsed = getLastUsedMachineId()
-        const foundLast = lastUsed ? selectableMachines.find((m) => m.id === lastUsed) : null
+        const foundLast = lastUsed ? onlineSelectableMachines.find((m) => m.id === lastUsed) : null
 
         if (foundLast) {
             setMachineId(foundLast.id)
             if (!props.initialDirectory) {
                 const paths = getRecentPaths(foundLast.id)
-                if (paths[0]) setDirectory(paths[0])
+                if (paths[0]) setDirectory((typed) => (typed.trim() ? typed : paths[0]))
             }
         } else {
-            setMachineId(selectableMachines[0].id)
+            setMachineId(onlineSelectableMachines[0].id)
         }
-    }, [selectableMachines, machineId, getLastUsedMachineId, getRecentPaths, props.initialDirectory])
+    }, [selectableMachines, onlineSelectableMachines, machineId, getLastUsedMachineId, getRecentPaths, props.initialDirectory])
 
     const selectedMachine = useMemo(
         () => (machineId ? selectableMachines.find((machine) => machine.id === machineId) ?? null : null),
@@ -1269,6 +1287,7 @@ export function NewSession(props: {
 
     const handleMachineChange = useCallback((newMachineId: string) => {
         preserveRestoredDraftRef.current = false
+        machinePickedByUserRef.current = true
         setMachineId(newMachineId)
         setModel('auto')
         setCursorSelectedBase('auto')
@@ -1636,14 +1655,34 @@ export function NewSession(props: {
     const fastModeSelectionPending = agent === 'codex'
         && serviceTier === 'fast'
         && codexModelsState.isLoading
+    const launchValidationPending = isLaunchPreferenceValidationPending || fastModeSelectionPending
+    // Validation waits on machine probes (model lists, directory existence). When
+    // a probe never answers, the wait used to keep Create grey indefinitely; after
+    // LAUNCH_VALIDATION_WAIT_MS the form launches with the selection unvalidated.
+    const launchValidationTimedOut = useHeldTrueFor(launchValidationPending, LAUNCH_VALIDATION_WAIT_MS)
+    const selectedMachineOffline = selectedMachine !== null && !isMachineOnline(selectedMachine)
     const canCreate = Boolean(
         selectedMachine
+        && !selectedMachineOffline
         && trimmedDirectory
         && !isFormDisabled
         && !missingWorktreeDirectory
-        && !isLaunchPreferenceValidationPending
-        && !fastModeSelectionPending
+        && (!launchValidationPending || launchValidationTimedOut)
     )
+    const createStatus = describeCreateStatus({
+        canCreate,
+        isBusy: isFormDisabled,
+        machinesLoading: Boolean(props.isLoading),
+        hasSelectableMachines: selectableMachines.length > 0,
+        hasOnlineMachines: onlineSelectableMachines.length > 0,
+        machineSelected: selectedMachine !== null,
+        machineOffline: selectedMachineOffline,
+        directoryEntered: trimmedDirectory !== '',
+        directoryProblemShown: missingWorktreeDirectory,
+        validationPending: launchValidationPending,
+        validationTimedOut: launchValidationTimedOut,
+        ompOnly: agent === 'omp'
+    })
 
     return (
         <div className="flex flex-col divide-y divide-[var(--app-divider)]">
@@ -1900,6 +1939,17 @@ export function NewSession(props: {
             {(error ?? spawnError) ? (
                 <div className="px-3 py-2 text-sm text-red-600">
                     {error ?? spawnError}
+                </div>
+            ) : null}
+
+            {createStatus ? (
+                <div
+                    data-testid="new-session-create-status"
+                    className={createStatus.tone === 'warning'
+                        ? 'px-3 pt-2 text-xs text-amber-600'
+                        : 'px-3 pt-2 text-xs text-[var(--app-hint)]'}
+                >
+                    {t(createStatus.messageKey)}
                 </div>
             ) : null}
 

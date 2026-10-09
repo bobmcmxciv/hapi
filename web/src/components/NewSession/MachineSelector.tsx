@@ -3,6 +3,7 @@ import type { Machine, MachineWithOwner } from '@/types/api'
 import { useTranslation } from '@/lib/use-translation'
 import { useMachineOwners } from '@/hooks/useMachineLabels'
 import { getMachinePlatform } from '@/lib/machineHealth'
+import { isMachineOnline } from './createStatus'
 import {
     MachineChip,
     MachineOwnerHeading,
@@ -47,7 +48,8 @@ export function MachineSelector(props: {
             platform: getMachinePlatform(machine),
             icon: machine.metadata?.icon ?? null,
             owner: (machine as MachineWithOwner).ownerUsername ?? owners[machine.id] ?? null,
-            sessionCount: counts[machine.id] ?? 0
+            sessionCount: counts[machine.id] ?? 0,
+            offline: !isMachineOnline(machine)
         })),
         [props.machines, owners, counts]
     )
@@ -61,11 +63,11 @@ export function MachineSelector(props: {
                     label={item.label}
                     platform={item.platform}
                     icon={item.icon}
-                    stat={item.sessionCount}
+                    stat={item.offline ? t('newSession.machineOffline') : item.sessionCount}
                     selected={props.machineId === item.id}
-                    title={[item.label, item.owner].filter(Boolean).join(' · ')}
-                    onSelect={() => { if (!props.isDisabled) props.onChange(item.id) }}
-                    className={props.isDisabled ? 'pointer-events-none opacity-50' : undefined}
+                    title={[item.label, item.owner, item.offline ? t('newSession.machineOffline') : null].filter(Boolean).join(' · ')}
+                    onSelect={() => { if (!props.isDisabled && !item.offline) props.onChange(item.id) }}
+                    className={props.isDisabled || item.offline ? 'pointer-events-none opacity-50' : undefined}
                 />
             ))}
         </div>

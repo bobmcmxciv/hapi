@@ -1037,4 +1037,98 @@ describe('NewSession launch preferences', () => {
             expect(screen.getByTestId('create')).toBeEnabled()
         })
     })
+
+    describe('offline machines and the Create status line', () => {
+        const offline = { id: 'offline-1', active: false, metadata: { host: 'Offline host' } } as Machine
+        const online = { id: 'online-1', active: true, metadata: { host: 'Online host' } } as Machine
+
+        it('does not auto-select an offline machine listed first', async () => {
+            render(
+                <NewSession
+                    api={api}
+                    machines={[offline, online]}
+                    initialDirectory="C:\repo"
+                    onSuccess={mocks.onSuccess}
+                    onCancel={() => {}}
+                />
+            )
+
+            await waitFor(() => expect(screen.getByTestId('machines')).toHaveValue('online-1'))
+            await waitFor(() => expect(screen.getByTestId('create')).toBeEnabled())
+            expect(screen.queryByTestId('new-session-create-status')).toBeNull()
+        })
+
+        it('keeps a requested offline machine and says why Create is disabled', async () => {
+            render(
+                <NewSession
+                    api={api}
+                    machines={[offline, online]}
+                    initialMachineId="offline-1"
+                    initialDirectory="C:\repo"
+                    onSuccess={mocks.onSuccess}
+                    onCancel={() => {}}
+                />
+            )
+
+            await waitFor(() => expect(screen.getByTestId('machines')).toHaveValue('offline-1'))
+            expect(screen.getByTestId('create')).toBeDisabled()
+            expect(screen.getByTestId('new-session-create-status')).toHaveTextContent('newSession.status.machineOffline')
+        })
+
+        it('says when every machine is offline', async () => {
+            render(
+                <NewSession
+                    api={api}
+                    machines={[offline]}
+                    initialDirectory="C:\repo"
+                    onSuccess={mocks.onSuccess}
+                    onCancel={() => {}}
+                />
+            )
+
+            await waitFor(() => expect(screen.getByTestId('new-session-create-status')).toHaveTextContent('newSession.status.allMachinesOffline'))
+            expect(screen.getByTestId('create')).toBeDisabled()
+        })
+
+        it('enables Create once a model check has been pending for the wait limit', async () => {
+            vi.useFakeTimers({ shouldAdvanceTime: true })
+            try {
+                mocks.copilotModelsLoading = true
+                savePreferredAgent('copilot')
+                savePreferredLaunchSettings('online-1', 'copilot', {
+                    model: 'gpt-5.6',
+                    cursorSelectedBase: 'auto',
+                    effort: 'auto',
+                    modelReasoningEffort: 'default'
+                })
+                mocks.spawnSession.mockResolvedValue({ type: 'success', sessionId: 'session-timeout' })
+
+                render(
+                    <NewSession
+                        api={api}
+                        machines={[online]}
+                        initialMachineId="online-1"
+                        initialDirectory="C:\repo"
+                        onSuccess={mocks.onSuccess}
+                        onCancel={() => {}}
+                    />
+                )
+
+                await waitFor(() => expect(screen.getByTestId('create')).toBeDisabled())
+                expect(screen.getByTestId('new-session-create-status')).toHaveTextContent('newSession.status.checkingLaunchOptions')
+
+                await act(async () => {
+                    vi.advanceTimersByTime(8_000)
+                })
+
+                await waitFor(() => expect(screen.getByTestId('create')).toBeEnabled())
+                expect(screen.getByTestId('new-session-create-status')).toHaveTextContent('newSession.status.validationTimedOut')
+                fireEvent.click(screen.getByTestId('create'))
+                await waitFor(() => expect(mocks.onSuccess).toHaveBeenCalledWith('session-timeout'))
+                expect(mocks.spawnSession).toHaveBeenCalledWith(expect.objectContaining({ agent: 'copilot', model: 'gpt-5.6' }))
+            } finally {
+                vi.useRealTimers()
+            }
+        })
+    })
 })
