@@ -788,8 +788,11 @@ export function markUninvokedImmediateMessages(
     sessionId: string,
     invokedAt: number
 ): string[] {
+    // INDEXED BY (here and below in the /clear helpers): same reason as the
+    // queued lookups above - without sqlite_stat1 the planner walks the whole
+    // session history through idx_messages_session.
     const rows = db.prepare(`
-        SELECT local_id FROM messages
+        SELECT local_id FROM messages INDEXED BY idx_messages_local_id
         WHERE session_id = ?
           AND local_id IS NOT NULL
           AND scheduled_at IS NULL
@@ -799,7 +802,7 @@ export function markUninvokedImmediateMessages(
     if (rows.length === 0) return []
 
     db.prepare(`
-        UPDATE messages
+        UPDATE messages INDEXED BY idx_messages_local_id
         SET invoked_at = ?
         WHERE session_id = ?
           AND local_id IS NOT NULL
@@ -822,7 +825,7 @@ export function moveUninvokedScheduledMessages(
     if (fromSessionId === toSessionId) return 0
 
     const rows = db.prepare(`
-        SELECT id FROM messages
+        SELECT id FROM messages INDEXED BY idx_messages_scheduled_pending
         WHERE session_id = ?
           AND scheduled_at IS NOT NULL
           AND invoked_at IS NULL
@@ -858,7 +861,7 @@ export function moveUninvokedMessages(db: Database, fromSessionId: string, toSes
     if (fromSessionId === toSessionId) return 0
     return db.transaction(() => {
         const discarded = db.prepare(`
-            DELETE FROM messages
+            DELETE FROM messages INDEXED BY idx_messages_local_id
             WHERE session_id = ?
               AND invoked_at IS NULL
               AND local_id IS NOT NULL
