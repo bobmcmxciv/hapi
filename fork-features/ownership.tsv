@@ -108,8 +108,8 @@ cli/src/omp/ompLocal.ts	fork-owned	#172	origin-only delta; fork commits 3686370a
 cli/src/omp/ompLocalLauncher.ts	fork-owned	#172	origin-only delta; fork commits 7e0010b8,3686370a
 cli/src/omp/ompRemoteLauncher.test.ts	fork-owned	#172	origin-only delta; fork commits 7e0010b8; omp-events: 准入后失败的 prompt 显示错误并回到 ready
 cli/src/omp/ompRemoteLauncher.ts	fork-owned	#172,session-relay	origin-only delta; fork commits d28853c7,7e0010b8,3686370a; omp-events: prompt_result 报「未到达 agent 即失败」时把错误显示到会话; session-relay: 启动 relay 控制器，转发压缩完成与一轮结束事件
-cli/src/omp/rpc/OmpRpcEventAdapter.test.ts	trunk-patch	omp-events	omp-events: role=custom 提示与空推理块的用例（上游 60865e24 系列已 cherry-pick）; prompt_result 失败文本只在 agentInvoked=false 且 status=error 时给出
-cli/src/omp/rpc/OmpRpcEventAdapter.ts	trunk-patch	omp-events	omp-events: message_end role=custom 且 display:true 显示一行 omp-notice、其余静默；空 thinking 块跳过（在上游 60865e24 系列之上）; prompt_result 的 status/error 透传给 onPromptResult(agentInvoked, failure)
+cli/src/omp/rpc/OmpRpcEventAdapter.test.ts	trunk-patch	omp-events,runtime-hardening	omp-events: role=custom 提示与空推理块的用例（上游 60865e24 系列已 cherry-pick）; prompt_result 失败文本只在 agentInvoked=false 且 status=error 时给出; runtime-hardening: 运行中卡片去重用例
+cli/src/omp/rpc/OmpRpcEventAdapter.ts	trunk-patch	omp-events,runtime-hardening	omp-events: message_end role=custom 且 display:true 显示一行 omp-notice、其余静默；空 thinking 块跳过（在上游 60865e24 系列之上）; prompt_result 的 status/error 透传给 onPromptResult(agentInvoked, failure); runtime-hardening: 工具进度更新不再重复发出相同的运行中卡片（单会话 180k 行里 173k 行是这种重复）
 cli/src/omp/rpc/OmpRpcTransport.test.ts	trunk-patch	omp-events	omp-events: 已应答 id 的第二个响应带错误文本诊断
 cli/src/omp/rpc/OmpRpcTransport.ts	trunk-patch	omp-events	omp-events: HAPI_OMP_RPC_TRACE=1 收发帧写 debug 日志；记住近期已应答 id，第二个响应报「second response」并带错误文本
 cli/src/omp/runOmp.ts	fork-owned	#172	origin-only delta; fork commits 3686370a
@@ -280,7 +280,7 @@ hub/src/startHub.ts	trunk-patch	#171,runtime-hardening	origin-only delta; fork c
 hub/src/store/index.ts	trunk-patch	#174,runtime-hardening	#170 removed unused helper; remaining persisted-session hook closed by #174; runtime-hardening: journal_size_limit 64 MiB；ensurePlannerStatistics / optimize
 hub/src/store/machines.ts	trunk-patch	machine-icons	machine-icons: icon 并入 hub 自有字段，CLI 整体替换元数据时保留
 hub/src/store/messageStore.ts	trunk-patch	usage-page	origin-only delta; single seam exposing db to fork-features/usage aggregation (2026-07-28); usage-perf: aggregateUsageGroups/aggregateUsageBuckets/warmUsageCache 接缝
-hub/src/store/messages.ts	trunk-patch	runtime-hardening	runtime-hardening (fork.26): queued/uninvoked 查询钉 INDEXED BY idx_messages_local_id
+hub/src/store/messages.ts	trunk-patch	runtime-hardening	runtime-hardening (fork.26): queued/uninvoked 查询钉 INDEXED BY idx_messages_local_id; runtime-hardening: queued/uninvoked 与 OpenCode /clear 查询钉部分索引
 hub/src/store/plannerStatistics.test.ts	fork-owned	runtime-hardening	fork-owned module: 缺统计时重建、WAL 上限
 hub/src/store/sessionStore.ts	trunk-patch	#174	origin-only delta; fork commits 413e76cc
 hub/src/store/sessions.test.ts	trunk-patch	#170	origin-only delta; fork commits 17e79d08,413e76cc
