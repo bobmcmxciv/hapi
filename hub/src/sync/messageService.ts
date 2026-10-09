@@ -741,8 +741,11 @@ export class MessageService {
 
     /** Replay durable immediate prompts whenever their CLI session attaches. */
     replayImmediateQueuedMessages(sessionId: string): number {
-        if (this.store.isOpenCodeClearDeliveryGated(sessionId)) return 0
+        // Runs on every session-alive heartbeat: do the cheap indexed lookup first and
+        // only consult the clear-handoff gate when there is something to deliver.
         const queued = this.store.messages.getImmediateQueuedLocalMessages(sessionId)
+        if (queued.length === 0) return 0
+        if (this.store.isOpenCodeClearDeliveryGated(sessionId)) return 0
         for (const msg of queued) {
             const update = {
                 id: msg.id,

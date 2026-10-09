@@ -200,8 +200,15 @@ export class Store {
         const target = this.db.prepare('SELECT namespace FROM sessions WHERE id = ?')
             .get(sessionId) as { namespace: string } | undefined
         if (!target) return false
-        const rows = this.db.prepare('SELECT metadata FROM sessions WHERE namespace = ? AND metadata IS NOT NULL')
-            .all(target.namespace) as Array<{ metadata: string }>
+        // Prefilter in SQLite: only rows whose metadata mentions this id can own it.
+        // Parsing every session's metadata in JS here saturated the hub event loop
+        // (called from the session-alive heartbeat path) once there were ~1.5k sessions.
+        const rows = this.db.prepare(`
+            SELECT metadata FROM sessions
+            WHERE namespace = ? AND metadata IS NOT NULL
+              AND instr(metadata, 'opencodeClearOperation') > 0
+              AND instr(metadata, ?) > 0
+        `).all(target.namespace, sessionId) as Array<{ metadata: string }>
         return rows.some((row) => {
             try {
                 const operation = (JSON.parse(row.metadata) as {

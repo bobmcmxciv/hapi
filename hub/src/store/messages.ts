@@ -467,7 +467,9 @@ export function getUninvokedLocalMessages(
     sessionId: string
 ): StoredMessage[] {
     const rows = db.prepare(
-        'SELECT * FROM messages WHERE session_id = ? AND invoked_at IS NULL AND local_id IS NOT NULL ORDER BY seq ASC'
+        // INDEXED BY: without sqlite_stat1 the planner picks idx_messages_session and walks the
+        // whole session history (171k rows / ~1s on prod) for what is almost always zero rows.
+        'SELECT * FROM messages INDEXED BY idx_messages_local_id WHERE session_id = ? AND invoked_at IS NULL AND local_id IS NOT NULL ORDER BY seq ASC'
     ).all(sessionId) as DbMessageRow[]
     return rows.map(toStoredMessage)
 }
@@ -532,7 +534,7 @@ export function getImmediateQueuedLocalMessages(
     sessionId: string
 ): StoredMessage[] {
     const rows = db.prepare(`
-        SELECT * FROM messages
+        SELECT * FROM messages INDEXED BY idx_messages_local_id
         WHERE session_id = ?
           AND invoked_at IS NULL
           AND local_id IS NOT NULL
