@@ -48,6 +48,7 @@ import { resolveOmpSessionPath } from './utils/ompSessionScanner';
 import type { OmpQueuedInput } from './OmpInputQueue';
 import { describeIgnoredOmpAttachments, prepareOmpInput } from './ompInputContent';
 import { OmpHostIntegration } from '../../../fork-features/omp-host-integration/cli';
+import { startOmpSessionRelay, type OmpSessionRelay } from '../../../fork-features/session-relay/omp';
 
 type PromptLifecycle = {
     phase: 'awaiting-agent' | 'streaming';
@@ -88,6 +89,8 @@ class OmpRemoteLauncher extends RemoteLauncherBase {
     private removeQueueChangeListener: (() => void) | null = null;
     private changeVersion = 0;
     private changeWaiter: (() => void) | null = null;
+    // fork(session-relay)
+    private sessionRelay: OmpSessionRelay | null = null;
 
     constructor(session: OmpSession) {
         super(process.env.DEBUG ? session.logPath : undefined);
@@ -177,6 +180,9 @@ class OmpRemoteLauncher extends RemoteLauncherBase {
             },
             onStructuredEvent: (event) => {
                 session.sendAgentMessage(event);
+                if (event.type === 'omp-compaction' && event.phase === 'finished' && event.outcome === 'completed') {
+                    this.sessionRelay?.controller.onCompactionCompleted();
+                }
             },
             onInkMessage: (message, type) => this.messageBuffer.addMessage(message, type),
             onUserMessageCommitted: (steering) => {
@@ -206,6 +212,7 @@ class OmpRemoteLauncher extends RemoteLauncherBase {
                     this.handleTransportFailure(error);
                 });
                 void this.sendReadyIfIdle();
+                this.sessionRelay?.controller.onTurnFinished();
             },
             onPromptResult: (agentInvoked, failure) => {
                 if (failure) {
@@ -305,6 +312,29 @@ class OmpRemoteLauncher extends RemoteLauncherBase {
             this.currentModel?.id
         );
         await this.sendReadyIfIdle();
+        this.sessionRelay = await startOmpSessionRelay({
+            cwd: session.path,
+            hubSessionId: session.client.sessionId,
+            launchSettings: () => {
+                const machineId = session.client.getMetadata()?.machineId;
+                if (!machineId) return null;
+                const model = this.currentModel ? `${this.currentModel.provider}/${this.currentModel.id}` : undefined;
+                const effort = this.thinkingState.configured ?? undefined;
+                const permissionMode = session.getPermissionMode() as string | undefined;
+                return { machineId, model, effort, permissionMode };
+            },
+            readContextUsage: async () => {
+                const state = await client.request({ type: 'get_state' });
+                const usage = state.contextUsage;
+                return usage ? { tokens: usage.tokens, contextWindow: usage.contextWindow } : null;
+            },
+            isIdle: () => !this.hasUnfinishedNativeInput() && !this.hasLocalPendingInput(),
+            abortRun: () => this.handleAbort(),
+            notify: (message) => {
+                session.sendSessionEvent({ type: 'message', message });
+                this.messageBuffer.addMessage(message, 'status');
+            }
+        });
 
         while (!this.shouldExit) {
             if (this.transportFailure) {
@@ -346,6 +376,8 @@ class OmpRemoteLauncher extends RemoteLauncherBase {
     }
 
     protected async cleanup(): Promise<void> {
+        this.sessionRelay?.stop();
+        this.sessionRelay = null;
         this.clearAbortHandlers(this.session.client.rpcHandlerManager);
         this.session.setRuntimeConfigApplier(null);
         this.removeQueueChangeListener?.();
