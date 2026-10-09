@@ -427,6 +427,8 @@ export class OmpRpcEventAdapter {
     private activeMessage: MainMessageAccumulator | null = null;
     private lastDisplayId: string | null = null;
     private readonly tools = new Map<string, ToolLifecycle>();
+    /** Tool card keys (tool id, or `subagentId:toolId`) whose in_progress card was emitted. */
+    private readonly inProgressToolCards = new Set<string>();
     private readonly subagents = new Map<string, SubagentState>();
 
     constructor(
@@ -920,6 +922,10 @@ export class OmpRpcEventAdapter {
             executionFailed: existing?.executionFailed
         };
         this.tools.set(tool.id, tool);
+        // The card carries no partial output, so each update used to store a row
+        // identical to the start one: a 15-minute `wait` wrote ~900 copies, and
+        // one maa-agent session held 173k such rows out of 180k.
+        if (this.inProgressToolCards.has(tool.id)) return;
         this.emitToolLifecycle(output, tool, 'in_progress');
     }
 
@@ -943,6 +949,7 @@ export class OmpRpcEventAdapter {
     }
 
     private emitToolLifecycle(output: OmpEventProjection, tool: ToolLifecycle, status: Extract<AgentMessage, { type: 'tool_call' }>['status']): void {
+        this.trackInProgressCard(output, tool.id, status);
         output.onAgentMessage({
             type: 'tool_call',
             id: tool.id,
@@ -1161,6 +1168,8 @@ export class OmpRpcEventAdapter {
             return;
         }
         if (childEvent.type === 'tool_execution_update') {
+            // Same duplicate-row guard as handleToolUpdate.
+            if (typeof childEvent.toolCallId === 'string' && this.inProgressToolCards.has(`${state.id}:${childEvent.toolCallId}`)) return;
             this.emitSubagentToolLifecycle(output, state, childEvent, 'in_progress');
             return;
         }
@@ -1270,6 +1279,7 @@ export class OmpRpcEventAdapter {
             executionFailed: event.isError === true || existing?.executionFailed
         };
         state.tools.set(tool.id, tool);
+        this.trackInProgressCard(output, `${state.id}:${tool.id}`, status);
         this.emitSubagentTrace(output, state, {
             type: 'tool_call',
             id: tool.id,
@@ -1277,6 +1287,15 @@ export class OmpRpcEventAdapter {
             input: tool.args,
             status
         });
+    }
+
+    /** Remembers which tool cards are already shown as running, so updates do not repeat them. */
+    private trackInProgressCard(output: OmpEventProjection, key: string, status: Extract<AgentMessage, { type: 'tool_call' }>['status']): void {
+        if (status !== 'in_progress') {
+            this.inProgressToolCards.delete(key);
+        } else if (output.enabled) {
+            this.inProgressToolCards.add(key);
+        }
     }
 
     private ensureSubagent(input: {

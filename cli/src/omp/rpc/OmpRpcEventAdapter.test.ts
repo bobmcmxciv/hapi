@@ -229,10 +229,11 @@ describe('OmpRpcEventAdapter', () => {
         }));
 
         const lifecycle = harness.agentMessages.filter((message) => message.type === 'tool_call');
-        expect(lifecycle).toHaveLength(3);
-        expect(lifecycle.map((message) => message.id)).toEqual(['tool-1', 'tool-1', 'tool-1']);
+        // The update repeats nothing new for the card, so it is not re-emitted.
+        expect(lifecycle).toHaveLength(2);
+        expect(lifecycle.map((message) => message.id)).toEqual(['tool-1', 'tool-1']);
+        expect(lifecycle.map((message) => message.status)).toEqual(['in_progress', 'completed']);
         expect(lifecycle.map((message) => message.input)).toEqual([
-            { command: 'printf start' },
             { command: 'printf start' },
             { command: 'printf start' }
         ]);
@@ -408,11 +409,10 @@ describe('OmpRpcEventAdapter', () => {
             .filter((message) => message.type === 'tool_call');
         expect(childLifecycle.map((message) => message.id)).toEqual([
             'child-tool',
-            'child-tool',
             'child-tool'
         ]);
+        expect(childLifecycle.map((message) => message.status)).toEqual(['in_progress', 'completed']);
         expect(childLifecycle.map((message) => message.input)).toEqual([
-            { command: 'printf original' },
             { command: 'printf original' },
             { command: 'printf original' }
         ]);
@@ -655,6 +655,34 @@ describe('OmpRpcEventAdapter', () => {
             type: 'omp-session-event', eventType: frame.type, frame
         })));
         expect(harness.canonicalMessages).toEqual([]);
+    });
+
+    it('stores one running card for a long tool call no matter how many progress updates arrive', () => {
+        const harness = createHarness();
+        harness.adapter.handle(rpcEvent({ type: 'tool_execution_start', toolCallId: 'wait-1', toolName: 'wait', args: { i: 'waiting' } }));
+        for (let second = 0; second < 900; second += 1) {
+            harness.adapter.handle(rpcEvent({ type: 'tool_execution_update', toolCallId: 'wait-1', toolName: 'wait',
+                args: { i: 'waiting' }, partialResult: { elapsed: second } }));
+        }
+        harness.adapter.handle(rpcEvent({ type: 'tool_execution_end', toolCallId: 'wait-1', toolName: 'wait', result: { done: true } }));
+        harness.adapter.handle(rpcEvent({ type: 'tool_execution_start', toolCallId: 'wait-2', toolName: 'wait', args: { i: 'again' } }));
+
+        expect(harness.agentMessages.filter((message) => message.type === 'tool_call').map((message) => [message.id, message.status])).toEqual([
+            ['wait-1', 'in_progress'],
+            ['wait-1', 'completed'],
+            ['wait-2', 'in_progress']
+        ]);
+    });
+
+    it('shows a running card from the first update when the start event is not forwarded', () => {
+        const harness = createHarness(new Set(['tool_execution_update', 'tool_execution_end']));
+        harness.adapter.handle(rpcEvent({ type: 'tool_execution_start', toolCallId: 'read-2', toolName: 'read', args: { path: 'a.ts' } }));
+        harness.adapter.handle(rpcEvent({ type: 'tool_execution_update', toolCallId: 'read-2', toolName: 'read', args: {}, partialResult: { text: 'p1' } }));
+        harness.adapter.handle(rpcEvent({ type: 'tool_execution_update', toolCallId: 'read-2', toolName: 'read', args: {}, partialResult: { text: 'p2' } }));
+
+        expect(harness.agentMessages).toEqual([{
+            type: 'tool_call', id: 'read-2', name: 'read', input: { path: 'a.ts' }, status: 'in_progress'
+        }]);
     });
 
     it('reconstructs a selected tool end from excluded start and update events', () => {
