@@ -17,6 +17,7 @@ import { FcmNotificationChannel } from './fcm/fcmNotificationChannel'
 import { resolveFcmConfig } from './fcm/fcmConfig'
 import { VisibilityTracker } from './visibility/visibilityTracker'
 import { TunnelManager } from './tunnel'
+import { startEventLoopLagMonitor } from './web/eventLoopLag'
 import { refreshRejectedRelayAuthKey, resolveRelayAuthKey } from './tunnel/relayAuth'
 import { waitForTunnelTlsReady } from './tunnel/tlsGate'
 import { ServerChanChannel } from './serverchan/channel'
@@ -183,7 +184,19 @@ export async function startHub(options: StartHubOptions = {}): Promise<HubInstan
         console.log(`[Hub] Tunnel: disabled (${relayFlag.source})`)
     }
 
+    // Phase timings: a restart once took 36 s before the hub listened, with
+    // nothing in the log to say where the time went.
+    const startupStartedAt = Date.now()
+    const logStartupPhase = (phase: string) => {
+        console.log(`[Hub] startup: ${phase} (+${((Date.now() - startupStartedAt) / 1000).toFixed(1)}s)`)
+    }
+
     const { store, multiUserGatewayStore, subscriptionStore } = bootstrapForkMultiUser(config)
+    logStartupPhase('databases open')
+    const plannerStatistics = store.ensurePlannerStatistics()
+    if (plannerStatistics.rebuilt) {
+        console.log(`[Hub] SQLite planner statistics were missing; rebuilt in ${plannerStatistics.ms} ms`)
+    }
     const gatewayMemoryDelivery = createGatewayMemoryDelivery(multiUserGatewayStore)
     const jwtSecret = await getOrCreateJwtSecret()
     const vapidKeys = await getOrCreateVapidKeys(config.dataDir)
@@ -224,6 +237,7 @@ export async function startHub(options: StartHubOptions = {}): Promise<HubInstan
     })
 
     syncEngine = new SyncEngine(store, socketServer.io, socketServer.rpcRegistry, sseManager, gatewayMemoryDelivery.decorateForCli)
+    logStartupPhase('session and machine caches loaded')
 
     const fcmConfig = resolveFcmConfig()
 
@@ -302,10 +316,24 @@ export async function startHub(options: StartHubOptions = {}): Promise<HubInstan
     }, 60 * 60 * 1000)
     blobPruneTimer.unref()
     const blobs = { store: blobStore, fetcher: new GeneratedBlobFetcher(blobStore) }
+    logStartupPhase('blob store indexed')
+
+    const eventLoopLag = startEventLoopLagMonitor()
+    // Keeps planner statistics current between the weekly full ANALYZE on ECS.
+    const optimizeTimer = setInterval(() => {
+        try {
+            const ms = store.optimize()
+            if (ms >= 100) console.log(`[Hub] PRAGMA optimize took ${ms} ms`)
+        } catch (error) {
+            console.warn('[Hub] PRAGMA optimize failed:', error instanceof Error ? error.message : error)
+        }
+    }, 6 * 60 * 60 * 1000)
+    optimizeTimer.unref()
 
     // Start HTTP service first (before tunnel, so tunnel has something to forward to)
     webServer = await startWebServer({
         blobs,
+        getEventLoopLag: eventLoopLag.snapshot,
         getSyncEngine: () => syncEngine,
         getSseManager: () => sseManager,
         getVisibilityTracker: () => visibilityTracker,
@@ -382,6 +410,7 @@ export async function startHub(options: StartHubOptions = {}): Promise<HubInstan
             .catch(error => console.error('[Usage] event cache warm-up failed:', error instanceof Error ? error.message : error))
     }, 20_000)
 
+    logStartupPhase('listening')
     console.log('')
     console.log('[Web] Hub listening on :' + config.listenPort)
     console.log('[Web] Local:  http://localhost:' + config.listenPort)
@@ -486,6 +515,8 @@ export async function startHub(options: StartHubOptions = {}): Promise<HubInstan
             cx2ccPoller?.stop()
             usageWarmupStopped = true
             clearTimeout(usageWarmupTimer)
+            clearInterval(optimizeTimer)
+            eventLoopLag.stop()
             stopWorkStore()
             subscriptionStore.close()
             multiUserGatewayStore.close()

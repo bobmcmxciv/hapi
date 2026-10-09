@@ -94,6 +94,9 @@ export class Store {
         this.db.exec('PRAGMA synchronous = NORMAL')
         this.db.exec('PRAGMA foreign_keys = ON')
         this.db.exec('PRAGMA busy_timeout = 5000')
+        // Truncate the WAL back to 64 MiB after checkpoints instead of keeping
+        // its high-water mark (a stalled checkpoint once left it at gigabytes).
+        this.db.exec('PRAGMA journal_size_limit = 67108864')
         try {
             this.initSchema()
         } catch (error) {
@@ -866,6 +869,42 @@ export class Store {
     private getMessageColumnNames(): Set<string> {
         const rows = this.db.prepare('PRAGMA table_info(messages)').all() as Array<{ name: string }>
         return new Set(rows.map((row) => row.name))
+    }
+
+    /**
+     * Rebuilds planner statistics when sqlite_stat1 has nothing for `messages`.
+     * Without them the planner walked whole session histories for hot-path
+     * lookups (2026-10-09 incident). Rebuilding holds the DB (8.8 s on the
+     * 4 GB production copy), so it runs once at startup before the hub
+     * listens; with statistics present this is a single cheap SELECT.
+     */
+    ensurePlannerStatistics(): { rebuilt: boolean; ms: number } {
+        if (this.hasMessageStatistics()) {
+            return { rebuilt: false, ms: 0 }
+        }
+        const startedAt = performance.now()
+        this.db.exec('PRAGMA analysis_limit = 400')
+        this.db.exec('PRAGMA optimize = 0x10002')
+        return { rebuilt: true, ms: Math.round(performance.now() - startedAt) }
+    }
+
+    /** Routine `PRAGMA optimize`; about 1 ms on production while statistics are current. */
+    optimize(): number {
+        const startedAt = performance.now()
+        this.db.exec('PRAGMA analysis_limit = 400')
+        this.db.exec('PRAGMA optimize')
+        return Math.round(performance.now() - startedAt)
+    }
+
+    private hasMessageStatistics(): boolean {
+        const table = this.db.prepare(
+            "SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'sqlite_stat1'"
+        ).get() as { present: number } | null
+        if (!table) return false
+        const row = this.db.prepare(
+            "SELECT COUNT(*) AS count FROM sqlite_stat1 WHERE tbl = 'messages'"
+        ).get() as { count: number } | null
+        return (row?.count ?? 0) > 0
     }
 
     private getUserVersion(): number {

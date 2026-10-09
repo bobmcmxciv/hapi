@@ -36,6 +36,8 @@ import type { SSEManager } from '../sse/sseManager'
 import type { VisibilityTracker } from '../visibility/visibilityTracker'
 import type { Server as BunServer, ServerWebSocket } from 'bun'
 import { applyDefaultWsCompression } from './wsCompression'
+import { redactAccessLogLine } from './accessLogRedaction'
+import type { EventLoopLagSnapshot } from './eventLoopLag'
 import { acceptsGzip } from './sseCompression'
 import type { Server as SocketEngine } from '@socket.io/bun-engine'
 import { jwtVerify } from 'jose'
@@ -241,13 +243,19 @@ function createWebApp(options: {
     officialWebUrl?: string
     multiUser: { store: MultiUserGatewayStore; coreUserId: number; subscriptionStore: SubscriptionStore }
     blobs?: GeneratedBlobServices
+    getEventLoopLag?: () => EventLoopLagSnapshot
 }): Hono<WebAppEnv> {
     const app = new Hono<WebAppEnv>()
 
-    app.use('*', logger())
+    app.use('*', logger((message, ...rest) => console.log(redactAccessLogLine(message), ...rest)))
 
-    // Health check endpoint (no auth required)
-    app.get('/health', (c) => c.json({ status: 'ok', protocolVersion: PROTOCOL_VERSION }))
+    // Health check endpoint (no auth required). eventLoop shows whether the
+    // single JS thread is stalling (see eventLoopLag.ts).
+    app.get('/health', (c) => c.json({
+        status: 'ok',
+        protocolVersion: PROTOCOL_VERSION,
+        ...(options.getEventLoopLag ? { eventLoop: options.getEventLoopLag() } : {})
+    }))
 
     const configuration = getConfiguration()
     const corsOrigins = options.corsOrigins ?? configuration.corsOrigins
@@ -543,6 +551,7 @@ export async function startWebServer(options: {
     officialWebUrl?: string
     multiUser: { store: MultiUserGatewayStore; coreUserId: number; subscriptionStore: SubscriptionStore }
     blobs?: GeneratedBlobServices
+    getEventLoopLag?: () => EventLoopLagSnapshot
 }): Promise<BunServer<WebSocketData>> {
     const isCompiled = isBunCompiled()
     const embeddedAssetMap = isCompiled ? await loadEmbeddedAssetMap() : null
@@ -558,7 +567,8 @@ export async function startWebServer(options: {
         relayMode: options.relayMode,
         officialWebUrl: options.officialWebUrl,
         multiUser: options.multiUser,
-        blobs: options.blobs
+        blobs: options.blobs,
+        getEventLoopLag: options.getEventLoopLag
     })
 
     const configuration = getConfiguration()

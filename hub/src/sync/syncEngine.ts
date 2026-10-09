@@ -230,6 +230,7 @@ export class SyncEngine {
             clearInterval(this.inactivityTimer)
             this.inactivityTimer = null
         }
+        this.sessionCache.stopBackgroundWork()
     }
 
     subscribe(listener: SyncEventListener): () => void {

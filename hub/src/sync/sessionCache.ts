@@ -35,10 +35,15 @@ type AgentSessionIdentity =
     }
     | { type: 'omp'; value: string; dedupeKey: string }
 
+/** Longest stretch the background todo backfill holds the event loop. */
+const TODO_BACKFILL_SLICE_MS = 25
+const TODO_BACKFILL_PAUSE_MS = 10
+
 export class SessionCache {
     private readonly sessions: Map<string, Session> = new Map()
     private readonly lastBroadcastAtBySessionId: Map<string, number> = new Map()
     private readonly todoBackfillAttemptedSessionIds: Set<string> = new Set()
+    private todoBackfillTimer: ReturnType<typeof setTimeout> | null = null
     private readonly deduplicateInProgress: Set<string> = new Set()
     private readonly deduplicatePending: Set<string> = new Set()
     private readonly pendingThinkingUntilBySessionId: Map<string, number> = new Map()
@@ -144,7 +149,7 @@ export class SessionCache {
         this.refreshSession(sessionId)
     }
 
-    refreshSession(sessionId: string): Session | null {
+    refreshSession(sessionId: string, options: { deferTodoBackfill?: boolean } = {}): Session | null {
         let stored = this.store.sessions.getSession(sessionId)
         if (!stored) {
             const existed = this.sessions.delete(sessionId)
@@ -158,22 +163,12 @@ export class SessionCache {
 
         const existing = this.sessions.get(sessionId)
 
-        if (stored.todos === null && !this.todoBackfillAttemptedSessionIds.has(sessionId)) {
-            this.todoBackfillAttemptedSessionIds.add(sessionId)
-            const messages = this.store.messages.getMessages(sessionId, 200)
-            let accumulated: TodoItem[] | null = null
-            let accumulatedAt: number | null = null
-            for (const message of messages) {
-                const nextTodos = applyTodoMessageContent(accumulated, message.content)
-                if (nextTodos) {
-                    accumulated = nextTodos
-                    accumulatedAt = message.createdAt
-                }
-            }
-            if (accumulated && accumulatedAt !== null) {
-                const updated = this.store.sessions.setSessionTodos(sessionId, accumulated, accumulatedAt, stored.namespace)
-                if (updated) stored = this.store.sessions.getSession(sessionId) ?? stored
-            }
+        if (
+            stored.todos === null
+            && !options.deferTodoBackfill
+            && this.backfillTodosFromRecentMessages(sessionId, stored.namespace)
+        ) {
+            stored = this.store.sessions.getSession(sessionId) ?? stored
         }
 
         const metadata = (() => {
@@ -241,9 +236,83 @@ export class SessionCache {
 
     reloadAll(): void {
         const sessions = this.store.sessions.getSessions()
+        const pendingTodoBackfill: string[] = []
         for (const session of sessions) {
-            this.refreshSession(session.id)
+            if (session.todos === null && !this.todoBackfillAttemptedSessionIds.has(session.id)) {
+                pendingTodoBackfill.push(session.id)
+            }
+            this.refreshSession(session.id, { deferTodoBackfill: true })
         }
+        this.scheduleTodoBackfill(pendingTodoBackfill)
+    }
+
+    stopBackgroundWork(): void {
+        if (this.todoBackfillTimer) {
+            clearTimeout(this.todoBackfillTimer)
+            this.todoBackfillTimer = null
+        }
+    }
+
+    /**
+     * Seeds todos for a session that never stored any by replaying its latest
+     * 200 messages, at most once per session per process. Returns true when
+     * todos were written.
+     */
+    private backfillTodosFromRecentMessages(sessionId: string, namespace: string): boolean {
+        if (this.todoBackfillAttemptedSessionIds.has(sessionId)) return false
+        this.todoBackfillAttemptedSessionIds.add(sessionId)
+        const messages = this.store.messages.getMessages(sessionId, 200)
+        let accumulated: TodoItem[] | null = null
+        let accumulatedAt: number | null = null
+        for (const message of messages) {
+            const nextTodos = applyTodoMessageContent(accumulated, message.content)
+            if (nextTodos) {
+                accumulated = nextTodos
+                accumulatedAt = message.createdAt
+            }
+        }
+        if (!accumulated || accumulatedAt === null) return false
+        return this.store.sessions.setSessionTodos(sessionId, accumulated, accumulatedAt, namespace)
+    }
+
+    /**
+     * Startup used to run the todo backfill inline for every session without
+     * stored todos before the hub could listen (production: 1.1k of 1.5k
+     * sessions, 111k message rows, 323 MB, ~12 s, repeated on every restart).
+     * It now runs in short slices after startup; a session touched earlier is
+     * backfilled on that access by refreshSession instead.
+     */
+    private scheduleTodoBackfill(sessionIds: string[]): void {
+        this.stopBackgroundWork()
+        if (sessionIds.length === 0) return
+        const startedAt = Date.now()
+        let index = 0
+        let filled = 0
+        const runSlice = () => {
+            this.todoBackfillTimer = null
+            try {
+                const sliceEnd = Date.now() + TODO_BACKFILL_SLICE_MS
+                while (index < sessionIds.length && Date.now() < sliceEnd) {
+                    const sessionId = sessionIds[index++]
+                    if (!sessionId) continue
+                    const stored = this.store.sessions.getSession(sessionId)
+                    if (!stored || stored.todos !== null) continue
+                    if (this.backfillTodosFromRecentMessages(sessionId, stored.namespace)) {
+                        filled += 1
+                        this.refreshSession(sessionId)
+                    }
+                }
+            } catch (error) {
+                console.warn('[SessionCache] todo backfill stopped:', error instanceof Error ? error.message : error)
+                return
+            }
+            if (index < sessionIds.length) {
+                this.todoBackfillTimer = setTimeout(runSlice, TODO_BACKFILL_PAUSE_MS)
+                return
+            }
+            console.log(`[SessionCache] todo backfill: ${sessionIds.length} sessions checked, ${filled} filled in ${((Date.now() - startedAt) / 1000).toFixed(1)}s`)
+        }
+        this.todoBackfillTimer = setTimeout(runSlice, TODO_BACKFILL_PAUSE_MS)
     }
 
     markSessionActive(sessionId: string, time: number = Date.now()): void {
