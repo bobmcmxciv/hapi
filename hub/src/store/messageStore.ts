@@ -42,7 +42,8 @@ import {
     aggregateUsageBuckets,
     aggregateUsageForSessions,
     aggregateUsageGroups,
-    warmUsageEventCache,
+    startUsageEventCacheWarmup,
+    whenUsageEventCacheWarm,
     type UsageAggregateRow,
 } from '../../../fork-features/usage/usageAggregate'
 
@@ -81,7 +82,12 @@ export class MessageStore {
 
     /** hub 启动后在后台分段预热用量事件缓存。 */
     warmUsageCache(options?: { shouldStop?: () => boolean }): Promise<{ sessions: number; rows: number }> {
-        return warmUsageEventCache(this.db, options)
+        return startUsageEventCacheWarmup(this.db, options)
+    }
+
+    /** 用量缓存预热完成（没开始就开始）。用量路由在同步聚合前先等它。 */
+    whenUsageCacheWarm(): Promise<void> {
+        return whenUsageEventCacheWarm(this.db)
     }
 
     addMessage(sessionId: string, content: unknown, localId?: string, scheduledAt?: number | null, createdAt?: number): StoredMessage {

@@ -219,6 +219,7 @@ const sessionEventCache = new Map<string, SessionUsageEvents>()
 /** 仅供测试：清空缓存，让用例之间互不影响。 */
 export function __resetUsageEventCacheForTests(): void {
     sessionEventCache.clear()
+    usageWarmups = new WeakMap()
 }
 
 const asRecord = (value: unknown): Record<string, unknown> | null =>
@@ -810,6 +811,31 @@ export async function warmUsageEventCache(
         }
     }
     return { sessions, rows }
+}
+
+type UsageWarmup = { promise: Promise<{ sessions: number; rows: number }>; done: boolean }
+let usageWarmups = new WeakMap<Database, UsageWarmup>()
+
+/** 预热只跑一次：startHub 的定时器和早到的用量请求共用同一个 Promise。 */
+export function startUsageEventCacheWarmup(
+    db: Database,
+    options: { budgetMs?: number; pauseMs?: number; shouldStop?: () => boolean } = {}
+): Promise<{ sessions: number; rows: number }> {
+    const existing = usageWarmups.get(db)
+    if (existing) return existing.promise
+    const warmup: UsageWarmup = { promise: Promise.resolve({ sessions: 0, rows: 0 }), done: false }
+    warmup.promise = warmUsageEventCache(db, options).finally(() => { warmup.done = true })
+    usageWarmups.set(db, warmup)
+    return warmup.promise
+}
+
+/** 用量请求在聚合前等它：缓存没热时同步聚合会在请求里解码全部历史。fork.27 启动只要约 3 秒，
+ *  换芯后第 19 秒的一个 /api/usage/summary 就让 hub 停摆了 124 秒（2026-10-10 实测）。
+ *  预热还没开始就立即开始；它分段让出事件循环，等待期间 hub 照常服务。 */
+export async function whenUsageEventCacheWarm(db: Database): Promise<void> {
+    const existing = usageWarmups.get(db)
+    if (existing?.done) return
+    await startUsageEventCacheWarmup(db).catch(() => undefined)
 }
 
 /** Strip a trailing context-window variant suffix: `gpt-5.6-sol[1m]` → `gpt-5.6-sol`.

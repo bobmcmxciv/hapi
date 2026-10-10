@@ -9,7 +9,9 @@ import {
     aggregateUsageBuckets,
     aggregateUsageForSessions,
     aggregateUsageGroups,
+    startUsageEventCacheWarmup,
     warmUsageEventCache,
+    whenUsageEventCacheWarm,
     type UsageAggregateRow
 } from './usageAggregate'
 import { planBuckets } from './usageTimeseries'
@@ -262,6 +264,39 @@ describe('一趟扫描多个视图 ≡ 逐个单独聚合', () => {
         const incremental = aggregateUsageForSessions(db, ids, window)
         __resetUsageEventCacheForTests()
         expect(sorted(incremental)).toEqual(sorted(aggregateUsageForSessions(db, ids, window)))
+    }, 60_000)
+
+    it('冷缓存时用量请求等共享的分段预热，等待期间事件循环照常跑', async () => {
+        const { store, ids } = buildFixture(13)
+        const db = (store as unknown as { db: Database }).db
+        const window = { sinceIso: new Date(START + 20 * HOUR).toISOString(), untilIso: new Date(START + 200 * HOUR).toISOString() }
+        const cold = aggregateUsageForSessions(db, ids, window)
+        __resetUsageEventCacheForTests()
+
+        let ticks = 0
+        const timer = setInterval(() => { ticks += 1 }, 0)
+        try {
+            // budgetMs 0 makes the warm-up yield after every session, as it does on a large database.
+            const warmup = startUsageEventCacheWarmup(db, { budgetMs: 0, pauseMs: 0 })
+            await whenUsageEventCacheWarm(db)
+            expect((await warmup).sessions).toBe(ids.length)
+        } finally {
+            clearInterval(timer)
+        }
+        expect(ticks).toBeGreaterThan(0)
+        expect(sorted(aggregateUsageForSessions(db, ids, window))).toEqual(sorted(cold))
+    }, 60_000)
+
+    it('请求先到时由它启动预热，启动定时器随后拿到的是同一次预热', async () => {
+        const { store, ids } = buildFixture(17)
+        const db = (store as unknown as { db: Database }).db
+        __resetUsageEventCacheForTests()
+
+        await whenUsageEventCacheWarm(db)
+        const total = (db.prepare('SELECT COUNT(*) AS n FROM messages').get() as { n: number }).n
+        const shared = await startUsageEventCacheWarmup(db)
+        expect(shared).toEqual({ sessions: ids.length, rows: total })
+        expect(await startUsageEventCacheWarmup(db)).toBe(shared)
     }, 60_000)
 
     it('预热可以中途停下', async () => {

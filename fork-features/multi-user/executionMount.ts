@@ -354,6 +354,7 @@ export function mountExecutionRoutes(app: Hono<WebAppEnv>, deps: {
         const sinceIso = parseIsoParam(c.req.query('since'))
         const untilIso = parseIsoParam(c.req.query('until'))
         const cacheKey = [account.id, sinceIso ?? '', untilIso ?? '', hostParam ?? ''].join('|')
+        await store.messages.whenUsageCacheWarm()
         return c.json(summaryCache.compute(cacheKey, () => {
             // 与 GET /api/sessions 共用同一个可见集解析器（含机器授权继承的那一支），
             // 区别只有这里不认领未绑定会话 —— 只读端点不该改写资源归属。
@@ -422,6 +423,7 @@ export function mountExecutionRoutes(app: Hono<WebAppEnv>, deps: {
         const untilMs = untilIso ? Date.parse(untilIso) : now
         const sinceMs = sinceIso ? Date.parse(sinceIso) : untilMs - 30 * 24 * 3600_000
         const cacheKey = [account.id, sinceIso ?? '', untilIso ?? '', unit, tz, hostParam ?? ''].join('|')
+        await store.messages.whenUsageCacheWarm()
         return c.json(timeseriesCache.compute(cacheKey, () => {
             const visible = collectVisibleSessions(deps.store, engine, account, { claimUnbound: false })
             const ids = (hostParam ? visible.filter(session => session.metadata?.host === hostParam) : visible)
