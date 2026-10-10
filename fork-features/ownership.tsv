@@ -88,6 +88,8 @@ cli/src/modules/common/handlers/files.test.ts	fork-owned	#177	origin-only delta;
 cli/src/modules/common/handlers/files.ts	trunk-patch	#176	origin-only delta; fork commits b4c31e88,bfa252da
 cli/src/modules/common/hooks/generateHookSettings.test.ts	fork-owned	#174	origin-only delta; fork commits 8a621492; claude-proxy-models: settings-level env override 用例
 cli/src/modules/common/hooks/generateHookSettings.ts	trunk-patch	#174	origin-only delta; fork commits 8a621492; claude-proxy-models: buildHookSettings 第 6 参 settingsEnvOverride + readSettingsEnvOverride; windows-hooks: hook 命令改用 claudeHookCommandJoin（Git Bash 下反斜杠被吃致 SessionStart exit 127）
+cli/src/modules/common/launcher/BaseLocalLauncher.test.ts	fork-owned	runtime-hardening	fork-owned module: 本地模式 Stop 保留排队消息
+cli/src/modules/common/launcher/BaseLocalLauncher.ts	trunk-patch	runtime-hardening	runtime-hardening: 本地模式 Stop 不再 queue.reset()，刚发来的消息保留给远程循环
 cli/src/modules/common/permission/BasePermissionHandler.test.ts	upstream-sync	#180	merge-base 87f5c78a; changed only on upstream/main
 cli/src/modules/common/permission/BasePermissionHandler.ts	trunk-patch	#176	both refs changed; fork commits b4c31e88,d28853c7
 cli/src/modules/common/registerCommonHandlers.ts	trunk-patch	#173	origin-only delta; fork commits 3994ee9a,fc7d7b4a,a8815d47
@@ -442,7 +444,7 @@ web/src/components/SyncingBanner.tsx	upstream-fix	#179	origin-only delta; fork c
 web/src/components/Terminal/TerminalView.tsx	trunk-patch	web-stability	CanvasAddon 仅桌面端加载：Android GPU 驱动崩浏览器、iOS canvas 计入 WebKit 内存预算，移动端走 DOM 渲染器
 web/src/components/ToastContainer.tsx	upstream-fix	#179	origin-only delta; fork commits d1f9f394; disposition upstream-issue https://github.com/tiann/hapi/issues/1077: general fix reported against latest upstream main
 web/src/components/ToolCard/ToolCard.test.ts	upstream-sync	#180	merge-base 87f5c78a; changed only on upstream/main
-web/src/components/ToolCard/ToolCard.tsx	trunk-patch	#178	both refs changed; fork commits 498aefb3,e9e7dbd7,302180e5,72c96399
+web/src/components/ToolCard/ToolCard.tsx	trunk-patch	#178,runtime-hardening	both refs changed; fork commits 498aefb3,e9e7dbd7,302180e5,72c96399; runtime-hardening: 网页答不了的提问卡片（终端本地模式提出）显示怎么继续
 web/src/components/ToolCard/ToolDetailDialogContent.test.tsx	fork-owned	#179	origin-only delta; fork commits 498aefb3
 web/src/components/ToolCard/ToolGroupCard.test.tsx	trunk-patch	#175	both refs changed; fork commits 72c96399
 web/src/components/ToolCard/ToolGroupCard.tsx	trunk-patch	#178	origin-only delta; fork commits 498aefb3,302180e5,72c96399
@@ -453,6 +455,8 @@ web/src/components/ToolCard/toolDuration.test.ts	upstream-sync	#180	merge-base 8
 web/src/components/ToolCard/toolDuration.ts	upstream-sync	#180	merge-base 87f5c78a; changed only on upstream/main
 web/src/components/ToolCard/trace.test.tsx	trunk-patch	#203	both refs changed; disposition fork-specific #203: OMP nested-event visibility coverage
 web/src/components/ToolCard/trace.tsx	trunk-patch	#203	origin-only delta; disposition fork-specific #203: OMP nested-event visibility guard
+web/src/components/ToolCard/unansweredQuestion.test.tsx	fork-owned	runtime-hardening	fork-owned module: 提问卡片提示
+web/src/components/ToolCard/unansweredQuestion.ts	fork-owned	runtime-hardening	fork-owned module: 运行超过 15 s 仍无权限请求的提问卡片判定
 web/src/components/ToolCard/views/WriteView.tsx	trunk-patch	#177	origin-only delta; fork commits f00c8228
 web/src/components/ToolCard/views/_results.test.tsx	trunk-patch	#177	both refs changed; fork commits e2a200a8,72c96399,e737b4b3
 web/src/components/ToolCard/views/_results.tsx	trunk-patch	#177	origin-only delta; fork commits e2a200a8,302180e5,72c96399,473d69b4,e737b4b3
@@ -512,7 +516,9 @@ web/src/fork-features/session-digest/DigestSettingsSection.tsx	fork-owned	sessio
 web/src/fork-features/session-digest/digestApi.ts	fork-owned	session-digest	fork-owned module: 摘要 API hooks
 web/src/fork-features/session-digest/refreshProgress.test.ts	fork-owned	session-digest	fork-owned module tests
 web/src/fork-features/session-digest/refreshProgress.ts	fork-owned	session-digest	fork-owned module: 「重新总结」进度判定（排队/生成中/完成/超时）
-web/src/fork-features/session-tabs/SessionTabsBar.tsx	fork-owned	session-tabs	fork-owned module: 会话页右栏顶部的会话标签条（打开即入、固定、拖拽排序、右键菜单）; 最左固定首页标签（admin 回工作总览）; 键盘快捷键（经 useSessionTabsSync 挂载）、关闭按钮提示快捷键
+web/src/fork-features/session-tabs/SessionTabsBar.test.tsx	fork-owned	session-tabs	fork-owned module: 标签菜单
+web/src/fork-features/session-tabs/SessionTabsBar.tsx	fork-owned	session-tabs	fork-owned module: 会话页右栏顶部的会话标签条（打开即入、固定、拖拽排序、右键菜单）; 最左固定首页标签（admin 回工作总览）; 键盘快捷键（经 useSessionTabsSync 挂载）、关闭按钮提示快捷键; session-tabs: 右键/长按标签弹出会话操作（重命名、复制引用、归类、归档）
+web/src/fork-features/session-tabs/TabSessionDialogs.tsx	fork-owned	session-tabs	fork-owned module: 标签菜单打开的重命名/归档/归类对话框
 web/src/fork-features/session-tabs/sessionTabs.css	fork-owned	session-tabs	fork-owned module: 标签条样式；有标签条时让下方页头放弃安全区内边距
 web/src/fork-features/session-tabs/sessionTabsStore.test.ts	fork-owned	session-tabs	fork-owned module tests
 web/src/fork-features/session-tabs/sessionTabsStore.ts	fork-owned	session-tabs	fork-owned module: 标签规则（纯函数）与按 hub+账号分区的 localStorage store
@@ -589,8 +595,8 @@ web/src/lib/fork-restore.test.ts	fork-owned	#170	origin-only delta; fork commits
 web/src/lib/fork-restore.ts	fork-owned	#170	origin-only delta; fork commits 88f9dc20,fbfd26f5,5262a261
 web/src/lib/generatedInlineMedia.test.ts	fork-owned	#175	origin-only delta; fork commits d28853c7
 web/src/lib/generatedInlineMedia.ts	fork-owned	#175	origin-only delta; fork commits d28853c7
-web/src/lib/locales/en.ts	trunk-patch	#171,new-session-guard	both refs changed; fork commits ba37bcfb,606c6579,302180e5,7faed2eb,85743eb7,4a0c5f0b,7b197fec,a8815d47,bfa252da,c853bcbf,aee648ee,d1f9f394,413e76cc,291c8db0,3582e989,d3199037; claude-proxy-models: newSession.model.proxyCatalog* 文案; machine-icons: machineIcon.* 文案; session-digest/usage trend 文案; work-overview: work.* 文案; session-tabs: tabs.* 文案; session-digest: 重新总结的排队/进度/已更新/超时文案; session-tabs: tabs.home; list-prefs: settings.listPrefs.*; work-overview: work.card2.*、work.briefing.*、work.lineDetail.*、work.need 忽略/恢复/只看; session-tabs: tabs.closeShortcut; work-overview: work.card2.todo/sessions、work.briefing.openCard; help: settings.help.*; new-session-guard: 创建状态文案
-web/src/lib/locales/zh-CN.ts	trunk-patch	#171,new-session-guard	both refs changed; fork commits ba37bcfb,606c6579,302180e5,7faed2eb,85743eb7,4a0c5f0b,7b197fec,a8815d47,bfa252da,c853bcbf,aee648ee,d1f9f394,413e76cc,291c8db0,3582e989,d3199037; claude-proxy-models: newSession.model.proxyCatalog* 文案; machine-icons: machineIcon.* 文案; session-digest/usage trend 文案; work-overview: work.* 文案; session-tabs: tabs.* 文案; session-digest: 重新总结的排队/进度/已更新/超时文案; session-tabs: tabs.home; list-prefs: settings.listPrefs.*; work-overview: work.card2.*、work.briefing.*、work.lineDetail.*、work.need 忽略/恢复/只看; session-tabs: tabs.closeShortcut; work-overview: work.card2.todo/sessions、work.briefing.openCard; help: settings.help.*; new-session-guard: 创建状态文案
+web/src/lib/locales/en.ts	trunk-patch	#171,new-session-guard,session-tabs	both refs changed; fork commits ba37bcfb,606c6579,302180e5,7faed2eb,85743eb7,4a0c5f0b,7b197fec,a8815d47,bfa252da,c853bcbf,aee648ee,d1f9f394,413e76cc,291c8db0,3582e989,d3199037; claude-proxy-models: newSession.model.proxyCatalog* 文案; machine-icons: machineIcon.* 文案; session-digest/usage trend 文案; work-overview: work.* 文案; session-tabs: tabs.* 文案; session-digest: 重新总结的排队/进度/已更新/超时文案; session-tabs: tabs.home; list-prefs: settings.listPrefs.*; work-overview: work.card2.*、work.briefing.*、work.lineDetail.*、work.need 忽略/恢复/只看; session-tabs: tabs.closeShortcut; work-overview: work.card2.todo/sessions、work.briefing.openCard; help: settings.help.*; new-session-guard: 创建状态文案; session-tabs: 标签菜单与归类文案；提问卡片提示
+web/src/lib/locales/zh-CN.ts	trunk-patch	#171,new-session-guard,session-tabs	both refs changed; fork commits ba37bcfb,606c6579,302180e5,7faed2eb,85743eb7,4a0c5f0b,7b197fec,a8815d47,bfa252da,c853bcbf,aee648ee,d1f9f394,413e76cc,291c8db0,3582e989,d3199037; claude-proxy-models: newSession.model.proxyCatalog* 文案; machine-icons: machineIcon.* 文案; session-digest/usage trend 文案; work-overview: work.* 文案; session-tabs: tabs.* 文案; session-digest: 重新总结的排队/进度/已更新/超时文案; session-tabs: tabs.home; list-prefs: settings.listPrefs.*; work-overview: work.card2.*、work.briefing.*、work.lineDetail.*、work.need 忽略/恢复/只看; session-tabs: tabs.closeShortcut; work-overview: work.card2.todo/sessions、work.briefing.openCard; help: settings.help.*; new-session-guard: 创建状态文案; session-tabs: 标签菜单与归类文案；提问卡片提示
 web/src/lib/message-window-store.test.ts	upstream-fix	#179,mouriya#323	origin-only delta; fork commits 7a5232bf; disposition upstream-issue https://github.com/tiann/hapi/issues/1071: general fix reported against latest upstream main; mouriya-s-lab/hapi#323 mechanism 1: held-range revalidation cases (older page + tail sync while reading history)
 web/src/lib/message-window-store.ts	upstream-fix	#179,mouriya#323	origin-only delta; fork commits 7a5232bf; disposition upstream-issue https://github.com/tiann/hapi/issues/1071: general fix reported against latest upstream main; mouriya-s-lab/hapi#323 mechanism 1: epoch change while reading history re-reads the held interval (after+until) instead of replacing the window with latest — drop when upstream lands #326/#327
 web/src/lib/query-keys.ts	trunk-patch	#173	both refs changed; fork commits 3994ee9a,fc7d7b4a,a8815d47,c58622c2; claude-proxy-models: claudeProxyModels 键

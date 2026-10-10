@@ -1021,3 +1021,20 @@ localStorage，按 hub 地址 + 账号分区，**所有账号都可用**（不�
 | Files | Missing upstream seam | Why it cannot move out | Runtime path | Sync verification |
 |---|---|---|---|---|
 | `cli/src/omp/ompRemoteLauncher.ts` | No OMP launcher lifecycle hook for context usage, compaction or turn end | The relay needs the live RPC client (`get_state`), the abort handler, compaction events and turn-end events, all owned by the launcher | OMP session → relay tick (60 s) → steer → handover file → spawn successor → kickoff → archive | Real hub + runner + OMP session in a project with a low threshold: the steer message, the handover file, the successor's kickoff and the archived original all appear |
+
+## 本地模式 Stop 丢消息 + 网页答不了的提问卡片 (2026-10-10)
+
+终端里跑的会话（本地模式）停在 AskUserQuestion 上时，从网页发消息触发切到远程，紧接着点停止，`BaseLocalLauncher` 的 doAbort 会清空队列，把这条消息丢掉，会话从此只是"等待消息"。现在中止只停本地进程、保留排队消息（与远程启动器一致）。终端里提出的问题不会登记成权限请求，网页卡片只会转圈；运行超过 15 秒仍没有可作答的请求时，卡片提示直接在下方输入回答。
+
+| Files | Missing upstream seam | Why it cannot move out | Runtime path | Sync verification |
+|---|---|---|---|---|
+| `cli/src/modules/common/launcher/BaseLocalLauncher.ts` and test | No local-launcher abort policy hook | The abort RPC handler and the queue reset live inside the shared local launcher used by claude/codex/cursor | web message in local mode → doSwitch → Stop → doAbort keeps the queue → remote loop runs the message | Start a session from a terminal, let it ask a question, send a message from the web and press Stop within 3 s: the message runs after the switch |
+| `web/src/components/ToolCard/ToolCard.tsx`, `unansweredQuestion.ts` and test, locale files | No tool-card footer registry | The question footers are chosen inline in ToolCard from the tool's permission state | running question tool without a permission request for 15 s → hint in the card | A terminal-asked AskUserQuestion shows the hint in the web; a remote one shows its options and no hint |
+
+## 标签菜单：会话操作 (2026-10-10)
+
+右键（桌面）或长按（触屏）会话标签弹出菜单：重命名、复制引用、归类到主线（admin）、归档（会话在跑时），以及原有的固定/关闭类操作。全部在 `web/src/fork-features/session-tabs/`（fork-owned），只动了两份文案。
+
+| Files | Missing upstream seam | Why it cannot move out | Runtime path | Sync verification |
+|---|---|---|---|---|
+| locale files | No locale registry for fork features | Strings are looked up from the shared locale tables | tab menu labels, classify dialog | In a real browser: right-click a tab and long-press it in a phone viewport; rename, copy reference, assign to a subline and archive from the menu |
