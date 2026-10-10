@@ -832,10 +832,19 @@ export function startUsageEventCacheWarmup(
 /** 用量请求在聚合前等它：缓存没热时同步聚合会在请求里解码全部历史。fork.27 启动只要约 3 秒，
  *  换芯后第 19 秒的一个 /api/usage/summary 就让 hub 停摆了 124 秒（2026-10-10 实测）。
  *  预热还没开始就立即开始；它分段让出事件循环，等待期间 hub 照常服务。 */
-export async function whenUsageEventCacheWarm(db: Database): Promise<void> {
+export async function whenUsageEventCacheWarm(db: Database, maxWaitMs = Number.POSITIVE_INFINITY): Promise<boolean> {
     const existing = usageWarmups.get(db)
-    if (existing?.done) return
-    await startUsageEventCacheWarmup(db).catch(() => undefined)
+    if (existing?.done) return true
+    const warmup = startUsageEventCacheWarmup(db).then(() => true, () => true)
+    if (!Number.isFinite(maxWaitMs)) return await warmup
+    // 生产冷预热约 2 分钟；Bun 约 50 秒就断开一直不回数据的请求，所以有上限地等，到点回 false 让路由回 503。
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const timeout = new Promise<boolean>((resolve) => { timer = setTimeout(() => resolve(false), maxWaitMs) })
+    try {
+        return await Promise.race([warmup, timeout])
+    } finally {
+        clearTimeout(timer)
+    }
 }
 
 /** Strip a trailing context-window variant suffix: `gpt-5.6-sol[1m]` → `gpt-5.6-sol`.

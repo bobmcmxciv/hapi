@@ -299,6 +299,18 @@ describe('一趟扫描多个视图 ≡ 逐个单独聚合', () => {
         expect(await startUsageEventCacheWarmup(db)).toBe(shared)
     }, 60_000)
 
+    it('有上限地等：预热没完就回 false，路由据此回 503', async () => {
+        const { store } = buildFixture(19)
+        const db = (store as unknown as { db: Database }).db
+        __resetUsageEventCacheForTests()
+
+        const warmup = startUsageEventCacheWarmup(db, { budgetMs: 0, pauseMs: 5 })
+        expect(await whenUsageEventCacheWarm(db, 1)).toBe(false)
+        expect(await whenUsageEventCacheWarm(db)).toBe(true)
+        await warmup
+        expect(await whenUsageEventCacheWarm(db, 1)).toBe(true)
+    }, 60_000)
+
     it('预热可以中途停下', async () => {
         const { store } = buildFixture(5)
         const db = (store as unknown as { db: Database }).db

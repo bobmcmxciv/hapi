@@ -85,9 +85,9 @@ export class MessageStore {
         return startUsageEventCacheWarmup(this.db, options)
     }
 
-    /** 用量缓存预热完成（没开始就开始）。用量路由在同步聚合前先等它。 */
-    whenUsageCacheWarm(): Promise<void> {
-        return whenUsageEventCacheWarm(this.db)
+    /** 用量缓存预热完成（没开始就开始）时为 true；等满 maxWaitMs 仍未完成为 false。 */
+    whenUsageCacheWarm(maxWaitMs?: number): Promise<boolean> {
+        return whenUsageEventCacheWarm(this.db, maxWaitMs)
     }
 
     addMessage(sessionId: string, content: unknown, localId?: string, scheduledAt?: number | null, createdAt?: number): StoredMessage {

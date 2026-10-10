@@ -1,4 +1,4 @@
-import type { Hono, MiddlewareHandler } from 'hono'
+import type { Context, Hono, MiddlewareHandler } from 'hono'
 import { jwtVerify } from 'jose'
 import { toSessionSummary } from '../../shared/src/sessionSummary'
 import type { Session, SyncEngine } from '../../hub/src/sync/syncEngine'
@@ -341,6 +341,12 @@ export function mountExecutionRoutes(app: Hono<WebAppEnv>, deps: {
     // 可见集与上面 GET /api/sessions 完全同构：admin 看整个 namespace，普通
     // 用户只统计自己拥有的 + 被授权的会话 —— 不泄漏他人用量。与列表不同的是
     // 这里**不做** bind-on-view 副作用（只读端点不该改写资源归属）。
+    // hub 重启后用量缓存要分段预热约 2 分钟（生产 130 万行）；请求最多等 25 秒，没热就回 503 让前端稍后重试。
+    const USAGE_WARM_WAIT_MS = 25_000
+    const usageWarmingResponse = (c: Context) => {
+        c.header('Retry-After', '30')
+        return c.json({ error: 'Usage statistics are still loading after a hub restart. Try again in a minute.', code: 'usage_warming' }, 503)
+    }
     const summaryCache = new UsageResponseCache<ReturnType<typeof buildUsageSummaryResponse>>(USAGE_SUMMARY_TTL_MS)
     const timeseriesCache = new UsageResponseCache<UsageTimeseriesResponse>(USAGE_TIMESERIES_TTL_MS)
     app.get('/api/usage/summary', async (c) => {
@@ -354,7 +360,7 @@ export function mountExecutionRoutes(app: Hono<WebAppEnv>, deps: {
         const sinceIso = parseIsoParam(c.req.query('since'))
         const untilIso = parseIsoParam(c.req.query('until'))
         const cacheKey = [account.id, sinceIso ?? '', untilIso ?? '', hostParam ?? ''].join('|')
-        await store.messages.whenUsageCacheWarm()
+        if (!await store.messages.whenUsageCacheWarm(USAGE_WARM_WAIT_MS)) return usageWarmingResponse(c)
         return c.json(summaryCache.compute(cacheKey, () => {
             // 与 GET /api/sessions 共用同一个可见集解析器（含机器授权继承的那一支），
             // 区别只有这里不认领未绑定会话 —— 只读端点不该改写资源归属。
@@ -423,7 +429,7 @@ export function mountExecutionRoutes(app: Hono<WebAppEnv>, deps: {
         const untilMs = untilIso ? Date.parse(untilIso) : now
         const sinceMs = sinceIso ? Date.parse(sinceIso) : untilMs - 30 * 24 * 3600_000
         const cacheKey = [account.id, sinceIso ?? '', untilIso ?? '', unit, tz, hostParam ?? ''].join('|')
-        await store.messages.whenUsageCacheWarm()
+        if (!await store.messages.whenUsageCacheWarm(USAGE_WARM_WAIT_MS)) return usageWarmingResponse(c)
         return c.json(timeseriesCache.compute(cacheKey, () => {
             const visible = collectVisibleSessions(deps.store, engine, account, { claimUnbound: false })
             const ids = (hostParam ? visible.filter(session => session.metadata?.host === hostParam) : visible)
