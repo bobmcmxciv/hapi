@@ -625,6 +625,7 @@ export default {
   'tool.exitPlan': 'Exit Plan Mode',
   'tool.patch': 'Patch',
   'tool.input': 'Input',
+  'tool.question.unanswerableHere': 'This question was asked in the terminal (the session was in local mode), so it cannot be answered here. Type your answer below and send it to continue; the session switches to remote mode.',
   'tool.trace': 'Trace',
   'tool.trace.callsSuffix': 'calls',
   'tool.result': 'Result',

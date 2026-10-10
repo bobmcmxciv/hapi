@@ -12,6 +12,7 @@ import { AskUserQuestionFooter } from '@/components/ToolCard/AskUserQuestionFoot
 import { RequestUserInputFooter } from '@/components/ToolCard/RequestUserInputFooter'
 import { isAskUserQuestionToolName } from '@/components/ToolCard/askUserQuestion'
 import { isRequestUserInputToolName } from '@/components/ToolCard/requestUserInput'
+import { useUnanswerableQuestion } from '@/components/ToolCard/unansweredQuestion'
 import { getToolPresentation } from '@/components/ToolCard/knownTools'
 import { getToolFullViewComponent, getToolViewComponent } from '@/components/ToolCard/views/_all'
 import { extractImagesFromResult, getToolResultViewComponent, ToolResultImages } from '@/components/ToolCard/views/_results'
@@ -477,6 +478,7 @@ function ToolCardInner(props: ToolCardProps) {
     const isAskUserQuestion = isAskUserQuestionToolName(toolName)
     const isRequestUserInput = isRequestUserInputToolName(toolName)
     const isQuestionTool = isAskUserQuestion || isRequestUserInput
+    const unanswerableQuestion = useUnanswerableQuestion(props.block.tool, isQuestionTool)
     const showsPermissionFooter = Boolean(permission && (
         permission.status === 'pending'
         || ((permission.status === 'denied' || permission.status === 'canceled') && Boolean(permission.reason))
@@ -485,7 +487,7 @@ function ToolCardInner(props: ToolCardProps) {
         () => !showInline && extractImagesFromResult(props.block.tool.result).length > 0,
         [props.block.tool.result, showInline]
     )
-    const hasBody = showInline || taskSummary !== null || showsPermissionFooter || hasInlineResultImages
+    const hasBody = showInline || taskSummary !== null || showsPermissionFooter || hasInlineResultImages || unanswerableQuestion
     // Header/content padding already supplies 12-16px below timing; add only
     // the remainder needed to match the detail dialog's 16px section gap.
     const inlineBodySpacing = props.block.tool.state === 'pending'
@@ -655,6 +657,15 @@ function ToolCardInner(props: ToolCardProps) {
                                 </div>
                             </div>
                         )
+                    ) : null}
+
+                    {unanswerableQuestion ? (
+                        <div
+                            data-testid="unanswerable-question-hint"
+                            className="mt-2 rounded-xl bg-[var(--app-subtle-bg)] px-3 py-2 text-xs text-[var(--app-hint)]"
+                        >
+                            {t('tool.question.unanswerableHere')}
+                        </div>
                     ) : null}
 
                     {isAskUserQuestion && permission?.status === 'pending' ? (

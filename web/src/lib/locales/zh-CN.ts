@@ -628,6 +628,7 @@ export default {
   'tool.exitPlan': '退出计划模式',
   'tool.patch': '补丁',
   'tool.input': '输入',
+  'tool.question.unanswerableHere': '这个问题没有发到网页上（提问时会话在终端本地模式运行），这里无法作答。直接在下方输入你的回答并发送即可继续，会话会切换到远程模式。',
   'tool.trace': '追踪',
   'tool.trace.callsSuffix': '次调用',
   'tool.result': '结果',
