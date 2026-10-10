@@ -6,6 +6,13 @@ import { useTranslation } from '@/lib/use-translation'
 import { getSessionTitle } from '@/lib/sessionTitle'
 import { getSessionLastSeenAt } from '@/lib/sessionLastSeen'
 import { cn } from '@/lib/utils'
+import { useLongPress } from '@/hooks/useLongPress'
+import { usePlatform } from '@/hooks/usePlatform'
+import { safeCopyToClipboard } from '@/lib/clipboard'
+import { buildSessionReferenceText } from '@/lib/sessionReference'
+import { useToast } from '@/lib/toast-context'
+import { useIsWorkOverviewEnabled } from '../work-overview/workApi'
+import { TabSessionDialog, type TabSessionDialogKind } from './TabSessionDialogs'
 import {
     closeOtherTabs,
     closeTab,
@@ -86,6 +93,8 @@ export function useHasSessionTabs(): boolean {
 }
 
 type Menu = { id: string; x: number; y: number } | null
+type OpenDialog = { id: string; kind: TabSessionDialogKind } | null
+type MenuItem = { key: string; label: string; run: () => void; danger?: boolean }
 
 export function SessionTabsBar(props: {
     sessions: SessionSummary[]
@@ -97,8 +106,13 @@ export function SessionTabsBar(props: {
     const { t } = useTranslation()
     const navigate = useNavigate()
     const scope = useSessionTabsScope()
+    const { api } = useAppContext()
+    const { haptic } = usePlatform()
+    const { addToast } = useToast()
+    const canClassify = useIsWorkOverviewEnabled()
     const { tabs } = useSessionTabsState(scope)
     const [menu, setMenu] = useState<Menu>(null)
+    const [dialog, setDialog] = useState<OpenDialog>(null)
     const [dragging, setDragging] = useState<string | null>(null)
     const scroller = useRef<HTMLDivElement>(null)
     const byId = useMemo(() => new Map(props.sessions.map(session => [session.id, session])), [props.sessions])
@@ -112,10 +126,21 @@ export function SessionTabsBar(props: {
     useEffect(() => {
         if (!menu) return
         const close = () => setMenu(null)
-        window.addEventListener('click', close)
+        // pointerdown rather than click: the click that ends a touch long-press
+        // would otherwise close the menu that long-press just opened.
+        const onPointerDown = (event: PointerEvent) => {
+            const target = event.target as Element | null
+            if (!target?.closest?.('[data-tab-menu]')) close()
+        }
+        const onKeyDown = (event: KeyboardEvent) => {
+            if (event.key === 'Escape') close()
+        }
+        window.addEventListener('pointerdown', onPointerDown, true)
+        window.addEventListener('keydown', onKeyDown)
         window.addEventListener('scroll', close, true)
         return () => {
-            window.removeEventListener('click', close)
+            window.removeEventListener('pointerdown', onPointerDown, true)
+            window.removeEventListener('keydown', onKeyDown)
             window.removeEventListener('scroll', close, true)
         }
     }, [menu])
@@ -133,6 +158,42 @@ export function SessionTabsBar(props: {
             close(id)
         }
     }
+
+    const menuSession = menu ? byId.get(menu.id) : undefined
+    // Actions on the tab's session: the same ones the session list offers on long-press.
+    const sessionItems: MenuItem[] = menu && menuSession ? [
+        { key: 'rename', label: t('session.action.rename'), run: () => setDialog({ id: menu.id, kind: 'rename' }) },
+        {
+            key: 'reference',
+            label: t('session.action.copyReference'),
+            run: () => {
+                const title = getSessionTitle(menuSession) || t('tabs.untitled')
+                void safeCopyToClipboard(buildSessionReferenceText(title, menuSession.id)).then(
+                    () => {
+                        haptic.notification('success')
+                        addToast({ title: t('tabs.referenceCopied'), body: title, sessionId: menuSession.id, url: window.location.href, durationMs: 2500 })
+                    },
+                    () => haptic.notification('error')
+                )
+            }
+        },
+        ...(canClassify ? [{ key: 'classify', label: t('tabs.classify.action'), run: () => setDialog({ id: menu.id, kind: 'classify' }) }] : []),
+        ...(menuSession.active ? [{ key: 'archive', label: t('session.action.archive'), danger: true, run: () => setDialog({ id: menu.id, kind: 'archive' }) }] : [])
+    ] : []
+    const tabItems: MenuItem[] = menu ? [
+        { key: 'pin', label: tabs.find(tab => tab.id === menu.id)?.pinned ? t('tabs.unpin') : t('tabs.pin'), run: () => updateSessionTabs(scope, state => togglePinTab(state, menu.id)) },
+        { key: 'close', label: t('tabs.close'), run: () => close(menu.id) },
+        { key: 'others', label: t('tabs.closeOthers'), run: () => { updateSessionTabs(scope, state => closeOtherTabs(state, menu.id)); if (props.selectedSessionId !== menu.id) go(menu.id) } },
+        {
+            key: 'right', label: t('tabs.closeRight'), run: () => {
+                const index = tabs.findIndex(tab => tab.id === menu.id)
+                const selectedIndex = tabs.findIndex(tab => tab.id === props.selectedSessionId)
+                updateSessionTabs(scope, state => closeTabsToRight(state, menu.id))
+                if (selectedIndex > index && !tabs[selectedIndex]?.pinned) go(menu.id)
+            }
+        }
+    ] : []
+    const dialogSession = dialog ? byId.get(dialog.id) : undefined
 
     return (
         <div className="session-tabs-bar flex shrink-0 items-end border-b border-[var(--app-divider)] bg-[var(--app-secondary-bg)] pt-[env(safe-area-inset-top)]" role="tablist" aria-label={t('tabs.label')}>
@@ -165,80 +226,168 @@ export function SessionTabsBar(props: {
                     const session = byId.get(tab.id)
                     const active = tab.id === props.selectedSessionId
                     const title = session ? getSessionTitle(session) || t('tabs.untitled') : t('tabs.loading')
-                    const unread = !!session && !active && session.updatedAt > getSessionLastSeenAt(session.id)
-                    const pending = session?.pendingRequestsCount ?? 0
                     return (
-                        <div
+                        <SessionTab
                             key={tab.id}
-                            data-tab-id={tab.id}
-                            role="tab"
-                            aria-selected={active}
-                            tabIndex={0}
-                            draggable
-                            title={session ? `${title} · ${props.machineLabel(session)}` : title}
-                            onClick={() => go(tab.id)}
-                            onKeyDown={event => { if (event.key === 'Enter') go(tab.id) }}
+                            id={tab.id}
+                            pinned={Boolean(tab.pinned)}
+                            session={session}
+                            active={active}
+                            title={title}
+                            tooltip={session ? `${title} · ${props.machineLabel(session)}` : title}
+                            unread={!!session && !active && session.updatedAt > getSessionLastSeenAt(session.id)}
+                            dragging={dragging === tab.id}
+                            closeLabel={t('tabs.close')}
+                            closeTitle={t('tabs.closeShortcut')}
+                            onOpen={() => go(tab.id)}
+                            onClose={() => close(tab.id)}
                             onAuxClick={event => onAuxClick(event, tab.id)}
-                            onMouseDown={event => { if (event.button === 1) event.preventDefault() }}
-                            onContextMenu={event => { event.preventDefault(); setMenu({ id: tab.id, x: event.clientX, y: event.clientY }) }}
-                            onDragStart={event => { setDragging(tab.id); event.dataTransfer.effectAllowed = 'move' }}
-                            onDragOver={event => { if (dragging && dragging !== tab.id) event.preventDefault() }}
-                            onDrop={event => { event.preventDefault(); if (dragging) updateSessionTabs(scope, state => moveTab(state, dragging, tab.id)); setDragging(null) }}
+                            onMenu={point => setMenu({ id: tab.id, x: point.x, y: point.y })}
+                            onDragStart={() => setDragging(tab.id)}
+                            canDropHere={Boolean(dragging && dragging !== tab.id)}
+                            onDrop={() => { if (dragging) updateSessionTabs(scope, state => moveTab(state, dragging, tab.id)); setDragging(null) }}
                             onDragEnd={() => setDragging(null)}
-                            className={cn(
-                                'session-tab group relative flex h-8 shrink-0 cursor-pointer select-none items-center gap-1.5 rounded-t-lg pl-2.5 pr-1 text-xs transition-colors',
-                                tab.pinned ? 'max-w-[120px]' : 'max-w-[200px] split:max-w-[220px]',
-                                active
-                                    ? 'bg-[var(--app-bg)] font-medium text-[var(--app-fg)] shadow-[0_-1px_0_var(--app-border),1px_0_0_var(--app-border),-1px_0_0_var(--app-border)]'
-                                    : 'text-[var(--app-hint)] hover:bg-[var(--app-subtle-bg)] hover:text-[var(--app-fg)]',
-                                dragging === tab.id && 'opacity-50'
-                            )}
-                        >
-                            {tab.pinned ? <PinGlyph className="h-3 w-3 shrink-0" /> : null}
-                            <StatusDot session={session} unread={unread} />
-                            <span className="min-w-0 truncate">{title}</span>
-                            {pending > 0 ? <span className="shrink-0 rounded-full bg-[var(--app-badge-error-bg)] px-1.5 text-[10px] font-semibold text-[var(--app-badge-error-text)]">{pending}</span> : null}
-                            <button
-                                type="button"
-                                aria-label={t('tabs.close')}
-                                title={t('tabs.closeShortcut')}
-                                onClick={event => { event.stopPropagation(); close(tab.id) }}
-                                className={cn(
-                                    'flex h-5 w-5 shrink-0 items-center justify-center rounded-md text-[var(--app-hint)] hover:bg-[var(--app-subtle-bg)] hover:text-[var(--app-fg)]',
-                                    active ? 'opacity-100' : 'opacity-60 split:opacity-0 split:group-hover:opacity-100'
-                                )}
-                            >
-                                ×
-                            </button>
-                        </div>
+                        />
                     )
                 })}
             </div>
             {menu ? (
                 <div
-                    className="fixed z-50 min-w-[160px] rounded-xl border border-[var(--app-border)] bg-[var(--app-bg)] py-1 text-xs shadow-lg"
-                    style={{ left: Math.min(menu.x, window.innerWidth - 180), top: menu.y + 4 }}
-                    onClick={event => event.stopPropagation()}
+                    data-tab-menu
+                    data-testid="session-tab-menu"
+                    role="menu"
+                    className="fixed z-50 min-w-[180px] rounded-xl border border-[var(--app-border)] bg-[var(--app-bg)] py-1 text-xs shadow-lg"
+                    style={{
+                        left: Math.max(8, Math.min(menu.x, window.innerWidth - 196)),
+                        top: Math.max(8, Math.min(menu.y + 4, window.innerHeight - 320))
+                    }}
                 >
-                    {[
-                        { key: 'pin', label: tabs.find(tab => tab.id === menu.id)?.pinned ? t('tabs.unpin') : t('tabs.pin'), run: () => updateSessionTabs(scope, state => togglePinTab(state, menu.id)) },
-                        { key: 'close', label: t('tabs.close'), run: () => close(menu.id) },
-                        { key: 'others', label: t('tabs.closeOthers'), run: () => { updateSessionTabs(scope, state => closeOtherTabs(state, menu.id)); if (props.selectedSessionId !== menu.id) go(menu.id) } },
-                        {
-                            key: 'right', label: t('tabs.closeRight'), run: () => {
-                                const index = tabs.findIndex(tab => tab.id === menu.id)
-                                const selectedIndex = tabs.findIndex(tab => tab.id === props.selectedSessionId)
-                                updateSessionTabs(scope, state => closeTabsToRight(state, menu.id))
-                                if (selectedIndex > index && !tabs[selectedIndex]?.pinned) go(menu.id)
-                            }
-                        }
-                    ].map(item => (
-                        <button key={item.key} type="button" className="block w-full px-3 py-1.5 text-left hover:bg-[var(--app-subtle-bg)]" onClick={() => { item.run(); setMenu(null) }}>
-                            {item.label}
-                        </button>
-                    ))}
+                    {sessionItems.length > 0 ? (
+                        <>
+                            <div className="px-3 pb-1 pt-1.5 text-[10px] font-semibold uppercase tracking-wide text-[var(--app-hint)]">{t('tabs.menu.session')}</div>
+                            {sessionItems.map(item => <TabMenuButton key={item.key} item={item} onDone={() => setMenu(null)} />)}
+                            <div className="my-1 border-t border-[var(--app-divider)]" />
+                        </>
+                    ) : null}
+                    {tabItems.map(item => <TabMenuButton key={item.key} item={item} onDone={() => setMenu(null)} />)}
                 </div>
             ) : null}
+            {dialog && dialogSession ? (
+                <TabSessionDialog api={api} kind={dialog.kind} session={dialogSession} onClose={() => setDialog(null)} />
+            ) : null}
+        </div>
+    )
+}
+
+function TabMenuButton(props: { item: MenuItem; onDone: () => void }) {
+    return (
+        <button
+            type="button"
+            role="menuitem"
+            data-testid={`session-tab-menu-${props.item.key}`}
+            className={cn('block w-full px-3 py-1.5 text-left hover:bg-[var(--app-subtle-bg)]', props.item.danger && 'text-[var(--app-badge-error-text)]')}
+            onClick={() => { props.item.run(); props.onDone() }}
+        >
+            {props.item.label}
+        </button>
+    )
+}
+
+/**
+ * One tab. Right-click (desktop) and long-press (touch) open the tab menu. The
+ * long-press uses the touch-only mode, so mouse clicks and HTML5 drag-to-reorder
+ * keep their native behaviour and the click that ends a long touch is swallowed.
+ */
+function SessionTab(props: {
+    id: string
+    pinned: boolean
+    session: SessionSummary | undefined
+    active: boolean
+    title: string
+    tooltip: string
+    unread: boolean
+    dragging: boolean
+    closeLabel: string
+    closeTitle: string
+    onOpen: () => void
+    onClose: () => void
+    onAuxClick: (event: ReactMouseEvent) => void
+    onMenu: (point: { x: number; y: number }) => void
+    onDragStart: () => void
+    canDropHere: boolean
+    onDrop: () => void
+    onDragEnd: () => void
+}) {
+    const { haptic } = usePlatform()
+    const longPress = useLongPress({
+        interaction: 'touch-only-native-click',
+        threshold: 500,
+        onLongPress: point => {
+            haptic.impact('medium')
+            props.onMenu(point)
+        },
+        onClick: props.onOpen
+    })
+    const pending = props.session?.pendingRequestsCount ?? 0
+    return (
+        <div
+            data-tab-id={props.id}
+            role="tab"
+            aria-selected={props.active}
+            aria-haspopup="menu"
+            tabIndex={0}
+            draggable
+            title={props.tooltip}
+            onClick={longPress.onClick}
+            onTouchStart={longPress.onTouchStart}
+            onTouchEnd={longPress.onTouchEnd}
+            onTouchMove={longPress.onTouchMove}
+            onTouchCancel={longPress.onTouchCancel}
+            onKeyDown={event => {
+                if (event.key === 'Enter') props.onOpen()
+                if (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')) {
+                    event.preventDefault()
+                    const rect = event.currentTarget.getBoundingClientRect()
+                    props.onMenu({ x: rect.left, y: rect.bottom })
+                }
+            }}
+            onAuxClick={props.onAuxClick}
+            onMouseDown={event => { if (event.button === 1) event.preventDefault() }}
+            onContextMenu={event => {
+                event.preventDefault()
+                props.onMenu({ x: event.clientX, y: event.clientY })
+            }}
+            onDragStart={event => { props.onDragStart(); event.dataTransfer.effectAllowed = 'move' }}
+            onDragOver={event => { if (props.canDropHere) event.preventDefault() }}
+            onDrop={event => { event.preventDefault(); props.onDrop() }}
+            onDragEnd={props.onDragEnd}
+            style={{ WebkitTouchCallout: 'none' }}
+            className={cn(
+                'session-tab group relative flex h-8 shrink-0 cursor-pointer select-none items-center gap-1.5 rounded-t-lg pl-2.5 pr-1 text-xs transition-colors',
+                props.pinned ? 'max-w-[120px]' : 'max-w-[200px] split:max-w-[220px]',
+                props.active
+                    ? 'bg-[var(--app-bg)] font-medium text-[var(--app-fg)] shadow-[0_-1px_0_var(--app-border),1px_0_0_var(--app-border),-1px_0_0_var(--app-border)]'
+                    : 'text-[var(--app-hint)] hover:bg-[var(--app-subtle-bg)] hover:text-[var(--app-fg)]',
+                props.dragging && 'opacity-50'
+            )}
+        >
+            {props.pinned ? <PinGlyph className="h-3 w-3 shrink-0" /> : null}
+            <StatusDot session={props.session} unread={props.unread} />
+            <span className="min-w-0 truncate">{props.title}</span>
+            {pending > 0 ? <span className="shrink-0 rounded-full bg-[var(--app-badge-error-bg)] px-1.5 text-[10px] font-semibold text-[var(--app-badge-error-text)]">{pending}</span> : null}
+            <button
+                type="button"
+                aria-label={props.closeLabel}
+                title={props.closeTitle}
+                onClick={event => { event.stopPropagation(); props.onClose() }}
+                onTouchStart={event => event.stopPropagation()}
+                className={cn(
+                    'flex h-5 w-5 shrink-0 items-center justify-center rounded-md text-[var(--app-hint)] hover:bg-[var(--app-subtle-bg)] hover:text-[var(--app-fg)]',
+                    props.active ? 'opacity-100' : 'opacity-60 split:opacity-0 split:group-hover:opacity-100'
+                )}
+            >
+                ×
+            </button>
         </div>
     )
 }
