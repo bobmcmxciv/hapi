@@ -6,7 +6,6 @@ import { RPC_METHODS } from '@hapi/protocol/rpcMethods'
 
 type QueueLike = {
     size(): number
-    reset(): void
     setOnMessage(callback: ((...args: unknown[]) => void) | null): void
 }
 
@@ -76,10 +75,17 @@ export class BaseLocalLauncher {
                 await this.exitFuture.promise
             }
 
+            // In local mode every incoming message triggers a switch to remote, so
+            // anything still queued here is a message that is waiting for that
+            // switch. Clearing the queue on abort dropped it for good: the hub had
+            // stored it, the CLI never ran it and never acked it, and the remote
+            // loop sat on an empty queue (2026-10-10, a message sent while the
+            // terminal session waited on a question, then Stop 3 s later). Abort
+            // now only stops the local process, like the remote launcher's abort;
+            // a queued message can still be cancelled from the web while queued.
             const doAbort = async () => {
-                logger.debug(`[${label}]: ${abortLogMessage}`)
+                logger.debug(`[${label}]: ${abortLogMessage} (keeping ${queue.size()} queued message(s))`)
                 this.setExitReason('switch')
-                queue.reset()
                 await abortProcess()
             }
 
