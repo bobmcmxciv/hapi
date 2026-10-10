@@ -47,11 +47,15 @@ cd cli && bun run scripts/build-executable.ts --target bun-linux-x64-baseline --
 `/usr/lib/node_modules/@twsxtd/hapi/node_modules/@twsxtd/hapi-linux-x64/bin/hapi`。
 
 ```bash
-# 备份照旧（二进制 + 主库 + gateway 库）
-sqlite3 /root/.hapi/hapi.db ".backup /root/.hapi/hapi.db.pre-<tag>-<ts>"
-sqlite3 /root/.hapi/multi-user-gateway.sqlite ".backup /root/.hapi/multi-user-gateway.sqlite.pre-<tag>-<ts>"
-
+# 备份（二进制 + 全部库）放数据盘 /data/hapi-backups，用正在运行的二进制自带的 SQLite 做 VACUUM INTO。
+# ⚠️ 不要用 ECS 上的 sqlite3 CLI（3.26）做 `.backup`：hub 每写一次它就从头重来，白天在 4 GB 的 hapi.db 上
+#    跑 11 分钟只写到 521 MB 还在原地打转（2026-10-10 实测）。VACUUM INTO 读一致快照，4 GB 约 3 分钟，hub 照常服务。
+#    scripts/snapshot-db.js：VACUUM INTO + quick_check，拒绝覆盖已有文件；ECS 上的副本在 /root/bin/ 和每次的 /data/xfer-<tag>/
 BIN=/usr/lib/node_modules/@twsxtd/hapi/node_modules/@twsxtd/hapi-linux-x64/bin/hapi
+for f in hapi.db multi-user-gateway.sqlite session-digests.sqlite work-overview.sqlite subscription-snapshots.sqlite; do
+  BUN_BE_BUN=1 nice -n 10 $BIN snapshot-db.js /root/.hapi/$f /data/hapi-backups/$f.pre-<tag>-<ts>
+done
+
 docker compose -f /clouddream/containerized/hapi/docker-compose.yml stop hapi-hub
 mv $BIN /root/hapi.bin.pre-<tag>-<ts>          # 仍用 mv，不覆写
 mv <新二进制> $BIN && chmod 755 $BIN
@@ -66,7 +70,8 @@ docker compose -f /clouddream/containerized/hapi/docker-compose.yml start hapi-h
 ### 4. 换芯（若 schema 变更，先拿生产库副本干跑迁移）
 
 - schema 有变：`.backup` 出副本 → `HAPI_HOME=<副本目录> HAPI_LISTEN_PORT=<空闲端口> <新二进制> hub` 干跑，确认 `user_version` 迁移成功再动真库。**迁移方向不可逆**——旧二进制拒启新 schema，回滚必须连库备份一起还原。
-- 正式换芯（stop→start 窗口实测约 6 秒）：
+- 正式换芯：fork.27 起 hub 启动约 3 秒就开始监听（之前要 36 秒，被启动时的 todo 回填拖住），
+  stop → `/health` 正常实测 15 秒（含 `up -d` 重建容器）。下面这段是 systemd 时代的写法，docker 版见 3.5：
 
 ```bash
 sqlite3 /root/.hapi/hapi.db ".backup /root/.hapi/hapi.db.pre-<tag>-<ts>"
@@ -84,7 +89,10 @@ systemctl start hapi-hub
 
 - `systemctl is-active` + journal 无 schema/fatal；`PRAGMA user_version` 符合预期
 - `POST /api/auth` 换 JWT 读 `/api/machines` **内存态**（DB 的 `machines.active` 是旧值不可信）；runner 靠各机看门狗 ≤5 分钟自愈回连（换芯前先比对双边 `PROTOCOL_VERSION`，不同则要全 fleet 升级，爆炸半径完全不同）
-- `GET /api/usage/summary` 返回 fork 形状（含 `hosts`）；公网 `https://bob.18852271093.top` 200
+- `GET /api/usage/summary` 返回 fork 形状（含 `hosts`）；公网 `https://hapi.bobmcmxciv.xin` 200
+  - ⚠️ fork.28 之前，缓存没热时的用量请求会在请求里同步解码全部历史：fork.27 换芯后第 19 秒的这条验收让 hub 停摆了
+    124 秒（2026-10-10）。fork.28 起用量请求会等后台分段预热；仍跑旧版本时，验收要等日志出现 `[Usage] event cache warmed`
+- fork.27 起看 `/health` 的 `eventLoop.maxLagMs` 和 `docker logs hapi-hub | grep 'event loop blocked'`：换芯后几分钟内不应出现秒级阻塞
 - 更新 `/root/.hapi/DEPLOYED.txt`（tag/commit/sha256/回滚坐标）
 
 ### 5.5 会话保全：更新时怎么不把在跑的会话搞离线（2026-08-11 事故复盘固化）
@@ -97,7 +105,7 @@ runner 自己回来了，但 **hub 不会自动 resume 被杀的会话**——�
 由此分两类操作，纪律不同：
 
 **A. hub 更新（docker compose stop → 换宿主二进制 → start）——本来就不杀会话**
-- 停启窗口保持短（实测 ~6s）；CLI 断连自动重试，runner 看门狗 ≤5min 兜底
+- 停启窗口保持短（fork.27 起实测 15 s：stop → `up -d` → `/health` ok）；CLI 断连自动重试，runner 看门狗 ≤5min 兜底
 - 更新镜像时先 `docker compose pull` 再 stop/start，别把拉镜像时间算进停机窗口
 - **不要 `docker compose down`**（会删容器重建，虽然状态都在 bind mount 里，
   但 stop/start 足够且窗口更短）；不要动 `network_mode: host`
