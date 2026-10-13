@@ -1038,3 +1038,15 @@ localStorage，按 hub 地址 + 账号分区，**所有账号都可用**（不�
 | Files | Missing upstream seam | Why it cannot move out | Runtime path | Sync verification |
 |---|---|---|---|---|
 | locale files | No locale registry for fork features | Strings are looked up from the shared locale tables | tab menu labels, classify dialog | In a real browser: right-click a tab and long-press it in a phone viewport; rename, copy reference, assign to a subline and archive from the menu |
+
+## 语音助手：问进度、语音下指令、曼波朗读 (2026-10-13)
+
+语音不再把问题转进会话：问进度走 hub 的 `/api/voice/session-qa`，材料取实时状态、代理待办清单、摘要库与摘要之后的新对话，交给 DeepSeek（失败回落 luna）单轮回答，不写会话。下指令时目标会话由代码决定（没点名就是当前会话），模型只整理文字，复述确认后才经 `/api/sessions/:id/messages` 发出（默认排队，可插进当前这一轮），附语音原话。语音权限默认只读：只装 `askSessionStatus` 一个工具。朗读可用 TXFA608 上常驻的曼波（GPT-SoVITS），此时百炼只出文字，网页按句合成播放；服务不在线就用百炼自带音色。新代码在 `fork-features/voice-assistant/`、`web/src/fork-features/voice-assistant/`。
+
+| Files | Missing upstream seam | Why it cannot move out | Runtime path | Sync verification |
+|---|---|---|---|---|
+| `shared/src/voice.ts`, `voicePromptLayers.ts`, `voicePersonality.ts` | No voice tool registry, per-session tool selection, or output-modality option | Tool definitions, the Qwen/Gemini setup builders and the platform prompt fixtures are upstream-owned constants consumed by both hub and web | browser `?tools=`/`?output=` → hub-owned setup frame → realtime model tools and modalities | Connect read-only and assistant sessions to the real Qwen endpoint; inspect the hub-sent `session.update` tools and modalities |
+| `hub/src/web/server.ts`, `hub/src/web/qwenProxyHandler.ts` and test | No voice proxy option hook | The WS upgrade parses query params and the proxy builds the setup frame inline | `/api/voice/qwen-ws?tools=readonly&output=text` → setup frame | Real hub: a read-only session only ever calls `askSessionStatus`; text output arrives as `response.text.delta` |
+| `hub/src/startHub.ts` | No service bootstrap registry | The assistant needs the sync engine, message store and digest store that only startHub wires | hub start → `startVoiceAssistant` | Hub log line `[VoiceAssistant] models: ...` |
+| `web/src/realtime/realtimeClientTools.ts`, `QwenVoiceSession.tsx`, `GeminiLiveVoiceSession.tsx`, `gemini/toolAdapter.ts`, `hooks/voiceHooks.ts`, `index.ts`, `web/src/lib/voicePersonalitySession.ts` | No client-tool registry or reply-audio sink | Tool dispatch, prompt composition and audio playback are inline in the upstream realtime sessions | realtime tool call → hub lookup/draft → read-back → confirm → message API; text reply → 曼波 stream → AudioContext | Real browser + real hub: ask progress (no message lands in the session), draft and confirm an instruction (one message lands, with the spoken original), barge in while 曼波 speaks |
+| `web/src/routes/settings/voice.tsx`, `web/src/components/SessionChat.tsx`, `web/src/api/client.ts`, locale files | No settings/composer slot registry | Settings rows and the composer area are upstream-owned | Settings → Voice permission/reading voice; draft card above the composer | Toggle both settings, reconnect voice, confirm the card appears for a draft and sends/cancels |
