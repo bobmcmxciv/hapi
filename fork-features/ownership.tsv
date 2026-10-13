@@ -545,6 +545,8 @@ web/src/fork-features/usage/UsagePage.tsx	fork-owned	usage-page	origin-only delt
 web/src/fork-features/usage/UsageTrendChart.test.ts	fork-owned	usage-page	fork-owned module tests
 web/src/fork-features/usage/UsageTrendChart.tsx	fork-owned	usage-page	fork-owned module: 用量折线图
 web/src/fork-features/voice-assistant/VoiceInstructionCard.tsx	fork-owned	voice-assistant	fork-owned module: 待确认指令卡片（编辑/发送/插进当前这一轮/取消）
+web/src/fork-features/voice-assistant/confirmIntent.test.ts	fork-owned	voice-assistant	fork-owned module tests
+web/src/fork-features/voice-assistant/confirmIntent.ts	fork-owned	voice-assistant	fork-owned module: 读短句“确认/取消/插队/排队”，草稿待确认时由网页直接发送或丢弃
 web/src/fork-features/voice-assistant/instructionDraft.ts	fork-owned	voice-assistant	fork-owned module: 待确认的语音指令与发送（附语音原话）
 web/src/fork-features/voice-assistant/manboSpeaker.test.ts	fork-owned	voice-assistant	fork-owned module tests
 web/src/fork-features/voice-assistant/manboSpeaker.ts	fork-owned	voice-assistant	fork-owned module: 按句流式合成并排队播放，失败回落浏览器朗读
