@@ -20,12 +20,15 @@ export const GEMINI_LIVE_VOICE_OPTIONS: readonly VoicePickerOption[] = [
     { id: 'Aoede', label: 'Aoede', description: 'Default' }
 ] as const
 
-/** English-accessible Qwen Realtime voices (expand after DashScope verification). */
+/**
+ * Qwen Realtime voices verified against qwen3.5-omni-flash-realtime (fork, 2026-10-13: a real
+ * response per voice). Cherry and Chelsie pass session.update but every response then fails with
+ * "<400> InternalError.Algo.InvalidParameter: Voice '…' is not supported" and DashScope closes the
+ * socket, so a stored Cherry/Chelsie selection now resolves to the default instead.
+ */
 export const QWEN_REALTIME_VOICE_OPTIONS: readonly VoicePickerOption[] = [
     { id: 'Tina', label: 'Tina', description: 'Default' },
-    { id: 'Cherry', label: 'Cherry' },
     { id: 'Mia', label: 'Mia' },
-    { id: 'Chelsie', label: 'Chelsie' },
     { id: 'Serena', label: 'Serena' },
     { id: 'Ethan', label: 'Ethan' }
 ] as const

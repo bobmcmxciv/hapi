@@ -64,3 +64,14 @@ describe('Qwen output mode', () => {
         expect((msg.session as { modalities: string[] }).modalities).toEqual(['text', 'audio'])
     })
 })
+
+describe('Qwen voice catalog (fork: verified on qwen3.5-omni-flash-realtime)', () => {
+    test('a stored voice the model rejects falls back to the default instead of failing the session', async () => {
+        const { resolveQwenRealtimeVoice } = await import('./voicePickerCatalog')
+        expect(resolveQwenRealtimeVoice('Cherry')).toBe('Tina')
+        expect(resolveQwenRealtimeVoice('Chelsie')).toBe('Tina')
+        expect(resolveQwenRealtimeVoice('Mia')).toBe('Mia')
+        const msg = buildQwenSessionUpdateMessage('zh', 'Cherry', undefined, 'readonly', 'text')
+        expect((msg.session as { voice: string }).voice).toBe('Tina')
+    })
+})
