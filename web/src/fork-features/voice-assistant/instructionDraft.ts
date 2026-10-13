@@ -75,15 +75,22 @@ export async function sendVoiceInstructionDraft(api: ApiClient, delivery?: Voice
     const current = draft
     if (!current) throw new Error('no drafted instruction')
     const mode = delivery ?? current.delivery
-    await api.sendMessage(
-        current.target.id,
-        composeVoiceInstructionText(current),
-        null,
-        undefined,
-        undefined,
-        undefined,
-        mode === 'steer' ? 'steer' : undefined
-    )
-    if (draft === current) setVoiceInstructionDraft(null)
+    // Take the draft before awaiting: the spoken yes and the model's own confirm can both arrive
+    // within a few hundred ms, and only the first may send. Restored if the send fails.
+    setVoiceInstructionDraft(null)
+    try {
+        await api.sendMessage(
+            current.target.id,
+            composeVoiceInstructionText(current),
+            null,
+            undefined,
+            undefined,
+            undefined,
+            mode === 'steer' ? 'steer' : undefined
+        )
+    } catch (error) {
+        if (!draft) setVoiceInstructionDraft(current)
+        throw error
+    }
     return { ...current, delivery: mode }
 }

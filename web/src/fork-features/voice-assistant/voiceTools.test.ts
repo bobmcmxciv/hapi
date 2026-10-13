@@ -2,6 +2,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ApiClient } from '@/api/client'
 import { updateCurrentSessionId } from '@/realtime/RealtimeSession'
 import {
+    noteVoiceToolCall,
+    onVoiceResponseWithoutTool,
+    onVoiceUserTranscript,
     realtimeClientTools,
     registerSessionStore,
     registerVoiceAssistantApi,
@@ -176,6 +179,63 @@ describe('voice assistant client tools', () => {
     it('treats a yes as a normal question when nothing is waiting, and never acts in read-only mode', async () => {
         await realtimeClientTools.askSessionStatus({ question: '确认' })
         expect(api.askVoiceSessionStatus).toHaveBeenCalledTimes(1)
+        expect(api.sendMessage).not.toHaveBeenCalled()
+    })
+
+    it('sends on the spoken yes itself, and the model confirm right after does not send again', async () => {
+        writeVoiceToolMode('assistant')
+        await realtimeClientTools.prepareInstruction({ instruction: '跟做视频那个说渲染先等等' })
+        await onVoiceUserTranscript('对，确认发送。')
+        expect(api.sendMessage).toHaveBeenCalledTimes(1)
+        expect(await realtimeClientTools.confirmInstruction({ decision: 'send' })).toContain('already sent to "视频渲染"')
+        expect(api.sendMessage).toHaveBeenCalledTimes(1)
+    })
+
+    it('sends exactly once when the spoken yes and the tool call race', async () => {
+        writeVoiceToolMode('assistant')
+        await realtimeClientTools.prepareInstruction({ instruction: '跟做视频那个说渲染先等等' })
+        let release: () => void = () => {}
+        api.sendMessage.mockImplementationOnce(() => new Promise<undefined>((resolve) => { release = () => resolve(undefined) }))
+        const spoken = onVoiceUserTranscript('确认')
+        const tool = realtimeClientTools.confirmInstruction({ decision: 'send' })
+        release()
+        await spoken
+        expect(await tool).toContain('sent to "视频渲染"')
+        expect(api.sendMessage).toHaveBeenCalledTimes(1)
+    })
+
+    it('puts the draft back when sending fails so it can be retried', async () => {
+        writeVoiceToolMode('assistant')
+        await realtimeClientTools.prepareInstruction({ instruction: '跟做视频那个说渲染先等等' })
+        api.sendMessage.mockRejectedValueOnce(new Error('HTTP 503'))
+        expect(await realtimeClientTools.confirmInstruction({ decision: 'send' })).toContain('sending failed')
+        expect(getVoiceInstructionDraft()?.target.id).toBe('target-1')
+    })
+
+    it('drafts an instruction the model answered by itself, once, and asks it to read the draft back', async () => {
+        writeVoiceToolMode('assistant')
+        await onVoiceUserTranscript('让他回复收到两个字，别做别的。')
+        const note = await onVoiceResponseWithoutTool()
+        expect(note).toContain('Read this back to the user exactly')
+        expect(api.prepareVoiceInstruction).toHaveBeenCalledWith(expect.objectContaining({ utterance: '让他回复收到两个字，别做别的。' }))
+        expect(await onVoiceResponseWithoutTool()).toBeNull()
+        expect(getVoiceInstructionDraft()).not.toBeNull()
+    })
+
+    it('leaves questions and tool-handled utterances alone', async () => {
+        writeVoiceToolMode('assistant')
+        await onVoiceUserTranscript('现在做到哪了？')
+        expect(await onVoiceResponseWithoutTool()).toBeNull()
+        await onVoiceUserTranscript('让它跑一下测试')
+        noteVoiceToolCall()
+        expect(await onVoiceResponseWithoutTool()).toBeNull()
+        expect(api.prepareVoiceInstruction).not.toHaveBeenCalled()
+    })
+
+    it('never drafts or sends from transcripts in read-only mode', async () => {
+        await onVoiceUserTranscript('让他回复收到')
+        expect(await onVoiceResponseWithoutTool()).toBeNull()
+        expect(api.prepareVoiceInstruction).not.toHaveBeenCalled()
         expect(api.sendMessage).not.toHaveBeenCalled()
     })
 

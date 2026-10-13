@@ -40,6 +40,12 @@ export function registerVoiceAssistantApi(api: ApiClient | null) {
 export function resetVoiceAssistantState() {
     voiceHistory = []
     setVoiceInstructionDraft(null)
+    lastSettled = null
+    lastUserTranscript = ''
+    previousUserTranscript = ''
+    transcriptSeq = 0
+    draftedFromSeq = 0
+    toolCalledSinceTranscript = false
 }
 
 function rememberTurn(q: string, a: string) {
@@ -62,6 +68,41 @@ function sentReply(sent: VoiceInstructionDraft): string {
     return `sent to "${sent.target.title}"${how} [say only that it was sent]`
 }
 
+/** What happened to the last draft, so a second yes (spoken + tool call) answers "already done". */
+let lastSettled: { reply: string; at: number } | null = null
+const SETTLED_ECHO_MS = 30_000
+const CANCELLED_REPLY = 'cancelled: the user declined the drafted instruction [say briefly that nothing was sent]'
+
+/** The one place a draft is sent or dropped, whichever path (spoken words, tool call, card) gets there first. */
+async function settleDraft(decision: 'send' | 'cancel', delivery?: VoiceDelivery): Promise<string> {
+    if (decision === 'cancel') {
+        setVoiceInstructionDraft(null)
+        lastSettled = { reply: CANCELLED_REPLY, at: Date.now() }
+        return CANCELLED_REPLY
+    }
+    if (!assistantApi) return 'error (sending not available)'
+    const pending = getVoiceInstructionDraft()
+    if (pending) {
+        // Recorded before the network wait so a near-simultaneous second yes is answered, not resent.
+        lastSettled = { reply: sentReply({ ...pending, delivery: delivery ?? pending.delivery }), at: Date.now() }
+    }
+    try {
+        const sent = await sendVoiceInstructionDraft(assistantApi, delivery)
+        const reply = sentReply(sent)
+        lastSettled = { reply, at: Date.now() }
+        return reply
+    } catch (error) {
+        lastSettled = null
+        return `error (sending failed: ${errorText(error)}). Tell the user it was not sent.`
+    }
+}
+
+function recentlySettledReply(): string | null {
+    return lastSettled && Date.now() - lastSettled.at < SETTLED_ECHO_MS
+        ? lastSettled.reply.replace(/^sent to/, 'already sent to').replace(/^cancelled/, 'already cancelled')
+        : null
+}
+
 /**
  * The read-back is waiting for a yes/no, but the realtime model sometimes hands that short answer to
  * askSessionStatus or prepareInstruction instead of calling confirmInstruction. When the words are
@@ -69,18 +110,55 @@ function sentReply(sent: VoiceInstructionDraft): string {
  */
 async function settlePendingDraft(text: string): Promise<string | null> {
     if (readVoiceToolMode() !== 'assistant' || !assistantApi) return null
-    if (!getVoiceInstructionDraft()) return null
     const intent = classifyConfirmation(text)
     if (!intent) return null
-    if (intent.decision === 'cancel') {
-        setVoiceInstructionDraft(null)
-        return 'cancelled: the user declined the drafted instruction [say briefly that nothing was sent]'
-    }
-    try {
-        return sentReply(await sendVoiceInstructionDraft(assistantApi, intent.delivery))
-    } catch (error) {
-        return `error (sending failed: ${errorText(error)}). Tell the user it was not sent.`
-    }
+    if (!getVoiceInstructionDraft()) return recentlySettledReply()
+    return await settleDraft(intent.decision, intent.delivery)
+}
+
+// fork(voice-assistant): what the user actually said, from the realtime model's input transcription.
+let lastUserTranscript = ''
+let previousUserTranscript = ''
+let transcriptSeq = 0
+let draftedFromSeq = 0
+let toolCalledSinceTranscript = false
+/** "让它…/叫它…/告诉它…/跟某个会话说…" — the user is instructing an agent, not the voice assistant. */
+const INSTRUCTION_PATTERN = /^(请|麻烦|帮我|你)?(让|叫|告诉|通知|吩咐|请)(它|他|她|那个|这个|.{0,12}会话)|^(请|麻烦|帮我|你)?(跟|和|给).{0,16}(说|讲|发)/
+
+/** The realtime model called a tool for the current utterance. */
+export function noteVoiceToolCall(): void {
+    toolCalledSinceTranscript = true
+}
+
+/**
+ * A finished transcript of the user's speech. With a draft waiting, a plain yes/no settles it right
+ * here — the spoken answer takes effect even if the model never calls confirmInstruction.
+ */
+export async function onVoiceUserTranscript(transcript: string): Promise<void> {
+    if (!transcript.trim()) return
+    previousUserTranscript = lastUserTranscript
+    lastUserTranscript = transcript.trim()
+    transcriptSeq += 1
+    toolCalledSinceTranscript = false
+    if (readVoiceToolMode() !== 'assistant' || !getVoiceInstructionDraft()) return
+    const intent = classifyConfirmation(lastUserTranscript)
+    if (intent) await settleDraft(intent.decision, intent.delivery)
+}
+
+/**
+ * The model answered the last utterance without any tool. If that utterance was an instruction for
+ * an agent, draft it here and return a note for the model to read the draft back.
+ */
+export async function onVoiceResponseWithoutTool(): Promise<string | null> {
+    if (toolCalledSinceTranscript || readVoiceToolMode() !== 'assistant' || !assistantApi) return null
+    // Each utterance is drafted at most once, and only the newest one.
+    if (transcriptSeq === draftedFromSeq) return null
+    const utterance = lastUserTranscript
+    if (!utterance || !INSTRUCTION_PATTERN.test(utterance) || getVoiceInstructionDraft()) return null
+    toolCalledSinceTranscript = true
+    draftedFromSeq = transcriptSeq
+    const result = await realtimeClientTools.prepareInstruction({ instruction: utterance })
+    return `(System note, not from the user) The user's last sentence was an instruction for an agent and has now been drafted; do not carry it out yourself. ${result}`
 }
 
 /**
@@ -261,22 +339,17 @@ export const realtimeClientTools = {
     confirmInstruction: async (parameters: unknown) => {
         if (readVoiceToolMode() === 'readonly') return READ_ONLY_REFUSAL
         const params = parameters as { decision?: unknown; delivery?: unknown }
-        const current = getVoiceInstructionDraft()
-        if (!current) return 'error (no drafted instruction; call prepareInstruction first)'
-        if (params?.decision === 'cancel') {
-            setVoiceInstructionDraft(null)
-            return 'cancelled [say briefly that nothing was sent]'
+        if (params?.decision !== 'send' && params?.decision !== 'cancel') return "error (decision must be 'send' or 'cancel')"
+        if (!getVoiceInstructionDraft()) {
+            // The spoken yes/no may already have settled it a moment ago.
+            return recentlySettledReply()
+                ?? (previousUserTranscript
+                    ? `error (nothing is drafted yet). If the user's earlier request "${previousUserTranscript}" was an instruction, call prepareInstruction with it now.`
+                    : 'error (no drafted instruction; call prepareInstruction first)')
         }
-        if (params?.decision !== 'send') return "error (decision must be 'send' or 'cancel')"
-        if (!assistantApi) return 'error (sending not available)'
-        try {
-            // The draft already says whether to interrupt; an explicit delivery is the user overriding it.
-            const override = params.delivery === 'steer' || params.delivery === 'queue' ? params.delivery : undefined
-            return sentReply(await sendVoiceInstructionDraft(assistantApi, override))
-        } catch (error) {
-            console.error('[Voice] confirmInstruction failed:', error)
-            return `error (sending failed: ${errorText(error)}). Tell the user it was not sent.`
-        }
+        // The draft already says whether to interrupt; an explicit delivery is the user overriding it.
+        const override = params.delivery === 'steer' || params.delivery === 'queue' ? params.delivery : undefined
+        return await settleDraft(params.decision, override)
     }
 }
 

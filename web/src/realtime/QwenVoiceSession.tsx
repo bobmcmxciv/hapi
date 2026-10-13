@@ -4,7 +4,7 @@ import { registerSessionStore } from './realtimeClientTools'
 import { fetchQwenToken } from '@/api/voice'
 import { GeminiAudioRecorder } from './gemini/audioRecorder'
 import { GeminiAudioPlayer } from './gemini/audioPlayer'
-import { getRealtimeClientTool } from './realtimeClientTools'
+import { getRealtimeClientTool, noteVoiceToolCall, onVoiceResponseWithoutTool, onVoiceUserTranscript } from './realtimeClientTools'
 import { readVoiceToolMode } from '@/fork-features/voice-assistant/toolMode'
 import { readVoiceReader } from '@/fork-features/voice-assistant/readerPreference'
 import { ManboSpeaker } from '@/fork-features/voice-assistant/manboSpeaker'
@@ -279,6 +279,7 @@ class QwenVoiceSessionImpl implements VoiceSession {
                     const argsStr = data.arguments as string
 
                     if (DEBUG) console.log('[Qwen] Tool call:', fnName, argsStr)
+                    noteVoiceToolCall()
 
                     let args: Record<string, unknown> = {}
                     try { args = JSON.parse(argsStr) } catch { /* empty */ }
@@ -314,11 +315,27 @@ class QwenVoiceSessionImpl implements VoiceSession {
                     return
                 }
 
+                // fork(voice-assistant): what the user said; a plain yes/no settles a waiting draft.
+                if (eventType === 'conversation.item.input_audio_transcription.completed') {
+                    void onVoiceUserTranscript(String(data.transcript ?? ''))
+                    return
+                }
+
                 // Response done
-                if (eventType === 'response.done' && DEBUG) {
-                    const resp = data.response as Record<string, unknown> | undefined
-                    const usage = resp?.usage as Record<string, unknown> | undefined
-                    if (usage) console.log('[Qwen] Usage:', usage)
+                if (eventType === 'response.done') {
+                    const resp = data.response as { output?: Array<{ type?: string }>; usage?: unknown } | undefined
+                    if (DEBUG && resp?.usage) console.log('[Qwen] Usage:', resp.usage)
+                    // fork(voice-assistant): the model answered an instruction itself instead of drafting it.
+                    const calledTool = (resp?.output ?? []).some((item) => item?.type === 'function_call')
+                    if (!calledTool) {
+                        const note = await onVoiceResponseWithoutTool()
+                        if (note) {
+                            sendEvent('conversation.item.create', {
+                                item: { type: 'message', role: 'user', content: [{ type: 'input_text', text: note }] }
+                            })
+                            sendEvent('response.create')
+                        }
+                    }
                     return
                 }
 
