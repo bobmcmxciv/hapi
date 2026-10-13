@@ -9,11 +9,7 @@ import { readVoiceToolMode } from '@/fork-features/voice-assistant/toolMode'
 import { readVoiceReader } from '@/fork-features/voice-assistant/readerPreference'
 import { ManboSpeaker } from '@/fork-features/voice-assistant/manboSpeaker'
 import { resolveQwenRealtimeVoice } from '@hapi/protocol/voicePickerCatalog'
-import {
-    buildResolvedVoiceSystemPrompt,
-    encodeVoiceSystemPromptForProxy,
-    truncatePromptForProxy
-} from '@/lib/voicePersonalitySession'
+import { buildResolvedVoiceSystemPrompt } from '@/lib/voicePersonalitySession'
 import { deliverVoiceSessionContextAfterConnect, isVoiceProactiveSummaryEnabled } from '@/lib/voiceContextStream'
 import { readStoredVoiceSelection } from '@/lib/voicePickerPreferences'
 import type { VoiceSession, VoiceSessionConfig, StatusCallback } from './types'
@@ -168,14 +164,14 @@ class QwenVoiceSessionImpl implements VoiceSession {
             config.voiceName ?? readStoredVoiceSelection('qwen-realtime')
         )
         const voiceParam = `&voice=${encodeURIComponent(resolvedVoice)}`
-        // User's resolved system prompt is forwarded so the hub's session.update applies the override.
-        // Truncate before encoding so long prompts are trimmed rather than silently dropped.
-        const encodedPrompt = encodeVoiceSystemPromptForProxy(truncatePromptForProxy(this.currentInstructions ?? ''))
-        const promptParam = `&systemPrompt=${encodeURIComponent(encodedPrompt)}`
-        // fork(voice-assistant): the hub installs only the tools this mode allows.
+        // fork(voice-assistant): the resolved system prompt no longer rides in the URL — with the
+        // tool rules it outgrew the reverse proxy's 8 KB request line (nginx answered 414 and the
+        // socket never opened). It goes in-band as an instructions-only session.update on open,
+        // which the hub queues until its own setup is acknowledged and then forwards.
+        // The hub installs only the tools this mode allows.
         const toolsParam = `&tools=${toolMode}`
         const outputParam = useHubVoice ? '&output=text' : ''
-        const wsUrl = `${proxyUrl}${separator}token=${encodeURIComponent(authToken)}${langParam}${voiceParam}${promptParam}${toolsParam}${outputParam}`
+        const wsUrl = `${proxyUrl}${separator}token=${encodeURIComponent(authToken)}${langParam}${voiceParam}${toolsParam}${outputParam}`
         state.speaker = useHubVoice
             ? new ManboSpeaker(this.api, state.playbackContext, (reason) => console.warn('[Qwen] hub voice failed, using browser speech:', reason))
             : null
@@ -187,6 +183,9 @@ class QwenVoiceSessionImpl implements VoiceSession {
 
             ws.onopen = () => {
                 if (DEBUG) console.log('[Qwen] WebSocket connected')
+                if (this.currentInstructions) {
+                    sendEvent('session.update', { session: { instructions: this.currentInstructions } })
+                }
             }
 
             ws.onmessage = async (event) => {

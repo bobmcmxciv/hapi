@@ -49,7 +49,7 @@ describe('ManboSpeaker', () => {
     })
 
     it('speaks complete sentences in order as the text streams in', async () => {
-        const open = vi.fn(async () => pcmResponse([[1, 0, 2, 0], [3, 0]]))
+        const open = vi.fn(async (_text: string, _signal?: AbortSignal) => pcmResponse([[1, 0, 2, 0], [3, 0]]))
         const context = new FakeAudioContext()
         const speaker = new ManboSpeaker({ openVoiceTtsStream: open } as unknown as ApiClient, context as unknown as AudioContext)
 
@@ -67,7 +67,7 @@ describe('ManboSpeaker', () => {
     })
 
     it('keeps an odd trailing byte for the next chunk instead of dropping it', async () => {
-        const open = vi.fn(async () => pcmResponse([[1, 0, 2], [0, 3, 0]]))
+        const open = vi.fn(async (_text: string, _signal?: AbortSignal) => pcmResponse([[1, 0, 2], [0, 3, 0]]))
         const context = new FakeAudioContext()
         const speaker = new ManboSpeaker({ openVoiceTtsStream: open } as unknown as ApiClient, context as unknown as AudioContext)
         speaker.push('好的。')
@@ -75,7 +75,7 @@ describe('ManboSpeaker', () => {
     })
 
     it('cuts a long clause at a comma so speech starts before the full stop', async () => {
-        const open = vi.fn(async () => pcmResponse([[0, 0]]))
+        const open = vi.fn(async (_text: string, _signal?: AbortSignal) => pcmResponse([[0, 0]]))
         const speaker = new ManboSpeaker({ openVoiceTtsStream: open } as unknown as ApiClient, new FakeAudioContext() as unknown as AudioContext)
         speaker.push('这个会话今天一共改了五个文件，主要是语音设置页和后端的问答接口')
         await vi.waitFor(() => expect(open).toHaveBeenCalledTimes(1))
@@ -102,7 +102,7 @@ describe('ManboSpeaker', () => {
 
     it('falls back to browser speech when the voice service fails, and stays there for the reply', async () => {
         const onFallback = vi.fn()
-        const open = vi.fn(async () => { throw new Error('HTTP 502') })
+        const open = vi.fn(async (_text: string, _signal?: AbortSignal): Promise<Response> => { throw new Error('HTTP 502') })
         const speaker = new ManboSpeaker({ openVoiceTtsStream: open } as unknown as ApiClient, new FakeAudioContext() as unknown as AudioContext, onFallback)
         speaker.push('第一句。第二句。')
         await vi.waitFor(() => expect(speak).toHaveBeenCalledTimes(2))
@@ -112,7 +112,7 @@ describe('ManboSpeaker', () => {
     })
 
     it('skips fragments with nothing to say', async () => {
-        const open = vi.fn(async () => pcmResponse([[0, 0]]))
+        const open = vi.fn(async (_text: string, _signal?: AbortSignal) => pcmResponse([[0, 0]]))
         const speaker = new ManboSpeaker({ openVoiceTtsStream: open } as unknown as ApiClient, new FakeAudioContext() as unknown as AudioContext)
         speaker.push('。。\n')
         speaker.flush()
