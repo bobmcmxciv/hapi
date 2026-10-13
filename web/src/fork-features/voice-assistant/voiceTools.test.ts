@@ -134,9 +134,52 @@ describe('voice assistant client tools', () => {
         expect(getVoiceInstructionDraft()).toBeNull()
     })
 
+    it('reads back whether a busy target will be interrupted and sends with that delivery', async () => {
+        writeVoiceToolMode('assistant')
+        api.prepareVoiceInstruction.mockResolvedValueOnce({
+            status: 'ready', target: { id: 'target-1', title: '视频渲染' }, instruction: '马上停下渲染。', readback: '停下渲染',
+            original: '让它先停下渲染', model: 'deepseek-flash', delivery: 'steer', deliveryReason: '要它停下', targetBusy: true
+        } as never)
+        const prepared = await realtimeClientTools.prepareInstruction({ instruction: '让它先停下渲染' })
+        expect(prepared).toContain('停下渲染（会插进它正在做的这一轮）。确认发送吗？')
+        await realtimeClientTools.confirmInstruction({ decision: 'send' })
+        expect(api.sendMessage).toHaveBeenLastCalledWith('target-1', expect.any(String), null, undefined, undefined, undefined, 'steer')
+    })
+
+    it('sends the pending draft when the model hands the spoken yes to the lookup tool instead', async () => {
+        writeVoiceToolMode('assistant')
+        await realtimeClientTools.prepareInstruction({ instruction: '跟做视频那个说渲染先等等' })
+        const reply = await realtimeClientTools.askSessionStatus({ question: '对，确认发送。' })
+        expect(reply).toContain('sent to "视频渲染"')
+        expect(api.askVoiceSessionStatus).not.toHaveBeenCalled()
+        expect(api.sendMessage).toHaveBeenCalledTimes(1)
+        expect(getVoiceInstructionDraft()).toBeNull()
+    })
+
+    it('sends the pending draft when the model drafts the spoken yes again, and honours an explicit interrupt', async () => {
+        writeVoiceToolMode('assistant')
+        await realtimeClientTools.prepareInstruction({ instruction: '跟做视频那个说渲染先等等' })
+        const reply = await realtimeClientTools.prepareInstruction({ instruction: '插队发吧' })
+        expect(reply).toContain('sent to "视频渲染"')
+        expect(api.prepareVoiceInstruction).toHaveBeenCalledTimes(1)
+        expect(api.sendMessage).toHaveBeenLastCalledWith('target-1', expect.any(String), null, undefined, undefined, undefined, 'steer')
+    })
+
+    it('drops the pending draft on a spoken no that reached the wrong tool', async () => {
+        writeVoiceToolMode('assistant')
+        await realtimeClientTools.prepareInstruction({ instruction: '跟做视频那个说渲染先等等' })
+        expect(await realtimeClientTools.askSessionStatus({ question: '算了' })).toContain('cancelled')
+        expect(getVoiceInstructionDraft()).toBeNull()
+        expect(api.sendMessage).not.toHaveBeenCalled()
+    })
+
+    it('treats a yes as a normal question when nothing is waiting, and never acts in read-only mode', async () => {
+        await realtimeClientTools.askSessionStatus({ question: '确认' })
+        expect(api.askVoiceSessionStatus).toHaveBeenCalledTimes(1)
+        expect(api.sendMessage).not.toHaveBeenCalled()
+    })
+
     it('leaves the text unchanged when the spoken original equals the instruction', () => {
-        expect(composeVoiceInstructionText({
-            target: { id: 'x', title: 'x' }, instruction: '跑测试', original: '跑测试', readback: '跑测试', createdAt: 0
-        })).toBe('跑测试')
+        expect(composeVoiceInstructionText({ instruction: '跑测试', original: '跑测试' })).toBe('跑测试')
     })
 })

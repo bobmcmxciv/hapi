@@ -145,7 +145,7 @@ export const VOICE_TOOLS = [
     {
         type: 'client' as const,
         name: 'askSessionStatus',
-        description: "Answer the user's question about the coding session (progress, status, what it is doing, what changed, errors, what is left, whether it waits for approval) by looking it up. Nothing is sent to the agent.",
+        description: "Answer the user's question about their work by looking it up: the current session or any other session or project (progress, status, what it is doing, what changed, errors, what is left, whether it waits for approval). Nothing is sent to any agent.",
         expects_response: true,
         response_timeout_secs: 30,
         parameters: {
@@ -196,7 +196,7 @@ export const VOICE_TOOLS = [
                 },
                 delivery: {
                     type: 'string',
-                    description: "'steer' only if the user asks to interrupt the agent right now; otherwise omit (queued after the current turn)."
+                    description: "Omit to use the draft's own choice. 'steer' only if the user explicitly says to interrupt now; 'queue' only if they say to wait until the agent finishes."
                 }
             }
         }

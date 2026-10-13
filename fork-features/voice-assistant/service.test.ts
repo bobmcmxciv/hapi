@@ -97,27 +97,62 @@ describe('voice-assistant material', () => {
 })
 
 describe('VoiceAssistant.ask', () => {
-    it('answers from the primary model and sends the session material', async () => {
-        const primary = fakeProvider('primary', ['现在在写测试，还剩部署。'])
-        const va = assistantWith({ sessions: [session('s1', '语音改造')], digests: { s1: digest('语音改造', '在写测试', 0) }, providers: [primary] })
-        const result = await va.ask({ sessionId: 's1', question: '做到哪了？' })
-        expect(result).toEqual({ answer: '现在在写测试，还剩部署。', model: 'primary-model', ms: 0 })
+    it('answers a question about the current session in one call, with the session material and the index', async () => {
+        const primary = fakeProvider('primary', [JSON.stringify({ answer: '现在在写测试，还剩部署。', details: [] })])
+        const sessions = [session('s1aaaaaa', '语音改造'), session('s2bbbbbb', '视频渲染', { thinking: true })]
+        const va = assistantWith({ sessions, digests: { s1aaaaaa: digest('语音改造', '在写测试', 0), s2bbbbbb: digest('视频渲染', '第三章在渲染', 0) }, providers: [primary] })
+        const result = await va.ask({ sessionId: 's1aaaaaa', question: '做到哪了？', candidates: sessions })
+        expect(result).toEqual({ answer: '现在在写测试，还剩部署。', model: 'primary-model', ms: 0, sessions: ['s1aaaaaa'] })
+        expect(primary.prompts).toHaveLength(1)
         expect(primary.prompts[0]!.prompt).toContain('现状：在写测试')
+        expect(primary.prompts[0]!.prompt).toContain('[s2bbbbbb] 视频渲染')
+        expect(primary.prompts[0]!.prompt).toContain('在跑')
         expect(primary.prompts[0]!.prompt).toContain('问题：做到哪了？')
+    })
+
+    it('answers about another session from the index when one line is enough', async () => {
+        const primary = fakeProvider('primary', [JSON.stringify({ answer: '视频渲染那个会话第三章还在渲染。', details: [] })])
+        const sessions = [session('s1aaaaaa', '语音改造'), session('s2bbbbbb', '视频渲染', { thinking: true })]
+        const va = assistantWith({ sessions, digests: { s2bbbbbb: digest('视频渲染', '第三章在渲染', 0) }, providers: [primary] })
+        const result = await va.ask({ sessionId: 's1aaaaaa', question: '视频那个怎么样了', candidates: sessions })
+        expect(result.answer).toBe('视频渲染那个会话第三章还在渲染。')
+        expect(primary.prompts).toHaveLength(1)
+    })
+
+    it('pulls the detailed material of the sessions the model names when the index is not enough', async () => {
+        const primary = fakeProvider('primary', [JSON.stringify({ answer: '', details: ['s2bbbbbb'] }), '视频渲染那个卡在字幕对齐，正在重试第三章。'])
+        const sessions = [session('s1aaaaaa', '语音改造'), session('s2bbbbbb', '视频渲染', { thinking: true })]
+        const va = assistantWith({
+            sessions,
+            digests: { s2bbbbbb: digest('视频渲染', '第三章在渲染', 0) },
+            messages: { s2bbbbbb: [user(1, '第三章字幕对不上'), assistant(2, '我在重试第三章的字幕对齐')] },
+            providers: [primary]
+        })
+        const result = await va.ask({ sessionId: 's1aaaaaa', question: '视频那个为什么慢', candidates: sessions })
+        expect(result).toMatchObject({ answer: '视频渲染那个卡在字幕对齐，正在重试第三章。', sessions: ['s2bbbbbb'] })
+        expect(primary.prompts).toHaveLength(2)
+        expect(primary.prompts[1]!.prompt).toContain('会话《视频渲染》')
+        expect(primary.prompts[1]!.prompt).toContain('我在重试第三章的字幕对齐')
+    })
+
+    it('speaks a plain-text reply when the model ignores the JSON format', async () => {
+        const primary = fakeProvider('primary', ['现在在写测试。'])
+        const va = assistantWith({ sessions: [session('s1aaaaaa', 'x')], providers: [primary] })
+        expect((await va.ask({ sessionId: 's1aaaaaa', question: '怎么样了' })).answer).toBe('现在在写测试。')
     })
 
     it('falls back to the next model when the primary fails', async () => {
         const primary = fakeProvider('primary', [new Error('LLM HTTP 402: Payment Required')])
-        const fallback = fakeProvider('fallback', ['luna 的回答'])
-        const va = assistantWith({ sessions: [session('s1', 'x')], providers: [primary, fallback] })
-        const result = await va.ask({ sessionId: 's1', question: '怎么样了' })
+        const fallback = fakeProvider('fallback', [JSON.stringify({ answer: 'luna 的回答', details: [] })])
+        const va = assistantWith({ sessions: [session('s1aaaaaa', 'x')], providers: [primary, fallback] })
+        const result = await va.ask({ sessionId: 's1aaaaaa', question: '怎么样了' })
         expect(result.answer).toBe('luna 的回答')
         expect(result.model).toBe('fallback-model')
     })
 
     it('reports unavailable when no model is configured', async () => {
-        const va = assistantWith({ sessions: [session('s1', 'x')], providers: [] })
-        await expect(va.ask({ sessionId: 's1', question: '怎么样了' })).rejects.toBeInstanceOf(VoiceAssistantUnavailableError)
+        const va = assistantWith({ sessions: [session('s1aaaaaa', 'x')], providers: [] })
+        await expect(va.ask({ sessionId: 's1aaaaaa', question: '怎么样了' })).rejects.toBeInstanceOf(VoiceAssistantUnavailableError)
     })
 })
 
@@ -166,6 +201,24 @@ describe('VoiceAssistant.prepareInstruction', () => {
         const va = assistantWith({ sessions, providers: [primary] })
         const result = await va.prepareInstruction({ currentSessionId: 'aaaa1111', utterance: '跑那个测试', candidates: sessions })
         expect(result).toEqual({ status: 'need_info', target: { id: 'aaaa1111', title: '语音改造' }, ask: '要跑哪一组测试？' })
+    })
+
+    it('interrupts a busy target only for instructions that change what it is doing', async () => {
+        const steer = fakeProvider('primary', [JSON.stringify({ instruction: '马上停下渲染。', readback: '停下渲染', ask: null, delivery: 'steer', deliveryReason: '要它停下' })])
+        const busy = [session('aaaa1111', '视频渲染', { thinking: true })]
+        const va = assistantWith({ sessions: busy, providers: [steer] })
+        const result = await va.prepareInstruction({ currentSessionId: 'aaaa1111', utterance: '先停下渲染', candidates: busy })
+        expect(result).toMatchObject({ status: 'ready', delivery: 'steer', deliveryReason: '要它停下', targetBusy: true })
+        expect(steer.prompts[0]!.system).toContain('"steer"')
+        expect(steer.prompts[0]!.prompt).toContain('代理正在工作')
+    })
+
+    it('queues when the target is idle even if the model asked to interrupt', async () => {
+        const steer = fakeProvider('primary', [JSON.stringify({ instruction: '停下。', readback: '停下', ask: null, delivery: 'steer' })])
+        const idle = [session('aaaa1111', '视频渲染')]
+        const va = assistantWith({ sessions: idle, providers: [steer] })
+        const result = await va.prepareInstruction({ currentSessionId: 'aaaa1111', utterance: '停下', candidates: idle })
+        expect(result).toMatchObject({ status: 'ready', delivery: 'queue', targetBusy: false })
     })
 
     it('refuses to draft for a stopped session', async () => {

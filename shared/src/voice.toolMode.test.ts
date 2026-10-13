@@ -41,8 +41,10 @@ describe('voice tool modes', () => {
 describe('voice prompt routing', () => {
     test('questions go to askSessionStatus and the old pass-it-through rule is gone', () => {
         const fixtures = getVoicePlatformFixturesPreview()
-        expect(fixtures).toContain('MUST be answered by calling askSessionStatus')
-        expect(fixtures).toContain('Never forward a question to the agent')
+        expect(fixtures).toContain('call askSessionStatus with the user')
+        expect(fixtures).toContain('questions about OTHER sessions or projects')
+        expect(fixtures).toContain('You never do the work yourself')
+        expect(fixtures).toContain('call confirmInstruction with decision "send" before saying anything')
         expect(fixtures).not.toContain('If in doubt, pass it through')
         expect(fixtures).not.toContain('You MUST call the messageCodingAgent tool for ANY request')
     })

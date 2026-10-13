@@ -180,6 +180,17 @@ export function buildSessionMaterial(params: {
     return parts.join('\n\n')
 }
 
+/** 跨会话问答的索引行：短 id、名字、在跑还是空闲、最后活动、现状、待办。 */
+export function describeSessionForIndex(session: VoiceSessionView, digest: VoiceDigestView | null, now: number): string {
+    const name = session.metadata?.name?.trim() || digest?.title || session.metadata?.summary?.text?.trim() || '未命名'
+    const folder = session.metadata?.path?.split(/[\\/]/).filter(Boolean).pop()
+    const state = session.active === false ? '已停' : session.thinking ? '在跑' : '空闲'
+    const pending = Object.keys(session.agentState?.requests ?? {}).length > 0 ? '，等批准' : ''
+    const status = digest?.status ? `｜现状：${short(digest.status, 90)}` : ''
+    const todo = digest?.todo.length ? `｜待办：${short(digest.todo.join('；'), 70)}` : ''
+    return `[${session.id.slice(0, 8)}] ${name}${folder ? `（${folder}）` : ''}｜${state}${pending}，${minutesAgo(now, session.updatedAt)}${status}${todo}`
+}
+
 /** 选目标会话时给模型看的一行：短 id、名字、现状。 */
 export function describeSessionForTargeting(session: VoiceSessionView, digest: VoiceDigestView | null): string {
     const name = session.metadata?.name?.trim() || digest?.title || session.metadata?.summary?.text?.trim() || '未命名'

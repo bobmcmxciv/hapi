@@ -72,7 +72,7 @@ export function mountVoiceAssistantRoutes(app: Hono<WebAppEnv>, resolveViewer: R
             return c.json({ error: 'Session not found' }, 404)
         }
         try {
-            return c.json(await assistant.ask(parsed.data))
+            return c.json(await assistant.ask({ ...parsed.data, candidates: viewer.sessions }))
         } catch (error) {
             return failure(c, error)
         }

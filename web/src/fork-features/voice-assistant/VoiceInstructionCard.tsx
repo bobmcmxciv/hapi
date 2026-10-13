@@ -7,10 +7,12 @@ import {
     updateVoiceInstructionText,
     useVoiceInstructionDraft
 } from './instructionDraft'
+import type { VoiceDelivery } from './types'
 
 /**
- * The instruction the voice assistant read back, shown so it can also be checked, edited and
- * sent or dropped by hand. Saying "yes" to the assistant does the same as the send button.
+ * The instruction the voice assistant read back. Saying yes to the assistant sends it and the card
+ * goes away; the card is the fallback for checking, editing, sending or dropping it by hand. While
+ * the target is busy it shows whether the instruction interrupts the current turn or waits for it.
  */
 export function VoiceInstructionCard(props: { api: ApiClient }) {
     const { t } = useTranslation()
@@ -19,7 +21,7 @@ export function VoiceInstructionCard(props: { api: ApiClient }) {
 
     if (!draft) return null
 
-    const send = async (delivery: 'queue' | 'steer') => {
+    const send = async (delivery?: VoiceDelivery) => {
         setState({ sending: true, error: null })
         try {
             await sendVoiceInstructionDraft(props.api, delivery)
@@ -28,6 +30,7 @@ export function VoiceInstructionCard(props: { api: ApiClient }) {
             setState({ sending: false, error: error instanceof Error ? error.message : String(error) })
         }
     }
+    const other: VoiceDelivery = draft.delivery === 'steer' ? 'queue' : 'steer'
 
     return (
         <div
@@ -38,6 +41,7 @@ export function VoiceInstructionCard(props: { api: ApiClient }) {
                 <span className="font-medium text-[var(--app-fg)]">{t('voice.instruction.title')}</span>
                 <span className="truncate text-xs text-[var(--app-hint)]">
                     {t('voice.instruction.target', { title: draft.target.title })}
+                    {draft.targetBusy ? ` · ${t(`voice.instruction.delivery.${draft.delivery}`)}` : ''}
                 </span>
             </div>
             <textarea
@@ -65,18 +69,20 @@ export function VoiceInstructionCard(props: { api: ApiClient }) {
                 >
                     {t('voice.instruction.cancel')}
                 </button>
-                <button
-                    type="button"
-                    className="rounded-md border border-[var(--app-border)] px-3 py-1.5 text-[var(--app-fg)] hover:bg-[var(--app-bg)]"
-                    onClick={() => { void send('steer') }}
-                    disabled={state.sending || !draft.instruction.trim()}
-                >
-                    {t('voice.instruction.steer')}
-                </button>
+                {draft.targetBusy ? (
+                    <button
+                        type="button"
+                        className="rounded-md border border-[var(--app-border)] px-3 py-1.5 text-[var(--app-fg)] hover:bg-[var(--app-bg)]"
+                        onClick={() => { void send(other) }}
+                        disabled={state.sending || !draft.instruction.trim()}
+                    >
+                        {t(`voice.instruction.sendAs.${other}`)}
+                    </button>
+                ) : null}
                 <button
                     type="button"
                     className="rounded-md bg-[var(--app-button)] px-3 py-1.5 text-[var(--app-button-text)] disabled:opacity-50"
-                    onClick={() => { void send('queue') }}
+                    onClick={() => { void send() }}
                     disabled={state.sending || !draft.instruction.trim()}
                 >
                     {state.sending ? t('voice.instruction.sending') : t('voice.instruction.send')}

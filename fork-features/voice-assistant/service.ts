@@ -12,6 +12,7 @@ import { createLlmCall, type LlmCall } from '../session-digest/llmClient'
 import type { TranscriptMessage } from '../session-digest/transcript'
 import {
     buildSessionMaterial,
+    describeSessionForIndex,
     describeSessionForTargeting,
     type VoiceDigestView,
     type VoiceProjectView,
@@ -19,10 +20,12 @@ import {
 } from './material'
 import {
     NORMALIZE_SYSTEM_PROMPT,
-    QA_SYSTEM_PROMPT,
+    QA_DETAIL_SYSTEM_PROMPT,
+    QA_ROUTER_SYSTEM_PROMPT,
     TARGET_SYSTEM_PROMPT,
     buildNormalizePrompt,
-    buildQaPrompt,
+    buildQaDetailPrompt,
+    buildQaRouterPrompt,
     buildTargetPrompt,
     parseJsonObject
 } from './prompts'
@@ -42,17 +45,34 @@ export type VoiceAssistantDeps = {
 
 export type VoiceTarget = { id: string; title: string }
 
+export type VoiceDelivery = 'queue' | 'steer'
+
 export type PrepareResult =
-    | { status: 'ready'; target: VoiceTarget; instruction: string; readback: string; original: string; model: string }
+    | {
+        status: 'ready'
+        target: VoiceTarget
+        instruction: string
+        readback: string
+        original: string
+        model: string
+        /** How to deliver while the target is busy; when it is idle both mean "now". */
+        delivery: VoiceDelivery
+        deliveryReason: string
+        targetBusy: boolean
+    }
     | { status: 'need_info'; target: VoiceTarget; ask: string }
     | { status: 'ambiguous'; candidates: VoiceTarget[]; ask: string }
     | { status: 'no_target'; ask: string }
     | { status: 'target_inactive'; target: VoiceTarget }
 
 const QA_MESSAGES = 160
+const DETAIL_MESSAGES = 120
 const TARGET_MESSAGES = 60
 const MAX_HISTORY_TURNS = 4
 const MAX_CANDIDATES = 40
+/** Sessions listed in the cross-session index: every running one plus the most recently active. */
+const INDEX_RECENT = 40
+const MAX_DETAIL_SESSIONS = 2
 
 export class VoiceAssistantUnavailableError extends Error {}
 
@@ -108,18 +128,67 @@ export class VoiceAssistant {
         })
     }
 
-    async ask(params: { sessionId: string; question: string; history?: VoiceTurn[] }): Promise<{ answer: string; model: string; ms: number }> {
-        const session = this.deps.getSession(params.sessionId)
-        if (!session) throw new Error('Session not found')
+    /**
+     * 问进度。第一轮给模型当前会话的详细材料和其他可见会话的索引：问当前会话、或索引够用就直接答；
+     * 问别的工作而索引不够时，模型点名最多两个会话，第二轮带上它们的详细材料再答。
+     */
+    async ask(params: {
+        sessionId: string
+        question: string
+        history?: VoiceTurn[]
+        candidates?: VoiceSessionView[]
+    }): Promise<{ answer: string; model: string; ms: number; sessions: string[] }> {
         const startedAt = this.now()
-        const { text, model } = await this.complete(QA_SYSTEM_PROMPT, buildQaPrompt({
+        const history = (params.history ?? []).slice(-MAX_HISTORY_TURNS)
+        const current = params.candidates?.find((session) => session.id === params.sessionId) ?? this.deps.getSession(params.sessionId)
+        if (!current) throw new Error('Session not found')
+
+        const others = (params.candidates ?? []).filter((session) => session.id !== current.id)
+        const running = others.filter((session) => session.active !== false && session.thinking)
+        const recent = others
+            .filter((session) => !running.includes(session))
+            .sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0))
+            .slice(0, INDEX_RECENT)
+        const indexed = [...running, ...recent]
+        const index = indexed.map((session) => describeSessionForIndex(session, this.deps.getDigest(session.id), startedAt)).join('\n')
+
+        const first = await this.complete(QA_ROUTER_SYSTEM_PROMPT, buildQaRouterPrompt({
             now: startedAt,
-            material: this.materialFor(session, QA_MESSAGES),
-            history: (params.history ?? []).slice(-MAX_HISTORY_TURNS),
+            currentMaterial: this.materialFor(current, QA_MESSAGES),
+            index,
+            history,
             question: params.question
-        }), 400)
-        if (!text) throw new Error('Model returned an empty answer')
-        return { answer: text, model, ms: this.now() - startedAt }
+        }), 500)
+        const parsed = parseJsonObject(first.text)
+        // A model that ignores the JSON format still produced a usable spoken answer.
+        if (!parsed) {
+            if (!first.text) throw new Error('Model returned an empty answer')
+            return { answer: first.text, model: first.model, ms: this.now() - startedAt, sessions: [current.id] }
+        }
+        const answer = typeof parsed.answer === 'string' ? parsed.answer.trim() : ''
+        const wanted = (Array.isArray(parsed.details) ? parsed.details : [])
+            .filter((id): id is string => typeof id === 'string')
+            .map((id) => id.replace(/[[\]\s]/g, ''))
+            .filter((id) => id.length >= 4)
+        const detailSessions = wanted
+            .map((id) => [current, ...indexed].find((session) => session.id.startsWith(id)))
+            .filter((session): session is VoiceSessionView => session !== undefined)
+            .filter((session, i, all) => all.findIndex((other) => other.id === session.id) === i)
+            .slice(0, MAX_DETAIL_SESSIONS)
+
+        if (detailSessions.length === 0) {
+            if (!answer) throw new Error('Model returned an empty answer')
+            return { answer, model: first.model, ms: this.now() - startedAt, sessions: [current.id] }
+        }
+
+        const second = await this.complete(QA_DETAIL_SYSTEM_PROMPT, buildQaDetailPrompt({
+            now: startedAt,
+            materials: detailSessions.map((session) => ({ title: this.titleOf(session), material: this.materialFor(session, DETAIL_MESSAGES) })),
+            history,
+            question: params.question
+        }), 500)
+        if (!second.text) throw new Error('Model returned an empty answer')
+        return { answer: second.text, model: second.model, ms: this.now() - startedAt, sessions: detailSessions.map((session) => session.id) }
     }
 
     /**
@@ -212,7 +281,11 @@ export class VoiceAssistant {
         if (ask) return { status: 'need_info', target, ask }
         if (!instruction) throw new Error('Model did not return an instruction')
         const readback = typeof parsed?.readback === 'string' && parsed.readback.trim() ? parsed.readback.trim() : instruction.slice(0, 40)
-        return { status: 'ready', target, instruction, readback, original: params.utterance, model }
+        const targetBusy = session.thinking === true
+        // Interrupting only matters while the target is working; anything unclear waits its turn.
+        const delivery: VoiceDelivery = targetBusy && parsed?.delivery === 'steer' ? 'steer' : 'queue'
+        const deliveryReason = typeof parsed?.deliveryReason === 'string' ? parsed.deliveryReason.trim().slice(0, 30) : ''
+        return { status: 'ready', target, instruction, readback, original: params.utterance, model, delivery, deliveryReason, targetBusy }
     }
 }
 

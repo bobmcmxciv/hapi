@@ -5,9 +5,11 @@ import { readVoiceToolMode } from '@/fork-features/voice-assistant/toolMode'
 import {
     getVoiceInstructionDraft,
     sendVoiceInstructionDraft,
-    setVoiceInstructionDraft
+    setVoiceInstructionDraft,
+    type VoiceInstructionDraft
 } from '@/fork-features/voice-assistant/instructionDraft'
-import type { VoiceTurn } from '@/fork-features/voice-assistant/types'
+import { classifyConfirmation } from '@/fork-features/voice-assistant/confirmIntent'
+import type { VoiceDelivery, VoiceTurn } from '@/fork-features/voice-assistant/types'
 
 // Store for session state and API client
 let sessionStore: {
@@ -48,6 +50,37 @@ const READ_ONLY_REFUSAL = 'error (read-only mode: voice cannot send anything to 
 
 function errorText(error: unknown): string {
     return error instanceof Error ? error.message : String(error)
+}
+
+function deliveryNote(delivery: VoiceDelivery, targetBusy: boolean): string {
+    if (!targetBusy) return ''
+    return delivery === 'steer' ? '（会插进它正在做的这一轮）' : '（等它这一轮做完再处理）'
+}
+
+function sentReply(sent: VoiceInstructionDraft): string {
+    const how = sent.targetBusy ? (sent.delivery === 'steer' ? ', interrupting its current turn' : ', queued until its current turn finishes') : ''
+    return `sent to "${sent.target.title}"${how} [say only that it was sent]`
+}
+
+/**
+ * The read-back is waiting for a yes/no, but the realtime model sometimes hands that short answer to
+ * askSessionStatus or prepareInstruction instead of calling confirmInstruction. When the words are
+ * only a yes or a no, act on the pending draft here so one spoken confirmation is always enough.
+ */
+async function settlePendingDraft(text: string): Promise<string | null> {
+    if (readVoiceToolMode() !== 'assistant' || !assistantApi) return null
+    if (!getVoiceInstructionDraft()) return null
+    const intent = classifyConfirmation(text)
+    if (!intent) return null
+    if (intent.decision === 'cancel') {
+        setVoiceInstructionDraft(null)
+        return 'cancelled: the user declined the drafted instruction [say briefly that nothing was sent]'
+    }
+    try {
+        return sentReply(await sendVoiceInstructionDraft(assistantApi, intent.delivery))
+    } catch (error) {
+        return `error (sending failed: ${errorText(error)}). Tell the user it was not sent.`
+    }
 }
 
 /**
@@ -149,6 +182,8 @@ export const realtimeClientTools = {
     askSessionStatus: async (parameters: unknown) => {
         const question = (parameters as { question?: unknown })?.question
         if (typeof question !== 'string' || !question.trim()) return 'error (missing question)'
+        const settled = await settlePendingDraft(question)
+        if (settled) return settled
         const sessionId = getCurrentRealtimeSessionId()
         if (!sessionId) return 'error (no active session)'
         if (!assistantApi) return 'error (lookup not available)'
@@ -174,6 +209,8 @@ export const realtimeClientTools = {
         if (readVoiceToolMode() === 'readonly') return READ_ONLY_REFUSAL
         const params = parameters as { instruction?: unknown; target?: unknown }
         if (typeof params?.instruction !== 'string' || !params.instruction.trim()) return 'error (missing instruction)'
+        const settled = await settlePendingDraft(params.instruction)
+        if (settled) return settled
         const sessionId = getCurrentRealtimeSessionId()
         if (!sessionId) return 'error (no active session)'
         if (!assistantApi) return 'error (instructions not available)'
@@ -188,16 +225,20 @@ export const realtimeClientTools = {
             })
             switch (result.status) {
                 case 'ready': {
+                    const delivery: VoiceDelivery = result.delivery === 'steer' ? 'steer' : 'queue'
+                    const targetBusy = result.targetBusy === true
                     setVoiceInstructionDraft({
                         target: result.target,
                         instruction: result.instruction,
                         original: result.original,
                         readback: result.readback,
-                        createdAt: Date.now()
+                        createdAt: Date.now(),
+                        delivery,
+                        targetBusy
                     })
-                    const readback = `发给《${result.target.title}》：${result.readback}。确认发送吗？`
+                    const readback = `发给《${result.target.title}》：${result.readback}${deliveryNote(delivery, targetBusy)}。确认发送吗？`
                     rememberTurn(utterance, readback)
-                    return `Draft ready, NOT sent yet. Read this back to the user exactly: "${readback}" Then wait for their answer: yes -> confirmInstruction with decision "send"; no -> decision "cancel".`
+                    return `Draft ready, NOT sent yet. Read this back to the user exactly: "${readback}" Then stop and wait. The moment the user agrees (确认 / 好 / 对 / 发吧), call confirmInstruction with decision "send" before saying anything; if they decline, decision "cancel".`
                 }
                 case 'need_info':
                     rememberTurn(utterance, result.ask)
@@ -229,8 +270,9 @@ export const realtimeClientTools = {
         if (params?.decision !== 'send') return "error (decision must be 'send' or 'cancel')"
         if (!assistantApi) return 'error (sending not available)'
         try {
-            const target = await sendVoiceInstructionDraft(assistantApi, params.delivery === 'steer' ? 'steer' : 'queue')
-            return `sent to "${target.title}" [say only that it was sent]`
+            // The draft already says whether to interrupt; an explicit delivery is the user overriding it.
+            const override = params.delivery === 'steer' || params.delivery === 'queue' ? params.delivery : undefined
+            return sentReply(await sendVoiceInstructionDraft(assistantApi, override))
         } catch (error) {
             console.error('[Voice] confirmInstruction failed:', error)
             return `error (sending failed: ${errorText(error)}). Tell the user it was not sent.`
