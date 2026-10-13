@@ -133,9 +133,11 @@ class QwenVoiceSessionImpl implements VoiceSession {
         // fork(voice-assistant): speak replies with the hub's own voice (曼波) when it is reachable;
         // otherwise the realtime model's built-in voice, as before.
         let useHubVoice = false
+        let hubVoiceSampleRate: number | null = null
         if (readVoiceReader() === 'manbo') {
             const ttsStatus = await this.api.getVoiceTtsStatus().catch(() => null)
             useHubVoice = ttsStatus?.available === true
+            hubVoiceSampleRate = ttsStatus?.sampleRate ?? null
             if (DEBUG) console.log('[Qwen] hub voice', ttsStatus)
         }
 
@@ -173,7 +175,7 @@ class QwenVoiceSessionImpl implements VoiceSession {
         const outputParam = useHubVoice ? '&output=text' : ''
         const wsUrl = `${proxyUrl}${separator}token=${encodeURIComponent(authToken)}${langParam}${voiceParam}${toolsParam}${outputParam}`
         state.speaker = useHubVoice
-            ? new ManboSpeaker(this.api, state.playbackContext, (reason) => console.warn('[Qwen] hub voice failed, using browser speech:', reason))
+            ? new ManboSpeaker(this.api, state.playbackContext, (reason) => console.warn('[Qwen] hub voice failed, using browser speech:', reason), hubVoiceSampleRate)
             : null
         const ws = new WebSocket(wsUrl)
         state.ws = ws

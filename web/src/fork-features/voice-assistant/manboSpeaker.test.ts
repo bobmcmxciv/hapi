@@ -111,6 +111,18 @@ describe('ManboSpeaker', () => {
         expect((speak.mock.calls[0]![0] as { text: string; lang: string }).lang).toBe('zh-CN')
     })
 
+    it('uses the status sample rate when a cross-origin response hides x-sample-rate', async () => {
+        const hidden = () => {
+            const stream = new ReadableStream<Uint8Array>({ start(c) { c.enqueue(new Uint8Array([0, 0, 0, 0])); c.close() } })
+            return new Response(stream)
+        }
+        const open = vi.fn(async (_text: string, _signal?: AbortSignal) => hidden())
+        const context = new FakeAudioContext()
+        const speaker = new ManboSpeaker({ openVoiceTtsStream: open } as unknown as ApiClient, context as unknown as AudioContext, undefined, 16000)
+        speaker.push('好的。')
+        await vi.waitFor(() => expect(context.buffers).toEqual([{ frames: 2, sampleRate: 16000 }]))
+    })
+
     it('skips fragments with nothing to say', async () => {
         const open = vi.fn(async (_text: string, _signal?: AbortSignal) => pcmResponse([[0, 0]]))
         const speaker = new ManboSpeaker({ openVoiceTtsStream: open } as unknown as ApiClient, new FakeAudioContext() as unknown as AudioContext)

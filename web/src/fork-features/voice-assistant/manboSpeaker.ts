@@ -29,11 +29,18 @@ export class ManboSpeaker {
     private nextStartTime = 0
     private generation = 0
     private fallback = false
+    /**
+     * Rate to assume when the response does not expose `x-sample-rate` (cross-origin pages see
+     * custom headers only if the hub lists them in Access-Control-Expose-Headers). Comes from the
+     * status endpoint's JSON body, which is always readable.
+     */
+    private readonly defaultSampleRate: number
 
-    constructor(api: ApiClient, context: AudioContext, onFallback?: (reason: string) => void) {
+    constructor(api: ApiClient, context: AudioContext, onFallback?: (reason: string) => void, defaultSampleRate?: number | null) {
         this.api = api
         this.context = context
         this.onFallback = onFallback
+        this.defaultSampleRate = defaultSampleRate && defaultSampleRate > 0 ? defaultSampleRate : 32000
     }
 
     /** Add reply text; whole sentences are queued for speaking. */
@@ -115,7 +122,7 @@ export class ManboSpeaker {
     private async synthesize(sentence: string, generation: number): Promise<void> {
         this.abort = new AbortController()
         const response = await this.api.openVoiceTtsStream(sentence, this.abort.signal)
-        const sampleRate = Number(response.headers.get('x-sample-rate')) || 32000
+        const sampleRate = Number(response.headers.get('x-sample-rate')) || this.defaultSampleRate
         const reader = response.body!.getReader()
         let carry: Uint8Array | null = null
         for (;;) {

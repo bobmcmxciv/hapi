@@ -266,7 +266,11 @@ function createWebApp(options: {
         allowMethods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
         // last-event-id: browsers attach it to EventSource reconnects for
         // SSE replay; allow it in case a browser preflights the request.
-        allowHeaders: ['authorization', 'content-type', 'last-event-id']
+        allowHeaders: ['authorization', 'content-type', 'last-event-id'],
+        // fork(voice-assistant): the web app is often served from another origin than the API
+        // (bob.18852271093.top -> hapi.bobmcmxciv.xin); without this the browser hides the PCM
+        // sample rate of /api/voice/tts and the voice plays at the wrong speed.
+        exposeHeaders: ['x-sample-rate', 'x-audio-format']
     })
     app.use('/api/*', corsMiddleware)
     app.use('/cli/*', corsMiddleware)
