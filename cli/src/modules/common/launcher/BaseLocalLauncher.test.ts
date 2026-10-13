@@ -14,7 +14,7 @@ function harness() {
         failureLabel: 'Local process failed',
         queue: {
             size: () => items.length,
-            setOnMessage: (callback) => { onMessage = callback },
+            setOnMessage: (callback: (...args: unknown[]) => void) => { onMessage = callback },
             // A queue that still offers reset(): the launcher must not call it.
             ...({ reset } as object)
         } as never,
