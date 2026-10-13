@@ -1,4 +1,5 @@
 import { getCurrentRealtimeSessionId, getVoiceSession, isVoiceSessionStarted } from '../RealtimeSession'
+import { resetVoiceAssistantState } from '../realtimeClientTools'
 import {
     formatNewMessages,
     formatPermissionRequest,
@@ -187,5 +188,6 @@ export const voiceHooks = {
         }
         shownSessions.clear()
         lastFocusSession = null
+        resetVoiceAssistantState()
     }
 }

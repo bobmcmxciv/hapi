@@ -2,6 +2,7 @@ import { buildVoiceAgentConfig, VOICE_TOOLS } from '@hapi/protocol/voice'
 import {
     DEFAULT_ELEVENLABS_VOICE_SETTINGS,
     ELEVENLABS_WEBRTC_CONTEXT_MAX_BYTES,
+    buildVoiceToolModeBlock,
     isDefaultVoicePersonality,
     resolveComposedVoiceSystemPrompt,
     resolveElevenLabsVoiceSettings,
@@ -145,10 +146,13 @@ export function truncatePromptForProxy(prompt: string): string {
 export function buildResolvedVoiceSystemPrompt(options?: {
     language?: string
     backend?: 'elevenlabs' | 'gemini-live' | 'qwen-realtime'
+    /** fork(voice-assistant): say which tools the hub installed for this session. */
+    toolMode?: 'readonly' | 'assistant'
 }): string {
     const personality = loadVoicePersonalityFromStorage()
-    return resolveComposedVoiceSystemPrompt(personality, {
+    const prompt = resolveComposedVoiceSystemPrompt(personality, {
         language: options?.language,
         backend: options?.backend ?? 'gemini-live'
     }).prompt
+    return options?.toolMode ? `${prompt}${buildVoiceToolModeBlock(options.toolMode)}` : prompt
 }

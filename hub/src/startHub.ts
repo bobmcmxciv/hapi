@@ -35,7 +35,9 @@ import {
 import { resolveGatewayCliNamespace } from '../../fork-features/multi-user/cliAdapter'
 import { createGatewayMemoryDelivery } from '../../fork-features/multi-user/memoryAdapter'
 import { startCx2ccPoller, type Cx2ccPollerHandle } from '../../fork-features/subscription/cx2ccPoller'
-import { startDigestService } from '../../fork-features/session-digest/digestService'
+import { projectKeyOf, startDigestService, type DigestSessionView } from '../../fork-features/session-digest/digestService'
+import { startVoiceAssistant } from '../../fork-features/voice-assistant/service'
+import type { VoiceSessionView } from '../../fork-features/voice-assistant/material'
 import { startWorkStore, stopWorkStore } from '../../fork-features/work-overview/workStore'
 
 /** Format config source for logging */
@@ -396,6 +398,15 @@ export async function startHub(options: StartHubOptions = {}): Promise<HubInstan
         }
     })
     console.log(`[Digest] session digest scheduler started (${digestService.status().configured ? 'model configured' : 'HAPI_DIGEST_API_URL/KEY unset: model calls disabled'})`)
+
+    // fork(voice-assistant): 语音问进度/整理指令。只读会话与摘要库，模型调用不进会话。
+    const voiceAssistant = startVoiceAssistant({
+        getSession: (sessionId) => syncEngine?.getSession(sessionId) as VoiceSessionView | undefined,
+        getRecentMessages: (sessionId, limit) => store.messages.getMessages(sessionId, limit),
+        getDigest: (sessionId) => digestService.store.getSession(sessionId),
+        getProject: (session) => digestService.store.getProject(projectKeyOf(session as DigestSessionView).key)
+    })
+    console.log(`[VoiceAssistant] ${voiceAssistant.configured() ? `models: ${voiceAssistant.providerLabels().join(', ')}` : 'no model configured (HAPI_VOICE_QA_* / HAPI_DIGEST_*): endpoints return 503'}`)
 
     // fork(work-overview): 工作总览的主线/支线归属，独立 sqlite，路由在 executionMount。
     startWorkStore(config.dataDir)

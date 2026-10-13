@@ -12,6 +12,8 @@ import { buildUsageSummaryResponse, parseIsoParam, summarizeUsageHosts } from '.
 import { buildUsageTimeseries, parseBucketUnit, planBuckets, type UsageTimeseriesResponse } from '../usage/usageTimeseries'
 import { UsageResponseCache, USAGE_SUMMARY_TTL_MS, USAGE_TIMESERIES_TTL_MS } from '../usage/usageResponseCache'
 import { mountDigestRoutes } from '../session-digest/routes'
+import { mountVoiceAssistantRoutes } from '../voice-assistant/routes'
+import type { VoiceSessionView } from '../voice-assistant/material'
 import { mountWorkRoutes } from '../work-overview/routes'
 import type { DigestSessionView } from '../session-digest/digestService'
 import { createSessionMachineResolver, createSessionPathResolver, pathWithinScope } from './machineInheritance'
@@ -453,6 +455,18 @@ export function mountExecutionRoutes(app: Hono<WebAppEnv>, deps: {
         }
         const sessions = collectVisibleSessions(deps.store, engine, account, { claimUnbound: false })
         return { ok: true, sessions: sessions as unknown as DigestSessionView[], isAdmin: account.role === 'admin' }
+    })
+
+    // fork-features/voice-assistant：语音问进度、整理指令。可见集同 /api/sessions（只读，不认领）。
+    mountVoiceAssistantRoutes(app, async (c) => {
+        const accountId = await gatewayAccountId(c.req.raw, deps.jwtSecret)
+        const account = accountId === null ? null : deps.store.getAccount(accountId)
+        const engine = deps.getSyncEngine()
+        if (!account || !engine) {
+            return { ok: false, response: c.json({ error: 'Not connected' }, account ? 503 : 401) }
+        }
+        const sessions = collectVisibleSessions(deps.store, engine, account, { claimUnbound: false })
+        return { ok: true, sessions: sessions as unknown as VoiceSessionView[] }
     })
 
     // fork-features/work-overview：工作总览的主线/支线归属。目前只给 admin（非 admin 403）。

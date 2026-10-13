@@ -6,7 +6,7 @@
 // a deterministic fake for the upstream connection.
 
 import type { ServerWebSocket } from 'bun'
-import { buildQwenSessionUpdateMessage, isQwenSafeClientFrame } from '@hapi/protocol/voice'
+import { buildQwenSessionUpdateMessage, isQwenSafeClientFrame, type VoiceToolMode } from '@hapi/protocol/voice'
 
 type WebSocketCtor = new (url: string, opts?: unknown) => WebSocketLike
 
@@ -52,7 +52,7 @@ export function createQwenProxyWebSocketHandler(
 
     return {
         open(clientWs) {
-            const data = clientWs.data as { apiKey: string; model: string; language?: string; voiceName?: string; systemInstruction?: string }
+            const data = clientWs.data as { apiKey: string; model: string; language?: string; voiceName?: string; systemInstruction?: string; toolMode?: VoiceToolMode; output?: 'audio' | 'text' }
             const upstreamBase = process.env.QWEN_REALTIME_WS_URL || QWEN_WS_BASE
             const upstreamUrl = new URL(upstreamBase)
             upstreamUrl.searchParams.set('model', data.model)
@@ -62,7 +62,7 @@ export function createQwenProxyWebSocketHandler(
             })
 
             upstreamMap.set(clientWs, upstream)
-            pendingSetupMap.set(clientWs, JSON.stringify(buildQwenSessionUpdateMessage(data.language, data.voiceName, data.systemInstruction)))
+            pendingSetupMap.set(clientWs, JSON.stringify(buildQwenSessionUpdateMessage(data.language, data.voiceName, data.systemInstruction, data.toolMode, data.output)))
             setupAckedMap.set(clientWs, false)
             pendingClientBytes.set(clientWs, 0)
 

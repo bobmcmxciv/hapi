@@ -13,7 +13,7 @@ export {
 } from './RealtimeSession'
 
 // Client tools
-export { realtimeClientTools, registerSessionStore } from './realtimeClientTools'
+export { realtimeClientTools, registerSessionStore, registerVoiceAssistantApi } from './realtimeClientTools'
 
 // Voice session components
 export { RealtimeVoiceSession, type RealtimeVoiceSessionProps } from './RealtimeVoiceSession'

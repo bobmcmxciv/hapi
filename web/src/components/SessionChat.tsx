@@ -118,7 +118,8 @@ import { useOmpModels } from '@/hooks/queries/useOmpModels'
 import { useOmpThinkingOptions } from '@/hooks/queries/useOmpThinkingOptions'
 import { useVoiceOptional } from '@/lib/voice-context'
 import { AgentTerminalView } from '@/components/AgentTerminal/AgentTerminalView'
-import { VoiceBackendSession, registerSessionStore, registerVoiceHooksStore, voiceHooks } from '@/realtime'
+import { VoiceBackendSession, registerSessionStore, registerVoiceAssistantApi, registerVoiceHooksStore, voiceHooks } from '@/realtime'
+import { VoiceInstructionCard } from '@/fork-features/voice-assistant/VoiceInstructionCard'
 import { isRemoteTerminalSupported } from '@/utils/terminalSupport'
 
 type SessionModelSelection = { provider: string; modelId: string } | string | null
@@ -1183,6 +1184,11 @@ function SessionChatInner(props: SessionChatProps) {
         })
     }, [props.session, props.api, props.onSend, props.onRefresh])
 
+    // fork(voice-assistant): lookups and instruction drafts call the hub with this client.
+    useEffect(() => {
+        registerVoiceAssistantApi(props.api)
+    }, [props.api])
+
     useEffect(() => {
         registerVoiceHooksStore(
             (sessionId) => (sessionId === props.session.id ? props.session : null),
@@ -1942,6 +1948,7 @@ function SessionChatInner(props: SessionChatProps) {
 
                     <div className="px-3">
                         <TodoPanel sessionId={props.session.id} todos={props.session.todos} status={sessionStatus} />
+                        <VoiceInstructionCard api={props.api} />
                         {/*
                          * Scratchlist drawer - composer-controlled. Only
                          * mounted when the operator clicks the notepad icon

@@ -1,4 +1,4 @@
-import { realtimeClientTools } from '../realtimeClientTools'
+import { getRealtimeClientTool } from '../realtimeClientTools'
 
 /**
  * Gemini Live API function call from server.
@@ -19,13 +19,6 @@ export interface GeminiFunctionResponse {
     response: { result: string }
 }
 
-type ClientToolHandler = (parameters: unknown) => Promise<string>
-
-const toolHandlers: Record<string, ClientToolHandler> = {
-    messageCodingAgent: realtimeClientTools.messageCodingAgent,
-    processPermissionRequest: realtimeClientTools.processPermissionRequest
-}
-
 /**
  * Execute a Gemini Live function call using the existing client tool handlers.
  * Returns a GeminiFunctionResponse ready to send back over the WebSocket.
@@ -33,7 +26,7 @@ const toolHandlers: Record<string, ClientToolHandler> = {
 export async function handleGeminiFunctionCall(
     call: GeminiFunctionCall
 ): Promise<GeminiFunctionResponse> {
-    const handler = toolHandlers[call.name]
+    const handler = getRealtimeClientTool(call.name)
 
     if (!handler) {
         return {

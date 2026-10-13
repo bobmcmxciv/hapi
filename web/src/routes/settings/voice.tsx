@@ -7,12 +7,16 @@ import { VoiceRespondsControls } from '@/components/settings/VoiceAdvancedContro
 import { SettingsChoiceGroup, SettingsLinkRow, SettingsPageContent, SettingsSection } from '@/components/settings/SettingsPrimitives'
 import { SelectControl } from '@/components/ui/select-control'
 import { useVoiceSettings } from './useVoiceSettings'
+import { useVoiceToolMode } from '@/fork-features/voice-assistant/toolMode'
+import { useVoiceReader } from '@/fork-features/voice-assistant/readerPreference'
 
 export default function SettingsVoicePage() {
     const { t } = useTranslation()
     const navigate = useNavigate()
     const voice = useVoiceSettings()
     const [opening, setOpening] = useState<'greet' | 'brief'>(() => localStorage.getItem('hapi-voice-proactive') === 'true' ? 'brief' : 'greet')
+    const [toolMode, setToolMode] = useVoiceToolMode()
+    const [reader, setReader] = useVoiceReader()
     const selectedLanguage = voice.voiceLanguages.find((language) => language.code === voice.voiceLanguage)
     const selectedVoice = voice.voices.find((option) => option.id === voice.voiceId)
 
@@ -98,6 +102,20 @@ export default function SettingsVoicePage() {
             {voice.voiceMode === 'assistant' ? (
                 <>
                     <SettingsSection title={t('settings.voice.behaves.title')}>
+                        <SettingsChoiceGroup
+                            label={t('settings.voice.toolMode.label')}
+                            value={toolMode}
+                            options={(['readonly', 'assistant'] as const).map((value) => ({ value, label: t(`settings.voice.toolMode.${value}`), description: t(`settings.voice.toolMode.${value}.hint`) }))}
+                            onChange={setToolMode}
+                        />
+                        {voice.backend === 'qwen-realtime' ? (
+                            <SettingsChoiceGroup
+                                label={t('settings.voice.reader.label')}
+                                value={reader}
+                                options={(['manbo', 'builtin'] as const).map((value) => ({ value, label: t(`settings.voice.reader.${value}`), description: t(`settings.voice.reader.${value}.hint`) }))}
+                                onChange={setReader}
+                            />
+                        ) : null}
                         <SettingsChoiceGroup
                             label={t('settings.voice.opening.label')}
                             value={opening}

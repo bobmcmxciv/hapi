@@ -184,3 +184,30 @@ describe('createQwenProxyWebSocketHandler ack-gate', () => {
         expect(upstream.closed).toBe(true)
     })
 })
+
+describe('createQwenProxyWebSocketHandler tool mode (fork voice-assistant)', () => {
+    function setupToolsFor(toolMode?: string): string[] {
+        const handler = createQwenProxyWebSocketHandler(FakeWebSocket)
+        const client = new FakeClient({ apiKey: 'k', model: 'qwen3.5-omni-flash-realtime', language: 'zh', voiceName: 'Cherry', toolMode }) as unknown as ServerWebSocket<unknown> & FakeClient
+        handler.open(client)
+        lastUpstream!.deliver({ type: 'session.created' })
+        const setup = JSON.parse(lastUpstream!.sent[0] as string) as { type: string; session: { tools: Array<{ name: string }> } }
+        expect(setup.type).toBe('session.update')
+        return setup.session.tools.map((tool) => tool.name)
+    }
+
+    test('a read-only connection gets only the lookup tool upstream', () => {
+        expect(setupToolsFor('readonly')).toEqual(['askSessionStatus'])
+    })
+
+    test('an assistant connection gets draft/confirm instead of direct send', () => {
+        const tools = setupToolsFor('assistant')
+        expect(tools).toContain('prepareInstruction')
+        expect(tools).toContain('confirmInstruction')
+        expect(tools).not.toContain('messageCodingAgent')
+    })
+
+    test('a connection without a mode keeps the old tools', () => {
+        expect(setupToolsFor(undefined)).toEqual(['messageCodingAgent', 'processPermissionRequest'])
+    })
+})

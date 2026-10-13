@@ -4,7 +4,10 @@ import { registerSessionStore } from './realtimeClientTools'
 import { fetchQwenToken } from '@/api/voice'
 import { GeminiAudioRecorder } from './gemini/audioRecorder'
 import { GeminiAudioPlayer } from './gemini/audioPlayer'
-import { realtimeClientTools } from './realtimeClientTools'
+import { getRealtimeClientTool } from './realtimeClientTools'
+import { readVoiceToolMode } from '@/fork-features/voice-assistant/toolMode'
+import { readVoiceReader } from '@/fork-features/voice-assistant/readerPreference'
+import { ManboSpeaker } from '@/fork-features/voice-assistant/manboSpeaker'
 import { resolveQwenRealtimeVoice } from '@hapi/protocol/voicePickerCatalog'
 import {
     buildResolvedVoiceSystemPrompt,
@@ -25,6 +28,8 @@ interface QwenState {
     ws: WebSocket | null
     recorder: GeminiAudioRecorder | null
     player: GeminiAudioPlayer | null
+    /** fork(voice-assistant): set when replies come back as text and the hub's own voice speaks them. */
+    speaker: ManboSpeaker | null
     playbackContext: AudioContext | null
     statusCallback: StatusCallback | null
     apiKey: string | null
@@ -36,6 +41,7 @@ const state: QwenState = {
     ws: null,
     recorder: null,
     player: null,
+    speaker: null,
     playbackContext: null,
     statusCallback: null,
     apiKey: null,
@@ -56,6 +62,10 @@ function cleanup() {
     if (state.player) {
         state.player.dispose()
         state.player = null
+    }
+    if (state.speaker) {
+        state.speaker.stop()
+        state.speaker = null
     }
     if (state.playbackContext && state.playbackContext.state !== 'closed') {
         void state.playbackContext.close()
@@ -98,9 +108,11 @@ class QwenVoiceSessionImpl implements VoiceSession {
         // Mirror the base instructions the hub will send so subsequent updates accumulate correctly.
         // buildResolvedVoiceSystemPrompt returns the user-customised prompt when set; with empty prefs
         // it falls back to VOICE_SYSTEM_PROMPT + buildVoiceLanguageBlock(language) (general language handling).
+        const toolMode = readVoiceToolMode()
         this.currentInstructions = buildResolvedVoiceSystemPrompt({
             language: config.language,
-            backend: 'qwen-realtime'
+            backend: 'qwen-realtime',
+            toolMode
         })
         cleanup()
         state.statusCallback?.('connecting')
@@ -121,6 +133,15 @@ class QwenVoiceSessionImpl implements VoiceSession {
         }
         state.apiKey = null // key stays server-side
         state.wsBaseUrl = tokenResp.wsUrl || null
+
+        // fork(voice-assistant): speak replies with the hub's own voice (曼波) when it is reachable;
+        // otherwise the realtime model's built-in voice, as before.
+        let useHubVoice = false
+        if (readVoiceReader() === 'manbo') {
+            const ttsStatus = await this.api.getVoiceTtsStatus().catch(() => null)
+            useHubVoice = ttsStatus?.available === true
+            if (DEBUG) console.log('[Qwen] hub voice', ttsStatus)
+        }
 
         // Request microphone
         let permissionStream: MediaStream | null = null
@@ -151,7 +172,13 @@ class QwenVoiceSessionImpl implements VoiceSession {
         // Truncate before encoding so long prompts are trimmed rather than silently dropped.
         const encodedPrompt = encodeVoiceSystemPromptForProxy(truncatePromptForProxy(this.currentInstructions ?? ''))
         const promptParam = `&systemPrompt=${encodeURIComponent(encodedPrompt)}`
-        const wsUrl = `${proxyUrl}${separator}token=${encodeURIComponent(authToken)}${langParam}${voiceParam}${promptParam}`
+        // fork(voice-assistant): the hub installs only the tools this mode allows.
+        const toolsParam = `&tools=${toolMode}`
+        const outputParam = useHubVoice ? '&output=text' : ''
+        const wsUrl = `${proxyUrl}${separator}token=${encodeURIComponent(authToken)}${langParam}${voiceParam}${promptParam}${toolsParam}${outputParam}`
+        state.speaker = useHubVoice
+            ? new ManboSpeaker(this.api, state.playbackContext, (reason) => console.warn('[Qwen] hub voice failed, using browser speech:', reason))
+            : null
         const ws = new WebSocket(wsUrl)
         state.ws = ws
 
@@ -227,6 +254,17 @@ class QwenVoiceSessionImpl implements VoiceSession {
                     return
                 }
 
+                // fork(voice-assistant): text-only replies, spoken by the hub's own voice.
+                if (eventType === 'response.text.delta') {
+                    const delta = data.delta as string
+                    if (delta) state.speaker?.push(delta)
+                    return
+                }
+                if (eventType === 'response.text.done') {
+                    state.speaker?.flush()
+                    return
+                }
+
                 // Text transcript (for debug)
                 if (eventType === 'response.audio_transcript.delta' && DEBUG) {
                     console.log('[Qwen] Transcript:', data.delta)
@@ -245,11 +283,7 @@ class QwenVoiceSessionImpl implements VoiceSession {
                     try { args = JSON.parse(argsStr) } catch { /* empty */ }
 
                     // Execute the tool
-                    const handler = fnName === 'messageCodingAgent'
-                        ? realtimeClientTools.messageCodingAgent
-                        : fnName === 'processPermissionRequest'
-                        ? realtimeClientTools.processPermissionRequest
-                        : null
+                    const handler = getRealtimeClientTool(fnName)
 
                     const result = handler
                         ? await handler(args)
@@ -272,6 +306,9 @@ class QwenVoiceSessionImpl implements VoiceSession {
                 if (eventType === 'input_audio_buffer.speech_started') {
                     if (state.player?.isPlaying()) {
                         state.player.clearQueue()
+                    }
+                    if (state.speaker?.isSpeaking()) {
+                        state.speaker.stop()
                     }
                     return
                 }

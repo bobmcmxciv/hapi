@@ -140,8 +140,85 @@ export const VOICE_TOOLS = [
                 }
             }
         }
+    },
+    // fork(voice-assistant): look things up and draft instructions without touching the agent's context.
+    {
+        type: 'client' as const,
+        name: 'askSessionStatus',
+        description: "Answer the user's question about the coding session (progress, status, what it is doing, what changed, errors, what is left, whether it waits for approval) by looking it up. Nothing is sent to the agent.",
+        expects_response: true,
+        response_timeout_secs: 30,
+        parameters: {
+            type: 'object',
+            required: ['question'],
+            properties: {
+                question: {
+                    type: 'string',
+                    description: "The user's question in their own words and language."
+                }
+            }
+        }
+    },
+    {
+        type: 'client' as const,
+        name: 'prepareInstruction',
+        description: 'Draft an instruction for a coding agent session from what the user said. Sends nothing: it returns a short read-back for the user to confirm, a question to ask, or session choices.',
+        expects_response: true,
+        response_timeout_secs: 30,
+        parameters: {
+            type: 'object',
+            required: ['instruction'],
+            properties: {
+                instruction: {
+                    type: 'string',
+                    description: "The user's complete request in their own words and language."
+                },
+                target: {
+                    type: 'string',
+                    description: 'How the user referred to another session (e.g. "the video one"). Leave empty for the current session.'
+                }
+            }
+        }
+    },
+    {
+        type: 'client' as const,
+        name: 'confirmInstruction',
+        description: "Send or cancel the drafted instruction after the user answers the read-back.",
+        expects_response: true,
+        response_timeout_secs: 30,
+        parameters: {
+            type: 'object',
+            required: ['decision'],
+            properties: {
+                decision: {
+                    type: 'string',
+                    description: "'send' when the user agrees, 'cancel' when they decline."
+                },
+                delivery: {
+                    type: 'string',
+                    description: "'steer' only if the user asks to interrupt the agent right now; otherwise omit (queued after the current turn)."
+                }
+            }
+        }
     }
 ]
+
+/**
+ * Which tools a realtime session gets. `readonly` can only look things up; `assistant` drafts and
+ * sends instructions (always after a spoken confirmation). `legacy` is what clients that predate
+ * the mode parameter get, so a cached old web bundle keeps the handlers it knows.
+ */
+export type VoiceToolMode = 'readonly' | 'assistant' | 'legacy'
+
+const VOICE_TOOL_NAMES_BY_MODE: Record<VoiceToolMode, readonly string[]> = {
+    readonly: ['askSessionStatus'],
+    assistant: ['askSessionStatus', 'prepareInstruction', 'confirmInstruction', 'processPermissionRequest'],
+    legacy: ['messageCodingAgent', 'processPermissionRequest']
+}
+
+export function parseVoiceToolMode(raw: string | null | undefined): VoiceToolMode {
+    return raw === 'readonly' || raw === 'assistant' ? raw : 'legacy'
+}
 
 export interface VoiceAgentConfig {
     name: string
@@ -389,6 +466,11 @@ function cloneVoiceToolDefinition(tool: VoiceToolSource): VoiceToolDefinition {
 
 export const VOICE_TOOL_DEFINITIONS: VoiceToolDefinition[] = VOICE_TOOLS.map(cloneVoiceToolDefinition)
 
+export function voiceToolDefinitionsFor(mode: VoiceToolMode): VoiceToolDefinition[] {
+    const names = VOICE_TOOL_NAMES_BY_MODE[mode]
+    return VOICE_TOOL_DEFINITIONS.filter((tool) => names.includes(tool.name))
+}
+
 export type GeminiLiveFunctionDeclaration = VoiceToolDefinition
 
 export interface GeminiLiveConfig {
@@ -400,14 +482,15 @@ export interface GeminiLiveConfig {
     responseModalities: ['AUDIO']
 }
 
-export function buildGeminiLiveFunctionDeclarations(): GeminiLiveFunctionDeclaration[] {
-    return VOICE_TOOLS.map(cloneVoiceToolDefinition)
+export function buildGeminiLiveFunctionDeclarations(toolMode: VoiceToolMode = 'legacy'): GeminiLiveFunctionDeclaration[] {
+    return voiceToolDefinitionsFor(toolMode)
 }
 
 export function buildGeminiLiveConfig(
     language?: string,
     voiceName?: string,
-    systemInstruction?: string
+    systemInstruction?: string,
+    toolMode: VoiceToolMode = 'legacy'
 ): GeminiLiveConfig {
     const systemInstructionText = systemInstruction?.trim()
         ? systemInstruction
@@ -417,7 +500,7 @@ export function buildGeminiLiveConfig(
         systemInstruction: systemInstructionText,
         tools: [
             {
-                functionDeclarations: buildGeminiLiveFunctionDeclarations()
+                functionDeclarations: buildGeminiLiveFunctionDeclarations(toolMode)
             }
         ],
         responseModalities: ['AUDIO']
@@ -428,13 +511,16 @@ export function buildGeminiLiveConfig(
 export function buildQwenSessionUpdateMessage(
     language?: string,
     voiceName?: string,
-    systemInstruction?: string
+    systemInstruction?: string,
+    toolMode: VoiceToolMode = 'legacy',
+    /** fork(voice-assistant): 'text' when the browser speaks the replies with its own voice (曼波). */
+    output: 'audio' | 'text' = 'audio'
 ): Record<string, unknown> {
     const instructions = systemInstruction?.trim()
         ? systemInstruction
         : `${VOICE_SYSTEM_PROMPT}${buildVoiceLanguageBlock(language)}`
     // Qwen Realtime uses the flat Realtime shape, not the chat-completions nested {function:{...}} shape.
-    const tools = VOICE_TOOL_DEFINITIONS.map((td) => ({
+    const tools = voiceToolDefinitionsFor(toolMode).map((td) => ({
         type: 'function' as const,
         name: td.name,
         description: td.description,
@@ -443,7 +529,7 @@ export function buildQwenSessionUpdateMessage(
     return {
         type: 'session.update',
         session: {
-            modalities: ['text', 'audio'],
+            modalities: output === 'text' ? ['text'] : ['text', 'audio'],
             voice: resolveQwenRealtimeVoice(voiceName),
             input_audio_format: 'pcm',
             output_audio_format: 'pcm',
@@ -491,9 +577,9 @@ export function buildGeminiLiveSetupMessage(
     language?: string,
     voiceName?: string,
     systemInstruction?: string,
-    options?: { affectiveDialog?: boolean }
+    options?: { affectiveDialog?: boolean; toolMode?: VoiceToolMode }
 ): { setup: Record<string, unknown> } {
-    const liveConfig = buildGeminiLiveConfig(language, voiceName, systemInstruction)
+    const liveConfig = buildGeminiLiveConfig(language, voiceName, systemInstruction, options?.toolMode)
     const resolvedVoice = resolveGeminiLiveVoice(voiceName)
     return {
         setup: {

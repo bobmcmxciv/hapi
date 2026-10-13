@@ -208,6 +208,7 @@ export function isDefaultVoiceSystemPrompt(prefs: VoicePersonalityPreferences, _
 export {
     DEFAULT_VOICE_CHARACTER,
     DEFAULT_VOICE_IDENTITY,
+    buildVoiceToolModeBlock,
     getVoicePlatformFixturesPreview
 } from './voicePromptLayers'
 

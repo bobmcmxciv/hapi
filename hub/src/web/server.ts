@@ -7,7 +7,7 @@ import { existsSync } from 'node:fs'
 import { serveStatic } from 'hono/bun'
 import { getConfiguration } from '../configuration'
 import { PROTOCOL_VERSION } from '@hapi/protocol'
-import { buildGeminiLiveSetupMessage, QWEN_REALTIME_MODEL } from '@hapi/protocol/voice'
+import { buildGeminiLiveSetupMessage, parseVoiceToolMode, QWEN_REALTIME_MODEL, type VoiceToolMode } from '@hapi/protocol/voice'
 import { createQwenProxyWebSocketHandler } from './qwenProxyHandler'
 import { decodeVoiceSystemPromptParam } from '../voiceSystemPromptParam'
 import type { SyncEngine } from '../sync/syncEngine'
@@ -113,6 +113,7 @@ function createGeminiProxyWebSocketHandler() {
                 voiceName?: string
                 systemInstruction?: string
                 affectiveDialog?: boolean
+                toolMode?: VoiceToolMode
             }
             const upstreamUrl = `${process.env.GEMINI_LIVE_WS_URL || GEMINI_WS_BASE}?key=${encodeURIComponent(data.apiKey)}`
             const pending: Array<string | ArrayBuffer | Uint8Array> = []
@@ -129,7 +130,7 @@ function createGeminiProxyWebSocketHandler() {
                     data.language,
                     data.voiceName,
                     data.systemInstruction,
-                    { affectiveDialog: data.affectiveDialog }
+                    { affectiveDialog: data.affectiveDialog, toolMode: data.toolMode }
                 )))
             }
             upstream.onmessage = (event) => {
@@ -654,8 +655,9 @@ export async function startWebServer(options: {
                 const voiceParam = url.searchParams.get('voice')?.trim() || undefined
                 const systemInstruction = decodeVoiceSystemPromptParam(url.searchParams.get('systemPrompt'))
                 const affectiveDialog = url.searchParams.get('affectiveDialog') === '1'
+                const toolMode = parseVoiceToolMode(url.searchParams.get('tools'))
                 const upgraded = (server as unknown as { upgrade: (req: Request, opts: unknown) => boolean }).upgrade(req, {
-                    data: { _geminiProxy: true, apiKey, language, voiceName: voiceParam, systemInstruction, affectiveDialog }
+                    data: { _geminiProxy: true, apiKey, language, voiceName: voiceParam, systemInstruction, affectiveDialog, toolMode }
                 })
                 if (!upgraded) {
                     return new Response('WebSocket upgrade failed', { status: 500 })
@@ -669,11 +671,13 @@ export async function startWebServer(options: {
                 const language = url.searchParams.get('language') ?? undefined
                 const voiceParam = url.searchParams.get('voice')?.trim() || undefined
                 const systemInstruction = decodeVoiceSystemPromptParam(url.searchParams.get('systemPrompt'))
+                const toolMode = parseVoiceToolMode(url.searchParams.get('tools'))
+                const output = url.searchParams.get('output') === 'text' ? 'text' : 'audio'
                 if (!apiKey) {
                     return new Response('DashScope API key not configured', { status: 400 })
                 }
                 const upgraded = (server as unknown as { upgrade: (req: Request, opts: unknown) => boolean }).upgrade(req, {
-                    data: { _qwenProxy: true, apiKey, model, language, voiceName: voiceParam, systemInstruction }
+                    data: { _qwenProxy: true, apiKey, model, language, voiceName: voiceParam, systemInstruction, toolMode, output }
                 })
                 if (!upgraded) {
                     return new Response('WebSocket upgrade failed', { status: 500 })

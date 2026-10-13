@@ -1,5 +1,6 @@
 import type { ClaudeProxyModelsResponse } from '@/fork-features/claude-proxy-models/types'
 import type { MachinePresentationPatch } from '@/fork-features/machine-icons/types'
+import type { VoiceInstructionPrepareResponse, VoiceSessionQaResponse, VoiceTtsStatus, VoiceTurn } from '@/fork-features/voice-assistant/types'
 import type {
     AttachmentMetadata,
     AuthResponse,
@@ -1455,6 +1456,55 @@ export class ApiClient {
         return await this.request('/api/voice/qwen-token', {
             method: 'POST',
             body: JSON.stringify({})
+        })
+    }
+
+    // fork(voice-assistant): look up a session / draft an instruction; neither writes to the session.
+    async askVoiceSessionStatus(body: { sessionId: string; question: string; history?: VoiceTurn[] }): Promise<VoiceSessionQaResponse> {
+        return await this.request('/api/voice/session-qa', {
+            method: 'POST',
+            body: JSON.stringify(body)
+        })
+    }
+
+    async getVoiceTtsStatus(): Promise<VoiceTtsStatus> {
+        return await this.request('/api/voice/tts/status')
+    }
+
+    /** Streamed PCM (s16le mono, rate in `x-sample-rate`) for one piece of text, spoken by the hub's own voice. */
+    async openVoiceTtsStream(text: string, signal?: AbortSignal): Promise<Response> {
+        const send = (token: string | null) => fetch(this.buildUrl('/api/voice/tts'), {
+            method: 'POST',
+            headers: {
+                'content-type': 'application/json',
+                ...(token ? { authorization: `Bearer ${token}` } : {})
+            },
+            body: JSON.stringify({ text }),
+            signal
+        })
+        let res = await send((this.getToken ? this.getToken() : null) ?? this.token)
+        if (res.status === 401 && this.onUnauthorized) {
+            const refreshed = await this.onUnauthorized()
+            if (refreshed) {
+                this.token = refreshed
+                res = await send(refreshed)
+            }
+        }
+        if (!res.ok || !res.body) {
+            throw new ApiError(`HTTP ${res.status} ${res.statusText}`, res.status)
+        }
+        return res
+    }
+
+    async prepareVoiceInstruction(body: {
+        currentSessionId: string
+        utterance: string
+        targetHint?: string
+        history?: VoiceTurn[]
+    }): Promise<VoiceInstructionPrepareResponse> {
+        return await this.request('/api/voice/instruction/prepare', {
+            method: 'POST',
+            body: JSON.stringify(body)
         })
     }
 

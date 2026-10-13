@@ -10,6 +10,8 @@ export type LlmConfig = {
     apiKey: string
     fetchImpl?: typeof fetch
     timeoutMs?: number
+    /** 合并进请求体的额外字段，例如 DeepSeek 的 { thinking: { type: 'disabled' } }。 */
+    extraBody?: Record<string, unknown>
 }
 
 export type LlmCall = (params: { model: string; system: string; prompt: string; maxTokens: number }) => Promise<string>
@@ -31,6 +33,7 @@ export function createLlmCall(config: LlmConfig): LlmCall {
             method: 'POST',
             headers: headers(config.apiKey),
             body: JSON.stringify({
+                ...config.extraBody,
                 model,
                 max_tokens: maxTokens,
                 system,

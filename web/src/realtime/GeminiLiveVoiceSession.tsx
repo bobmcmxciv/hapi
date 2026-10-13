@@ -13,6 +13,7 @@ import {
     truncatePromptForProxy
 } from '@/lib/voicePersonalitySession'
 import { loadVoicePersonalityFromStorage } from '@/hooks/useVoicePersonality'
+import { readVoiceToolMode } from '@/fork-features/voice-assistant/toolMode'
 import { deliverVoiceSessionContextAfterConnect, isVoiceProactiveSummaryEnabled } from '@/lib/voiceContextStream'
 import { readStoredVoiceSelection } from '@/lib/voicePickerPreferences'
 import type { VoiceSession, VoiceSessionConfig, StatusCallback } from './types'
@@ -131,16 +132,20 @@ class GeminiLiveVoiceSessionImpl implements VoiceSession {
         const languageParam = config.language ? `&language=${encodeURIComponent(config.language)}` : ''
         const resolvedVoice = resolveGeminiLiveVoice(config.voiceName ?? readStoredVoiceSelection('gemini-live'))
         const voiceParam = `&voice=${encodeURIComponent(resolvedVoice)}`
+        const toolMode = readVoiceToolMode()
         const systemInstruction = buildResolvedVoiceSystemPrompt({
             language: config.language,
-            backend: 'gemini-live'
+            backend: 'gemini-live',
+            toolMode
         })
         const encodedPrompt = encodeVoiceSystemPromptForProxy(truncatePromptForProxy(systemInstruction))
         const promptParam = `&systemPrompt=${encodeURIComponent(encodedPrompt)}`
         const prefs = loadVoicePersonalityFromStorage()
         const affectiveParam = prefs.gemini?.affective_dialog ? '&affectiveDialog=1' : ''
+        // fork(voice-assistant): the hub installs only the tools this mode allows.
+        const toolsParam = `&tools=${toolMode}`
         const wsUrl = isProxy
-            ? `${wsBase}${wsBase.includes('?') ? '&' : '?'}token=${encodeURIComponent(authToken)}${languageParam}${voiceParam}${promptParam}${affectiveParam}`
+            ? `${wsBase}${wsBase.includes('?') ? '&' : '?'}token=${encodeURIComponent(authToken)}${languageParam}${voiceParam}${promptParam}${affectiveParam}${toolsParam}`
             : `${wsBase}?key=${encodeURIComponent(state.apiKey)}`
         console.log('[GeminiLive] Connecting WebSocket to:', wsBase, isProxy ? '(proxied)' : '(direct)')
         const ws = new WebSocket(wsUrl)
@@ -157,7 +162,8 @@ class GeminiLiveVoiceSessionImpl implements VoiceSession {
                     ws.send(JSON.stringify(buildGeminiLiveSetupMessage(
                         config.language,
                         resolvedVoice,
-                        systemInstruction
+                        systemInstruction,
+                        { toolMode }
                     )))
                 }
             }
