@@ -189,7 +189,7 @@ fork-features/multi-user/domain.ts	fork-owned	#171	origin-only delta; fork commi
 fork-features/multi-user/executionDispatcher.test.ts	fork-owned	#171	origin-only delta; fork commits a6f9e3f9
 fork-features/multi-user/executionDispatcher.ts	fork-owned	#171	origin-only delta; fork commits a6f9e3f9
 fork-features/multi-user/executionMount.test.ts	fork-owned	#171	origin-only delta; fork commits a3a7a239,9334b6bf
-fork-features/multi-user/executionMount.ts	fork-owned	#171,voice-assistant	origin-only delta; fork commits a3a7a239,9334b6bf,a6f9e3f9; session-digest: 挂 /api/digests/*；usage: /api/usage/timeseries; work-overview: 挂 /api/work/*（admin-only）；usage: summary/timeseries 响应缓存; voice-assistant: 挂语音助手路由（可见集同 /api/sessions）
+fork-features/multi-user/executionMount.ts	fork-owned	#171,voice-assistant	origin-only delta; fork commits a3a7a239,9334b6bf,a6f9e3f9; session-digest: 挂 /api/digests/*；usage: /api/usage/timeseries; work-overview: 挂 /api/work/*（admin-only）；usage: summary/timeseries 响应缓存; voice-assistant: 挂语音助手路由（可见集同 /api/sessions）；voice-assistant: 解析器带上账号与是否 admin（声纹）
 fork-features/multi-user/gatewayRoutes.test.ts	fork-owned	#171	origin-only delta; fork commits a6f9e3f9
 fork-features/multi-user/gatewayRoutes.ts	fork-owned	#171	origin-only delta; fork commits a6f9e3f9
 fork-features/multi-user/gatewayStore.ts	fork-owned	#171	origin-only delta; fork commits a6f9e3f9
@@ -253,9 +253,13 @@ fork-features/usage/usageTimeseries.test.ts	fork-owned	usage-page	fork-owned mod
 fork-features/usage/usageTimeseries.ts	fork-owned	usage-page	fork-owned module: 用量按时间分桶
 fork-features/voice-assistant/material.ts	fork-owned	voice-assistant	fork-owned module: 语音问答材料（实时状态、待办清单、摘要、摘要后的新对话、最近工具调用）
 fork-features/voice-assistant/prompts.ts	fork-owned	voice-assistant	fork-owned module: 问答/选会话/整理指令提示词与 JSON 解析
-fork-features/voice-assistant/routes.ts	fork-owned	voice-assistant	fork-owned module: /api/voice/session-qa、/api/voice/instruction/prepare、/api/voice/tts(/status)，可见集同 /api/sessions
+fork-features/voice-assistant/routes.ts	fork-owned	voice-assistant	fork-owned module: /api/voice/session-qa、/api/voice/instruction/prepare、/api/voice/tts(/status)，可见集同 /api/sessions、/api/voice/speaker（状态/录入/清除）
 fork-features/voice-assistant/service.test.ts	fork-owned	voice-assistant	fork-owned module tests
 fork-features/voice-assistant/service.ts	fork-owned	voice-assistant	fork-owned module: 问进度、整理指令（目标会话由代码决定），主模型 DeepSeek 失败回落 luna
+fork-features/voice-assistant/speaker.test.ts	fork-owned	voice-assistant	fork-owned module tests
+fork-features/voice-assistant/speaker.ts	fork-owned	voice-assistant	fork-owned module: 声纹（TXFA608 上 CAM++ 计算，hub 存每账号每次录入的质心；门的开关/阈值文件现读；录入去静音、查一致性）
+fork-features/voice-assistant/speakerGate.test.ts	fork-owned	voice-assistant	fork-owned module tests
+fork-features/voice-assistant/speakerGate.ts	fork-owned	voice-assistant	fork-owned module: 只认本人的声音：扣住每一轮，本人说到 2 秒先放行，拒绝只看整轮并删掉这一轮，说不准就放行
 fork-features/voice-assistant/tts.test.ts	fork-owned	voice-assistant	fork-owned module tests
 fork-features/voice-assistant/tts.ts	fork-owned	voice-assistant	fork-owned module: 曼波朗读转发（TXFA608 GPT-SoVITS 经 chisel 隧道），token 只在 hub
 fork-features/work-overview/briefing.test.ts	fork-owned	work-overview	fork-owned module tests
@@ -284,7 +288,7 @@ hub/src/socket/socketLimits.test.ts	trunk-patch	#176	origin-only delta; fork com
 hub/src/socket/socketLimits.ts	trunk-patch	#176	origin-only delta; fork commits 3edb7db8
 hub/src/socket/socketTypes.ts	trunk-patch	#171	origin-only delta; fork commits a6f9e3f9
 hub/src/sse/sseManager.ts	trunk-patch	sse-isolation	订阅新增可选 canDeliver 谓词；SSE 层无按账号过滤的注册 API
-hub/src/startHub.ts	trunk-patch	#171,runtime-hardening,voice-assistant	origin-only delta; fork commits a6f9e3f9; session-digest: 启动摘要调度器; work-overview: 打开 work-overview.sqlite; usage-perf: 启动 20s 后后台预热用量事件缓存; runtime-hardening: 启动阶段耗时日志、缺统计时监听前重建、每 6 小时 PRAGMA optimize、事件循环延迟采样; voice-assistant: 启动语音助手（复用摘要库与消息表）
+hub/src/startHub.ts	trunk-patch	#171,runtime-hardening,voice-assistant	origin-only delta; fork commits a6f9e3f9; session-digest: 启动摘要调度器; work-overview: 打开 work-overview.sqlite; usage-perf: 启动 20s 后后台预热用量事件缓存; runtime-hardening: 启动阶段耗时日志、缺统计时监听前重建、每 6 小时 PRAGMA optimize、事件循环延迟采样; voice-assistant: 启动语音助手（复用摘要库与消息表）；voice-assistant: 打开声纹库并打印门的开关
 hub/src/store/index.ts	trunk-patch	#174,runtime-hardening	#170 removed unused helper; remaining persisted-session hook closed by #174; runtime-hardening: journal_size_limit 64 MiB；ensurePlannerStatistics / optimize
 hub/src/store/machines.ts	trunk-patch	machine-icons	machine-icons: icon 并入 hub 自有字段，CLI 整体替换元数据时保留
 hub/src/store/messageStore.ts	trunk-patch	usage-page	origin-only delta; single seam exposing db to fork-features/usage aggregation (2026-07-28); usage-perf: aggregateUsageGroups/aggregateUsageBuckets/warmUsageCache 接缝
@@ -310,8 +314,8 @@ hub/src/web/accessLogRedaction.test.ts	fork-owned	runtime-hardening	fork-owned m
 hub/src/web/accessLogRedaction.ts	fork-owned	runtime-hardening	fork-owned module: 访问日志里的 token 脱敏
 hub/src/web/eventLoopLag.test.ts	fork-owned	runtime-hardening	fork-owned module: 事件循环延迟采样
 hub/src/web/eventLoopLag.ts	fork-owned	runtime-hardening	fork-owned module: 事件循环延迟采样（/health eventLoop）
-hub/src/web/qwenProxyHandler.test.ts	trunk-patch	voice-assistant	voice-assistant: 工具模式用例
-hub/src/web/qwenProxyHandler.ts	trunk-patch	voice-assistant	voice-assistant: hub 自有的 session.update 按 ?tools= 与 ?output= 装工具和输出模态
+hub/src/web/qwenProxyHandler.test.ts	trunk-patch	voice-assistant	voice-assistant: 工具模式用例；断句方式与声纹门用例
+hub/src/web/qwenProxyHandler.ts	trunk-patch	voice-assistant	voice-assistant: hub 自有的 session.update 按 ?tools= 与 ?output= 装工具和输出模态；?turn= 断句方式，turn=verified 时接声纹门（没有声纹就退回免提）
 hub/src/web/routes/cli.ts	trunk-patch	#171	origin-only delta; fork commits a6f9e3f9
 hub/src/web/routes/events.ts	trunk-patch	sse-isolation	按认证 userId 取谓词注入订阅；路由工厂参数为唯一注入点
 hub/src/web/routes/generatedBlobs.test.ts	fork-owned	fork.16	origin-only delta; fork commits 05710223（发送即上传 / hub blob 存储）
@@ -321,7 +325,7 @@ hub/src/web/routes/machines.test.ts	trunk-patch	#173	origin-only delta; fork com
 hub/src/web/routes/machines.ts	trunk-patch	#173	origin-only delta; fork commits 51929072,3994ee9a,fc7d7b4a,a8815d47,c853bcbf; claude-proxy-models: spawn 透传 ccSwitchProviderId（仅 Claude）; machine-icons: PATCH /machines/:id 同时接受 icon（词表校验，null/空串清除）
 hub/src/web/routes/sessions.test.ts	trunk-patch	#173	both refs changed; fork commits 51929072,9e76994b,c58622c2,bec12318,413e76cc
 hub/src/web/routes/sessions.ts	trunk-patch	#173	both refs changed; fork commits 51929072,9e76994b,c58622c2,bec12318,413e76cc,7e0010b8
-hub/src/web/server.ts	trunk-patch	#171,#256,runtime-hardening,voice-assistant	closed authenticated Hono app mounts multi-user, session-fork, history-import, and hapi agent routes; claude-proxy-models: 挂 /api/claude-proxy-models（env 单例）; runtime-hardening: 访问日志脱敏、/health 带 eventLoop; voice-assistant: 语音 WS 代理解析 ?tools= 与 ?output=
+hub/src/web/server.ts	trunk-patch	#171,#256,runtime-hardening,voice-assistant	closed authenticated Hono app mounts multi-user, session-fork, history-import, and hapi agent routes; claude-proxy-models: 挂 /api/claude-proxy-models（env 单例）; runtime-hardening: 访问日志脱敏、/health 带 eventLoop; voice-assistant: 语音 WS 代理解析 ?tools= 与 ?output=；voice-assistant: ?turn= 断句方式，WS 升级时取网关账号与角色给声纹门
 hub/tsconfig.json	trunk-patch	#171	origin-only delta; fork commits a6f9e3f9,f3c58338; claude-proxy-models: include ../fork-features/claude-proxy-models; session-digest: include fork-features/session-digest; work-overview: include fork-features/work-overview
 package.json	trunk-patch	#171	origin-only delta; fork commits a6f9e3f9
 scripts/dev/recompute-usage-prod.ts	fork-owned	usage-page	origin-only delta; 生产库副本离线复算 + 信封形状直方图 (2026-08-09)
@@ -343,8 +347,8 @@ shared/src/schemas.ts	trunk-patch	#170	origin-only delta; fork commits 17e79d08,
 shared/src/sessionSummary.ts	trunk-patch	#179	origin-only delta; fork commits 473d69b4,3582e989; disposition fork-specific #179: bob fork customization import; archive visibility and session attention feature
 shared/src/socketLimits.ts	fork-owned	#176	origin-only delta; fork commits 3edb7db8
 shared/src/types.ts	trunk-patch	#170	origin-only delta; fork commits e009becc,3686370a
-shared/src/voice.toolMode.test.ts	fork-owned	voice-assistant	fork-owned module tests: 语音工具模式、提示词路由、百炼只出文字
-shared/src/voice.ts	trunk-patch	voice-assistant	voice-assistant: 新增 askSessionStatus/prepareInstruction/confirmInstruction 工具与 readonly/assistant/legacy 工具组合；Qwen session.update 可只出文字
+shared/src/voice.toolMode.test.ts	fork-owned	voice-assistant	fork-owned module tests: 语音工具模式、提示词路由、百炼只出文字、断句方式
+shared/src/voice.ts	trunk-patch	voice-assistant	voice-assistant: 新增 askSessionStatus/prepareInstruction/confirmInstruction 工具与 readonly/assistant/legacy 工具组合；Qwen session.update 可只出文字；?turn= 断句方式（免提语义断句 / 只认本人：不自动回答不自动打断 / 按住说话：关服务端断句）
 shared/src/voicePersonality.ts	trunk-patch	voice-assistant	voice-assistant: 导出 buildVoiceToolModeBlock
 shared/src/voicePromptLayers.ts	trunk-patch	voice-assistant	voice-assistant: 问题一律走 askSessionStatus、动作先整理再复述确认，删掉「拿不准就转给代理」；模式说明块
 web/changelog-build.ts	fork-owned	#179	origin-only delta; fork commits 4a0c5f0b
@@ -370,7 +374,7 @@ web/package.json	trunk-patch	#177	origin-only delta; fork commits 4a0c5f0b,c36d2
 web/src/App.tsx	trunk-patch	#171	origin-only delta; fork commits a6f9e3f9
 web/src/api/client.generatedBlob.test.ts	fork-owned	fork.16	origin-only delta; fork commits 05710223（发送即上传 / hub blob 存储）
 web/src/api/client.test.ts	upstream-sync	#180	merge-base 87f5c78a; changed only on upstream/main
-web/src/api/client.ts	trunk-patch	#171,new-session-guard,voice-assistant	both refs changed; fork commits a6f9e3f9,51929072,9e76994b,3994ee9a,fc7d7b4a,b4c31e88,a8815d47,bfa252da,d28853c7,c853bcbf,c58622c2,5262a261,7dca6478,2ef4c618,413e76cc; claude-proxy-models: getClaudeProxyModels(refresh); machine-icons: updateMachine(patch); new-session-guard: spawn 请求 60 秒时限; voice-assistant: 问进度/整理指令/曼波朗读的请求方法
+web/src/api/client.ts	trunk-patch	#171,new-session-guard,voice-assistant	both refs changed; fork commits a6f9e3f9,51929072,9e76994b,3994ee9a,fc7d7b4a,b4c31e88,a8815d47,bfa252da,d28853c7,c853bcbf,c58622c2,5262a261,7dca6478,2ef4c618,413e76cc; claude-proxy-models: getClaudeProxyModels(refresh); machine-icons: updateMachine(patch); new-session-guard: spawn 请求 60 秒时限; voice-assistant: 问进度/整理指令/曼波朗读的请求方法、声纹状态/录入/清除
 web/src/chat/agentTimestamp.test.ts	upstream-sync	#180	merge-base 87f5c78a; changed only on upstream/main
 web/src/chat/agentTimestamp.ts	upstream-sync	#180	merge-base 87f5c78a; changed only on upstream/main
 web/src/chat/modelConfig.test.ts	trunk-patch	ctx-window-proxy	钉死裸代理别名与空 model 走同一条保守回退（190k）；proxy-models 追加钉死带 [1m] 的别名走 990k; trunk hook for claude-proxy-models（见 trunk-patches.md 2026-09-06 节）
@@ -390,6 +394,7 @@ web/src/chat/toolGroups.test.ts	upstream-sync	#180	merge-base 87f5c78a; changed 
 web/src/chat/types.ts	trunk-patch	#176	both refs changed; fork commits 92f048f7,b4c31e88,d1f9f394
 web/src/components/AppErrorBoundary.test.tsx	fork-owned	web-stability	崩溃兜底组件测试（渲染异常→兜底 UI→重试出口）
 web/src/components/AppErrorBoundary.tsx	fork-owned	web-stability	根级/路由级渲染崩溃兜底（CrashFallback + AppErrorBoundary），不依赖任何上层 provider
+web/src/components/AssistantChat/ComposerButtons.tsx	trunk-patch	voice-assistant	voice-assistant: 按住说话模式下在语音按钮旁放按住说话按钮
 web/src/components/AssistantChat/HappyComposer.test.tsx	fork-owned	#174	origin-only delta; fork commits 8240268f,bec12318,413e76cc
 web/src/components/AssistantChat/HappyComposer.tsx	trunk-patch	#174	origin-only delta; fork commits 8240268f,606c6579,a8815d47,473d69b4,413e76cc; claude-proxy-models: prop claudeProxyModelOptions
 web/src/components/AssistantChat/HappyThread.tsx	upstream-fix	#179	origin-only delta; fork commits 0bc807dc; disposition upstream-issue https://github.com/tiann/hapi/issues/1067: general fix reported against latest upstream main
@@ -545,14 +550,19 @@ web/src/fork-features/usage/UsagePage.tsx	fork-owned	usage-page	origin-only delt
 web/src/fork-features/usage/UsageTrendChart.test.ts	fork-owned	usage-page	fork-owned module tests
 web/src/fork-features/usage/UsageTrendChart.tsx	fork-owned	usage-page	fork-owned module: 用量折线图
 web/src/fork-features/voice-assistant/VoiceInstructionCard.tsx	fork-owned	voice-assistant	fork-owned module: 待确认指令卡片（编辑/发送/插进当前这一轮/取消）
+web/src/fork-features/voice-assistant/VoiceTalkButton.tsx	fork-owned	voice-assistant	fork-owned module: 按住说话按钮（指针离开/取消也结束这一轮）
+web/src/fork-features/voice-assistant/VoiceprintSettings.test.tsx	fork-owned	voice-assistant	fork-owned module tests
+web/src/fork-features/voice-assistant/VoiceprintSettings.tsx	fork-owned	voice-assistant	fork-owned module: 我的声纹（朗读录入、清除、门的状态、最近几轮的相似度）
 web/src/fork-features/voice-assistant/confirmIntent.test.ts	fork-owned	voice-assistant	fork-owned module tests
 web/src/fork-features/voice-assistant/confirmIntent.ts	fork-owned	voice-assistant	fork-owned module: 读短句“确认/取消/插队/排队”，草稿待确认时由网页直接发送或丢弃
 web/src/fork-features/voice-assistant/instructionDraft.ts	fork-owned	voice-assistant	fork-owned module: 待确认的语音指令与发送（附语音原话）
+web/src/fork-features/voice-assistant/listenMode.test.tsx	fork-owned	voice-assistant	fork-owned module tests
+web/src/fork-features/voice-assistant/listenMode.ts	fork-owned	voice-assistant	fork-owned module: 收音方式（免提 / 只认我的声音 / 按住说话）
 web/src/fork-features/voice-assistant/manboSpeaker.test.ts	fork-owned	voice-assistant	fork-owned module tests
 web/src/fork-features/voice-assistant/manboSpeaker.ts	fork-owned	voice-assistant	fork-owned module: 按句流式合成并排队播放，失败回落浏览器朗读
 web/src/fork-features/voice-assistant/readerPreference.ts	fork-owned	voice-assistant	fork-owned module: 朗读音色（曼波/百炼自带）
 web/src/fork-features/voice-assistant/toolMode.ts	fork-owned	voice-assistant	fork-owned module: 语音权限（只问不发/可以下指令），默认只读
-web/src/fork-features/voice-assistant/types.ts	fork-owned	voice-assistant	fork-owned module: hub 语音助手接口类型
+web/src/fork-features/voice-assistant/types.ts	fork-owned	voice-assistant	fork-owned module: hub 语音助手接口类型、声纹状态与录入结果
 web/src/fork-features/voice-assistant/voiceTools.test.ts	fork-owned	voice-assistant	fork-owned module tests
 web/src/fork-features/work-overview/BriefingPanel.tsx	fork-owned	work-overview	fork-owned module: 总览顶部「梳理待办」按钮与结果
 web/src/fork-features/work-overview/LineDetailPanel.tsx	fork-owned	work-overview	fork-owned module: 会话列表按主线/支线过滤时的可折叠详情
@@ -617,8 +627,8 @@ web/src/lib/fork-restore.test.ts	fork-owned	#170	origin-only delta; fork commits
 web/src/lib/fork-restore.ts	fork-owned	#170	origin-only delta; fork commits 88f9dc20,fbfd26f5,5262a261
 web/src/lib/generatedInlineMedia.test.ts	fork-owned	#175	origin-only delta; fork commits d28853c7
 web/src/lib/generatedInlineMedia.ts	fork-owned	#175	origin-only delta; fork commits d28853c7
-web/src/lib/locales/en.ts	trunk-patch	#171,new-session-guard,session-tabs,voice-assistant	both refs changed; fork commits ba37bcfb,606c6579,302180e5,7faed2eb,85743eb7,4a0c5f0b,7b197fec,a8815d47,bfa252da,c853bcbf,aee648ee,d1f9f394,413e76cc,291c8db0,3582e989,d3199037; claude-proxy-models: newSession.model.proxyCatalog* 文案; machine-icons: machineIcon.* 文案; session-digest/usage trend 文案; work-overview: work.* 文案; session-tabs: tabs.* 文案; session-digest: 重新总结的排队/进度/已更新/超时文案; session-tabs: tabs.home; list-prefs: settings.listPrefs.*; work-overview: work.card2.*、work.briefing.*、work.lineDetail.*、work.need 忽略/恢复/只看; session-tabs: tabs.closeShortcut; work-overview: work.card2.todo/sessions、work.briefing.openCard; help: settings.help.*; new-session-guard: 创建状态文案; session-tabs: 标签菜单与归类文案；提问卡片提示; voice-assistant: 设置项与指令卡片文案
-web/src/lib/locales/zh-CN.ts	trunk-patch	#171,new-session-guard,session-tabs,voice-assistant	both refs changed; fork commits ba37bcfb,606c6579,302180e5,7faed2eb,85743eb7,4a0c5f0b,7b197fec,a8815d47,bfa252da,c853bcbf,aee648ee,d1f9f394,413e76cc,291c8db0,3582e989,d3199037; claude-proxy-models: newSession.model.proxyCatalog* 文案; machine-icons: machineIcon.* 文案; session-digest/usage trend 文案; work-overview: work.* 文案; session-tabs: tabs.* 文案; session-digest: 重新总结的排队/进度/已更新/超时文案; session-tabs: tabs.home; list-prefs: settings.listPrefs.*; work-overview: work.card2.*、work.briefing.*、work.lineDetail.*、work.need 忽略/恢复/只看; session-tabs: tabs.closeShortcut; work-overview: work.card2.todo/sessions、work.briefing.openCard; help: settings.help.*; new-session-guard: 创建状态文案; session-tabs: 标签菜单与归类文案；提问卡片提示; voice-assistant: 设置项与指令卡片文案
+web/src/lib/locales/en.ts	trunk-patch	#171,new-session-guard,session-tabs,voice-assistant	both refs changed; fork commits ba37bcfb,606c6579,302180e5,7faed2eb,85743eb7,4a0c5f0b,7b197fec,a8815d47,bfa252da,c853bcbf,aee648ee,d1f9f394,413e76cc,291c8db0,3582e989,d3199037; claude-proxy-models: newSession.model.proxyCatalog* 文案; machine-icons: machineIcon.* 文案; session-digest/usage trend 文案; work-overview: work.* 文案; session-tabs: tabs.* 文案; session-digest: 重新总结的排队/进度/已更新/超时文案; session-tabs: tabs.home; list-prefs: settings.listPrefs.*; work-overview: work.card2.*、work.briefing.*、work.lineDetail.*、work.need 忽略/恢复/只看; session-tabs: tabs.closeShortcut; work-overview: work.card2.todo/sessions、work.briefing.openCard; help: settings.help.*; new-session-guard: 创建状态文案; session-tabs: 标签菜单与归类文案；提问卡片提示; voice-assistant: 设置项与指令卡片文案、收音方式、我的声纹、按住说话
+web/src/lib/locales/zh-CN.ts	trunk-patch	#171,new-session-guard,session-tabs,voice-assistant	both refs changed; fork commits ba37bcfb,606c6579,302180e5,7faed2eb,85743eb7,4a0c5f0b,7b197fec,a8815d47,bfa252da,c853bcbf,aee648ee,d1f9f394,413e76cc,291c8db0,3582e989,d3199037; claude-proxy-models: newSession.model.proxyCatalog* 文案; machine-icons: machineIcon.* 文案; session-digest/usage trend 文案; work-overview: work.* 文案; session-tabs: tabs.* 文案; session-digest: 重新总结的排队/进度/已更新/超时文案; session-tabs: tabs.home; list-prefs: settings.listPrefs.*; work-overview: work.card2.*、work.briefing.*、work.lineDetail.*、work.need 忽略/恢复/只看; session-tabs: tabs.closeShortcut; work-overview: work.card2.todo/sessions、work.briefing.openCard; help: settings.help.*; new-session-guard: 创建状态文案; session-tabs: 标签菜单与归类文案；提问卡片提示; voice-assistant: 设置项与指令卡片文案、收音方式、我的声纹、按住说话
 web/src/lib/message-window-store.test.ts	upstream-fix	#179,mouriya#323	origin-only delta; fork commits 7a5232bf; disposition upstream-issue https://github.com/tiann/hapi/issues/1071: general fix reported against latest upstream main; mouriya-s-lab/hapi#323 mechanism 1: held-range revalidation cases (older page + tail sync while reading history)
 web/src/lib/message-window-store.ts	upstream-fix	#179,mouriya#323	origin-only delta; fork commits 7a5232bf; disposition upstream-issue https://github.com/tiann/hapi/issues/1071: general fix reported against latest upstream main; mouriya-s-lab/hapi#323 mechanism 1: epoch change while reading history re-reads the held interval (after+until) instead of replacing the window with latest — drop when upstream lands #326/#327
 web/src/lib/query-keys.ts	trunk-patch	#173	both refs changed; fork commits 3994ee9a,fc7d7b4a,a8815d47,c58622c2; claude-proxy-models: claudeProxyModels 键
@@ -645,13 +655,15 @@ web/src/lib/usageReportBackfill.ts	fork-owned	usage-footer	usage_report 帧差�
 web/src/lib/voicePersonalitySession.ts	trunk-patch	voice-assistant	voice-assistant: 系统提示末尾附模式说明块
 web/src/main.tsx	trunk-patch	web-stability	installCrashGuard、AppErrorBoundary 包根、bootstrap().catch 静态兜底页
 web/src/realtime/GeminiLiveVoiceSession.tsx	trunk-patch	voice-assistant	voice-assistant: ?tools= 与模式说明块
-web/src/realtime/QwenVoiceSession.tsx	trunk-patch	voice-assistant	voice-assistant: ?tools=/?output=text、按名派发工具、文字回复交给曼波朗读与打断
+web/src/realtime/QwenVoiceSession.tsx	trunk-patch	voice-assistant	voice-assistant: ?tools=/?output=text、按名派发工具、文字回复交给曼波朗读与打断；收音方式：?turn=、持续说话 0.7 秒才打断、声纹放行的一轮立即打断、按住说话
+web/src/realtime/RealtimeSession.ts	trunk-patch	voice-assistant	voice-assistant: setVoicePushToTalk 转给当前语音会话
 web/src/realtime/gemini/toolAdapter.ts	trunk-patch	voice-assistant	voice-assistant: 按名派发全部客户端工具
 web/src/realtime/hooks/voiceHooks.ts	trunk-patch	voice-assistant	voice-assistant: 结束语音时清空问答历史与待确认指令
-web/src/realtime/index.ts	trunk-patch	voice-assistant	voice-assistant: 导出 registerVoiceAssistantApi
+web/src/realtime/index.ts	trunk-patch	voice-assistant	voice-assistant: 导出 registerVoiceAssistantApi、setVoicePushToTalk
 web/src/realtime/messageSummarySpeaker.test.ts	fork-owned	#179	origin-only delta; fork commits 7faed2eb
 web/src/realtime/messageSummarySpeaker.ts	fork-owned	#179	origin-only delta; fork commits 7faed2eb
 web/src/realtime/realtimeClientTools.ts	trunk-patch	voice-assistant	voice-assistant: 三个新工具、只读模式拒绝动作工具、按名取工具
+web/src/realtime/types.ts	trunk-patch	voice-assistant	voice-assistant: VoiceSession.setTalking（按住说话）
 web/src/router.tsx	trunk-patch	#171	both refs changed; fork commits a6f9e3f9,0894d3d2,3582e989; machine-icons: useMachineIcons 注入会话列表; work-overview: 会话页右栏总览、左栏主线过滤、手机切换、页头入口、/work 路由; session-tabs: 右栏挂标签条与同步 hook、新建会话页头标 data-safe-top="calc"; work-overview v2: /work 搜索参数 tab/line/folder; session-tabs: 首页标签 tabsHome（回 /sessions 并切手机「工作」视图）; list-prefs: 页头按钮倒序进 row-reverse 容器、手机「工作|会话」切换并入工具栏行; help: /settings/help 路由
 web/src/routes/sessions/file.test.tsx	trunk-patch	#179	origin-only delta; fork commits merge-resolution; disposition fork-specific #179: fork file viewer behavior merge resolution
 web/src/routes/sessions/file.tsx	trunk-patch	#177	origin-only delta; fork commits bfa252da,7a5232bf,e737b4b3,d3199037; session-tabs: 页头安全区容器标 data-safe-top
@@ -660,7 +672,7 @@ web/src/routes/settings/categories.ts	trunk-patch	help	help: 设置导航加「�
 web/src/routes/settings/display.tsx	upstream-sync	#180	merge-base 87f5c78a; changed only on upstream/main
 web/src/routes/settings/index.test.tsx	upstream-sync	#180	merge-base 87f5c78a; changed only on upstream/main
 web/src/routes/settings/machines.tsx	trunk-patch	machine-icons	machine-icons: 设备页行首图标按钮 + 内联选择
-web/src/routes/settings/voice.tsx	trunk-patch	voice-assistant	voice-assistant: 语音权限与朗读音色两项设置
+web/src/routes/settings/voice.tsx	trunk-patch	voice-assistant	voice-assistant: 语音权限、收音方式、朗读音色设置与我的声纹
 web/src/sw.ts	trunk-patch	web-stability	cleanupOutdatedCaches + NavigationRoute 精缓存 index.html；sw-scope: 导航匹配由 denylist 改为 allowlist（只认领 HAPI 自己的路由），同域下其他服务不再被喂 index.html
 web/src/types/api.ts	upstream-sync	#180	merge-base 87f5c78a; changed only on upstream/main
 web/src/types/global.d.ts	trunk-patch	#179	origin-only delta; fork commits 4a0c5f0b; disposition fork-specific #179: fork PWA changelog feature
