@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import {
     buildGeminiLiveSetupMessage,
     buildQwenSessionUpdateMessage,
+    parseVoiceListenMode,
     parseVoiceToolMode,
     voiceToolDefinitionsFor
 } from './voice'
@@ -75,5 +76,31 @@ describe('Qwen voice catalog (fork: verified on qwen3.5-omni-flash-realtime)', (
         expect(resolveQwenRealtimeVoice('Mia')).toBe('Mia')
         const msg = buildQwenSessionUpdateMessage('zh', 'Cherry', undefined, 'readonly', 'text')
         expect((msg.session as { voice: string }).voice).toBe('Tina')
+    })
+})
+
+describe('voice listen modes', () => {
+    const turnDetection = (listen: Parameters<typeof buildQwenSessionUpdateMessage>[5]) =>
+        (buildQwenSessionUpdateMessage('zh', undefined, undefined, 'readonly', 'text', listen) as { session: { turn_detection: unknown } }).session.turn_detection
+
+    test('unknown or missing values keep the old server VAD', () => {
+        expect(parseVoiceListenMode(null)).toBe('legacy')
+        expect(parseVoiceListenMode('nonsense')).toBe('legacy')
+        expect(turnDetection(undefined)).toMatchObject({ type: 'server_vad' })
+    })
+
+    test('hands-free uses semantic turn detection and answers by itself', () => {
+        expect(parseVoiceListenMode('auto')).toBe('auto')
+        expect(turnDetection('auto')).toEqual({ type: 'semantic_vad', threshold: 0.5, silence_duration_ms: 800, prefix_padding_ms: 300 })
+    })
+
+    test('my-voice-only leaves answering and interrupting to the hub gate', () => {
+        expect(parseVoiceListenMode('verified')).toBe('verified')
+        expect(turnDetection('verified')).toMatchObject({ type: 'semantic_vad', create_response: false, interrupt_response: false })
+    })
+
+    test('push-to-talk turns server turn detection off', () => {
+        expect(parseVoiceListenMode('manual')).toBe('manual')
+        expect(turnDetection('manual')).toBeNull()
     })
 })

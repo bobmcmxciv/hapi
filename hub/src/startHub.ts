@@ -37,6 +37,7 @@ import { createGatewayMemoryDelivery } from '../../fork-features/multi-user/memo
 import { startCx2ccPoller, type Cx2ccPollerHandle } from '../../fork-features/subscription/cx2ccPoller'
 import { projectKeyOf, startDigestService, type DigestSessionView } from '../../fork-features/session-digest/digestService'
 import { startVoiceAssistant } from '../../fork-features/voice-assistant/service'
+import { initVoiceprintStore } from '../../fork-features/voice-assistant/speaker'
 import type { VoiceSessionView } from '../../fork-features/voice-assistant/material'
 import { startWorkStore, stopWorkStore } from '../../fork-features/work-overview/workStore'
 
@@ -406,6 +407,8 @@ export async function startHub(options: StartHubOptions = {}): Promise<HubInstan
         getDigest: (sessionId) => digestService.store.getSession(sessionId),
         getProject: (session) => digestService.store.getProject(projectKeyOf(session as DigestSessionView).key)
     })
+    const voiceprints = initVoiceprintStore(config.dataDir)
+    console.log(`[SpeakerGate] voiceprint gate: ${JSON.stringify(voiceprints.gateConfig())}`)
     console.log(`[VoiceAssistant] ${voiceAssistant.configured() ? `models: ${voiceAssistant.providerLabels().join(', ')}` : 'no model configured (HAPI_VOICE_QA_* / HAPI_DIGEST_*): endpoints return 503'}`)
 
     // fork(work-overview): 工作总览的主线/支线归属，独立 sqlite，路由在 executionMount。

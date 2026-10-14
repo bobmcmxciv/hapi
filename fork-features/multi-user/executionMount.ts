@@ -466,7 +466,7 @@ export function mountExecutionRoutes(app: Hono<WebAppEnv>, deps: {
             return { ok: false, response: c.json({ error: 'Not connected' }, account ? 503 : 401) }
         }
         const sessions = collectVisibleSessions(deps.store, engine, account, { claimUnbound: false })
-        return { ok: true, sessions: sessions as unknown as VoiceSessionView[] }
+        return { ok: true, sessions: sessions as unknown as VoiceSessionView[], accountId: account.id, isAdmin: account.role === 'admin' }
     })
 
     // fork-features/work-overview：工作总览的主线/支线归属。目前只给 admin（非 admin 403）。

@@ -7,6 +7,7 @@ import { GeminiAudioPlayer } from './gemini/audioPlayer'
 import { getRealtimeClientTool, noteVoiceToolCall, onVoiceResponseWithoutTool, onVoiceUserTranscript } from './realtimeClientTools'
 import { readVoiceToolMode } from '@/fork-features/voice-assistant/toolMode'
 import { readVoiceReader } from '@/fork-features/voice-assistant/readerPreference'
+import { readVoiceListenMode, type VoiceListenPreference } from '@/fork-features/voice-assistant/listenMode'
 import { ManboSpeaker } from '@/fork-features/voice-assistant/manboSpeaker'
 import { resolveQwenRealtimeVoice } from '@hapi/protocol/voicePickerCatalog'
 import { buildResolvedVoiceSystemPrompt } from '@/lib/voicePersonalitySession'
@@ -31,6 +32,11 @@ interface QwenState {
     apiKey: string | null
     wsBaseUrl: string | null
     micMuted: boolean
+    /** fork(voice-assistant): how this session listens, and whether the talk button is held. */
+    listen: VoiceListenPreference
+    talking: boolean
+    talkStartedAt: number
+    bargeInTimer: ReturnType<typeof setTimeout> | null
 }
 
 const state: QwenState = {
@@ -42,7 +48,30 @@ const state: QwenState = {
     statusCallback: null,
     apiKey: null,
     wsBaseUrl: null,
-    micMuted: false
+    micMuted: false,
+    listen: 'auto',
+    talking: false,
+    talkStartedAt: 0,
+    bargeInTimer: null
+}
+
+/** Hands-free: someone must keep talking this long before the reply being spoken is cut off. */
+const BARGE_IN_SUSTAIN_MS = 700
+/** Push-to-talk: a press shorter than this is a slip, not a turn. */
+const MIN_TALK_MS = 300
+
+/** Push-to-talk keeps the mic closed unless the talk button is held. */
+function applyMicState(): void {
+    state.recorder?.setMuted(state.micMuted || (state.listen === 'manual' && !state.talking))
+}
+
+function stopSpeakingNow(): void {
+    if (state.bargeInTimer) {
+        clearTimeout(state.bargeInTimer)
+        state.bargeInTimer = null
+    }
+    if (state.player?.isPlaying()) state.player.clearQueue()
+    if (state.speaker?.isSpeaking()) state.speaker.stop()
 }
 
 let eventCounter = 0
@@ -51,6 +80,11 @@ function nextEventId(): string {
 }
 
 function cleanup() {
+    if (state.bargeInTimer) {
+        clearTimeout(state.bargeInTimer)
+        state.bargeInTimer = null
+    }
+    state.talking = false
     if (state.recorder) {
         state.recorder.dispose()
         state.recorder = null
@@ -105,6 +139,7 @@ class QwenVoiceSessionImpl implements VoiceSession {
         // buildResolvedVoiceSystemPrompt returns the user-customised prompt when set; with empty prefs
         // it falls back to VOICE_SYSTEM_PROMPT + buildVoiceLanguageBlock(language) (general language handling).
         const toolMode = readVoiceToolMode()
+        state.listen = readVoiceListenMode()
         this.currentInstructions = buildResolvedVoiceSystemPrompt({
             language: config.language,
             backend: 'qwen-realtime',
@@ -173,7 +208,9 @@ class QwenVoiceSessionImpl implements VoiceSession {
         // The hub installs only the tools this mode allows.
         const toolsParam = `&tools=${toolMode}`
         const outputParam = useHubVoice ? '&output=text' : ''
-        const wsUrl = `${proxyUrl}${separator}token=${encodeURIComponent(authToken)}${langParam}${voiceParam}${toolsParam}${outputParam}`
+        // fork(voice-assistant): semantic turn detection, voiceprint-gated turns, or push-to-talk.
+        const turnParam = `&turn=${state.listen}`
+        const wsUrl = `${proxyUrl}${separator}token=${encodeURIComponent(authToken)}${langParam}${voiceParam}${toolsParam}${outputParam}${turnParam}`
         state.speaker = useHubVoice
             ? new ManboSpeaker(this.api, state.playbackContext, (reason) => console.warn('[Qwen] hub voice failed, using browser speech:', reason), hubVoiceSampleRate)
             : null
@@ -306,11 +343,22 @@ class QwenVoiceSessionImpl implements VoiceSession {
 
                 // VAD: user started speaking - barge-in
                 if (eventType === 'input_audio_buffer.speech_started') {
-                    if (state.player?.isPlaying()) {
-                        state.player.clearQueue()
+                    // fork(voice-assistant): the hub marks this only after the voiceprint matched, so it is
+                    // the user — stop at once. Otherwise (hands-free, or `verified` without a voiceprint)
+                    // wait for sustained speech, so a cough or someone passing by does not cut the reply off.
+                    if (data.hapi_verified === true) {
+                        stopSpeakingNow()
+                    } else if (state.player?.isPlaying() || state.speaker?.isSpeaking()) {
+                        if (state.bargeInTimer) clearTimeout(state.bargeInTimer)
+                        state.bargeInTimer = setTimeout(stopSpeakingNow, BARGE_IN_SUSTAIN_MS)
                     }
-                    if (state.speaker?.isSpeaking()) {
-                        state.speaker.stop()
+                    return
+                }
+
+                if (eventType === 'input_audio_buffer.speech_stopped') {
+                    if (state.bargeInTimer) {
+                        clearTimeout(state.bargeInTimer)
+                        state.bargeInTimer = null
                     }
                     return
                 }
@@ -398,6 +446,33 @@ class QwenVoiceSessionImpl implements VoiceSession {
         sendEvent('response.create')
     }
 
+    /** Push-to-talk: open the mic while held; on release send what was said as one turn. */
+    setTalking(active: boolean): void {
+        if (state.listen !== 'manual' || !state.ws) return
+        if (active) {
+            if (state.talking) return
+            stopSpeakingNow()
+            sendEvent('input_audio_buffer.clear')
+            state.talking = true
+            state.talkStartedAt = Date.now()
+            applyMicState()
+            return
+        }
+        if (!state.talking) return
+        state.talking = false
+        const heldMs = Date.now() - state.talkStartedAt
+        // Let the last audio frames leave the recorder before closing the turn.
+        setTimeout(() => {
+            applyMicState()
+            if (heldMs < MIN_TALK_MS) {
+                sendEvent('input_audio_buffer.clear')
+                return
+            }
+            sendEvent('input_audio_buffer.commit')
+            sendEvent('response.create')
+        }, 150)
+    }
+
     sendContextualUpdate(update: string): void {
         // Append context silently — no response.create, so model doesn't speak yet.
         this.updateInstructions(`[System Context Update] ${update}`)
@@ -419,7 +494,7 @@ async function startAudioCapture(playbackContext: AudioContext): Promise<void> {
     )
 
     // Apply mute state after recorder has a stream — safe to call either way
-    state.recorder.setMuted(state.micMuted)
+    applyMicState()
 }
 
 // --- React component ---
@@ -480,7 +555,7 @@ export function QwenVoiceSession({
     useEffect(() => {
         state.micMuted = micMuted
         if (state.recorder) {
-            state.recorder.setMuted(micMuted)
+            applyMicState()
         }
     }, [micMuted])
 

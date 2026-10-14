@@ -1,6 +1,6 @@
 import type { ClaudeProxyModelsResponse } from '@/fork-features/claude-proxy-models/types'
 import type { MachinePresentationPatch } from '@/fork-features/machine-icons/types'
-import type { VoiceInstructionPrepareResponse, VoiceSessionQaResponse, VoiceTtsStatus, VoiceTurn } from '@/fork-features/voice-assistant/types'
+import type { VoiceInstructionPrepareResponse, VoiceSessionQaResponse, VoiceSpeakerEnrollResponse, VoiceSpeakerStatus, VoiceTtsStatus, VoiceTurn } from '@/fork-features/voice-assistant/types'
 import type {
     AttachmentMetadata,
     AuthResponse,
@@ -1494,6 +1494,23 @@ export class ApiClient {
             throw new ApiError(`HTTP ${res.status} ${res.statusText}`, res.status)
         }
         return res
+    }
+
+    async getVoiceSpeakerStatus(): Promise<VoiceSpeakerStatus> {
+        return await this.request('/api/voice/speaker/status')
+    }
+
+    /** Raw 16 kHz s16le mono PCM of the user reading a passage; the hub keeps only the voiceprint. */
+    async enrollVoiceSpeaker(pcm: Uint8Array): Promise<VoiceSpeakerEnrollResponse> {
+        return await this.request('/api/voice/speaker/enroll', {
+            method: 'POST',
+            headers: { 'content-type': 'application/octet-stream' },
+            body: pcm.slice().buffer
+        })
+    }
+
+    async clearVoiceSpeaker(): Promise<void> {
+        await this.request('/api/voice/speaker', { method: 'DELETE' })
     }
 
     async prepareVoiceInstruction(body: {

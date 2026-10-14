@@ -11,6 +11,22 @@ export type VoiceTarget = { id: string; title: string }
 
 export type VoiceTtsStatus = { available: boolean; voice: string | null; sampleRate: number | null; reason?: string }
 
+export type VoiceSpeakerRecord = { at: number; seconds: number; score: number | null; decision: 'accept' | 'reject'; reason: string; enforced: boolean }
+
+export type VoiceSpeakerStatus = {
+    available: boolean
+    gate: { mode: 'off' | 'observe' | 'enforce'; threshold: number } | null
+    enrolled: boolean
+    /** Enrolled in hapi itself (otherwise an admin may be using the imported recording-helper voiceprint). */
+    own: boolean
+    source: string | null
+    samples: number
+    updatedAt: string | null
+    recent: VoiceSpeakerRecord[]
+}
+
+export type VoiceSpeakerEnrollResponse = { ok: true; voicedSeconds: number; windows: number; consistency: number; previousScore: number | null; samples: number }
+
 export type VoiceInstructionPrepareResponse =
     | {
         status: 'ready'

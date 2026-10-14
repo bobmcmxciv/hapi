@@ -7,7 +7,7 @@ import { existsSync } from 'node:fs'
 import { serveStatic } from 'hono/bun'
 import { getConfiguration } from '../configuration'
 import { PROTOCOL_VERSION } from '@hapi/protocol'
-import { buildGeminiLiveSetupMessage, parseVoiceToolMode, QWEN_REALTIME_MODEL, type VoiceToolMode } from '@hapi/protocol/voice'
+import { buildGeminiLiveSetupMessage, parseVoiceListenMode, parseVoiceToolMode, QWEN_REALTIME_MODEL, type VoiceToolMode } from '@hapi/protocol/voice'
 import { createQwenProxyWebSocketHandler } from './qwenProxyHandler'
 import { decodeVoiceSystemPromptParam } from '../voiceSystemPromptParam'
 import type { SyncEngine } from '../sync/syncEngine'
@@ -637,13 +637,18 @@ export async function startWebServer(options: {
 
             // Voice WebSocket proxies — require JWT auth via query param
             // (browser WebSocket API cannot set custom headers)
+            // fork(voice-assistant)：顺带取出网关账号，供按声纹放行时找到本人的声纹。
+            let voiceAccountId: number | null = null
+            let voiceIsAdmin = false
             if (url.pathname === '/api/voice/gemini-ws' || url.pathname === '/api/voice/qwen-ws') {
                 const token = url.searchParams.get('token')
                 if (!token) {
                     return new Response('Missing authorization token', { status: 401 })
                 }
                 try {
-                    await jwtVerify(token, options.jwtSecret, { algorithms: ['HS256'] })
+                    const verified = await jwtVerify(token, options.jwtSecret, { algorithms: ['HS256'] })
+                    voiceAccountId = typeof verified.payload.gaid === 'number' ? verified.payload.gaid : null
+                    voiceIsAdmin = verified.payload.role === 'admin'
                 } catch {
                     return new Response('Invalid token', { status: 401 })
                 }
@@ -677,11 +682,12 @@ export async function startWebServer(options: {
                 const systemInstruction = decodeVoiceSystemPromptParam(url.searchParams.get('systemPrompt'))
                 const toolMode = parseVoiceToolMode(url.searchParams.get('tools'))
                 const output = url.searchParams.get('output') === 'text' ? 'text' : 'audio'
+                const listen = parseVoiceListenMode(url.searchParams.get('turn'))
                 if (!apiKey) {
                     return new Response('DashScope API key not configured', { status: 400 })
                 }
                 const upgraded = (server as unknown as { upgrade: (req: Request, opts: unknown) => boolean }).upgrade(req, {
-                    data: { _qwenProxy: true, apiKey, model, language, voiceName: voiceParam, systemInstruction, toolMode, output }
+                    data: { _qwenProxy: true, apiKey, model, language, voiceName: voiceParam, systemInstruction, toolMode, output, listen, accountId: voiceAccountId, isAdmin: voiceIsAdmin }
                 })
                 if (!upgraded) {
                     return new Response('WebSocket upgrade failed', { status: 500 })

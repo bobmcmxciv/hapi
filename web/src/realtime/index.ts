@@ -9,7 +9,8 @@ export {
     isVoiceSessionStarted,
     getVoiceSession,
     getCurrentRealtimeSessionId,
-    updateCurrentSessionId
+    updateCurrentSessionId,
+    setVoicePushToTalk
 } from './RealtimeSession'
 
 // Client tools

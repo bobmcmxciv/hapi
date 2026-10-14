@@ -211,3 +211,61 @@ describe('createQwenProxyWebSocketHandler tool mode (fork voice-assistant)', () 
         expect(setupToolsFor(undefined)).toEqual(['messageCodingAgent', 'processPermissionRequest'])
     })
 })
+
+describe('createQwenProxyWebSocketHandler speaker gate (fork voice-assistant)', () => {
+    type TurnDetection = { type: string; create_response?: boolean; interrupt_response?: boolean } | null
+    function openWith(listen: string | undefined, gate: { frames: string[]; upstreamTypes: string[] } | null) {
+        const opened: Array<{ accountId: number | null; isAdmin: boolean }> = []
+        const handler = createQwenProxyWebSocketHandler(FakeWebSocket, (params) => {
+            opened.push({ accountId: params.accountId, isAdmin: params.isAdmin })
+            if (!gate) return null
+            return {
+                clientFrame: (raw: string) => { gate.frames.push(raw) },
+                upstream: (raw: string) => {
+                    const type = (JSON.parse(raw) as { type?: string }).type ?? ''
+                    gate.upstreamTypes.push(type)
+                    return type === 'input_audio_buffer.speech_started'
+                },
+                close: () => {}
+            }
+        })
+        const client = new FakeClient({ apiKey: 'k', model: 'qwen3.5-omni-flash-realtime', language: 'zh', listen, accountId: 7, isAdmin: true }) as unknown as ServerWebSocket<unknown> & FakeClient
+        handler.open(client)
+        const upstream = lastUpstream!
+        upstream.deliver({ type: 'session.created' })
+        const setup = JSON.parse(upstream.sent[0] as string) as { session: { turn_detection: TurnDetection } }
+        return { handler, client, upstream, opened, turnDetection: setup.session.turn_detection }
+    }
+
+    test('verified listening without a voiceprint answers like the ordinary hands-free mode', () => {
+        const { opened, turnDetection } = openWith('verified', null)
+        expect(opened).toEqual([{ accountId: 7, isAdmin: true }])
+        expect(turnDetection?.type).toBe('semantic_vad')
+        expect(turnDetection?.create_response).toBeUndefined()
+    })
+
+    test('verified listening hands turn-taking to the gate', () => {
+        const gate = { frames: [] as string[], upstreamTypes: [] as string[] }
+        const { handler, client, upstream, turnDetection } = openWith('verified', gate)
+        expect(turnDetection).toMatchObject({ type: 'semantic_vad', create_response: false, interrupt_response: false })
+
+        const early = JSON.stringify({ type: 'input_audio_buffer.append', audio: 'AAAA' })
+        handler.message(client, early)
+        upstream.deliver({ type: 'session.updated', session: {} })
+        const later = JSON.stringify({ type: 'input_audio_buffer.append', audio: 'BBBB' })
+        handler.message(client, later)
+        expect(gate.frames).toEqual([early, later])
+
+        const sentBefore = client.sent.length
+        upstream.deliver({ type: 'input_audio_buffer.speech_started', item_id: 'u1', audio_start_ms: 0 })
+        expect(client.sent).toHaveLength(sentBefore)
+        upstream.deliver({ type: 'response.text.delta', delta: '好' })
+        expect(client.sent).toHaveLength(sentBefore + 1)
+        expect(gate.upstreamTypes).toContain('input_audio_buffer.speech_started')
+    })
+
+    test('other listening modes never open the gate', () => {
+        const { opened } = openWith('auto', { frames: [], upstreamTypes: [] })
+        expect(opened).toEqual([])
+    })
+})

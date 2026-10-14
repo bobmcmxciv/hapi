@@ -19,6 +19,8 @@ export interface VoiceSession {
     endSession(): Promise<void>
     sendTextMessage(message: string): void
     sendContextualUpdate(update: string): void
+    /** fork(voice-assistant): push-to-talk — true while the talk button is held. */
+    setTalking?(active: boolean): void
 }
 
 export type ConversationStatus = 'disconnected' | 'connecting' | 'connected' | 'error'

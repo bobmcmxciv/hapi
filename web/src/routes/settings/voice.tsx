@@ -9,6 +9,8 @@ import { SelectControl } from '@/components/ui/select-control'
 import { useVoiceSettings } from './useVoiceSettings'
 import { useVoiceToolMode } from '@/fork-features/voice-assistant/toolMode'
 import { useVoiceReader } from '@/fork-features/voice-assistant/readerPreference'
+import { useVoiceListenMode, type VoiceListenPreference } from '@/fork-features/voice-assistant/listenMode'
+import { VoiceprintSettings } from '@/fork-features/voice-assistant/VoiceprintSettings'
 
 export default function SettingsVoicePage() {
     const { t } = useTranslation()
@@ -17,6 +19,8 @@ export default function SettingsVoicePage() {
     const [opening, setOpening] = useState<'greet' | 'brief'>(() => localStorage.getItem('hapi-voice-proactive') === 'true' ? 'brief' : 'greet')
     const [toolMode, setToolMode] = useVoiceToolMode()
     const [reader, setReader] = useVoiceReader()
+    const [listenMode, setListenMode] = useVoiceListenMode()
+    const listenOptions: VoiceListenPreference[] = ['auto', 'verified', 'manual']
     const selectedLanguage = voice.voiceLanguages.find((language) => language.code === voice.voiceLanguage)
     const selectedVoice = voice.voices.find((option) => option.id === voice.voiceId)
 
@@ -110,6 +114,14 @@ export default function SettingsVoicePage() {
                         />
                         {voice.backend === 'qwen-realtime' ? (
                             <SettingsChoiceGroup
+                                label={t('settings.voice.listen.label')}
+                                value={listenMode}
+                                options={listenOptions.map((value) => ({ value, label: t(`settings.voice.listen.${value}`), description: t(`settings.voice.listen.${value}.hint`) }))}
+                                onChange={setListenMode}
+                            />
+                        ) : null}
+                        {voice.backend === 'qwen-realtime' ? (
+                            <SettingsChoiceGroup
                                 label={t('settings.voice.reader.label')}
                                 value={reader}
                                 options={(['manbo', 'builtin'] as const).map((value) => ({ value, label: t(`settings.voice.reader.${value}`), description: t(`settings.voice.reader.${value}.hint`) }))}
@@ -124,6 +136,7 @@ export default function SettingsVoicePage() {
                         />
                         <VoiceRespondsControls t={t} voiceBackend={voice.backend} />
                     </SettingsSection>
+                    {voice.backend === 'qwen-realtime' ? <VoiceprintSettings /> : null}
                     <SettingsSection>
                         <SettingsLinkRow label={t('settings.voice.advanced.title')} description={t('settings.voice.advanced.hint')} onClick={() => navigate({ to: '/settings/voice/advanced' })} />
                     </SettingsSection>

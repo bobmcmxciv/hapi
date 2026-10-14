@@ -220,6 +220,33 @@ export function parseVoiceToolMode(raw: string | null | undefined): VoiceToolMod
     return raw === 'readonly' || raw === 'assistant' ? raw : 'legacy'
 }
 
+/**
+ * fork(voice-assistant): how the realtime model decides that the user spoke.
+ * - `auto`: semantic VAD (DashScope's recommendation for qwen3.5-omni), answers on its own.
+ * - `verified`: semantic VAD, but the model only answers when the hub sends response.create after
+ *   checking the turn's voiceprint; other people's speech never becomes a turn.
+ * - `manual`: push-to-talk, no VAD; the client commits the buffer when the button is released.
+ * - `legacy`: what clients without the parameter always had (server VAD 0.5 / 800 ms).
+ */
+export type VoiceListenMode = 'auto' | 'verified' | 'manual' | 'legacy'
+
+export function parseVoiceListenMode(raw: string | null | undefined): VoiceListenMode {
+    return raw === 'auto' || raw === 'verified' || raw === 'manual' ? raw : 'legacy'
+}
+
+function qwenTurnDetection(listen: VoiceListenMode): Record<string, unknown> | null {
+    switch (listen) {
+        case 'manual':
+            return null
+        case 'verified':
+            return { type: 'semantic_vad', threshold: 0.6, silence_duration_ms: 800, prefix_padding_ms: 300, create_response: false, interrupt_response: false }
+        case 'auto':
+            return { type: 'semantic_vad', threshold: 0.5, silence_duration_ms: 800, prefix_padding_ms: 300 }
+        case 'legacy':
+            return { type: 'server_vad', threshold: 0.5, silence_duration_ms: 800, prefix_padding_ms: 300 }
+    }
+}
+
 export interface VoiceAgentConfig {
     name: string
     conversation_config: {
@@ -514,7 +541,8 @@ export function buildQwenSessionUpdateMessage(
     systemInstruction?: string,
     toolMode: VoiceToolMode = 'legacy',
     /** fork(voice-assistant): 'text' when the browser speaks the replies with its own voice (曼波). */
-    output: 'audio' | 'text' = 'audio'
+    output: 'audio' | 'text' = 'audio',
+    listen: VoiceListenMode = 'legacy'
 ): Record<string, unknown> {
     const instructions = systemInstruction?.trim()
         ? systemInstruction
@@ -535,12 +563,7 @@ export function buildQwenSessionUpdateMessage(
             output_audio_format: 'pcm',
             instructions,
             temperature: 0.7,
-            turn_detection: {
-                type: 'server_vad',
-                threshold: 0.5,
-                silence_duration_ms: 800,
-                prefix_padding_ms: 300
-            },
+            turn_detection: qwenTurnDetection(listen),
             // Qwen-Omni-Realtime decides whether to call tools automatically.
             // The official realtime API does not support OpenAI-style tool_choice /
             // parallel_tool_calls parameters on session.update.

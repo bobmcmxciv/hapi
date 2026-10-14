@@ -87,3 +87,9 @@ export function updateCurrentSessionId(sessionId: string | null) {
     console.log(`[Voice] Realtime session ID updated: ${sessionId}`)
     currentSessionId = sessionId
 }
+
+/** fork(voice-assistant): push-to-talk from the talk button; no-op for backends without it. */
+export function setVoicePushToTalk(active: boolean) {
+    if (!voiceSessionStarted) return
+    voiceSession?.setTalking?.(active)
+}

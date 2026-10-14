@@ -10,6 +10,8 @@ import { Children, isValidElement, useRef, useState, type ReactElement, type Rea
 import { useComposerToolbarLayout, type ComposerToolbarItemId, type ComposerToolbarLayout } from '@/hooks/useComposerToolbarLayout'
 import { useLongPress } from '@/hooks/useLongPress'
 import type { ComposerSendIntent } from '@/lib/messageDelivery'
+import { useVoiceListenMode } from '@/fork-features/voice-assistant/listenMode'
+import { VoiceTalkButton } from '@/fork-features/voice-assistant/VoiceTalkButton'
 
 function ToolbarItemSlot(props: { item: ComposerToolbarItemId; children: ReactNode }) {
     return <>{props.children}</>
@@ -676,6 +678,7 @@ export function ComposerButtons(props: {
     const { t } = useTranslation()
     const { layout } = useComposerToolbarLayout()
     const isVoiceConnected = props.voiceStatus === 'connected'
+    const [voiceListenMode] = useVoiceListenMode()
     const [showSchedulePicker, setShowSchedulePicker] = useState(false)
     const scheduleButtonRef = useRef<HTMLButtonElement>(null)
 
@@ -811,7 +814,9 @@ export function ComposerButtons(props: {
                 </ToolbarItemSlot>
 
                 <ToolbarItemSlot item="voiceMic">
-                {isVoiceConnected && props.onVoiceMicToggle ? (
+                {isVoiceConnected && voiceListenMode === 'manual' ? (
+                    <VoiceTalkButton />
+                ) : isVoiceConnected && props.onVoiceMicToggle ? (
                     <button
                         type="button"
                         aria-label={props.voiceMicMuted ? t('voice.unmute') : t('voice.mute')}

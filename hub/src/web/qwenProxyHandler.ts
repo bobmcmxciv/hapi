@@ -6,7 +6,8 @@
 // a deterministic fake for the upstream connection.
 
 import type { ServerWebSocket } from 'bun'
-import { buildQwenSessionUpdateMessage, isQwenSafeClientFrame, type VoiceToolMode } from '@hapi/protocol/voice'
+import { buildQwenSessionUpdateMessage, isQwenSafeClientFrame, type VoiceListenMode, type VoiceToolMode } from '@hapi/protocol/voice'
+import { openSpeakerGate, type OpenSpeakerGate, type SpeakerGateLike } from '../../../fork-features/voice-assistant/speakerGate'
 
 type WebSocketCtor = new (url: string, opts?: unknown) => WebSocketLike
 
@@ -35,7 +36,8 @@ function toClientCloseCode(code: number): number {
 }
 
 export function createQwenProxyWebSocketHandler(
-    WebSocketImpl: WebSocketCtor = WebSocket as unknown as WebSocketCtor
+    WebSocketImpl: WebSocketCtor = WebSocket as unknown as WebSocketCtor,
+    openGate: OpenSpeakerGate = openSpeakerGate
 ): QwenProxyHandler {
     const MAX_PENDING_BYTES = 1024 * 1024 // 1 MiB — rejects setup-gate floods
     const upstreamMap = new WeakMap<ServerWebSocket<unknown>, WebSocketLike>()
@@ -49,10 +51,16 @@ export function createQwenProxyWebSocketHandler(
     const setupAckedMap = new WeakMap<ServerWebSocket<unknown>, boolean>()
     const pendingClientFrames = new WeakMap<ServerWebSocket<unknown>, Array<string | ArrayBuffer | Uint8Array>>()
     const pendingClientBytes = new WeakMap<ServerWebSocket<unknown>, number>()
+    // fork(voice-assistant)：turn=verified 时按声纹放行每一轮（见 fork-features/voice-assistant/speakerGate.ts）。
+    const gateMap = new WeakMap<ServerWebSocket<unknown>, SpeakerGateLike>()
+    const dropGate = (clientWs: ServerWebSocket<unknown>) => {
+        gateMap.get(clientWs)?.close()
+        gateMap.delete(clientWs)
+    }
 
     return {
         open(clientWs) {
-            const data = clientWs.data as { apiKey: string; model: string; language?: string; voiceName?: string; systemInstruction?: string; toolMode?: VoiceToolMode; output?: 'audio' | 'text' }
+            const data = clientWs.data as { apiKey: string; model: string; language?: string; voiceName?: string; systemInstruction?: string; toolMode?: VoiceToolMode; output?: 'audio' | 'text'; listen?: VoiceListenMode; accountId?: number | null; isAdmin?: boolean }
             const upstreamBase = process.env.QWEN_REALTIME_WS_URL || QWEN_WS_BASE
             const upstreamUrl = new URL(upstreamBase)
             upstreamUrl.searchParams.set('model', data.model)
@@ -62,7 +70,19 @@ export function createQwenProxyWebSocketHandler(
             })
 
             upstreamMap.set(clientWs, upstream)
-            pendingSetupMap.set(clientWs, JSON.stringify(buildQwenSessionUpdateMessage(data.language, data.voiceName, data.systemInstruction, data.toolMode, data.output)))
+            let listen = data.listen
+            if (listen === 'verified') {
+                const gate = openGate({
+                    accountId: data.accountId ?? null,
+                    isAdmin: data.isAdmin === true,
+                    sendUpstream: (event) => { try { if (upstream.readyState === WS_OPEN) upstream.send(JSON.stringify(event)) } catch { /* upstream gone */ } },
+                    sendClient: (raw) => { try { if (clientWs.readyState === 1) clientWs.send(raw) } catch { /* client gone */ } }
+                })
+                // Nobody to verify against: answer like the ordinary hands-free mode instead of never answering.
+                if (gate) gateMap.set(clientWs, gate)
+                else listen = 'auto'
+            }
+            pendingSetupMap.set(clientWs, JSON.stringify(buildQwenSessionUpdateMessage(data.language, data.voiceName, data.systemInstruction, data.toolMode, data.output, listen)))
             setupAckedMap.set(clientWs, false)
             pendingClientBytes.set(clientWs, 0)
 
@@ -102,6 +122,8 @@ export function createQwenProxyWebSocketHandler(
                     } catch { /* not JSON */ }
                 }
 
+                if (gateMap.get(clientWs)?.upstream(text)) return
+
                 try {
                     if (clientWs.readyState === 1) {
                         clientWs.send(typeof raw === 'string' ? raw : new Uint8Array(raw as ArrayBuffer))
@@ -109,6 +131,7 @@ export function createQwenProxyWebSocketHandler(
                 } catch { /* client gone */ }
             }
             upstream.onerror = (event) => {
+                dropGate(clientWs)
                 pendingSetupMap.delete(clientWs)
                 setupAckedMap.delete(clientWs)
                 pendingClientFrames.delete(clientWs)
@@ -122,6 +145,7 @@ export function createQwenProxyWebSocketHandler(
                 try { clientWs.close(1011, 'Upstream error') } catch { /* */ }
             }
             upstream.onclose = (event) => {
+                dropGate(clientWs)
                 pendingSetupMap.delete(clientWs)
                 setupAckedMap.delete(clientWs)
                 pendingClientFrames.delete(clientWs)
@@ -158,14 +182,17 @@ export function createQwenProxyWebSocketHandler(
                     return
                 }
                 pendingClientBytes.set(clientWs, total)
+                if (typeof message === 'string') gateMap.get(clientWs)?.clientFrame(message)
                 const queue = pendingClientFrames.get(clientWs) ?? []
                 queue.push(message)
                 pendingClientFrames.set(clientWs, queue)
                 return
             }
+            if (typeof message === 'string') gateMap.get(clientWs)?.clientFrame(message)
             upstream.send(message)
         },
         close(clientWs, code, reason) {
+            dropGate(clientWs)
             pendingSetupMap.delete(clientWs)
             setupAckedMap.delete(clientWs)
             pendingClientFrames.delete(clientWs)
