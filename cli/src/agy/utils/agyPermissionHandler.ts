@@ -88,12 +88,15 @@ type PermissionResponse = {
 // Source: [agy hooks topic](knowledge/topics/2026-06-13_agy-antigravity-cli-hooks.md)
 const AGY_AUTO_ALLOW_TOOLS = new Set<string>([
     'view_file',
+    'read_file',
     'list_dir',
     'find_by_name',
     'grep_search',
     'read_url_content',
     'search_web',
-    'list_permissions'
+    'list_permissions',
+    'list_resources',
+    'read_resource'
 ]);
 
 export type AgyPermissionHandlerOptions = {

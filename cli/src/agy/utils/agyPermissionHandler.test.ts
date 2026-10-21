@@ -395,4 +395,15 @@ describe('AgyPermissionHandler', () => {
         handler.cancelAll('test cleanup');
         await expect(decision).rejects.toThrow();
     });
+
+    it('auto-allows agy 1.4.3+ read_file, list_resources, and read_resource in default mode', async () => {
+        const { client, state } = createFakeClient();
+        const handler = new AgyPermissionHandler(client, { getPermissionMode: () => 'default' });
+
+        for (const toolName of ['read_file', 'list_resources', 'read_resource']) {
+            const decision = await handler.requestDecision(`conv-auto:${toolName}`, toolName, { Path: '/tmp/a.txt' });
+            expect(decision).toEqual({ permissionDecision: 'allow' });
+        }
+        expect(Object.keys(state.requests)).toHaveLength(0);
+    });
 });

@@ -1484,4 +1484,91 @@ describe('normalizeDecryptedMessage', () => {
         })
     })
 
+
+    it('maps agy 1.4.3+ read_file, write_file, edit_file, and CHECKPOINT tool actions', () => {
+        const readMsg = makeMessage({
+            role: 'agent',
+            content: {
+                type: 'output',
+                data: {
+                    type: 'agy_tool_action',
+                    name: 'READ_FILE',
+                    toolName: 'read_file',
+                    input: { Path: '/repo/src/index.ts', StartLine: 1, EndLine: 20 },
+                    content: 'Created At: 2026-10-21T00:00:00Z\nCompleted At: 2026-10-21T00:00:01Z\nShowing lines 1-2 of 2\n1: const a = 1\n2: const b = 2'
+                }
+            }
+        })
+        const normalizedRead = normalizeDecryptedMessage(readMsg)
+        expect(normalizedRead).toMatchObject({
+            role: 'agent',
+            content: [
+                {
+                    type: 'tool-call',
+                    name: 'Read',
+                    input: { file_path: '/repo/src/index.ts', offset: 1, limit: 20 },
+                    nativeKind: 'agy-numbered-read'
+                },
+                {
+                    type: 'tool-result',
+                    content: '1: const a = 1\n2: const b = 2'
+                }
+            ]
+        })
+
+        const editMsg = makeMessage({
+            role: 'agent',
+            content: {
+                type: 'output',
+                data: {
+                    type: 'agy_tool_action',
+                    name: 'EDIT_FILE',
+                    toolName: 'edit_file',
+                    input: { Path: '/repo/src/index.ts', Target: 'const a = 1', Replacement: 'const a = 2' },
+                    content: 'Edited file.'
+                }
+            }
+        })
+        expect(normalizeDecryptedMessage(editMsg)).toMatchObject({
+            role: 'agent',
+            content: [
+                {
+                    type: 'tool-call',
+                    name: 'Edit',
+                    input: { file_path: '/repo/src/index.ts', old_string: 'const a = 1', new_string: 'const a = 2' }
+                },
+                {
+                    type: 'tool-result',
+                    content: 'Edited file.'
+                }
+            ]
+        })
+
+        const checkpointMsg = makeMessage({
+            role: 'agent',
+            content: {
+                type: 'output',
+                data: {
+                    type: 'agy_tool_action',
+                    name: 'CHECKPOINT',
+                    content: 'Created At: 2026-10-21T00:00:00Z\nCompleted At: 2026-10-21T00:00:05Z'
+                }
+            }
+        })
+        expect(normalizeDecryptedMessage(checkpointMsg)).toMatchObject({
+            role: 'agent',
+            content: [
+                {
+                    type: 'tool-call',
+                    name: 'Checkpoint',
+                    description: 'Context checkpoint'
+                },
+                {
+                    type: 'tool-result',
+                    content: ''
+                }
+            ]
+        })
+    })
+
 })

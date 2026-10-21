@@ -444,7 +444,7 @@ export function stripAgyActionPreamble(content: string, name: string, rawActionN
         ''
     )
 
-    if (name === 'Read' || rawActionName === 'VIEW_FILE') {
+    if (name === 'Read' || rawActionName === 'VIEW_FILE' || rawActionName === 'READ_FILE') {
         result = result
             .replace(/^(?:(?:File Path:|Total Lines:|Total Bytes:|Showing lines\b).*(?:\r?\n|$))+/, '')
             .replace(/^The following code has been modified to include a line number.*(?:\r?\n|$)/, '')
@@ -561,12 +561,29 @@ type AgyToolSpec = { name: string; buildInput: (args: Record<string, unknown>) =
 const AGY_TOOL_SPECS: Record<string, AgyToolSpec> = {
     run_command: { name: 'Bash', buildInput: (a) => ({ command: a.CommandLine, cwd: a.Cwd }) },
     view_file: { name: 'Read', buildInput: (a) => ({ file_path: a.AbsolutePath ?? a.RelativePath }) },
+    read_file: {
+        name: 'Read',
+        buildInput: (a) => ({
+            file_path: a.Path ?? a.AbsolutePath ?? a.RelativePath,
+            ...(a.StartLine !== undefined ? { offset: a.StartLine } : {}),
+            ...(a.EndLine !== undefined ? { limit: a.EndLine } : {}),
+        }),
+    },
     // Write: the view renders input.content under the file path.
     write_to_file: { name: 'Write', buildInput: (a) => ({ file_path: a.TargetFile, content: a.CodeContent }) },
+    write_file: { name: 'Write', buildInput: (a) => ({ file_path: a.Path ?? a.TargetFile, content: a.Content ?? a.CodeContent }) },
     // Edit: the view renders a diff from old_string → new_string.
     replace_file_content: {
         name: 'Edit',
         buildInput: (a) => ({ file_path: a.TargetFile, old_string: a.TargetContent, new_string: a.ReplacementContent }),
+    },
+    edit_file: {
+        name: 'Edit',
+        buildInput: (a) => ({
+            file_path: a.Path ?? a.TargetFile,
+            old_string: a.Target ?? a.TargetContent,
+            new_string: a.Replacement ?? a.ReplacementContent,
+        }),
     },
     grep_search: { name: 'Grep', buildInput: (a) => ({ pattern: a.Query ?? a.SearchQuery, path: a.SearchDirectory ?? a.SearchPath }) },
     list_dir: { name: 'LS', buildInput: (a) => ({ path: a.DirectoryPath ?? a.AbsolutePath }) },
@@ -821,7 +838,7 @@ export function normalizeAgentRecord(
                 role: 'agent',
                 isSidechain: false,
                 content: [{ type: 'text', text, uuid: messageId, parentUUID: null }],
-                // Per-turn model (display name from the conversation DB), surfaced
+                // Per-turn model (wire id or display name from the conversation DB), surfaced
                 // in the message metadata footer like the other flavors.
                 model: asString(data.model) ?? null,
                 meta
@@ -866,6 +883,11 @@ export function normalizeAgentRecord(
                 description = parsed.summary
                 content = parsed.body
                 isError = true
+            } else if (rawActionName === 'CHECKPOINT') {
+                name = 'Checkpoint'
+                input = undefined
+                description = 'Context checkpoint'
+                content = stripAgyActionPreamble(asString(data.content) ?? '', name, rawActionName)
             } else {
                 // Pair the invocation (toolName + input) the CLI forwarded from the
                 // preceding PLANNER_RESPONSE with this action's result, so the card
@@ -880,10 +902,12 @@ export function normalizeAgentRecord(
                 input = mapped.input
                 description = mapped.description
                 content = stripAgyActionPreamble(asString(data.content) ?? '', name, rawActionName)
-                // view_file → Read: also drop agy's per-line "<n>: " prefixes and
+                // view_file / read_file → Read: also drop agy's per-line "<n>: " prefixes and
                 // the "The above content shows…" trailer so the code block renders
                 // clean, single-gutter line numbers.
-                if (name === 'Read' || rawActionName === 'VIEW_FILE') content = stripAgyReadArtifacts(content)
+                if (name === 'Read' || rawActionName === 'VIEW_FILE' || rawActionName === 'READ_FILE') {
+                    content = stripAgyReadArtifacts(content)
+                }
             }
             // agy action entries are already DONE, so pair the tool-call with a
             // tool-result (matching ids) — that makes the card render as COMPLETED
@@ -901,7 +925,7 @@ export function normalizeAgentRecord(
                         name,
                         input,
                         description,
-                        nativeKind: name === 'Read' || rawActionName === 'VIEW_FILE'
+                        nativeKind: name === 'Read' || rawActionName === 'VIEW_FILE' || rawActionName === 'READ_FILE'
                             ? 'agy-numbered-read'
                             : null,
                         uuid: messageId,

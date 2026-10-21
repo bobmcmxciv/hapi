@@ -19,6 +19,10 @@ export const agyCommand: CommandDefinition = {
     name: 'agy',
     requiresRuntimeAssets: true,
     run: async ({ commandArgs }) => {
+        if (commandArgs.includes('-h') || commandArgs.includes('--help')) {
+            console.log('Usage: hapi agy [--resume [sessionId]] [--model <model>] [--permission-mode <mode>]')
+            return
+        }
         try {
             const options = parseAgyCommandOptions(commandArgs)
 
