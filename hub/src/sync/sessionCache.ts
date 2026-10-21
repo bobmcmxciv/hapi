@@ -48,6 +48,15 @@ export class SessionCache {
     private readonly deduplicatePending: Set<string> = new Set()
     private readonly pendingThinkingUntilBySessionId: Map<string, number> = new Map()
     private readonly runtimeConfigUpdatedAtBySessionId: Map<string, Partial<Record<RuntimeConfigKey, number>>> = new Map()
+    private readonly resumingSessionIds: Set<string> = new Set()
+
+    setSessionResuming(sessionId: string, resuming: boolean): void {
+        if (resuming) {
+            this.resumingSessionIds.add(sessionId)
+        } else {
+            this.resumingSessionIds.delete(sessionId)
+        }
+    }
 
     constructor(
         private readonly store: Store,
@@ -442,6 +451,9 @@ export class SessionCache {
 
         const wasActive = session.active
         const wasThinking = session.thinking
+        if (!this.resumingSessionIds.has(session.id) && (session.metadata?.lifecycleState === 'archived' || session.metadata?.archivedAt != null)) {
+            return
+        }
         const previousActiveTurnStartedAt = session.activeTurnStartedAt
         const previousPermissionMode = session.permissionMode
         const previousModel = session.model
@@ -988,6 +1000,7 @@ export class SessionCache {
             delete next.lifecycleState
             delete next.archivedBy
             delete next.archiveReason
+            delete next.archivedAt
             next.lifecycleStateSince = Date.now()
 
             let cursorSessionProtocol: 'acp' | 'stream-json' | undefined
@@ -1044,6 +1057,7 @@ export class SessionCache {
             archivedBy?: string
             archiveReason?: string
             lifecycleStateSince?: number
+            archivedAt?: number
         }
     ): Promise<void> {
         // tiann/hapi#919: retry-with-refresh on version-mismatch. This is the
@@ -1076,6 +1090,11 @@ export class SessionCache {
                 next.lifecycleStateSince = snapshot.lifecycleStateSince
             } else {
                 delete next.lifecycleStateSince
+            }
+            if (snapshot.archivedAt !== undefined) {
+                next.archivedAt = snapshot.archivedAt
+            } else {
+                delete next.archivedAt
             }
 
             const result = this.store.sessions.updateSessionMetadata(

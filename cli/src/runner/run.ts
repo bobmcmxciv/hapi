@@ -504,6 +504,19 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
         if (persisted) {
           persisted.confirmedSessionId = sessionId;
           persistResumeProcesses();
+        } else {
+          const startMarker = getProcessStartMarker(pid);
+          if (startMarker) {
+            const reqId = existingSession.requestedHappySessionId ?? sessionId;
+            existingSessionIdByChildPid.set(pid, reqId);
+            persistedResumeProcesses.set(pid, {
+              pid,
+              requestedSessionId: reqId,
+              confirmedSessionId: sessionId,
+              processStartMarker: startMarker,
+            });
+            persistResumeProcesses();
+          }
         }
         existingSession.happySessionMetadataFromLocalWebhook = sessionMetadata;
         logger.debug(`[RUNNER RUN] Updated runner-spawned session ${sessionId} with metadata`);
@@ -986,6 +999,8 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
     const stopSession = async (sessionId: string): Promise<'stopped' | 'already_gone' | 'still_alive'> => {
       logger.debug(`[RUNNER RUN] Attempting to stop session ${sessionId}`);
 
+      let stoppedAny = false;
+      let alreadyGoneAny = false;
       // Try to find by sessionId first
       for (const [pid, session] of pidToTrackedSession.entries()) {
         if (session.happySessionId === sessionId ||
@@ -1037,7 +1052,7 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
           pidToConfirmedSessionId.delete(pid);
           if (persistedResumeProcesses.delete(pid)) persistResumeProcesses();
           logger.debug(`[RUNNER RUN] Removed terminated session ${sessionId} from tracking`);
-          return 'stopped';
+          stoppedAny = true; continue;
         }
       }
 
@@ -1066,7 +1081,7 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
             if (requestedSessionId) rememberVerifiedExit(requestedSessionId);
             if (confirmedSessionId) rememberVerifiedExit(confirmedSessionId);
             releaseRecoveredSpawnDedupe(pid, existingSessionIdByChildPid, spawnSession);
-            return 'already_gone';
+            alreadyGoneAny = true; continue;
           }
           if (!(await killProcessTreeByPid(pid))) return 'still_alive';
           if (requestedSessionId) rememberVerifiedExit(requestedSessionId);
@@ -1076,7 +1091,7 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
           pidToConfirmedSessionId.delete(pid);
           if (persistedResumeProcesses.delete(pid)) persistResumeProcesses();
           releaseRecoveredSpawnDedupe(pid, existingSessionIdByChildPid, spawnSession);
-          return 'stopped';
+          stoppedAny = true; continue;
         }
         if (requestedSessionId) rememberVerifiedExit(requestedSessionId);
         if (confirmedSessionId) rememberVerifiedExit(confirmedSessionId);
@@ -1085,9 +1100,11 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
         pidToConfirmedSessionId.delete(pid);
         if (persistedResumeProcesses.delete(pid)) persistResumeProcesses();
         releaseRecoveredSpawnDedupe(pid, existingSessionIdByChildPid, spawnSession);
-        return 'already_gone';
+        alreadyGoneAny = true;
       }
 
+      if (stoppedAny) return 'stopped';
+      if (alreadyGoneAny) return 'already_gone';
       if (hasVerifiedExit(sessionId)) {
         logger.debug(`[RUNNER RUN] Session ${sessionId} was previously observed exited`);
         return 'already_gone';

@@ -121,6 +121,20 @@ describe('parseAgyAsyncTaskMessage', () => {
         expect(isError).toBe(true)
         expect(body).toContain('The command failed with exit code: 2')
         expect(body).not.toContain('<SYSTEM_MESSAGE>')
-        expect(body).not.toContain('[Message]')
+                expect(body).not.toContain('[Message]')
+    })
+
+    it('recognizes Command exited with code 0/non-zero, killed tasks, and subagent replies', () => {
+        const okTask = parseAgyAsyncTaskMessage('<SYSTEM_MESSAGE>\n[Message] timestamp=2026-10-21T00:00:00Z sender=u/task-7 content=Task id "u/task-7" finished with result:\nCommand exited with code 0.\n</SYSTEM_MESSAGE>')
+        expect(okTask.summary).toBe('task-7 · completed')
+        expect(okTask.isError).toBe(false)
+
+        const errTask = parseAgyAsyncTaskMessage('<SYSTEM_MESSAGE>\n[Message] timestamp=2026-10-21T00:00:00Z sender=u/task-8 content=Task id "u/task-8" finished with result:\nCommand exited with code 3.\n</SYSTEM_MESSAGE>')
+        expect(errTask.summary).toBe('task-8 · failed (exit 3)')
+        expect(errTask.isError).toBe(true)
+
+        const subReply = parseAgyAsyncTaskMessage('<SYSTEM_MESSAGE>\n[Message] timestamp=2026-10-21T00:00:00Z sender=87654321-abcd-ef00 content=Audit complete.\n</SYSTEM_MESSAGE>')
+        expect(subReply.summary).toBe('subagent 87654321 · replied')
+        expect(subReply.isError).toBe(false)
     })
 })

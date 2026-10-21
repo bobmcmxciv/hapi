@@ -21,6 +21,29 @@ export function extractBackgroundTaskDelta(messageContent: unknown): { started: 
     const data = isObject(record.content.data) ? record.content.data : null
     if (!data) return null
 
+    if (data.type === 'agy_tool_action') {
+        const text = typeof data.content === 'string' ? data.content : ''
+        if (data.name === 'SYSTEM_MESSAGE') {
+            if (text.includes('All your subagents and background tasks have been stopped')) {
+                return { started: 0, completed: 999 }
+            }
+            if (
+                /\bTask id\s+"[^"]+"\s+(?:finished|failed|was killed|completed)/i.test(text)
+                || /\[Message\]\s+timestamp=\S+\s+sender=(?!system\b)\S+/i.test(text)
+            ) {
+                return { started: 0, completed: 1 }
+            }
+            return null
+        }
+        if (
+            text.includes('Tool is running as a background task with task id:')
+            || (data.toolName === 'invoke_subagent' && text.length > 0 && !/^Encountered error/i.test(text))
+        ) {
+            return { started: 1, completed: 0 }
+        }
+        return null
+    }
+
     const started = countTaskStarts(record.content)
     const completed = data.type === 'user' ? countTaskCompletions(data) : 0
 

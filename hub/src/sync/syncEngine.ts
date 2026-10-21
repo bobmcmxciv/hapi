@@ -1612,6 +1612,10 @@ async uploadScratchlistAttachment(
         // sessions. This runs ONLY here, on the explicit archive path — NOT in
         // the shared handleSessionEnd/expireInactive — so naturally-ended or
         // timed-out sessions are never mistaken for user-archived ones.
+        const machineId = this.sessionCache.getSession(sessionId)?.metadata?.machineId
+        if (machineId && typeof (this.rpcGateway as { stopRunnerSession?: unknown }).stopRunnerSession === 'function') {
+            await this.rpcGateway.stopRunnerSession(machineId, sessionId).catch(() => {})
+        }
         this.markSessionArchived(sessionId)
     }
 
@@ -1622,7 +1626,15 @@ async uploadScratchlistAttachment(
             if (!latest) return
             if (latest.metadata?.archivedAt != null) return
 
-            const nextMetadata = { ...(latest.metadata ?? {}), archivedAt: Date.now() }
+            const now = Date.now()
+            const nextMetadata = {
+                ...(latest.metadata ?? {}),
+                archivedAt: now,
+                lifecycleState: 'archived',
+                lifecycleStateSince: latest.metadata?.lifecycleState === 'archived' && typeof latest.metadata.lifecycleStateSince === 'number'
+                    ? latest.metadata.lifecycleStateSince
+                    : now
+            }
             const result = this.store.sessions.updateSessionMetadata(
                 sessionId,
                 nextMetadata,
@@ -2945,6 +2957,7 @@ async uploadScratchlistAttachment(
             this.sessionReadyIds.delete(access.sessionId)
         }
         let piResumeSucceeded = false
+        this.sessionCache.setSessionResuming(access.sessionId, true)
         try {
             const includeStoredModelParameters = flavor !== 'claude' || session.resumeWithSessionModel
             const spawnResult = await this.rpcGateway.spawnSession(
@@ -3137,6 +3150,10 @@ async uploadScratchlistAttachment(
             }
 
             this.sessionCache.markSessionActive(spawnResult.sessionId)
+            const resumedSession = this.sessionCache.getSession(spawnResult.sessionId)
+            if (resumedSession?.metadata?.archivedAt != null || resumedSession?.metadata?.lifecycleState === 'archived') {
+                await this.sessionCache.clearSessionArchiveMetadata(spawnResult.sessionId).catch(() => {})
+            }
             piResumeSucceeded = true
             if (requiresPiNativeReady) await this.writePiResumeAttempt(access.sessionId, namespace, null)
             if (resumedStartingMode === 'pty') {
@@ -3158,6 +3175,7 @@ async uploadScratchlistAttachment(
             if (resumedStartingMode === 'pty') {
                 this.ptyResumeInFlightIds.delete(access.sessionId)
             }
+            this.sessionCache.setSessionResuming(access.sessionId, false)
             if (requiresPiNativeReady) {
                 this.piResumeInFlightIds.delete(access.sessionId)
                 if (!piResumeSucceeded && this.sessionCache.getSession(access.sessionId)?.metadata?.piResumeAttempt?.state === 'resuming') {
@@ -3279,6 +3297,7 @@ async uploadScratchlistAttachment(
                 lifecycleState: metadata.lifecycleState,
                 archivedBy: metadata.archivedBy,
                 archiveReason: metadata.archiveReason,
+                archivedAt: metadata.archivedAt,
                 lifecycleStateSince: metadata.lifecycleStateSince
             }
 

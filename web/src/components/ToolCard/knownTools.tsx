@@ -133,6 +133,7 @@ export const knownTools: Record<string, {
             const task = getInputStringAny(opts.input, ['task'])
             return task ? `${task} log` : 'Inspecting task log'
         },
+        subtitle: (opts) => getInputStringAny(opts.input, ['summary']) ?? opts.description ?? null,
         minimal: true
     },
     // agy async/background task result (SYSTEM_MESSAGE). description carries the

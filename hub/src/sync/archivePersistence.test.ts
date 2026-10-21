@@ -65,6 +65,25 @@ describe('archive persistence', () => {
         expect(toSessionSummary(after!).metadata?.archivedAt).toBeUndefined()
     })
 
+    it('ignores stray session-alive heartbeats for an archived session until explicitly resumed', async () => {
+        const store = new Store(':memory:')
+        const engine = createEngine(store)
+
+        const session = newSession(engine, 'archive-resurrect-guard')
+        await engine.archiveSession(session.id)
+        expect(engine.getSession(session.id)?.active).toBe(false)
+        expect(engine.getSession(session.id)?.metadata?.lifecycleState).toBe('archived')
+
+        engine.handleSessionAlive({ sid: session.id, time: Date.now() + 5_000, thinking: true })
+        expect(engine.getSession(session.id)?.active).toBe(false)
+
+        await (engine as any).sessionCache.clearSessionArchiveMetadata(session.id)
+        engine.handleSessionAlive({ sid: session.id, time: Date.now() + 10_000, thinking: false })
+        expect(engine.getSession(session.id)?.active).toBe(true)
+        expect(engine.getSession(session.id)?.metadata?.archivedAt).toBeUndefined()
+        expect(engine.getSession(session.id)?.metadata?.lifecycleState).toBeUndefined()
+    })
+
     it('does NOT mark timed-out (expireInactive) sessions as archived', () => {
         const store = new Store(':memory:')
         const engine = createEngine(store)

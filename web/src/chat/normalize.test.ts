@@ -268,11 +268,11 @@ describe('normalizeDecryptedMessage', () => {
     it('carries the per-turn model on agy_message for the metadata footer', () => {
         const message = makeMessage({
             role: 'agent',
-            content: { type: 'output', data: { type: 'agy_message', content: 'hi', model: 'Gemini 3.5 Flash (Medium)' } }
+            content: { type: 'output', data: { type: 'agy_message', content: 'hi', model: 'claude-opus-5-5-medium' } }
         })
         const normalized = normalizeDecryptedMessage(message)
         if (!normalized || normalized.role !== 'agent') throw new Error('Expected agent message')
-        expect(normalized.model).toBe('Gemini 3.5 Flash (Medium)')
+        expect(normalized.model).toBe('claude-opus-5-5-medium')
     })
 
     it('agy_message without a model leaves model null (no footer)', () => {
@@ -1484,7 +1484,6 @@ describe('normalizeDecryptedMessage', () => {
         })
     })
 
-
     it('maps agy 1.4.3+ read_file, write_file, edit_file, and CHECKPOINT tool actions', () => {
         const readMsg = makeMessage({
             role: 'agent',
@@ -1562,6 +1561,65 @@ describe('normalizeDecryptedMessage', () => {
                     type: 'tool-call',
                     name: 'Checkpoint',
                     description: 'Context checkpoint'
+                },
+                {
+                    type: 'tool-result',
+                    content: ''
+                }
+            ]
+        })
+
+        const subagentMsg = makeMessage({
+            role: 'agent',
+            content: {
+                type: 'output',
+                data: {
+                    type: 'agy_tool_action',
+                    name: 'INVOKE_SUBAGENT',
+                    toolName: 'invoke_subagent',
+                    input: { TypeName: 'research', Role: 'Codebase Researcher', Prompt: 'Check tests', Model: 'flash' },
+                    content: 'Subagent started'
+                }
+            }
+        })
+        expect(normalizeDecryptedMessage(subagentMsg)).toMatchObject({
+            role: 'agent',
+            content: [
+                {
+                    type: 'tool-call',
+                    name: 'Task',
+                    input: {
+                        description: 'Codebase Researcher',
+                        prompt: 'Check tests',
+                        subagent_type: 'research',
+                        model: 'flash'
+                    }
+                },
+                {
+                    type: 'tool-result',
+                    content: 'Subagent started'
+                }
+            ]
+        })
+
+        const taskLogMsg = makeMessage({
+            role: 'agent',
+            content: {
+                type: 'output',
+                data: {
+                    type: 'agy_message',
+                    content: 'Inside the task-246 log: Running unit tests'
+                }
+            }
+        })
+        expect(normalizeDecryptedMessage(taskLogMsg)).toMatchObject({
+            role: 'agent',
+            content: [
+                {
+                    type: 'tool-call',
+                    name: 'AgyTaskLog',
+                    input: { task: 'task-246', summary: 'Running unit tests' },
+                    description: 'Running unit tests'
                 },
                 {
                     type: 'tool-result',

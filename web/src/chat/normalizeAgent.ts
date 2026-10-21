@@ -521,8 +521,20 @@ export function parseAgyAsyncTaskMessage(raw: string): { body: string; summary: 
     let outcome = ''
     if (failMatch) outcome = `failed (exit ${failMatch[1]})`
     else if (/completed successfully/i.test(body)) outcome = 'completed'
-    const summary = outcome ? `${taskLabel} · ${outcome}` : taskLabel
-    return { body, summary, isError }
+    const senderMatch = raw.match(/\bsender=(?!system\b)(\S+)/)
+    const resolvedLabel = taskMatch ? taskLabel : senderMatch ? `subagent ${senderMatch[1].slice(0, 8)}` : taskLabel
+    const exitMatch = body.match(/Command exited with code\s+(\d+)/i)
+    const exitCode = failMatch ? Number(failMatch[1]) : exitMatch ? Number(exitMatch[1]) : null
+    const killed = /\bwas killed\b/i.test(body)
+    const computedError = isError || (exitCode !== null && exitCode !== 0) || killed
+    if (!outcome) {
+        if (exitCode !== null && exitCode !== 0) outcome = `failed (exit ${exitCode})`
+        else if (killed) outcome = 'killed'
+        else if (exitCode === 0) outcome = 'completed'
+        else if (senderMatch && !taskMatch) outcome = 'replied'
+    }
+    const summary = outcome ? `${resolvedLabel} · ${outcome}` : resolvedLabel
+    return { body, summary, isError: computedError }
 }
 
 // Canonical tool id for agy's ERROR_MESSAGE entries — the runtime's feedback that
@@ -587,6 +599,15 @@ const AGY_TOOL_SPECS: Record<string, AgyToolSpec> = {
     },
     grep_search: { name: 'Grep', buildInput: (a) => ({ pattern: a.Query ?? a.SearchQuery, path: a.SearchDirectory ?? a.SearchPath }) },
     list_dir: { name: 'LS', buildInput: (a) => ({ path: a.DirectoryPath ?? a.AbsolutePath }) },
+    invoke_subagent: {
+        name: 'Task',
+        buildInput: (a) => ({
+            description: a.Role ?? a.TypeName,
+            prompt: a.Prompt,
+            subagent_type: a.TypeName,
+            model: a.Model,
+        }),
+    },
 }
 
 // agy arg keys → the canonical input field names the ToolCard presentations read
@@ -815,7 +836,7 @@ export function normalizeAgentRecord(
             // Send-Message-style chip, not a full agent bubble. The actual task
             // result renders in its own background-task card, so this stays a thin
             // marker of what the agent is doing.
-            const taskLog = text.match(/^Inside the task-(\d+) log\b/)
+            const taskLog = text.match(/^Inside the task-(\d+) log\b(?::\s*(.+))?/)
             if (taskLog) {
                 const toolCallId = `${messageId}:tasklog`
                 return {
@@ -825,7 +846,7 @@ export function normalizeAgentRecord(
                     role: 'agent',
                     isSidechain: false,
                     content: [
-                        { type: 'tool-call', id: toolCallId, name: AGY_TASK_LOG_TOOL, input: { task: `task-${taskLog[1]}` }, description: null, uuid: messageId, parentUUID: null },
+                        { type: 'tool-call', id: toolCallId, name: AGY_TASK_LOG_TOOL, input: { task: `task-${taskLog[1]}`, ...(taskLog[2]?.trim() ? { summary: taskLog[2].trim() } : {}) }, description: taskLog[2]?.trim() || null, uuid: messageId, parentUUID: null },
                         { type: 'tool-result', tool_use_id: toolCallId, content: '', is_error: false, uuid: messageId, parentUUID: null }
                     ],
                     meta
