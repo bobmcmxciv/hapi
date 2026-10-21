@@ -10,7 +10,7 @@ import { bootstrapExistingSession, bootstrapSession } from '@/agent/sessionFacto
 import { registerLocalHandoffHandler } from '@/agent/localHandoff';
 import { createModeChangeHandler, createRunnerLifecycle, setControlledByUser } from '@/agent/runnerLifecycle';
 import { registerSessionConfigRpc } from '@/agent/sessionConfigRpc';
-import { formatMessageWithAttachments } from '@/utils/attachmentFormatter';
+import { formatAgyUserMessage } from './utils/agyBoost';
 import { getInvokedCwd } from '@/utils/invokedCwd';
 import type { SessionEffort, SessionModel } from '@/api/types';
 import { startHookServer } from '@/claude/utils/startHookServer';
@@ -257,11 +257,17 @@ export async function runAgy(opts: {
     };
 
     session.onUserMessage((message, localId) => {
-        const formattedText = formatMessageWithAttachments(message.content.text, message.content.attachments);
+        const formatted = formatAgyUserMessage(message.content.text, message.content.attachments);
         const mode: AgyMode = {
             permissionMode: currentPermissionMode,
         };
-        messageQueue.push(formattedText, mode, localId);
+        // Slash commands must not be joined with adjacent queued prompts: a
+        // leading /boost would otherwise become ordinary text in a batch.
+        if (formatted.isolate) {
+            messageQueue.pushIsolated(formatted.message, mode, localId);
+        } else {
+            messageQueue.push(formatted.message, mode, localId);
+        }
     });
 
     session.onCancelQueuedMessage((localId) => {

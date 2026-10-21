@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
 import type { SubscriptionSnapshot } from '../domain'
+import { collectAntigravity, findAntigravityBinary, type runAntigravityUsage } from './antigravity'
 import {
     collectAnthropic,
     collectDeepSeek,
@@ -28,7 +29,7 @@ import {
  */
 
 export type CollectorConfig = {
-    /** hub 基址,如 `https://bob.18852271093.top`。 */
+    /** hub 基址,如 `https://hapi.bobmcmxciv.xin`。 */
     hubUrl: string
     /** hub 的 cliApiToken,用来换 gateway JWT。 */
     hubToken: string
@@ -38,6 +39,12 @@ export type CollectorConfig = {
     intervalMs?: number
     /** 读 Claude 凭据的 home 目录,默认 os.homedir()。测试用它指向空目录做隔离。 */
     homeDir?: string
+    /** null disables auto-discovery; otherwise use this CLI path or find agy locally. */
+    antigravityBinary?: string | null
+    /** Stable display key when multiple Antigravity accounts are used on one machine. */
+    antigravityAccountKey?: string
+    /** Test injection point. */
+    runAntigravityUsage?: typeof runAntigravityUsage
     /** 是否在 startCollector 返回前立刻跑一轮,默认 true(生产要的就是启动即有数据)。
      *  测试关掉它,好精确计数请求次数。 */
     eager?: boolean
@@ -98,6 +105,8 @@ export function configFromEnv(env: Record<string, string | undefined> = process.
             hubToken,
             machine: env.HAPI_SUB_MACHINE?.trim() || hostname(),
             intervalMs: Number.isFinite(parsedInterval) && parsedInterval >= 30_000 ? parsedInterval : 5 * 60 * 1000,
+            antigravityBinary: env.HAPI_SUB_AGY_BIN?.trim() || undefined,
+            antigravityAccountKey: env.HAPI_SUB_AGY_ACCOUNT?.trim() || 'default',
             credentials: {
                 // 显式给了就用给的,否则从 CLI 凭据文件读(vircs 上就是这条路)。
                 anthropicAccessToken: env.HAPI_SUB_ANTHROPIC_TOKEN?.trim() || null,
@@ -125,6 +134,9 @@ export async function collectAll(config: CollectorConfig): Promise<SubscriptionS
     if (config.credentials.deepseekApiKey) jobs.push(collectDeepSeek(ctx, config.credentials.deepseekApiKey))
     if (config.credentials.kimiApiKey) jobs.push(collectKimi(ctx, config.credentials.kimiApiKey))
     if (config.credentials.glmApiKey) jobs.push(collectGlm(ctx, config.credentials.glmApiKey))
+    const agyBinary = config.antigravityBinary === null ? null
+        : config.antigravityBinary ?? findAntigravityBinary(config.homeDir)
+    if (agyBinary) jobs.push(collectAntigravity(ctx, agyBinary, config.antigravityAccountKey, config.runAntigravityUsage))
 
     // 适配器自己已保证不 throw,这里再兜一层:某个适配器万一漏了,也不能带崩整轮。
     const settled = await Promise.allSettled(jobs)

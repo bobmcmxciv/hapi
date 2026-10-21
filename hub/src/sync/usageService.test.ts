@@ -17,6 +17,34 @@ function addAgentMessage(store: Store, sessionId: string, content: unknown, crea
 }
 
 describe('usage service', () => {
+    it('deduplicates Antigravity generations and includes cache exactly once in totals', () => {
+        const store = new Store(':memory:')
+        try {
+            const session = store.sessions.getOrCreateSession(
+                'agy-usage-test', { path: '/test', host: 'vircs', flavor: 'agy' }, null, 'default', 'latest-model',
+            )
+            const message = {
+                type: 'output',
+                data: {
+                    type: 'agy_message', messageId: 'agy:brain:7', model: 'gemini-4-argon',
+                    usage: { input_tokens: 2830, output_tokens: 585, cache_creation_input_tokens: 0, cache_read_input_tokens: 222865 },
+                },
+            }
+            addAgentMessage(store, session.id, message)
+            addAgentMessage(store, session.id, message)
+            const result = getUsageSummary(store, 'default', 'all')
+            expect(result.totals.requests).toBe(1)
+            expect(result.totals.inputTokens).toBe(225695)
+            expect(result.totals.outputTokens).toBe(585)
+            expect(result.totals.cacheReadTokens).toBe(222865)
+            expect(result.totals.totalTokens).toBe(226280)
+            expect(result.byAgent.find(row => row.key === 'agy')?.totalTokens).toBe(226280)
+            expect(result.byModel.find(row => row.key === 'gemini-4-argon')?.totalTokens).toBe(226280)
+        } finally {
+            store.close()
+        }
+    })
+
     it('deduplicates Claude stream fragments and normalizes cached input', () => {
         const store = new Store(':memory:')
         const session = store.sessions.getOrCreateSession(

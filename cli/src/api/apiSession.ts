@@ -10,6 +10,7 @@ import { AsyncLock } from '@/utils/lock'
 import type { RawJSONLines } from '@/claude/types'
 import { configuration } from '@/configuration'
 import { extractUserRequest } from '@/agy/utils/agySessionScanner'
+import type { AgyTranscriptEntry } from '@/agy/utils/agyTranscriptTypes'
 import { AGENT_MESSAGE_PAYLOAD_TYPE } from "@hapi/protocol"
 import type { SessionEndReason } from '@hapi/protocol'
 import type { ClientToServerEvents, ServerToClientEvents, TerminalOutputPayload, Update } from '@hapi/protocol'
@@ -869,7 +870,7 @@ export class ApiSessionClient extends EventEmitter {
     }
 
     sendAgySessionMessage(
-        entry: { type: string; content?: string; tool_calls?: { name: string; args: Record<string, unknown> }[]; step_index?: number; model?: string },
+        entry: Pick<AgyTranscriptEntry, 'type' | 'content' | 'tool_calls' | 'model' | 'usage' | 'usageId'> & Partial<Pick<AgyTranscriptEntry, 'step_index' | 'created_at'>>,
         conversationId?: string,
         // The tool CALL (name + args) that produced this action entry, paired by
         // the launcher from the preceding PLANNER_RESPONSE. agy splits the
@@ -932,7 +933,16 @@ export class ApiSessionClient extends EventEmitter {
         } else {
             // Tag the agent response with the model that produced it (per-turn),
             // enriched by the scanner from the conversation DB.
-            data = { type: 'agy_message', content: entry.content ?? '', model: entry.model }
+            data = {
+                type: 'agy_message',
+                content: entry.content ?? '',
+                model: entry.model,
+                ...(entry.created_at ? { timestamp: entry.created_at } : {}),
+                ...(conversationId != null && entry.step_index != null ? {
+                    messageId: `agy:${conversationId}:${entry.usageId ?? entry.step_index}`,
+                    usage: entry.usage,
+                } : {}),
+            }
         }
         this.socket.emit('message', {
             sid: this.sessionId,

@@ -15,3 +15,5 @@ if (process.argv[2] === 'hook-forwarder') {
     const { runCli } = await import('./commands/runCli')
     await runCli()
 }
+
+export {}

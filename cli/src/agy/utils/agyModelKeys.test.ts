@@ -3,13 +3,12 @@ import { buildAgyModelNavigationKeys, buildAgyModelPickerTarget, findAgyCurrentM
 
 describe('buildAgyModelPickerTarget', () => {
     it.each([
-        ['gemini-3.6-flash-high', 0, 2, 'Gemini 3.6 Flash (High)'],
-        ['gemini-3.5-flash-low', 1, 0, 'Gemini 3.5 Flash (Low)'],
-        ['gemini-3.1-pro-high', 2, 2, 'Gemini 3.1 Pro (High)'],
-        ['claude-sonnet-4-6', 3, null, 'Claude Sonnet 4.6 (Thinking)'],
-        ['claude-opus-4-6-thinking', 4, null, 'Claude Opus 4.6 (Thinking)'],
-        ['gpt-oss-120b-medium', 5, null, 'GPT-OSS 120B (Medium)'],
-    ] as const)('maps %s to the verified AGY 1.1.5 picker row', (modelId, row, effort, label) => {
+        ['gemini-4-argon-high', 0, 2, 'Gemini 4 Argon (High)'],
+        ['gemini-3.8-flash-low', 1, 0, 'Gemini 3.8 Flash (Low)'],
+        ['claude-opus-5-5-high', 2, 2, 'Claude Opus 5.5 (High)'],
+        ['claude-sonnet-5-5-medium', 3, 1, 'Claude Sonnet 5.5 (Medium)'],
+        ['gpt-oss-120b-medium', 4, null, 'GPT-OSS 120B (Medium)'],
+    ] as const)('maps %s to the verified AGY 1.4.2 picker row', (modelId, row, effort, label) => {
         expect(buildAgyModelPickerTarget(modelId)).toEqual({ row, effort, label })
     })
 
@@ -22,11 +21,11 @@ describe('buildAgyModelPickerTarget', () => {
 describe('AGY model picker navigation', () => {
     it('finds the current row and moves relatively without relying on Home', () => {
         const picker = [
-            '  Gemini 3.6 Flash',
-            '> Gemini 3.5 Flash             (current)',
-            '  Gemini 3.1 Pro',
+            '  Gemini 4 Argon',
+            '> Gemini 3.8 Flash             (current)',
+            '  Claude Opus 5.5',
         ].join('\n')
-        const target = buildAgyModelPickerTarget('gemini-3.6-flash-low')
+        const target = buildAgyModelPickerTarget('gemini-4-argon-low')
 
         expect(findAgyCurrentModelRow(picker)).toBe(1)
         expect(findAgyCurrentModelRow(picker.replaceAll('\n', ''))).toBe(1)
@@ -34,12 +33,12 @@ describe('AGY model picker navigation', () => {
     })
 
     it('moves down from the current row and does not move vertically for the same row', () => {
-        const target = buildAgyModelPickerTarget('gemini-3.1-pro-high')
+        const target = buildAgyModelPickerTarget('claude-opus-5-5-high')
         expect(buildAgyModelNavigationKeys(target, 0)).toBe(`${'\x1b[B'.repeat(2)}${'\x1b[D'.repeat(3)}${'\x1b[C'.repeat(2)}`)
         expect(buildAgyModelNavigationKeys(target, 2)).toBe(`${'\x1b[D'.repeat(3)}${'\x1b[C'.repeat(2)}`)
     })
 
     it('fails closed when the picker does not identify its current row', () => {
-        expect(findAgyCurrentModelRow('Switch Model\n  Gemini 3.6 Flash')).toBeNull()
+        expect(findAgyCurrentModelRow('Switch Model\n  Gemini 4 Argon')).toBeNull()
     })
 })

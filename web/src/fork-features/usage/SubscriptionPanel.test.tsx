@@ -185,6 +185,23 @@ describe('translateWindowLabel — 标签跟随界面语言，不吃采集器的
 })
 
 describe('SubscriptionPanel 渲染', () => {
+    it('Antigravity 卡片显示各模型组的剩余额度，而不是已用比例', async () => {
+        mockSummary([claudeSnapshot({
+            provider: 'antigravity', account_key: 'default', plan_name: null,
+            windows: [
+                { key: 'agy:gemini-weekly', label: 'Gemini Models · Weekly Limit Remaining', used_percent: 0,
+                    reset_at: null, severity: 'normal', is_active: false },
+                { key: 'agy:3p-5h', label: 'Claude and GPT models · Five Hour Limit Remaining', used_percent: 4.6,
+                    reset_at: null, severity: 'normal', is_active: false }
+            ]
+        })])
+        renderPanel()
+        await waitFor(() => expect(screen.getByText('Gemini models · weekly quota')).toBeTruthy())
+        expect(screen.getByText('Claude/GPT models · 5-hour quota')).toBeTruthy()
+        expect(screen.getByText('100% remaining')).toBeTruthy()
+        expect(screen.getByText('95.4% remaining')).toBeTruthy()
+    })
+
     it('渲染真实 Claude 快照的三个窗口（含 Fable）', async () => {
         mockSummary([claudeSnapshot()])
         renderPanel()

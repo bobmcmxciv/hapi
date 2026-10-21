@@ -93,6 +93,18 @@ If you use the dev-only workaround, assume MITM risk; do not use on public netwo
 
 </details>
 
+## Generated-file downloads returning 507
+
+Generated files and inline media are cached under `HAPI_BLOB_DIR` (default: `~/.hapi/blobs`). New uploads and uncached downloads return `507` when storing the file would leave less than `HAPI_BLOB_MIN_FREE_BYTES` available on that volume. The default reserve is 2 GiB; deployments may set a larger reserve. Check the actual container mounts and configuration, not just the free space on the CLI machine.
+
+Use `df -h <blob-directory>` and inspect other consumers of the same volume, especially database snapshots. Do not disable the free-space reserve or delete live databases to restore downloads.
+
+For the ECS maintenance scripts in this repository:
+
+- `scripts/hapi-db-maint.sh`: daily verified snapshots, compression, retention of the two latest daily backups, and a 5 GiB free-space reserve before backup or analysis writes. Install alongside `scripts/snapshot-db.js` and `scripts/compress-hapi-backups.sh` in `/root/bin`; the existing cron entry remains unchanged.
+- `scripts/compress-hapi-backups.sh <backup-file> ...`: compress **closed backups only** under `/data/hapi-backups`. Compression is staged on the system disk, compared byte-for-byte with the source, then published before removing the uncompressed copy. Insufficient publication space leaves the original intact.
+- Restore a compressed snapshot to a separate file with `gzip -dc backup.db.gz > restored.db`; validate it before any deliberate database replacement. Never redirect this command over the running database.
+
 ## Background service deployment
 
 Keep HAPI running persistently so it survives terminal closes, system restarts, and continues running in the background.

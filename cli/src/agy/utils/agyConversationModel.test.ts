@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { resolveAgyTurnModels, resolveAgyTurnModelsFromRows } from './agyConversationModel'
+import { resolveAgyTurnModels, resolveAgyTurnModelsFromRows, resolveAgyTurnMetadataFromRows } from './agyConversationModel'
 
 function varint(value: number): Buffer {
     const bytes: number[] = []
@@ -17,6 +17,10 @@ function field(number: number, value: Uint8Array | string): Buffer {
     return Buffer.concat([varint((number << 3) | 2), varint(data.length), data])
 }
 
+function countField(number: number, value: number): Buffer {
+    return Buffer.concat([varint(number << 3), varint(value)])
+}
+
 function step(idx: number, invocation: string, metadata = field(12, invocation)) {
     return { kind: 'step' as const, idx, data: metadata }
 }
@@ -29,6 +33,99 @@ function generation(idx: number, invocation: string, model: string, data = Buffe
 }
 
 describe('resolveAgyTurnModelsFromRows', () => {
+    it('prefers the stable response model id over its optional display label', () => {
+        const data = Buffer.concat([
+            field(1, Buffer.concat([field(19, 'gemini-4-argon'), field(21, 'Gemini 4 Argon')])),
+            field(4, 'inv'),
+        ])
+        expect(resolveAgyTurnModelsFromRows([1], [step(1, 'inv'), generation(1, 'inv', 'unused', data)]).get(1))
+            .toBe('gemini-4-argon')
+    })
+
+    it('extracts per-generation tokens with the matching model; output already includes thinking', () => {
+        const usage = Buffer.concat([
+            countField(2, 2830), countField(3, 585), countField(5, 222865),
+            countField(9, 151), countField(10, 434),
+        ])
+        const rows = [
+            step(7, 'inv-a'),
+            generation(30, 'inv-a', 'unused', Buffer.concat([
+                field(1, Buffer.concat([field(19, 'gemini-4-argon'), field(4, usage)])),
+                field(4, 'inv-a'),
+            ])),
+        ]
+        expect(resolveAgyTurnMetadataFromRows([7], rows).get(7)).toEqual({
+            model: 'gemini-4-argon',
+            usageId: 'generation:30',
+            usage: { input_tokens: 2830, output_tokens: 585, cache_creation_input_tokens: 0, cache_read_input_tokens: 222865 },
+        })
+    })
+
+    it('keeps cache writes separate and matches multiple requests by ordinal', () => {
+        const makeGen = (idx: number, model: string, input: number) => generation(idx, 'inv', model, Buffer.concat([
+            field(1, Buffer.concat([
+                field(19, model),
+                field(4, Buffer.concat([countField(2, input), countField(3, 40), countField(4, 20), countField(5, 500)])),
+            ])),
+            field(4, 'inv'),
+        ]))
+        const turns = resolveAgyTurnMetadataFromRows([4, 8], [
+            step(8, 'inv'), makeGen(20, 'model-b', 200),
+            step(4, 'inv'), makeGen(10, 'model-a', 100),
+        ])
+        expect(turns.get(4)).toEqual({
+            model: 'model-a',
+            usageId: 'generation:10',
+            usage: { input_tokens: 100, output_tokens: 40, cache_creation_input_tokens: 20, cache_read_input_tokens: 500 },
+        })
+        expect(turns.get(8)?.usage?.input_tokens).toBe(200)
+        expect(turns.get(8)?.model).toBe('model-b')
+    })
+
+    it('uses explicit generation step links while the next response has no generation yet', () => {
+        const data = Buffer.concat([
+            field(1, Buffer.concat([field(19, 'gemini-4-argon'), field(4, countField(2, 100))])),
+            field(2, Buffer.concat([varint(668), varint(669)])),
+            field(4, 'inv'),
+        ])
+        const turns = resolveAgyTurnMetadataFromRows([668, 669, 670], [
+            step(668, 'inv'), step(669, 'inv'), step(670, 'inv'),
+            generation(246, 'inv', 'unused', data),
+        ])
+        expect(turns.get(668)?.usage?.input_tokens).toBe(100)
+        expect(turns.get(668)?.usageId).toBe('generation:246')
+        expect(turns.get(669)?.usageId).toBe('generation:246')
+        expect(turns.get(670)).toBeNull()
+    })
+
+    it('does not use ordinal guesses for malformed or conflicting explicit step links', () => {
+        const data = (indexes: Buffer) => Buffer.concat([
+            field(1, field(19, 'model')), field(2, indexes), field(4, 'inv'),
+        ])
+        const rows = [step(1, 'inv'), generation(1, 'inv', 'unused', data(Buffer.from([0x80])))]
+        expect(resolveAgyTurnMetadataFromRows([1], rows).get(1)).toBeNull()
+        rows[1] = generation(1, 'inv', 'unused', data(varint(1)))
+        rows.push(generation(2, 'inv', 'unused', data(varint(1))))
+        expect(resolveAgyTurnMetadataFromRows([1], rows).get(1)).toBeNull()
+    })
+
+    it('does not invent usage for absent, empty, malformed or unsafe counters', () => {
+        const invalid = [
+            Buffer.alloc(0),
+            Buffer.from([16, 0x80]),
+            Buffer.concat([countField(2, 1), countField(2, 2), countField(3, 10)]),
+            Buffer.concat([field(2, 'not a count'), countField(3, 10)]),
+            Buffer.from([16, ...Array(9).fill(0xff), 1]),
+        ]
+        for (const usage of invalid) {
+            const rows = [step(1, 'inv'), generation(1, 'inv', 'unused', Buffer.concat([
+                field(1, Buffer.concat([field(19, 'model'), field(4, usage)])), field(4, 'inv'),
+            ]))]
+            expect(resolveAgyTurnMetadataFromRows([1], rows).get(1)?.usage).toBeNull()
+        }
+        expect(resolveAgyTurnMetadataFromRows([1], [step(1, 'inv'), generation(1, 'inv', 'model')]).get(1)?.usage).toBeNull()
+    })
+
     it('reads the verified metadata.field12 and data.field4/data.field1.field21 wire paths', () => {
         const rows = [
             step(7, 'inv-a'),
@@ -37,6 +134,22 @@ describe('resolveAgyTurnModelsFromRows', () => {
 
         expect(resolveAgyTurnModelsFromRows([7], rows)).toEqual(new Map([
             [7, 'Gemini 3.5 Flash (Medium)'],
+        ]))
+    })
+
+    it('reads agy 1.4.x generation field 19 without losing old field 21 conversations', () => {
+        const rows = [
+            step(1, 'new-inv'),
+            generation(0, 'new-inv', 'unused', Buffer.concat([
+                field(1, field(19, 'claude-opus-5-5-medium')),
+                field(4, 'new-inv'),
+            ])),
+            step(3, 'old-inv'),
+            generation(1, 'old-inv', 'gemini-3.5-flash-medium'),
+        ]
+        expect(resolveAgyTurnModelsFromRows([1, 3], rows)).toEqual(new Map([
+            [1, 'claude-opus-5-5-medium'],
+            [3, 'gemini-3.5-flash-medium'],
         ]))
     })
 

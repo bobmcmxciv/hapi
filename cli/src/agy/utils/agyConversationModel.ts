@@ -1,5 +1,6 @@
 import { homedir } from 'node:os'
 import { join } from 'node:path'
+import type { AgyTokenUsage } from './agyTranscriptTypes'
 
 const CONVERSATIONS_DIR = join(homedir(), '.gemini', 'antigravity-cli', 'conversations')
 const CANONICAL_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
@@ -12,7 +13,9 @@ export type AgyConversationRow = {
 
 type QueryConversationRows = (brainUuid: string) => Promise<AgyConversationRow[]>
 
-function unknownModels(stepIndexes: readonly number[]): Map<number, string | null> {
+export type AgyTurnMetadata = { model: string | null; usage: AgyTokenUsage | null; usageId: string }
+
+function unknownTurns(stepIndexes: readonly number[]): Map<number, AgyTurnMetadata | null> {
     return new Map(stepIndexes.map((idx) => [idx, null]))
 }
 
@@ -36,41 +39,69 @@ function readVarint(bytes: Uint8Array, start: number): { value: number; next: nu
     return null
 }
 
-function readLengthDelimitedField(bytes: Uint8Array, wantedField: number): Uint8Array | null {
+/** null = absent proto3 field; undefined = malformed wire data. */
+function readField(bytes: Uint8Array, wantedField: number): Uint8Array | number | null | undefined {
     let offset = 0
-    let found: Uint8Array | null = null
+    let found: Uint8Array | number | null = null
     while (offset < bytes.length) {
         const tag = readVarint(bytes, offset)
-        if (!tag || tag.value === 0) return null
+        if (!tag || tag.value < 8) return undefined
         offset = tag.next
         const fieldNumber = Math.floor(tag.value / 8)
         const wireType = tag.value & 7
 
         if (wireType === 2) {
             const length = readVarint(bytes, offset)
-            if (!length) return null
+            if (!length) return undefined
             const end = length.next + length.value
-            if (!Number.isSafeInteger(end) || end > bytes.length) return null
+            if (!Number.isSafeInteger(end) || end > bytes.length) return undefined
             if (fieldNumber === wantedField) {
-                if (found) return null
+                if (found !== null) return undefined
                 found = bytes.subarray(length.next, end)
             }
             offset = end
         } else if (wireType === 0) {
             const value = readVarint(bytes, offset)
-            if (!value) return null
+            if (!value) return undefined
+            if (fieldNumber === wantedField) {
+                if (found !== null) return undefined
+                found = value.value
+            }
             offset = value.next
         } else if (wireType === 1) {
-            if (offset + 8 > bytes.length) return null
+            if (offset + 8 > bytes.length || fieldNumber === wantedField) return undefined
             offset += 8
         } else if (wireType === 5) {
-            if (offset + 4 > bytes.length) return null
+            if (offset + 4 > bytes.length || fieldNumber === wantedField) return undefined
             offset += 4
         } else {
-            return null
+            return undefined
         }
     }
     return found
+}
+
+function readLengthDelimitedField(bytes: Uint8Array, field: number): Uint8Array | null {
+    const value = readField(bytes, field)
+    return value instanceof Uint8Array ? value : null
+}
+
+function generationUsage(generation: Uint8Array): AgyTokenUsage | null {
+    // Verified against agy 1.4.3's embedded protobuf descriptors:
+    // ChatModelMetadata.usage = 4; ModelUsageStats input/output/write/read = 2/3/4/5.
+    // output_tokens already includes thinking_output_tokens (9); never add it again.
+    const bytes = readLengthDelimitedField(generation, 4)
+    if (!bytes) return null
+    const counts = [2, 3, 4, 5].map(field => readField(bytes, field))
+    if (counts.some(value => value !== null && typeof value !== 'number')) return null
+    const [input, output, write, read] = counts.map(value => typeof value === 'number' ? value : 0)
+    if (input + output + write + read === 0) return null
+    return {
+        input_tokens: input,
+        output_tokens: output,
+        cache_creation_input_tokens: write,
+        cache_read_input_tokens: read,
+    }
 }
 
 function decodeText(bytes: Uint8Array | null): string | null {
@@ -88,24 +119,53 @@ function invocationFromStep(data: unknown): string | null {
     return bytes ? decodeText(readLengthDelimitedField(bytes, 12)) : null
 }
 
-function generationMetadata(data: unknown): { invocation: string; model: string | null } | null {
+function generationStepIndexes(bytes: Uint8Array): number[] | null {
+    // CortexStepGeneratorMetadata.step_indices = 2 (packed uint32). These are
+    // authoritative even while a new planner step is ahead of its DB commit.
+    const packed = readField(bytes, 2)
+    if (packed === null) return null
+    if (typeof packed === 'number') return packed <= 0xffffffff ? [packed] : []
+    if (!(packed instanceof Uint8Array)) return []
+    const indexes: number[] = []
+    for (let offset = 0; offset < packed.length;) {
+        const value = readVarint(packed, offset)
+        if (!value || value.value > 0xffffffff) return []
+        indexes.push(value.value)
+        offset = value.next
+    }
+    return indexes
+}
+
+function generationMetadata(data: unknown): {
+    invocation: string; model: string | null; usage: AgyTokenUsage | null; stepIndexes: number[] | null
+} | null {
     const bytes = asBytes(data)
     if (!bytes) return null
     const invocation = decodeText(readLengthDelimitedField(bytes, 4))
     if (!invocation) return null
     const generation = readLengthDelimitedField(bytes, 1)
-    const model = generation ? decodeText(readLengthDelimitedField(generation, 21)) : null
-    return { invocation, model }
+    // ChatModelMetadata.response_model = 19; model_display_name = 21.
+    // Prefer the wire id for stable per-model grouping, with display-name
+    // fallback for older conversations that did not persist response_model.
+    const model = generation
+        ? decodeText(readLengthDelimitedField(generation, 19))
+            ?? decodeText(readLengthDelimitedField(generation, 21))
+        : null
+    return {
+        invocation, model, usage: generation ? generationUsage(generation) : null,
+        stepIndexes: generationStepIndexes(bytes),
+    }
 }
 
-export function resolveAgyTurnModelsFromRows(
+export function resolveAgyTurnMetadataFromRows(
     stepIndexes: readonly number[],
     rows: readonly AgyConversationRow[],
-): Map<number, string | null> {
-    const result = unknownModels(stepIndexes)
+): Map<number, AgyTurnMetadata | null> {
+    const result = unknownTurns(stepIndexes)
     const requested = new Set(stepIndexes)
     const stepsByInvocation = new Map<string, number[]>()
-    const generationsByInvocation = new Map<string, Array<{ idx: number; model: string | null }>>()
+    const generationsByInvocation = new Map<string, Array<AgyTurnMetadata & { idx: number; stepIndexes: number[] | null }>>()
+    const explicitSteps = new Set<number>()
 
     for (const row of rows) {
         if (!Number.isSafeInteger(row.idx)) continue
@@ -119,19 +179,32 @@ export function resolveAgyTurnModelsFromRows(
             const metadata = generationMetadata(row.data)
             if (!metadata) continue
             const generations = generationsByInvocation.get(metadata.invocation) ?? []
-            generations.push({ idx: row.idx, model: metadata.model })
+            const turn = { model: metadata.model, usage: metadata.usage, usageId: `generation:${row.idx}` }
+            generations.push({ idx: row.idx, ...turn, stepIndexes: metadata.stepIndexes })
             generationsByInvocation.set(metadata.invocation, generations)
+            for (const idx of new Set(metadata.stepIndexes ?? [])) {
+                if (!requested.has(idx)) continue
+                // Conflicting generations are ambiguous; do not attribute by guess.
+                result.set(idx, explicitSteps.has(idx) ? null : turn)
+                explicitSteps.add(idx)
+            }
         }
     }
 
     for (const [invocation, steps] of stepsByInvocation) {
         const generations = generationsByInvocation.get(invocation)
         if (!generations || steps.length !== generations.length) continue
+        // Old conversations without explicit links still use the verified ordinal
+        // mapping. Never mix that fallback into an explicitly linked invocation.
+        if (generations.some(generation => generation.stepIndexes !== null)) continue
         steps.sort((a, b) => a - b)
         generations.sort((a, b) => a.idx - b.idx)
         for (let ordinal = 0; ordinal < steps.length; ordinal++) {
             const stepIndex = steps[ordinal]
-            if (requested.has(stepIndex)) result.set(stepIndex, generations[ordinal].model)
+            if (requested.has(stepIndex) && !explicitSteps.has(stepIndex)) {
+                const { model, usage, usageId } = generations[ordinal]
+                result.set(stepIndex, { model, usage, usageId })
+            }
         }
     }
     return result
@@ -157,16 +230,33 @@ async function queryConversationRows(brainUuid: string): Promise<AgyConversation
 }
 
 /** Best-effort batch resolver. Database absence/locks/format drift never throw. */
+export async function resolveAgyTurnMetadata(
+    brainUuid: string | null | undefined,
+    stepIndexes: readonly number[],
+    queryRows: QueryConversationRows = queryConversationRows,
+): Promise<Map<number, AgyTurnMetadata | null>> {
+    const unknown = unknownTurns(stepIndexes)
+    if (!brainUuid || !CANONICAL_UUID_RE.test(brainUuid) || stepIndexes.length === 0) return unknown
+    try {
+        return resolveAgyTurnMetadataFromRows(stepIndexes, await queryRows(brainUuid))
+    } catch {
+        return unknown
+    }
+}
+
+export function resolveAgyTurnModelsFromRows(
+    stepIndexes: readonly number[],
+    rows: readonly AgyConversationRow[],
+): Map<number, string | null> {
+    return new Map([...resolveAgyTurnMetadataFromRows(stepIndexes, rows)]
+        .map(([idx, metadata]) => [idx, metadata?.model ?? null]))
+}
+
 export async function resolveAgyTurnModels(
     brainUuid: string | null | undefined,
     stepIndexes: readonly number[],
     queryRows: QueryConversationRows = queryConversationRows,
 ): Promise<Map<number, string | null>> {
-    const unknown = unknownModels(stepIndexes)
-    if (!brainUuid || !CANONICAL_UUID_RE.test(brainUuid) || stepIndexes.length === 0) return unknown
-    try {
-        return resolveAgyTurnModelsFromRows(stepIndexes, await queryRows(brainUuid))
-    } catch {
-        return unknown
-    }
+    return new Map([...await resolveAgyTurnMetadata(brainUuid, stepIndexes, queryRows)]
+        .map(([idx, metadata]) => [idx, metadata?.model ?? null]))
 }

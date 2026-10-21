@@ -46,8 +46,9 @@ function parseUsageEvent(session: StoredSession, message: StoredMessage): UsageE
 
     // Claude stream-json/SDK messages. A stream emits several updates for one
     // assistant message, so the provider's message id is the stable upsert key.
-    if (payload.type === 'output' && data.type === 'assistant') {
-        const assistant = asRecord(data.message)
+    if (payload.type === 'output' && (data.type === 'assistant' || data.type === 'agy_message')) {
+        const isAgy = data.type === 'agy_message'
+        const assistant = isAgy ? data : asRecord(data.message)
         const usage = asRecord(assistant?.usage)
         if (!usage) return null
         const inputTokens = firstCount(usage, 'input_tokens', 'inputTokens')
@@ -55,16 +56,19 @@ function parseUsageEvent(session: StoredSession, message: StoredMessage): UsageE
         const cacheReadTokens = firstCount(usage, 'cache_read_input_tokens', 'cacheReadTokens', 'cachedInputTokens')
         const cacheCreationTokens = firstCount(usage, 'cache_creation_input_tokens', 'cacheCreationTokens', 'cacheWriteInputTokens')
         if (inputTokens + outputTokens + cacheReadTokens + cacheCreationTokens <= 0) return null
-        const providerId = typeof assistant?.id === 'string' ? assistant.id : message.id
+        if (isAgy && (typeof data.messageId !== 'string' || !data.messageId)) return null
+        const providerId = isAgy ? data.messageId
+            : typeof assistant?.id === 'string' ? assistant.id : message.id
         const model = typeof assistant?.model === 'string' && assistant.model.trim()
             ? assistant.model.trim()
-            : null
+            : isAgy ? 'unknown' : null
+        const agyTimestamp = isAgy && typeof data.timestamp === 'string' ? Date.parse(data.timestamp) : NaN
         return {
             sessionId: session.id,
-            sourceKey: `claude|${providerId}`,
+            sourceKey: `${isAgy ? 'agy' : 'claude'}|${providerId}`,
             sourceSeq: message.seq,
-            createdAt: message.createdAt,
-            agent: 'claude',
+            createdAt: Number.isFinite(agyTimestamp) ? agyTimestamp : message.createdAt,
+            agent: isAgy ? 'agy' : 'claude',
             model,
             kind: 'delta',
             inputTokens,
@@ -331,7 +335,7 @@ export function getUsageSummary(
             }
         }
         if (duplicateCumulativeEvent || !isInRange(event) || inputTokens + outputTokens + cacheReadTokens + cacheCreationTokens <= 0) continue
-        const normalizedInputTokens = event.agent === 'claude'
+        const normalizedInputTokens = event.agent === 'claude' || event.agent === 'agy'
             ? inputTokens + cacheReadTokens + cacheCreationTokens
             : inputTokens
         addTotals(totals, normalizedInputTokens, outputTokens, cacheReadTokens, cacheCreationTokens)

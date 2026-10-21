@@ -1,6 +1,9 @@
 import type { SlashCommand } from './apiTypes'
 
 export const BUILTIN_SLASH_COMMANDS = {
+    agy: [
+        { name: 'boost', description: 'Deep research/reasoning for one task (paid plan): /boost <task>', source: 'builtin' },
+    ],
     claude: [
         { name: 'clear', description: 'Clear conversation history and free up context', source: 'builtin' },
         { name: 'compact', description: 'Clear conversation history but keep a summary in context', source: 'builtin' },

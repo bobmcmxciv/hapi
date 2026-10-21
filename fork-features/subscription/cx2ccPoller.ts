@@ -2,11 +2,13 @@ import type { SubscriptionStore } from './subscriptionStore'
 import type { SubscriptionSnapshot, SubscriptionWindow } from './domain'
 
 /**
- * cx2cc 轮询器:hub 侧定时器,每隔 `intervalMs` 拉一次 cx2cc-api/usage,
+ * cx2cc 轮询器:hub 侧定时器,每隔 `intervalMs` 拉一次 cx2cc 的 /api/usage,
  * 把响应翻译成通用 SubscriptionSnapshot 写入 store。
  *
- * cx2cc 端点是**hub 自己所在 ECS 上的另一个反代**(bob.18852271093.top/cx2cc-api/usage),
+ * cx2cc 端点是**hub 自己所在 ECS 上的另一个反代**(cx2cc.bobmcmxciv.xin/api/usage),
  * hub 直连即可,不用走 vircs collector——这是所有 provider 里唯一"hub 直取"的一路。
+ * 2026-10-01 起反代后面多了一层 cx2cc-gateway(按 key 鉴权 + 审计),hub 用的是
+ * 网关里单独发给它的那把 key;cx2cc 换 key 时只需改 ECS 上 hapi 的 .env 并重建容器。
  *
  * 关闭:调用返回的 `stop()`,后续采集立即停止,最后一次写入的快照保留在 DB 里
  * (前端会看到 staleness > interval,自然显灰,符合"数据过期"语义)。
@@ -16,7 +18,7 @@ import type { SubscriptionSnapshot, SubscriptionWindow } from './domain'
  */
 
 export type Cx2ccPollerOptions = {
-    /** 完整 URL,一般是 `https://bob.18852271093.top/cx2cc-api/usage`。 */
+    /** 完整 URL,一般是 `https://cx2cc.bobmcmxciv.xin/api/usage`。 */
     url: string
     /** 账号池 URL。默认把 `url` 末段的 `usage` 换成 `accounts`,一般不用显式给。 */
     accountsUrl?: string

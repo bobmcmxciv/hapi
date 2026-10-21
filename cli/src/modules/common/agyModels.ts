@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process'
-import { AGY_MODEL_LABELS, AGY_MODEL_PRESETS } from '@hapi/protocol'
+import { AGY_MODEL_LABELS } from '@hapi/protocol'
 import type { AgyModelsResponse } from '@hapi/protocol/apiTypes'
 
 export type ListAgyModelsResponse = AgyModelsResponse
@@ -24,17 +24,8 @@ const cache: CacheEntry = {
 }
 let inflight: Promise<ListAgyModelsResponse> | null = null
 
-// Hardcoded list — used as a FALLBACK only (when `agy models` can't be reached)
-// and as the source of truth for name→id mapping of known models.
-function buildModelList(): AgyModelsResponse['availableModels'] {
-    return AGY_MODEL_PRESETS.map((id) => ({
-        modelId: id,
-        name: AGY_MODEL_LABELS[id]
-    }))
-}
-
-// Reverse lookup: agy prints display names ("Gemini 3.5 Flash (Medium)") but
-// `--model` wants ids ("gemini-3.5-flash-medium"). Known names map exactly via
+// Reverse lookup for legacy name-only output: `--model` wants wire ids.
+// Known names map exactly via
 // the hardcoded mirror; unknown (newly added) models fall back to deriveAgyId.
 const NAME_TO_ID: Map<string, string> = new Map(
     (Object.entries(AGY_MODEL_LABELS) as Array<[string, string]>).map(([id, name]) => [name, id])
@@ -42,7 +33,7 @@ const NAME_TO_ID: Map<string, string> = new Map(
 
 // Best-effort id from a display name, following agy's `<model>-<effort>`
 // convention: lowercase, spaces→dashes, "(Variant)"→"-variant". Claude ids use
-// dashes in the version (4.6→4-6); Gemini keeps the dot (3.5).
+// dashes in the version (5.5→5-5); Gemini keeps the dot (3.8).
 function deriveAgyId(name: string): string {
     let id = name.trim().toLowerCase()
     id = id.replace(/\s*\(([^)]+)\)\s*$/, '-$1')
@@ -52,7 +43,7 @@ function deriveAgyId(name: string): string {
 }
 
 // Parse `agy models` stdout into model entries, preserving agy's order. Returns
-// null when no model lines are found (so the caller can fall back).
+// null when no model lines are found, rather than claiming stale models work.
 function parseAgyModelsOutput(output: string): AgyModelsResponse['availableModels'] | null {
     const clean = output.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '').replace(/\r/g, '\n')
     const models: AgyModelsResponse['availableModels'] = []
@@ -60,10 +51,11 @@ function parseAgyModelsOutput(output: string): AgyModelsResponse['availableModel
     for (const raw of clean.split('\n')) {
         const line = raw.trim()
         if (!line) continue
-        // agy 1.1.5 prints two columns: the exact wire id, then the display
-        // name separated by two or more spaces. Never derive an id from the
+        // agy prints two columns: the exact wire id, then the display name.
+        // Newer CLI versions separate them with one tab; older ones use spaces.
+        // Never derive an id from the
         // whole row: that produced ids such as `<id>-<id>`.
-        const columns = line.match(/^([a-z0-9][a-z0-9._/-]*)\s{2,}(.+)$/i)
+        const columns = line.match(/^([a-z0-9][a-z0-9._/-]*)(?:\t+| {2,})(.+)$/i)
         if (columns) {
             const modelId = columns[1]
             if (seen.has(modelId)) continue
@@ -121,9 +113,8 @@ function buildAgyProbeEnv(): NodeJS.ProcessEnv {
 }
 
 // Fetch the live model list from `agy models` (the agy CLI's own listing) so the
-// picker always matches what agy currently offers — no redeploy when agy changes
-// models. The hardcoded mirror is only a fallback (timeout / spawn error /
-// unparseable output). An auth failure is surfaced so the UI can prompt sign-in.
+// catalog matches what agy currently offers. A failed probe must not advertise
+// hardcoded models as available.
 async function fetchAgyModels(): Promise<ListAgyModelsResponse> {
     return await new Promise((resolve) => {
         const child = spawn('agy', ['models'], {
@@ -139,7 +130,7 @@ async function fetchAgyModels(): Promise<ListAgyModelsResponse> {
             if (settled) return
             settled = true
             child.kill('SIGTERM')
-            resolve({ success: true, availableModels: buildModelList() })
+            resolve({ success: false, error: 'Timed out fetching Antigravity models' })
         }, PROBE_TIMEOUT_MS)
 
         child.stdout?.on('data', (chunk: Buffer) => {
@@ -152,9 +143,9 @@ async function fetchAgyModels(): Promise<ListAgyModelsResponse> {
             if (settled) return
             settled = true
             clearTimeout(timeout)
-            resolve({ success: true, availableModels: buildModelList() })
+            resolve({ success: false, error: 'Antigravity CLI unavailable' })
         })
-        child.on('exit', () => {
+        child.on('exit', (code) => {
             if (settled) return
             settled = true
             clearTimeout(timeout)
@@ -166,10 +157,14 @@ async function fetchAgyModels(): Promise<ListAgyModelsResponse> {
                 return
             }
 
-            // Prefer the live list; fall back to the hardcoded mirror if the
-            // output couldn't be parsed (format change, partial fetch, etc.).
+            if (code !== 0) {
+                resolve({ success: false, error: 'Failed to fetch Antigravity models' })
+                return
+            }
             const parsed = parseAgyModelsOutput(output)
-            resolve({ success: true, availableModels: parsed ?? buildModelList() })
+            resolve(parsed
+                ? { success: true, availableModels: parsed }
+                : { success: false, error: 'Unrecognized Antigravity model list' })
         })
     })
 }
@@ -192,7 +187,7 @@ export async function listAgyModels(): Promise<ListAgyModelsResponse> {
             }
             return response
         } catch {
-            return { success: true, availableModels: buildModelList() }
+            return { success: false, error: 'Failed to fetch Antigravity models' }
         } finally {
             inflight = null
         }

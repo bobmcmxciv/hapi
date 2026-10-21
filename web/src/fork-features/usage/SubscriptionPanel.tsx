@@ -109,6 +109,7 @@ const SEVERITY_TEXT_CLASS: Record<SubscriptionWindow['severity'], string> = {
 /** provider id → 展示名。未知 provider 原样显示，不隐藏。 */
 const PROVIDER_LABELS: Record<string, string> = {
     anthropic: 'Claude',
+    antigravity: 'Antigravity',
     cx2cc: 'cx2cc',
     deepseek: 'DeepSeek',
     kimi: 'Kimi',
@@ -150,6 +151,16 @@ export function translateWindowLabel(
         }
     }
     switch (key) {
+        case 'agy:gemini-weekly':
+            return t('subscription.window.agyGeminiWeekly')
+        case 'agy:gemini-5h':
+            return t('subscription.window.agyGeminiFiveHour')
+        case 'agy:3p-weekly':
+            return t('subscription.window.agyThirdPartyWeekly')
+        case 'agy:3p-5h':
+            return t('subscription.window.agyThirdPartyFiveHour')
+        case 'agy:gemini-argon-wtu-weekly':
+            return t('subscription.window.agyArgonWeekly')
         case 'session':
         case 'five_hour':
             return t('subscription.window.fiveHour')
@@ -173,10 +184,11 @@ export function translateWindowLabel(
     }
 }
 
-function WindowRow(props: { window: SubscriptionWindow; isPrimary: boolean }) {
-    const { window: w, isPrimary } = props
+function WindowRow(props: { window: SubscriptionWindow; isPrimary: boolean; showRemaining?: boolean }) {
+    const { window: w, isPrimary, showRemaining = false } = props
     const { t } = useTranslation()
     const reset = formatResetTime(w.reset_at)
+    const percent = showRemaining ? Math.round((100 - w.used_percent) * 10) / 10 : w.used_percent
     return (
         <div className="space-y-1">
             <div className="flex items-baseline justify-between gap-2 text-xs">
@@ -185,7 +197,7 @@ function WindowRow(props: { window: SubscriptionWindow; isPrimary: boolean }) {
                 </span>
                 <span className="flex shrink-0 items-baseline gap-1.5 tabular-nums">
                     <span className={cn('font-semibold', SEVERITY_TEXT_CLASS[w.severity])}>
-                        {w.used_percent}%
+                        {showRemaining ? t('subscription.remainingPercent', { n: percent }) : `${percent}%`}
                     </span>
                     {reset && <span className="text-[var(--app-hint)]">{reset}</span>}
                 </span>
@@ -194,7 +206,7 @@ function WindowRow(props: { window: SubscriptionWindow; isPrimary: boolean }) {
                 <div
                     className={cn('h-full rounded-full transition-all', SEVERITY_BAR_CLASS[w.severity])}
                     // 0% 也画一丝宽度，让人看出这条窗口存在（而不是以为渲染坏了）。
-                    style={{ width: `${Math.max(w.used_percent, 1.5)}%` }}
+                    style={{ width: `${Math.max(percent, 1.5)}%` }}
                 />
             </div>
         </div>
@@ -250,8 +262,8 @@ function SnapshotCard(props: { snapshot: SubscriptionSnapshot; now: number }) {
                             </span>
                         </div>
                     )}
-                    {primary && <WindowRow window={primary} isPrimary />}
-                    {others.map(w => <WindowRow key={w.key} window={w} isPrimary={false} />)}
+                    {primary && <WindowRow window={primary} isPrimary showRemaining={snapshot.provider === 'antigravity'} />}
+                    {others.map(w => <WindowRow key={w.key} window={w} isPrimary={false} showRemaining={snapshot.provider === 'antigravity'} />)}
                     {snapshot.windows.length === 0 && !snapshot.balance && (
                         <div className="text-xs text-[var(--app-hint)]">{t('subscription.noWindows')}</div>
                     )}

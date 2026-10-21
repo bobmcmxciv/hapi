@@ -154,6 +154,8 @@ type UsageEvent =
         ts: string | null
         messageId: string
         model: string
+        /** Antigravity reports uncached input explicitly; no proxy heuristic. */
+        inputIsUncached?: boolean
         inputTokens: number
         outputTokens: number
         cacheCreationInputTokens: number
@@ -282,6 +284,22 @@ function extractUsageEvents(
     const data = outer.data as Record<string, unknown> | undefined
     if (!data) return []
     const ts = typeof data.timestamp === 'string' ? data.timestamp : null
+
+    if (outer.type === 'output' && data.type === 'agy_message') {
+        const usage = asRecord(data.usage)
+        if (!usage || typeof data.messageId !== 'string' || !data.messageId) return []
+        const nums = readNums(usage)
+        if (usageTotal(nums) <= 0) return []
+        const timestamp = ts ? Date.parse(ts) : NaN
+        return [{
+            kind: 'assistant',
+            ts: new Date(Number.isFinite(timestamp) ? timestamp : createdAt).toISOString(),
+            messageId: data.messageId,
+            model: typeof data.model === 'string' && data.model.trim() ? data.model.trim() : 'unknown',
+            inputIsUncached: true,
+            ...nums,
+        }]
+    }
 
     // Claude 专有的两支仍然只认 output 信封。
     if (outer.type === 'output' && data.type === 'assistant') {
@@ -482,9 +500,8 @@ class UsageViewAccumulator {
     private readonly seenTurn = new Set<string>()
     private readonly assistantBySession = new Map<string, Map<string, UsageAggregateRow>>()
     private readonly frameBySession = new Map<string, Map<string, UsageNums>>()
-    /** `sessionId::model`：这一桶的 input 已经在 agentUsage 分支逐帧扣过缓存读，
-     *  不能再被 normalizeInclusiveInput 扣第二遍。 */
-    private readonly agentUsageBuckets = new Set<string>()
+    /** Known uncached input: normalized agentUsage or native Antigravity counts. */
+    private readonly uncachedInputBuckets = new Set<string>()
 
     private bucket<T>(store: Map<string, Map<string, T>>, sessionId: string): Map<string, T> {
         let inner = store.get(sessionId)
@@ -514,12 +531,13 @@ class UsageViewAccumulator {
         if (this.seenTurn.has(turnKey)) return
         this.seenTurn.add(turnKey)
         this.addRow(sessionId, event.model, event)
+        if (event.inputIsUncached) this.uncachedInputBuckets.add(`${sessionId}::${event.model}`)
     }
 
     /** token_count 的一帧（已取差值、已扣缓存读）。 */
     addAgentUsage(sessionId: string, model: string, nums: UsageNums): void {
         this.addRow(sessionId, model, nums)
-        this.agentUsageBuckets.add(`${sessionId}::${model}`)
+        this.uncachedInputBuckets.add(`${sessionId}::${model}`)
     }
 
     addFrame(sessionId: string, model: string, delta: UsageNums): void {
@@ -540,7 +558,7 @@ class UsageViewAccumulator {
         // 缓存读的整段 prompt。逐桶归一（而不是逐行）：判据只有在整段累计上才可靠。
         for (const [sessionId, perModel] of this.assistantBySession) {
             for (const [model, agg] of perModel) {
-                if (this.agentUsageBuckets.has(`${sessionId}::${model}`)) continue
+                if (this.uncachedInputBuckets.has(`${sessionId}::${model}`)) continue
                 normalizeInclusiveInput(agg)
             }
         }

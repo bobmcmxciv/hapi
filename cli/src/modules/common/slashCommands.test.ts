@@ -307,4 +307,10 @@ describe('listSlashCommands', () => {
         expect(commands.find((command) => command.name === 'rubber-duck')?.source).toBe('builtin')
         expect(commands.find((command) => command.name === 'plan')?.source).toBe('builtin')
     })
+
+    it('advertises Antigravity Boost without falling back to Claude commands', async () => {
+        const commands = await listSlashCommands('agy', projectDir)
+        expect(commands.find((command) => command.name === 'boost')).toMatchObject({ source: 'builtin' })
+        expect(commands.some((command) => command.name === 'compact')).toBe(false)
+    })
 })

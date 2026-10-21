@@ -309,15 +309,15 @@ describe('agyPtyLauncher session-found wiring (brain UUID -> scanner)', () => {
         await tick(20)
         expect(harness.liveModelHandler).not.toBeNull()
 
-        const applied = harness.liveModelHandler!('gemini-3.6-flash-low')
+        const applied = harness.liveModelHandler!('gemini-4-argon-low')
         await tick(10)
         expect(harness.sendKeys).toHaveBeenCalledWith('/model\r')
 
-        ptyOptsCaptured.onMessage('\u001b[2JSwitch Model\n  Gemini 3.6 Flash\n> Gemini 3.5 Flash             (current)')
+        ptyOptsCaptured.onMessage('\u001b[2JSwitch Model\n  Gemini 4 Argon\n> Gemini 3.8 Flash             (current)')
         await tick(10)
         expect(harness.sendKeys).toHaveBeenCalledWith(`\u001b[A${'\u001b[D'.repeat(3)}`)
 
-        ptyOptsCaptured.onMessage('Model set to Gemini 3.6 Flash (Low)')
+        ptyOptsCaptured.onMessage('Model set to Gemini 4 Argon (Low)')
         await expect(applied).resolves.toBeUndefined()
 
         harness.exitReason = 'exit'
@@ -333,9 +333,9 @@ describe('agyPtyLauncher session-found wiring (brain UUID -> scanner)', () => {
         const launcherPromise = agyPtyLauncher(session as never)
         await tick(20)
 
-        const first = harness.liveModelHandler!('gemini-3.5-flash-low')
+        const first = harness.liveModelHandler!('gemini-3.8-flash-low')
         await tick(10)
-        const second = harness.liveModelHandler!('gemini-3.6-flash-low')
+        const second = harness.liveModelHandler!('gemini-4-argon-low')
         await tick(5)
 
         ptyOptsCaptured.onExit(1)
@@ -359,7 +359,7 @@ describe('agyPtyLauncher session-found wiring (brain UUID -> scanner)', () => {
         await tick(20)
         ptyOptsCaptured.onMessageSubmitted?.('current turn')
 
-        await expect(harness.liveModelHandler!('gemini-3.5-flash-low'))
+        await expect(harness.liveModelHandler!('gemini-3.8-flash-low'))
             .rejects.toThrow('Wait for the current AGY turn to finish')
         expect(harness.sendKeys).not.toHaveBeenCalledWith('/model\r')
 
@@ -379,7 +379,7 @@ describe('agyPtyLauncher session-found wiring (brain UUID -> scanner)', () => {
         await tick(20)
 
         await ptyOptsCaptured.onBeforeAgentRunStart?.()
-        await expect(harness.liveModelHandler!('gemini-3.5-flash-low'))
+        await expect(harness.liveModelHandler!('gemini-3.8-flash-low'))
             .rejects.toThrow('Wait for the current AGY turn to finish')
         expect(harness.sendKeys).not.toHaveBeenCalledWith('/model\r')
 
@@ -395,7 +395,7 @@ describe('agyPtyLauncher session-found wiring (brain UUID -> scanner)', () => {
         const launcherPromise = agyPtyLauncher(session as never)
         await tick(20)
 
-        const applied = harness.liveModelHandler!('gemini-3.5-flash-low')
+        const applied = harness.liveModelHandler!('gemini-3.8-flash-low')
         await tick(10)
         expect(harness.sendKeys).toHaveBeenCalledWith('/model\r')
 
@@ -406,9 +406,9 @@ describe('agyPtyLauncher session-found wiring (brain UUID -> scanner)', () => {
         await tick(10)
         expect(boundaryReached).toBe(false)
 
-        ptyOptsCaptured.onMessage('Switch Model\n> Gemini 3.5 Flash             (current)')
+        ptyOptsCaptured.onMessage('Switch Model\n> Gemini 3.8 Flash             (current)')
         await tick(10)
-        ptyOptsCaptured.onMessage('Model set to Gemini 3.5 Flash (Low)')
+        ptyOptsCaptured.onMessage('Model set to Gemini 3.8 Flash (Low)')
         await boundary
         await applied
         expect(boundaryReached).toBe(true)
@@ -1704,7 +1704,7 @@ describe('agyPtyLauncher ask_question safety: invalidate stale pending questions
         const launcherPromise = agyPtyLauncher(session as never)
         await tick(20)
 
-        const modelChange = harness.liveModelHandler!('gemini-3.5-flash-low')
+        const modelChange = harness.liveModelHandler!('gemini-3.8-flash-low')
         await tick(10)
         expect(harness.sendKeys).toHaveBeenCalledWith('/model\r')
 
@@ -1722,9 +1722,9 @@ describe('agyPtyLauncher ask_question safety: invalidate stale pending questions
 
         await harness.abortHandler!()
         harness.sendKeys.mockClear()
-        ptyOptsCaptured.onMessage('Switch Model\n> Gemini 3.5 Flash             (current)')
+        ptyOptsCaptured.onMessage('Switch Model\n> Gemini 3.8 Flash             (current)')
         await tick(5)
-        ptyOptsCaptured.onMessage('Model set to Gemini 3.5 Flash (Low)')
+        ptyOptsCaptured.onMessage('Model set to Gemini 3.8 Flash (Low)')
         await modelChange
         await tick(10)
 
@@ -1745,7 +1745,7 @@ describe('agyPtyLauncher ask_question safety: invalidate stale pending questions
         const launcherPromise = agyPtyLauncher(session as never)
         await tick(20)
 
-        const modelChange = harness.liveModelHandler!('gemini-3.5-flash-low')
+        const modelChange = harness.liveModelHandler!('gemini-3.8-flash-low')
         await tick(10)
         const onEntry = harness.scannerOpts!.onEntry as (e: unknown) => void
         onEntry({
@@ -1766,9 +1766,9 @@ describe('agyPtyLauncher ask_question safety: invalidate stale pending questions
             sendKeys: respawnedSendKeys,
             invalidateInputReady: respawnedInvalidateInputReady,
         })
-        ptyOptsCaptured.onMessage('Switch Model\n> Gemini 3.5 Flash             (current)')
+        ptyOptsCaptured.onMessage('Switch Model\n> Gemini 3.8 Flash             (current)')
         await tick(5)
-        ptyOptsCaptured.onMessage('Model set to Gemini 3.5 Flash (Low)')
+        ptyOptsCaptured.onMessage('Model set to Gemini 3.8 Flash (Low)')
         await modelChange.catch(() => {})
         await tick(10)
 

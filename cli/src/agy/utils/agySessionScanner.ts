@@ -4,14 +4,14 @@ import { homedir } from "node:os"
 import { BaseSessionScanner } from "@/modules/common/session/BaseSessionScanner"
 import { logger } from "@/lib"
 import type { AgyTranscriptEntry } from "./agyTranscriptTypes"
-import { resolveAgyTurnModels } from "./agyConversationModel"
+import { resolveAgyTurnMetadata } from "./agyConversationModel"
 
 const AGY_BRAIN_DIR = join(homedir(), '.gemini', 'antigravity-cli', 'brain')
 const LOG_REL_PATH = join('.system_generated', 'logs', 'transcript_full.jsonl')
 
 const MODEL_SETTLING_RETRY_DELAYS_MS = [100, 200, 300] as const
 
-type ResolveModels = typeof resolveAgyTurnModels
+type ResolveTurns = typeof resolveAgyTurnMetadata
 type Sleep = (delayMs: number, signal?: AbortSignal) => Promise<void>
 
 function abortableSleep(delayMs: number, signal?: AbortSignal): Promise<void> {
@@ -32,30 +32,36 @@ export async function emitAgyEntriesWithModels(
     onEntry: (entry: AgyTranscriptEntry) => void,
     brainUuid: string | null,
     options: {
-        resolveModels?: ResolveModels
+        resolveTurns?: ResolveTurns
         retryDelaysMs?: readonly number[]
         sleep?: Sleep
         signal?: AbortSignal
     } = {},
 ): Promise<void> {
-    const resolveModels = options.resolveModels ?? resolveAgyTurnModels
+    const resolveTurns = options.resolveTurns ?? resolveAgyTurnMetadata
     const retryDelaysMs = options.retryDelaysMs ?? MODEL_SETTLING_RETRY_DELAYS_MS
     const sleep = options.sleep ?? abortableSleep
     const unresolvedEntries = new Map(
         entries
-            .filter((entry) => entry.type === 'PLANNER_RESPONSE' && !entry.model)
+            .filter((entry) => entry.type === 'PLANNER_RESPONSE' && (!entry.model || !entry.usage))
             .map((entry) => [entry.step_index, entry]),
     )
     let unresolved = [...unresolvedEntries.keys()]
 
     for (let attempt = 0; unresolved.length > 0; attempt++) {
-        const models = await resolveModels(brainUuid, unresolved)
+        const turns = await resolveTurns(brainUuid, unresolved)
         const stillUnresolved: number[] = []
         for (const stepIndex of unresolved) {
-            const model = models.get(stepIndex)
+            const turn = turns.get(stepIndex)
             const entry = unresolvedEntries.get(stepIndex)
-            if (model && entry) entry.model = model
-            else stillUnresolved.push(stepIndex)
+            if (entry) {
+                if (turn?.model) entry.model = turn.model
+                if (turn?.usage) {
+                    entry.usage = turn.usage
+                    entry.usageId = turn.usageId
+                }
+                if (!entry.model || !entry.usage) stillUnresolved.push(stepIndex)
+            }
         }
         unresolved = stillUnresolved
         if (unresolved.length === 0 || attempt >= retryDelaysMs.length || options.signal?.aborted) break

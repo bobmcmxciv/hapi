@@ -5,6 +5,8 @@
 #
 # 采集器自己带 5 分钟轮询循环，所以这个脚本是**长驻**的：计划任务配成
 # 开机启动 + 失败重启即可，不要配成每 5 分钟拉起一次（会叠出多个进程）。
+# 计划任务的参数里要带 -WindowStyle Hidden：Interactive 任务的控制台会弹在 RDP
+# 桌面上，留着它只会招人点进去（见下面日志重定向处的事故说明）。
 
 $ErrorActionPreference = 'Stop'
 
@@ -56,12 +58,30 @@ $logFile = Join-Path $logDir 'subscription-collector.log'
 if ((Test-Path $logFile) -and ((Get-Item $logFile).Length -gt 5MB)) {
     Move-Item -LiteralPath $logFile -Destination "$logFile.1" -Force
 }
+# 旧版用 Tee-Object 写，PS 5.1 落的是 UTF-16；现在 bun 直接写 UTF-8，混在一个文件里
+# 两种编码都读不对。遇到 UTF-16 BOM 就整份挪开，从新文件开始。
+if (Test-Path $logFile) {
+    $head = [byte[]]::new(2)
+    $fs = [IO.File]::OpenRead($logFile)
+    try { $n = $fs.Read($head, 0, 2) } finally { $fs.Dispose() }
+    if ($n -eq 2 -and $head[0] -eq 0xFF -and $head[1] -eq 0xFE) {
+        Move-Item -LiteralPath $logFile -Destination "$logFile.utf16" -Force
+    }
+}
 
-"[run-subscription-collector] $(Get-Date -Format o) 启动，仓库=$repo" | Tee-Object -FilePath $logFile -Append
+$utf8 = [Text.UTF8Encoding]::new($false)
+function Write-WrapperLog([string]$msg) {
+    [IO.File]::AppendAllText($logFile, "[run-subscription-collector] $(Get-Date -Format o) $msg`r`n", $utf8)
+}
 
-# 2>&1 合并 stderr，否则采集器的报错只会消失。stdout 有真实去处后，
-# 写日志也不再可能因为句柄关闭而抛。
-& $bun run $script 2>&1 | Tee-Object -FilePath $logFile -Append
+Write-WrapperLog "启动，仓库=$repo"
+
+# bun 的 stdout/stderr 由 cmd 直接重定向进日志文件，**不经 PowerShell 管道和控制台**。
+# 2026-09-30 停摆 46 小时的根因：计划任务是 Interactive，控制台窗口弹在 RDP 桌面上，
+# 窗口里点一下就进 QuickEdit 选择模式（标题变 "Select ..."），控制台写入被冻结 →
+# Tee-Object 卡住不再读管道 → bun 的 stdout 管道写满后同步写阻塞 → 事件循环冻结，
+# 进程内看门狗也跟着冻住。写文件句柄不会被这样卡住。
+& cmd.exe /d /s /c "`"$bun`" run `"$script`" >> `"$logFile`" 2>&1"
 $code = $LASTEXITCODE
-"[run-subscription-collector] $(Get-Date -Format o) 退出，code=$code" | Tee-Object -FilePath $logFile -Append
+Write-WrapperLog "退出，code=$code"
 exit $code

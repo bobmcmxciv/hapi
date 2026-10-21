@@ -90,6 +90,7 @@ import { usePlatform } from '@/hooks/usePlatform'
 import { useSessionActions } from '@/hooks/mutations/useSessionActions'
 import { useCcSwitchProvider } from '@/hooks/mutations/useCcSwitchProvider'
 import { useCodexModels } from '@/hooks/queries/useCodexModels'
+import { useAgyModels } from '@/hooks/queries/useAgyModels'
 import { useCcSwitchProviders } from '@/hooks/queries/useCcSwitchProviders'
 import { useClaudeProxyModels } from '@/fork-features/claude-proxy-models/useClaudeProxyModels'
 import { useCursorModels } from '@/hooks/queries/useCursorModels'
@@ -988,6 +989,15 @@ function SessionChatInner(props: SessionChatProps) {
         enabled: agentFlavor === 'cursor' && props.session.active
     })
     const sessionMachineId = props.session.metadata?.machineId ?? null
+    const agyModelsState = useAgyModels({
+        api: props.api,
+        machineId: sessionMachineId,
+        enabled: agentFlavor === 'agy' && props.session.active && Boolean(sessionMachineId)
+    })
+    const agyModelOptions = useMemo(() => agyModelsState.availableModels.map((model) => ({
+        value: model.modelId,
+        label: model.name ?? model.modelId
+    })), [agyModelsState.availableModels])
     const ccSwitchProvidersState = useCcSwitchProviders({
         api: props.api,
         machineId: sessionMachineId,
@@ -2014,6 +2024,8 @@ function SessionChatInner(props: SessionChatProps) {
                         availableModelOptions={
                             agentFlavor === 'codex'
                                 ? codexModelOptions
+                                : agentFlavor === 'agy'
+                                    ? agyModelOptions
                                 : agentFlavor === 'cursor'
                                     ? (
                                         cursorCatalogPending

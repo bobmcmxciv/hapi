@@ -48,7 +48,8 @@ PY
 fi
 
 echo "=== 5 environment: 公网入口 ==="
-CODE=$(curl -s -o /tmp/verify-pub.html -w '%{http_code}' https://bob.18852271093.top/)
+PUBLIC_URL=${PUBLIC_URL:-https://hapi.bobmcmxciv.xin}
+CODE=$(curl -s -o /tmp/verify-pub.html -w '%{http_code}' "$PUBLIC_URL/")
 grep -qiE '<div id="root"|<title' /tmp/verify-pub.html && [ "$CODE" = 200 ] \
     && ok "公网 200 且返回的是 web 应用外壳" || no "公网 code=$CODE，body 头部：$(head -c 120 /tmp/verify-pub.html)"
 

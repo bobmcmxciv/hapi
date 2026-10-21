@@ -1,3 +1,12 @@
+/** Per-generation counts from Antigravity's ModelUsageStats, not estimates.
+ * Input excludes both cache reads and cache writes; output includes thinking. */
+export type AgyTokenUsage = {
+    input_tokens: number
+    output_tokens: number
+    cache_creation_input_tokens: number
+    cache_read_input_tokens: number
+}
+
 export type AgyTranscriptEntry = {
     step_index: number
     source: 'USER_EXPLICIT' | 'MODEL' | 'SYSTEM'
@@ -10,10 +19,13 @@ export type AgyTranscriptEntry = {
     created_at: string
     content?: string
     tool_calls?: AgyToolCall[]
-    // Model that produced this turn (display name, e.g. "Gemini 3.5 Flash
-    // (Medium)"), enriched by the scanner from the conversation DB for agent
-    // responses. Not present in the raw transcript JSONL.
+    // Model that produced this turn (wire id in current agy, display name in
+    // older versions), enriched from the conversation DB for agent responses.
+    // Not present in the raw transcript JSONL.
     model?: string
+    usage?: AgyTokenUsage
+    /** Generation-local identity; several steps can belong to one model request. */
+    usageId?: string
 }
 
 export type AgyToolCall = {

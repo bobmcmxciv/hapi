@@ -10,12 +10,26 @@
  *  3. onNewSession() switches to a new brain UUID.
  */
 
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, afterAll, vi } from 'vitest'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir, homedir } from 'node:os'
 import { createAgySessionScanner, emitAgyEntriesWithModels } from './agySessionScanner'
 import type { AgyTranscriptEntry } from './agyTranscriptTypes'
+
+vi.mock('node:os', async (importOriginal) => {
+    const os = await importOriginal<typeof import('node:os')>()
+    const fs = await import('node:fs')
+    const path = await import('node:path')
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'hapi-agy-scanner-'))
+    return { ...os, homedir: () => home }
+})
+
+afterAll(() => {
+    const home = homedir()
+    if (!home.startsWith(join(tmpdir(), 'hapi-agy-scanner-'))) throw new Error('Unsafe test home')
+    rmSync(home, { recursive: true, force: true })
+})
 
 // Build a minimal transcript line for a given step and type.
 function makeTranscriptLine(step_index: number, type: AgyTranscriptEntry['type'], content: string): string {
@@ -30,7 +44,7 @@ function makeTranscriptLine(step_index: number, type: AgyTranscriptEntry['type']
     return JSON.stringify(entry)
 }
 
-// We need to write into the real brain dir so AgySessionScanner finds it.
+// The scanner and fixtures share an isolated home; never touch real conversations.
 // Capture the expected path structure: ~/.gemini/antigravity-cli/brain/<uuid>/.system_generated/logs/transcript_full.jsonl
 const BRAIN_BASE = join(homedir(), '.gemini', 'antigravity-cli', 'brain')
 
@@ -44,18 +58,20 @@ describe('AGY planner model settling', () => {
             JSON.parse(makeTranscriptLine(3, 'VIEW_FILE', 'tool')) as AgyTranscriptEntry,
         ]
         const emitted: AgyTranscriptEntry[] = []
-        const resolveModels = vi.fn()
+        const usage = { input_tokens: 10, output_tokens: 20, cache_creation_input_tokens: 0, cache_read_input_tokens: 100 }
+        const resolveTurns = vi.fn()
             .mockResolvedValueOnce(new Map([[2, null]]))
-            .mockResolvedValueOnce(new Map([[2, 'Gemini 3.5 Flash (High)']]))
+            .mockResolvedValueOnce(new Map([[2, { model: 'Gemini 3.5 Flash (High)', usage }]]))
         const sleep = vi.fn(async () => {})
 
         await emitAgyEntriesWithModels(entries, emitted.push.bind(emitted), BRAIN_UUID, {
-            resolveModels,
+            resolveTurns,
             retryDelaysMs: [100, 200],
             sleep,
         })
 
-        expect(resolveModels).toHaveBeenCalledTimes(2)
+        expect(resolveTurns).toHaveBeenCalledTimes(2)
+        expect(emitted[1].usage).toEqual(usage)
         expect(sleep).toHaveBeenCalledTimes(1)
         expect(emitted.map((entry) => [entry.step_index, entry.model])).toEqual([
             [1, undefined],
@@ -70,21 +86,33 @@ describe('AGY planner model settling', () => {
             JSON.parse(makeTranscriptLine(5, 'PLANNER_RESPONSE', 'second')) as AgyTranscriptEntry,
         ]
         const emitted: AgyTranscriptEntry[] = []
-        const resolveModels = vi.fn(async (_uuid: string | null | undefined, indexes: readonly number[]) => new Map(indexes.map((idx) => [idx, null])))
+        const resolveTurns = vi.fn(async (_uuid: string | null | undefined, indexes: readonly number[]) => new Map(indexes.map((idx) => [idx, null])))
         const sleep = vi.fn(async () => {})
 
         await emitAgyEntriesWithModels(entries, emitted.push.bind(emitted), BRAIN_UUID, {
-            resolveModels,
+            resolveTurns,
             retryDelaysMs: [100, 200, 300],
             sleep,
         })
 
-        expect(resolveModels).toHaveBeenCalledTimes(4)
+        expect(resolveTurns).toHaveBeenCalledTimes(4)
         expect(sleep).toHaveBeenCalledTimes(3)
         expect(emitted.map((entry) => [entry.step_index, entry.model])).toEqual([
             [4, undefined],
             [5, undefined],
         ])
+    })
+
+    it('retries usage settling even when the model is already known', async () => {
+        const usage = { input_tokens: 10, output_tokens: 20, cache_creation_input_tokens: 0, cache_read_input_tokens: 100 }
+        const entry = { ...JSON.parse(makeTranscriptLine(1, 'PLANNER_RESPONSE', 'answer')), model: 'model-a' } as AgyTranscriptEntry
+        const resolveTurns = vi.fn()
+            .mockResolvedValueOnce(new Map([[1, { model: 'model-a', usage: null }]]))
+            .mockResolvedValueOnce(new Map([[1, { model: 'model-a', usage }]]))
+        const emitted = vi.fn()
+        await emitAgyEntriesWithModels([entry], emitted, BRAIN_UUID, { resolveTurns, sleep: async () => {} })
+        expect(resolveTurns).toHaveBeenCalledTimes(2)
+        expect(emitted).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ usage }))
     })
 })
 

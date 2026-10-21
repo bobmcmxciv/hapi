@@ -35,6 +35,7 @@ function baseConfig(overrides: Partial<CollectorConfig> = {}): CollectorConfig {
         log: () => {},
         credentials: {},
         homeDir: EMPTY_HOME,
+        antigravityBinary: null,
         eager: false,
         ...overrides
     }
@@ -176,6 +177,20 @@ describe('collectAll', () => {
         expect(ds?.error).toBe('DNS fail')
         expect(kimi?.error).toBeNull()
         expect(kimi?.windows.length).toBeGreaterThan(0)
+    })
+
+    test('collects Antigravity through the local CLI without provider credentials', async () => {
+        const snapshots = await collectAll(baseConfig({
+            antigravityBinary: 'agy',
+            runAntigravityUsage: async () => JSON.stringify({ status: 'SUCCESS', command: {
+                name: 'usage', data: { groups: [{ name: 'Gemini Models', buckets: [
+                    { id: 'gemini-5h', name: 'Five Hour Limit Remaining', remaining_fraction: 0.75 }
+                ] }] }
+            } })
+        }))
+        expect(snapshots).toHaveLength(1)
+        expect(snapshots[0]?.provider).toBe('antigravity')
+        expect(snapshots[0]?.windows[0]?.used_percent).toBe(25)
     })
 })
 

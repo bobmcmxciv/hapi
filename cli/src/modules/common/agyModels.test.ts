@@ -31,6 +31,16 @@ describe('parseAgyModelsOutput', () => {
         ])
     })
 
+    it('parses agy 1.4.x tab-separated live model rows', () => {
+        expect(_parseAgyModelsOutputForTests([
+            'gemini-4-argon-medium\tGemini 4 Argon (Medium)',
+            'claude-opus-5-5-high\tClaude Opus 5.5 (High)',
+        ].join('\n'))).toEqual([
+            { modelId: 'gemini-4-argon-medium', name: 'Gemini 4 Argon (Medium)' },
+            { modelId: 'claude-opus-5-5-high', name: 'Claude Opus 5.5 (High)' },
+        ])
+    })
+
     it('keeps legacy display-name-only output compatible', () => {
         expect(_parseAgyModelsOutputForTests('Gemini 3.5 Flash (High)\n')).toEqual([
             { modelId: 'gemini-3.5-flash-high', name: 'Gemini 3.5 Flash (High)' }
@@ -41,9 +51,9 @@ describe('parseAgyModelsOutput', () => {
         // Piped `agy models` emits bare wire ids, which is the path the probe
         // actually takes; without the label backfill the picker would regress to
         // showing raw ids for every model.
-        expect(_parseAgyModelsOutputForTests('gemini-3.6-flash-high\ngemini-3.6-flash-low\n')).toEqual([
-            { modelId: 'gemini-3.6-flash-high', name: 'Gemini 3.6 Flash (High)' },
-            { modelId: 'gemini-3.6-flash-low', name: 'Gemini 3.6 Flash (Low)' }
+        expect(_parseAgyModelsOutputForTests('gemini-4-argon-high\ngemini-4-argon-low\n')).toEqual([
+            { modelId: 'gemini-4-argon-high', name: 'Gemini 4 Argon (High)' },
+            { modelId: 'gemini-4-argon-low', name: 'Gemini 4 Argon (Low)' }
         ])
     })
 
@@ -70,11 +80,11 @@ describe('listAgyModels live probe', () => {
         expect(options.env.PATH).toBe(process.env.PATH)
         expect(Object.keys(options.env).some((key) => key.startsWith('SSH_'))).toBe(false)
 
-        child.stdout.emit('data', Buffer.from('gemini-3.6-flash-low\n'))
+        child.stdout.emit('data', Buffer.from('gemini-4-argon-low\n'))
         child.emit('exit', 0)
         await expect(resultPromise).resolves.toMatchObject({
             success: true,
-            availableModels: [{ modelId: 'gemini-3.6-flash-low' }]
+            availableModels: [{ modelId: 'gemini-4-argon-low' }]
         })
     })
 
@@ -87,8 +97,7 @@ describe('listAgyModels live probe', () => {
         await vi.advanceTimersByTimeAsync(15_000)
         const result = await resultPromise
         expect(child.kill).toHaveBeenCalledTimes(1)
-        expect(result.success).toBe(true)
-        expect(result.availableModels?.length).toBeGreaterThan(0)
+        expect(result).toMatchObject({ success: false, error: 'Timed out fetching Antigravity models' })
         child.emit('exit', 0)
         expect(child.kill).toHaveBeenCalledTimes(1)
     })
@@ -100,7 +109,6 @@ describe('listAgyModels live probe', () => {
         child.emit('error', new Error('missing'))
         child.emit('exit', 1)
         const result = await resultPromise
-        expect(result.success).toBe(true)
-        expect(result.availableModels?.length).toBeGreaterThan(0)
+        expect(result).toMatchObject({ success: false, error: 'Antigravity CLI unavailable' })
     })
 })

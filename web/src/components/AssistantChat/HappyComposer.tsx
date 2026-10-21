@@ -1394,6 +1394,9 @@ export function HappyComposer(props: {
             // would lose the provider and can pick the wrong cached match or clear
             // the model. Pi model changes go only through the dedicated PiModelPanel.
             if (agentFlavor === 'pi') return
+            // The AGY model catalog is fetched from the host. Until it arrives (or
+            // if the probe fails), do not cycle to null: live AGY reset is unsupported.
+            if (agentFlavor === 'agy' && modelOptions.length === 0) return
             if (e.key === 'm' && (e.metaKey || e.ctrlKey) && (onCycleModel || onModelChange) && supportsModelChange(agentFlavor)) {
                 e.preventDefault()
                 if (onCycleModel) {
@@ -1407,7 +1410,7 @@ export function HappyComposer(props: {
 
         window.addEventListener('keydown', handleGlobalKeyDown)
         return () => window.removeEventListener('keydown', handleGlobalKeyDown)
-    }, [model, onModelChange, onCycleModel, haptic, agentFlavor, availableModelOptions, claudeProxyModelOptions])
+    }, [model, onModelChange, onCycleModel, haptic, agentFlavor, availableModelOptions, claudeProxyModelOptions, modelOptions.length])
 
     const handleChange = useCallback((e: ReactChangeEvent<HTMLTextAreaElement>) => {
         const selection = {

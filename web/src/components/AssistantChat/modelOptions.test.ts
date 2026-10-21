@@ -31,6 +31,16 @@ describe('getModelOptionsForFlavor', () => {
         expect(options.some((option) => option.value === null)).toBe(false)
     })
 
+    it('uses the machine live Antigravity catalog instead of stale presets', () => {
+        const live = [
+            { value: 'gemini-4-argon-medium', label: 'Gemini 4 Argon (Medium)' },
+            { value: 'claude-opus-5-5-high', label: 'Claude Opus 5.5 (High)' },
+        ]
+        expect(getModelOptionsForFlavor('agy', null, live)).toEqual(live)
+        expect(getNextModelForFlavor('agy', live[0]!.value, live)).toBe(live[1]!.value)
+        expect(getModelOptionsForFlavor('agy', null, [])).toEqual([])
+    })
+
     it('returns Gemini model options for gemini flavor', () => {
         const options = getModelOptionsForFlavor('gemini')
         expect(options[0]).toEqual({ value: null, label: 'Default' })

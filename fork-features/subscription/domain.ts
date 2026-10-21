@@ -45,7 +45,7 @@ export type SubscriptionBalance = {
 export type SubscriptionSnapshot = {
     /** 采集机 hostname 或对应别名。cx2cc 由 hub 直接拉,填 'ecs-hub'。 */
     machine: string
-    /** provider 标识:'anthropic' | 'deepseek' | 'kimi' | 'glm' | 'cx2cc' (以及未来新增)。 */
+    /** provider 标识:'anthropic' | 'antigravity' | 'deepseek' | 'kimi' | 'glm' | 'cx2cc' (以及未来新增)。 */
     provider: string
     /** 同一 provider 下账号的稳定 id。首选邮箱(anthropic/cx2cc 都有),否则 API key 后 8 位。
      *  用于**同机同 provider 多账号**并存的场景。 */

@@ -240,6 +240,14 @@ If a remote session reports authentication failure, run `grok login --device-aut
 - **Antigravity** (`hapi agy`) — Google's Antigravity CLI (`agy`), driven as an interactive PTY with hook-based permission bridging. [Google Antigravity](https://antigravity.google)
 - **Pi** (`hapi pi`) — the Pi coding agent running as `pi --mode rpc` (JSON-line RPC over piped stdio); remote-control only, no local TUI input path. [badlogic/pi-mono](https://github.com/badlogic/pi-mono)
 
+For an Antigravity deep investigation, send `/boost <task>` in HAPI chat. HAPI passes this native, per-turn command through without batching it with other prompts; Antigravity runs its [Boost multi-agent reasoning workflow](https://www.antigravity.google/docs/boost) when the account is eligible. This is **not** a persistent `max` effort level. Select a model's available Low/Medium/High variant in HAPI's model picker for ordinary turns; available variants come from the installed `agy models` catalog. Do not present `xhigh` or `max` unless Antigravity actually offers them for the selected model.
+
+### Antigravity token usage
+
+The Usage page records per-request Antigravity token counts from the local conversation database, attributed to the model that generated each response. Input, output (including thinking), cache reads, and cache writes are counted separately; replayed requests are deduplicated. Subscription quota percentages remain separate from these token totals.
+
+Both the Hub and the CLI session process need the updated build. Existing processes keep their old reporting behavior until restarted or resumed with the new CLI. Replies previously uploaded without token metadata are not automatically backfilled, and missing or ambiguous metadata is not estimated.
+
 ## Related
 
 - [How it Works](./how-it-works.md) - Architecture and data flow

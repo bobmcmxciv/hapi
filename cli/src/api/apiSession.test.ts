@@ -414,6 +414,42 @@ describe('ApiSessionClient lazy materialization', () => {
 })
 
 describe('ApiSessionClient agy transcript messages', () => {
+    it('forwards actual token counts with the original timestamp and a replay-stable request id', () => {
+        socketHarness.sockets.length = 0
+        const client = new ApiSessionClient('token', createSession({ namespace: 'default' }))
+        const socket = socketHarness.sockets[0]
+        if (!socket) throw new Error('expected socket')
+        const usage = { input_tokens: 2830, output_tokens: 585, cache_creation_input_tokens: 0, cache_read_input_tokens: 222865 }
+        client.sendAgySessionMessage({
+            type: 'PLANNER_RESPONSE', content: 'hi', model: 'gemini-4-argon',
+            step_index: 7, created_at: '2026-10-20T08:00:00Z', usage, usageId: 'generation:3',
+        }, 'brain-uuid')
+        const emitted = socket.emitted.find((entry) => entry.event === 'message')
+        const payload = emitted?.args[0] as { message?: { content?: { data?: unknown } } } | undefined
+        expect(payload?.message?.content?.data).toEqual({
+            type: 'agy_message', content: 'hi', model: 'gemini-4-argon',
+            messageId: 'agy:brain-uuid:generation:3', timestamp: '2026-10-20T08:00:00Z', usage,
+        })
+        client.close()
+    })
+
+    it('forwards the resolved Antigravity model with the assistant reply', () => {
+        socketHarness.sockets.length = 0
+        const client = new ApiSessionClient('token', createSession({ namespace: 'default' }))
+        const socket = socketHarness.sockets[0]
+        if (!socket) throw new Error('expected socket')
+
+        client.sendAgySessionMessage({
+            type: 'PLANNER_RESPONSE', content: 'hi', model: 'claude-opus-5-5-medium'
+        })
+        const emitted = socket.emitted.find((entry) => entry.event === 'message')
+        const payload = emitted?.args[0] as { message?: { content?: { data?: unknown } } } | undefined
+        expect(payload?.message?.content?.data).toEqual({
+            type: 'agy_message', content: 'hi', model: 'claude-opus-5-5-medium'
+        })
+        client.close()
+    })
+
     it('renders only the USER_REQUEST body, not the sections agy appends', () => {
         socketHarness.sockets.length = 0
         const client = new ApiSessionClient('token', createSession({ namespace: 'default' }))

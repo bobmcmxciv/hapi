@@ -10,7 +10,7 @@
  *   bun run scripts/subscription-collector.ts --dry-run  # 只采集并打印,不推 hub
  *
  * 必需环境变量:
- *   HAPI_SUB_HUB_URL     hub 基址,如 https://bob.18852271093.top
+ *   HAPI_SUB_HUB_URL     hub 基址,如 https://hapi.bobmcmxciv.xin
  *   HAPI_SUB_HUB_TOKEN   hub 的 cliApiToken(换 gateway JWT 用)
  *
  * 可选:
@@ -18,6 +18,8 @@
  *   HAPI_SUB_INTERVAL_MS 轮询间隔,默认 300000(5 分钟),下限 30000
  *   HAPI_SUB_ANTHROPIC_TOKEN  显式指定 Claude OAuth token;不给则读 ~/.claude/.credentials.json
  *   HAPI_SUB_DEEPSEEK_KEY / HAPI_SUB_KIMI_KEY / HAPI_SUB_GLM_KEY
+ *   HAPI_SUB_AGY_BIN      Antigravity CLI 路径；不给则自动发现，未安装则跳过
+ *   HAPI_SUB_AGY_ACCOUNT  卡片账号标识，默认 default（CLI /usage 不返回邮箱）
  *
  * 凭据只在内存里,不落盘不进日志——下面打印的都是 provider 名与百分比,不含 key。
  */
@@ -31,7 +33,7 @@ const dryRun = args.has('--dry-run')
 const parsed = configFromEnv()
 if (!parsed.ok) {
     console.error(`[subscription-collector] 缺少必需环境变量: ${parsed.missing.join(', ')}`)
-    console.error('  HAPI_SUB_HUB_URL   例: https://bob.18852271093.top')
+    console.error('  HAPI_SUB_HUB_URL   例: https://hapi.bobmcmxciv.xin')
     console.error('  HAPI_SUB_HUB_TOKEN 例: hub 的 cliApiToken')
     process.exit(2)
 }
@@ -47,7 +49,11 @@ function describe(snapshot: Awaited<ReturnType<typeof collectAll>>[number]): str
     const parts: string[] = []
     for (const w of snapshot.windows) {
         const reset = w.reset_at ? new Date(w.reset_at).toLocaleString() : '无重置'
-        parts.push(`${w.label} ${w.used_percent}% (${reset} 重置)`)
+        const percent = snapshot.provider === 'antigravity'
+            ? `剩余 ${Math.round((100 - w.used_percent) * 10) / 10}%`
+            : `${w.used_percent}% 已用`
+        const label = snapshot.provider === 'antigravity' ? w.label.replace(/ · 已用$/, '') : w.label
+        parts.push(`${label} ${percent} (${reset} 重置)`)
     }
     if (snapshot.balance) {
         parts.push(`余额 ${snapshot.balance.amount} ${snapshot.balance.currency}`)

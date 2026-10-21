@@ -82,11 +82,12 @@ function getClaudeModelOptions(
     return nextOptions
 }
 
-function getAgyModelOptions(currentModel?: string | null): ModelOption[] {
-    const options = MODEL_OPTIONS.agy.filter((m) => m.value !== 'auto').map((m) => ({
-        value: m.value,
-        label: m.label
-    }))
+function getAgyModelOptions(currentModel?: string | null, liveOptions?: ModelOption[]): ModelOption[] {
+    const options = (liveOptions ?? MODEL_OPTIONS.agy)
+        .filter((m) => m.value !== 'auto' && m.value !== null).map((m) => ({
+            value: m.value,
+            label: m.label
+        }))
     return withCurrentModelOption(options, currentModel)
 }
 
@@ -114,7 +115,7 @@ export function getModelOptionsForFlavor(
     claudeProxyModels?: readonly ModelOption[] | null
 ): ModelOption[] {
     if (flavor === 'agy') {
-        return getAgyModelOptions(currentModel)
+        return getAgyModelOptions(currentModel, customOptions)
     }
     if (flavor === 'claude') {
         return getClaudeModelOptions(currentModel, customOptions, claudeProxyModels)
@@ -176,7 +177,7 @@ export function getNextModelForFlavor(
     claudeProxyModels?: readonly ModelOption[] | null
 ): string | null {
     if (flavor === 'agy') {
-        const options = getAgyModelOptions(currentModel)
+        const options = getAgyModelOptions(currentModel, customOptions)
         const currentIndex = options.findIndex((option) => option.value === (normalizeCurrentModel(currentModel) ?? null))
         if (currentIndex === -1) {
             return options.find((option) => option.value !== null)?.value ?? null
