@@ -19,7 +19,7 @@ import {
 // Transcript entry types that agy inserts as meta (not tool results): they must
 // NOT consume a pending tool_call invocation, or the FIFO pairing drifts and the
 // real tool actions in the same planner batch get mis-labeled.
-const AGY_NON_TOOL_ACTION_TYPES = new Set(['ERROR_MESSAGE', 'SYSTEM_MESSAGE'])
+const AGY_NON_TOOL_ACTION_TYPES = new Set(['ERROR_MESSAGE', 'SYSTEM_MESSAGE', 'CHECKPOINT'])
 const QUOTA_DETECTOR_RAW_TAIL_SIZE = 8 * 1024
 const QUOTA_ANCHOR = 'Individual quota reached. Please upgrade your subscription to increase your limits.'
 const QUOTA_SCREEN_CONTEXT = "How's the CLI experience so far? Help us improve:"
@@ -102,6 +102,16 @@ function parseAttachmentMessage(text: string, separator: '\n\n' | '\n'): {
     }
 }
 
+// Windows ConPTY (OEM codepage 437) silently drops non-ASCII general punctuation,
+// arrows, math operators, and zero-width joiners when pasting UTF-8 into a TUI.
+// Stripping only those ConPTY-dropped codepoints as a secondary comparison keeps
+// delivery confirmation working on Windows without weakening ASCII/CJK matching.
+const CONPTY_DROPPED_CHARS_RE = /[\u00b0\u00b7\u00d7\u200b-\u200f\u2010-\u2027\u2060-\u206f\u2190-\u21ff\u2200-\u22ff\ufeff]/g
+
+function normalizeForConPtyComparison(value: string): string {
+    return normalizeUserInput(value).replace(CONPTY_DROPPED_CHARS_RE, '')
+}
+
 export function userRequestMatches(message: string, content: string): boolean {
     const request = extractUserRequest(content)
     if (request === null) return false
@@ -112,11 +122,20 @@ export function userRequestMatches(message: string, content: string): boolean {
     // Normalize exactly like the scanner's discovery match, so the two paths
     // cannot disagree over a CRLF or trailing whitespace.
     if (normalizeUserInput(request) === normalizeUserInput(message)) return true
+    const conPtyNormalizedBody = normalizeForConPtyComparison(body)
+    if (conPtyNormalizedBody.length > 0 && normalizeForConPtyComparison(request) === normalizeForConPtyComparison(message)) {
+        return true
+    }
     if (body === message) return false
     const sentAttachment = parseAttachmentMessage(message, '\n\n')
     const observedAttachment = parseAttachmentMessage(request, '\n')
     if (!sentAttachment || !observedAttachment) return false
-    return sentAttachment.body === observedAttachment.body
+    const attachmentBodyMatches = sentAttachment.body === observedAttachment.body
+        || (
+            normalizeForConPtyComparison(sentAttachment.body).length > 0
+            && normalizeForConPtyComparison(sentAttachment.body) === normalizeForConPtyComparison(observedAttachment.body)
+        )
+    return attachmentBodyMatches
         && sentAttachment.paths.length === observedAttachment.paths.length
         && sentAttachment.paths.every((path, index) => path === observedAttachment.paths[index])
 }
@@ -151,6 +170,7 @@ class AgyPtyLauncher extends RemoteLauncherBase {
     private pendingAgyToolCalls: AgyToolCall[] = []
     private pendingWebDelivery: PendingWebDelivery | null = null
     private pendingWebDeliveryResolved: (() => void) | null = null
+    private deliveryConfirmedByTurnProgress = false
     private activeWebPrompt: string | null = null
     // One-shot "discovery never happened" warning. Armed on the first real
     // evidence a model call is in flight (onThinkingChange(true) — NOT PTY
@@ -317,6 +337,7 @@ class AgyPtyLauncher extends RemoteLauncherBase {
 
     private finishPendingWebDelivery(): void {
         this.pendingWebDelivery = null
+        this.deliveryConfirmedByTurnProgress = false
         const resolve = this.pendingWebDeliveryResolved
         this.pendingWebDeliveryResolved = null
         resolve?.()
@@ -623,6 +644,7 @@ class AgyPtyLauncher extends RemoteLauncherBase {
                         .map((item) => item.localId)
                         .filter((localId): localId is string => Boolean(localId))
                     if (localIds.length > 0) {
+                        this.deliveryConfirmedByTurnProgress = false
                         this.pendingWebDelivery = {
                             message: msg.message,
                             localIds,
@@ -718,13 +740,17 @@ class AgyPtyLauncher extends RemoteLauncherBase {
                     // stays alive and can continue serving ordinary approvals.
                     this.session.agyPermissionHandler?.cancelAll('agy PTY exited while a permission request was pending')
                     if (this.pendingWebDelivery) {
-                        this.exitReason = 'exit'
-                        this.pendingWebDeliveryResolved?.()
-                        this.session.client.sendSessionEvent({
-                            type: 'message',
-                            message: 'agy PTY exited before delivery could be confirmed'
-                        })
-                        return
+                        if (this.deliveryConfirmedByTurnProgress) {
+                            this.releaseUnechoedWebDelivery()
+                        } else {
+                            this.exitReason = 'exit'
+                            this.pendingWebDeliveryResolved?.()
+                            this.session.client.sendSessionEvent({
+                                type: 'message',
+                                message: 'agy PTY exited before delivery could be confirmed'
+                            })
+                            return
+                        }
                     }
                     if (authFailedThisRound) return
                     this.session.client.sendSessionEvent({
@@ -765,9 +791,13 @@ class AgyPtyLauncher extends RemoteLauncherBase {
                     }
                     return
                 }
+                if (entry.type === 'PLANNER_RESPONSE' && this.pendingWebDelivery?.submitted) {
+                    this.deliveryConfirmedByTurnProgress = true
+                }
                 const hasText = (entry.content ?? '').trim().length > 0
                 const hasToolCalls = (entry.tool_calls?.length ?? 0) > 0
-                if (!hasText && !hasToolCalls) return
+                const hasUsage = entry.type === 'PLANNER_RESPONSE' && Boolean((entry as { usage?: unknown }).usage)
+                if (!hasText && !hasToolCalls && !hasUsage) return
                 if (entry.type === 'PLANNER_RESPONSE') {
                     // A planner step declares the tool CALLS (name + args) for the
                     // action entries that immediately follow it — one per call, in

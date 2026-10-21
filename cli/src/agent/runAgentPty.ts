@@ -196,6 +196,10 @@ export async function runAgentPty(opts: RunAgentPtyOpts): Promise<void> {
     let sawOutput = false
     // For marker-based agents (claude): true once the input prompt rendered.
     let promptSeen = false
+    // Once verifyPromptAfterResize succeeds or the first message is submitted,
+    // stdin is known to be wired up; subsequent writes must not retry on slow
+    // TUI echo or the same prompt gets pasted 2x-3x into the composer.
+    let stdinVerified = false
     // Re-armable readiness: true only while the agent is actually sitting at an
     // input prompt. Set by a prompt/idle marker (or the idle watchdog) and
     // cleared on a busy marker and on every submit, so a queued message waits for
@@ -304,6 +308,7 @@ export async function runAgentPty(opts: RunAgentPtyOpts): Promise<void> {
         try {
             manager.resize(verificationCols, currentRows)
             await waitForInputReady(idleReadyMs + 1500)
+            if (inputReady) stdinVerified = true
         } finally {
             // External terminal resizes may arrive while verification is in
             // flight. Restore the latest tracked size, not a hard-coded default
@@ -322,8 +327,9 @@ export async function runAgentPty(opts: RunAgentPtyOpts): Promise<void> {
         // newlines stay literal instead of each submitting a partial line. The
         // trailing CR sent separately below is what submits the whole block.
         const payload = bracketPasteIfMultiline(message)
+        const maxAttempts = stdinVerified ? 1 : 3
         let echoed = false
-        for (let attempt = 0; attempt < 3 && !echoed; attempt++) {
+        for (let attempt = 0; attempt < maxAttempts && !echoed; attempt++) {
             const before = lastOutputAt
             manager.write(payload)
             const waitStart = Date.now()
@@ -336,6 +342,7 @@ export async function runAgentPty(opts: RunAgentPtyOpts): Promise<void> {
                 logger.debug(`${debugPrefix} no echo after write (attempt ${attempt + 1}); retrying`)
             }
         }
+        stdinVerified = true
         await sleep(150)
         await opts.onBeforeMessageSubmit?.(message)
         manager.write('\r')

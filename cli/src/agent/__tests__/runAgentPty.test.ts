@@ -805,4 +805,37 @@ describe('runAgentPty', () => {
         expect(harness.m.write).not.toHaveBeenCalledWith('should not send')
         expect(harness.m.kill).toHaveBeenCalled()
     })
+
+    it('writes a message only once (no 3x duplicate paste) when verifyPromptAfterResize already verified the prompt', async () => {
+        const msg1 = deferred<{ message: string } | null>()
+        const msg2 = deferred<{ message: string } | null>()
+        const nextMessage = vi.fn()
+            .mockImplementationOnce(() => msg1.promise)
+            .mockImplementationOnce(() => msg2.promise)
+        const promise = runAgentPty(makeOpts({
+            promptMarkers: ['? for shortcuts'],
+            idleMarkers: ['? for shortcuts'],
+            requirePromptMarker: true,
+            verifyPromptAfterResize: true,
+            idleReadyMs: 30,
+            nextMessage,
+        }))
+
+        await tick(20)
+        harness.triggerData('? for shortcuts')
+        await tick(60)
+        // Re-emit prompt marker in response to verifyPromptAfterResize
+        harness.triggerData('? for shortcuts')
+        await tick(100)
+        // Turn off echo before message submission to simulate a slow TUI render
+        harness.setEcho(false)
+        msg1.resolve({ message: 'single-paste' })
+        await tick(1000)
+
+        const payloadWrites = harness.m.write.mock.calls.filter((c) => c[0] === 'single-paste')
+        expect(payloadWrites).toHaveLength(1)
+        msg2.resolve(null)
+        harness.setRunning(false)
+        await promise
+    })
 })

@@ -1779,4 +1779,77 @@ describe('agyPtyLauncher ask_question safety: invalidate stale pending questions
         msgPromise.resolve(null)
         await launcherPromise
     })
+
+    it('matches user requests when Windows ConPTY drops non-ASCII punctuation (—, “, ”, ·, \u2060)', () => {
+        const sent = '请检查 vircs — “编译机” · 状态\u2060正常'
+        const conPtyObserved = '<USER_REQUEST>\n请检查 vircs  编译机  状态正常\n</USER_REQUEST>'
+        expect(userRequestMatches(sent, conPtyObserved)).toBe(true)
+    })
+
+    it('does not shift pendingAgyToolCalls when a CHECKPOINT action entry arrives mid-batch', async () => {
+        harness.exitReason = 'exit'
+        const { session } = createSessionStub()
+        vi.mocked(session.queue.waitForMessagesAndGetAsString).mockResolvedValue(null)
+
+        await agyPtyLauncher(session as never)
+        const onEntry = harness.scannerOpts!.onEntry as (e: unknown) => void
+
+        onEntry({
+            type: 'PLANNER_RESPONSE',
+            step_index: 10,
+            content: 'Reading file',
+            tool_calls: [{ name: 'read_file', args: { Path: '/tmp/foo.ts' } }]
+        })
+        onEntry({
+            type: 'CHECKPOINT',
+            step_index: 11,
+            content: 'Created At: 2026-10-21T00:00:00Z\nCompleted At: 2026-10-21T00:00:05Z'
+        })
+        onEntry({
+            type: 'READ_FILE',
+            step_index: 12,
+            content: '1: const x = 1'
+        })
+
+        const calls = vi.mocked(session.client.sendAgySessionMessage).mock.calls
+        const checkpointCall = calls.find(([e]) => (e as { type: string }).type === 'CHECKPOINT')
+        const readFileCall = calls.find(([e]) => (e as { type: string }).type === 'READ_FILE')
+        expect(checkpointCall?.[2]).toBeUndefined()
+        expect(readFileCall?.[2]).toEqual({ name: 'read_file', args: { Path: '/tmp/foo.ts' } })
+    })
+
+    it('releases pendingWebDelivery and allows respawn when agy exits mid-turn after PLANNER_RESPONSE', async () => {
+        harness.exitReason = null
+        const { session } = createSessionStub()
+        vi.mocked(session.queue.waitForMessagesAndGetAsString).mockResolvedValueOnce({
+            message: 'check status — now',
+            mode: 'default',
+            isolate: false,
+            hash: 'default',
+            items: [{ message: 'check status — now', localId: 'loc-midturn-1' }],
+        } as never)
+        harness.afterNextMessage = async (opts) => {
+            await opts.onMessageSubmitted?.('check status — now')
+            const onEntry = harness.scannerOpts!.onEntry as (e: unknown) => void
+            onEntry({
+                type: 'PLANNER_RESPONSE',
+                step_index: 2,
+                content: 'Working on it...',
+                tool_calls: [],
+            })
+            opts.onExit?.(0)
+        }
+
+        await agyPtyLauncher(session as never)
+
+        expect(session.client.emitMessagesConsumed).toHaveBeenCalledWith(['loc-midturn-1'])
+        expect(session.client.sendSessionEvent).toHaveBeenCalledWith({
+            type: 'message',
+            message: 'Process exited with code 0',
+        })
+        expect(session.client.sendSessionEvent).not.toHaveBeenCalledWith({
+            type: 'message',
+            message: 'agy PTY exited before delivery could be confirmed',
+        })
+    })
 })
