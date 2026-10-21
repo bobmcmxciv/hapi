@@ -18,7 +18,8 @@ export const SESSION_REFERENCE_STEER_SUFFIX =
  * negative constraint), not for humans.
  */
 export const INSPECT_PEER_TOOL_DESCRIPTION =
-    'Read another HAPI session (metadata + recent message text) on the same hub/namespace. ' +
+    'Read another HAPI session (metadata, structured digest, artifacts, attachments + recent message text) on the same hub/namespace. ' +
+    'Accepts an optional question for targeted factual evidence extraction via lightweight read-only QA, without a session fork. ' +
     'Fires when the user cites a peer via markdown [title](/sessions/<id>), Copy-reference prose ' +
     'See session "…" (/sessions/<id>) for context, or a bare /sessions/<id>. ' +
     'Extract <id> and pass it as sessionIdPrefix. /sessions/<id> is a hub path - do NOT Grep, Glob, or Read it as a local filesystem path. ' +

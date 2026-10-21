@@ -19,6 +19,7 @@ import {
     type VoiceSessionView
 } from './material'
 import {
+    EVIDENCE_QA_SYSTEM_PROMPT,
     NORMALIZE_SYSTEM_PROMPT,
     QA_DETAIL_SYSTEM_PROMPT,
     QA_ROUTER_SYSTEM_PROMPT,
@@ -118,13 +119,14 @@ export class VoiceAssistant {
             || session.id.slice(0, 8)
     }
 
-    private materialFor(session: VoiceSessionView, messageLimit: number): string {
+    private materialFor(session: VoiceSessionView, messageLimit: number, fullTranscript?: boolean): string {
         return buildSessionMaterial({
             session,
             digest: this.deps.getDigest(session.id),
             project: this.deps.getProject(session),
             messages: this.deps.getRecentMessages(session.id, messageLimit),
-            now: this.now()
+            now: this.now(),
+            fullTranscript
         })
     }
 
@@ -137,9 +139,22 @@ export class VoiceAssistant {
         question: string
         history?: VoiceTurn[]
         candidates?: VoiceSessionView[]
+        mode?: 'voice' | 'evidence'
     }): Promise<{ answer: string; model: string; ms: number; sessions: string[] }> {
         const startedAt = this.now()
         const history = (params.history ?? []).slice(-MAX_HISTORY_TURNS)
+        if (params.mode === 'evidence') {
+            const current = this.deps.getSession(params.sessionId)
+            if (!current) throw new Error('Session not found')
+            const material = this.materialFor(current, QA_MESSAGES, true)
+            const { text, model } = await this.complete(EVIDENCE_QA_SYSTEM_PROMPT, buildQaDetailPrompt({
+                now: this.now(),
+                materials: [{ title: this.titleOf(current), material }],
+                history,
+                question: params.question
+            }), 900)
+            return { answer: text, model, ms: this.now() - startedAt, sessions: [current.id] }
+        }
         const current = params.candidates?.find((session) => session.id === params.sessionId) ?? this.deps.getSession(params.sessionId)
         if (!current) throw new Error('Session not found')
 

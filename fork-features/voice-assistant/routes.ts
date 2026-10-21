@@ -20,6 +20,7 @@ const historySchema = z.array(z.object({
 const askSchema = z.object({
     sessionId: z.string().min(1),
     question: z.string().trim().min(1).max(500),
+    mode: z.enum(['voice', 'evidence']).optional(),
     history: historySchema
 })
 

@@ -1,5 +1,5 @@
 import { existsSync, realpathSync } from 'node:fs'
-import { isAbsolute, relative, resolve } from 'node:path'
+import { posix, win32 } from 'node:path'
 import {
     extractAssistantPlainText,
     isObject,
@@ -14,6 +14,7 @@ import type {
     AgentSessionSummary,
     AgentStatus
 } from './protocol'
+import { stripInjectedBlocks } from '../session-digest/transcript'
 
 const SUMMARY_LIMIT = 240
 
@@ -30,15 +31,33 @@ export function deriveAgentStatus(session: Session): AgentStatus {
     return 'idle'
 }
 
+function isWindowsPath(path: string): boolean {
+    return /^[A-Za-z]:[\\/]/.test(path) || path.startsWith('\\\\')
+}
+
 function normalizePath(path: string): string | null {
-    if (!isAbsolute(path)) return null
-    const absolutePath = resolve(path)
-    return existsSync(absolutePath) ? realpathSync.native(absolutePath) : absolutePath
+    if (isWindowsPath(path)) {
+        if (!win32.isAbsolute(path)) return null
+        const absolutePath = win32.resolve(path)
+        return (process.platform === 'win32' && existsSync(absolutePath)
+            ? realpathSync.native(absolutePath)
+            : absolutePath).toLowerCase()
+    }
+    if (!posix.isAbsolute(path)) return null
+    const absolutePath = posix.resolve(path)
+    return process.platform !== 'win32' && existsSync(absolutePath)
+        ? realpathSync.native(absolutePath)
+        : absolutePath
 }
 
 function isAncestorOrSame(ancestor: string, descendant: string): boolean {
-    const candidate = relative(ancestor, descendant)
-    return candidate === '' || (!candidate.startsWith('..') && !isAbsolute(candidate))
+    const windows = isWindowsPath(ancestor)
+    if (windows !== isWindowsPath(descendant)) return false
+    const paths = windows ? win32 : posix
+    const candidate = windows
+        ? win32.relative(ancestor.toLowerCase(), descendant.toLowerCase())
+        : posix.relative(ancestor, descendant)
+    return candidate === '' || (candidate !== '..' && !candidate.startsWith(`..${paths.sep}`) && !paths.isAbsolute(candidate))
 }
 
 function sessionPath(session: Session): string | null {
@@ -153,6 +172,14 @@ function toolProjection(message: DecryptedMessage, content: unknown): AgentProje
         }
     }
     if (content.type !== 'output' || !data) return null
+    if (data.type === 'agy_tool_action') {
+        return {
+            ...projectedBase(message),
+            kind: 'tool',
+            name: typeof data.name === 'string' ? data.name : 'tool',
+            summary: stringifySummary(data.content ?? data.input)
+        }
+    }
 
     if (data.type === 'tool_use') {
         return {
@@ -197,17 +224,29 @@ export function projectAgentMessage(message: DecryptedMessage): AgentProjectedMe
     }
 
     if (envelope.role === 'user') {
-        const text = textFromUserContent(envelope.content)
-        if (text) {
+        const text = stripInjectedBlocks(textFromUserContent(envelope.content) ?? '')
+        const attachments = isObject(envelope.content) && Array.isArray(envelope.content.attachments)
+            ? envelope.content.attachments.flatMap((entry) => {
+                if (!isObject(entry) || (typeof entry.filename !== 'string' && typeof entry.path !== 'string')) return []
+                return [{
+                    ...(typeof entry.filename === 'string' ? { filename: entry.filename } : {}),
+                    ...(typeof entry.mimeType === 'string' ? { mimeType: entry.mimeType } : {}),
+                    ...(typeof entry.path === 'string' ? { path: entry.path } : {})
+                }]
+            })
+            : []
+        if (text || attachments.length > 0) {
             const meta = isObject(envelope.meta) ? envelope.meta : null
             return {
                 ...projectedBase(message),
                 kind: 'user',
                 text,
+                ...(attachments.length > 0 ? { attachments } : {}),
                 ...(typeof meta?.sentFrom === 'string' ? { sentFrom: meta.sentFrom } : {}),
                 ...(typeof meta?.fromSessionId === 'string' ? { fromSessionId: meta.fromSessionId } : {})
             }
         }
+        return null
     }
 
     if (hiddenAgentRecord(envelope.content)) return null

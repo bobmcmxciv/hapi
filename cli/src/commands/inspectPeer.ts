@@ -12,15 +12,18 @@ type ParsedInspectPeerArgs = {
     help: boolean
     sessionIdPrefix?: string
     messageLimit?: number
+    question?: string
 }
 
 function showHelp(): void {
     console.log(`
-${chalk.bold('hapi inspect-peer')} - Read another HAPI session's metadata + recent messages
+${chalk.bold('hapi inspect-peer')} - Read another HAPI session's digest, artifacts, attachments + recent messages
 
 ${chalk.bold('Usage:')}
   hapi inspect-peer <session-id-or-prefix>
   hapi inspect-peer <session-id-or-prefix> --limit 50
+  hapi inspect-peer <session-id-or-prefix> --ask "Which files changed and why?"
+  --ask <question> / --ask=<question>: targeted read-only factual evidence QA
 
 ${chalk.bold('Notes:')}
   Read-only twin of ping-peer. Prefer this (or MCP inspect_peer) over JWT+curl.
@@ -42,6 +45,14 @@ export function parseInspectPeerArgs(args: string[]): ParsedInspectPeerArgs {
         const arg = args[i]!
         if (arg === '--help' || arg === '-h') {
             result.help = true
+            continue
+        }
+        if (arg === '--ask' || arg.startsWith('--ask=')) {
+            const value = arg === '--ask' ? args[++i] : arg.slice('--ask='.length)
+            if (!value?.trim() || value.startsWith('--')) {
+                throw new PingPeerError('bad_args', '--ask requires a question')
+            }
+            result.question = value.trim()
             continue
         }
         if (arg === '--limit') {
@@ -89,7 +100,8 @@ export async function handleInspectPeerCommand(args: string[]): Promise<void> {
 
     const result = await inspectPeer({
         sessionIdPrefix: parsed.sessionIdPrefix,
-        messageLimit: parsed.messageLimit
+        messageLimit: parsed.messageLimit,
+        question: parsed.question
     })
     console.log(formatInspectPeerReport(result))
 }

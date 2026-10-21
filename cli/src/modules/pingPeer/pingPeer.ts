@@ -1,6 +1,7 @@
 /**
  * Resume-if-inactive + wait-active + POST /api/sessions/:id/messages,
- * plus read-only inspectPeer (GET session + messages, never resume).
+ * plus read-only inspectPeer (digest, artifacts, attachments, recent text,
+ * optional targeted evidence QA; never resume or fork).
  *
  * Shared by `hapi ping-peer` / `hapi inspect-peer` and MCP `ping_peer` /
  * `inspect_peer`. Uses the same hub JWT flow as the web app
@@ -519,7 +520,7 @@ export async function pingPeer(options: PingPeerOptions): Promise<PingPeerResult
     await sendMessage(apiUrl, jwt, matched.id, message, http)
 
     return {
-        sessionId: matched.id,
+        sessionId: live.id,
         name,
         resumed
     }
@@ -548,9 +549,31 @@ export type InspectPeerOptions = {
     sessionIdPrefix: string
     /** Recent message page size (default 30, clamped 1..100). */
     messageLimit?: number
+    question?: string
     apiUrl?: string
     accessToken?: string
     http?: AxiosInstance
+}
+
+export type InspectPeerAttachment = {
+    filename: string
+    mimeType: string | null
+    path: string | null
+}
+
+export type InspectPeerDigest = {
+    title: string
+    status: string
+    done: string[]
+    todo: string[]
+    files: string[]
+    commits: string[]
+}
+
+export type InspectPeerAnswer = {
+    question: string
+    answer: string
+    model: string | null
 }
 
 export type InspectPeerMessage = {
@@ -558,6 +581,8 @@ export type InspectPeerMessage = {
     role: string
     text: string
     createdAt: number | null
+    seq?: number | null
+    attachments?: InspectPeerAttachment[]
 }
 
 export type InspectPeerResult = {
@@ -570,6 +595,9 @@ export type InspectPeerResult = {
     lifecycleState: string | null
     updatedAt: number | null
     messages: InspectPeerMessage[]
+    digest?: InspectPeerDigest | null
+    attachments?: InspectPeerAttachment[]
+    answer?: InspectPeerAnswer | null
 }
 
 const DEFAULT_INSPECT_MESSAGE_LIMIT = 30
@@ -585,13 +613,12 @@ function clampInspectMessageLimit(raw: number | undefined): number {
 }
 
 function extractUserPlainText(inner: unknown): string | null {
-    if (typeof inner === 'string' && inner.trim()) return inner
-    if (!isObject(inner)) return null
-    if (typeof inner.text === 'string' && inner.text.trim()) return inner.text
-    if (isObject(inner.content) && typeof inner.content.text === 'string' && inner.content.text.trim()) {
-        return inner.content.text
-    }
-    return null
+    const text = typeof inner === 'string' ? inner
+        : isObject(inner) && typeof inner.text === 'string' ? inner.text
+            : isObject(inner) && isObject(inner.content) && typeof inner.content.text === 'string' ? inner.content.text
+                : ''
+    const clean = text.replace(/<([a-z_][a-z0-9_-]*)(\s[^>]*)?>[\s\S]*?<\/\1>/gi, ' ').trim()
+    return clean || null
 }
 
 /** Best-effort text from a hub message row; skip tool-call / empty noise. */
@@ -599,6 +626,16 @@ export function extractInspectMessageSnippet(content: unknown): InspectPeerMessa
     if (!isObject(content)) return null
     const role = typeof content.role === 'string' ? content.role : 'unknown'
     const inner = content.content
+    const attachments: InspectPeerAttachment[] = role === 'user' && isObject(inner) && Array.isArray(inner.attachments)
+        ? inner.attachments.flatMap((entry) => {
+            if (!isObject(entry) || (!entry.filename && !entry.path)) return []
+            return [{
+                filename: String(entry.filename || 'attachment'),
+                mimeType: typeof entry.mimeType === 'string' ? entry.mimeType : null,
+                path: typeof entry.path === 'string' ? entry.path : null
+            }]
+        })
+        : []
     let text: string | null = null
     if (role === 'user') {
         text = extractUserPlainText(inner)
@@ -606,9 +643,8 @@ export function extractInspectMessageSnippet(content: unknown): InspectPeerMessa
         text = extractAssistantPlainText(inner)
         if (!text) text = extractUserPlainText(inner)
     }
-    if (!text) return null
-    const trimmed = text.replace(/\s+/g, ' ').trim()
-    if (!trimmed) return null
+    const trimmed = (text ?? '').replace(/\s+/g, ' ').trim()
+    if (!trimmed && attachments.length === 0) return null
     const snippet = trimmed.length > MAX_SNIPPET_CHARS
         ? `${trimmed.slice(0, MAX_SNIPPET_CHARS)}…`
         : trimmed
@@ -616,7 +652,8 @@ export function extractInspectMessageSnippet(content: unknown): InspectPeerMessa
         id: typeof content.id === 'string' ? content.id : '',
         role,
         text: snippet,
-        createdAt: null
+        createdAt: null,
+        ...(attachments.length > 0 ? { attachments } : {})
     }
 }
 
@@ -651,14 +688,46 @@ async function fetchSessionMessages(
         out.push({
             ...snippet,
             id: typeof row.id === 'string' ? row.id : snippet.id,
+            seq: typeof row.seq === 'number' ? row.seq : null,
             createdAt: typeof row.createdAt === 'number' ? row.createdAt : null
         })
     }
     return out
 }
 
+async function fetchSessionDigest(
+    apiUrl: string,
+    jwt: string,
+    sessionId: string,
+    http: AxiosInstance
+): Promise<InspectPeerDigest | null> {
+    try {
+        const response = await http.get(`${apiUrl}/api/digests/sessions/${encodeURIComponent(sessionId)}`, {
+            headers: authHeaders(jwt),
+            timeout: 10_000,
+            validateStatus: () => true
+        })
+        if (response.status !== 200 || !isObject(response.data?.digest)) return null
+        const digest = response.data.digest
+        const artifacts = isObject(digest.artifacts) ? digest.artifacts : null
+        const strings = (value: unknown): string[] => Array.isArray(value)
+            ? value.filter((entry): entry is string => typeof entry === 'string')
+            : []
+        return {
+            title: typeof digest.title === 'string' ? digest.title : '',
+            status: typeof digest.status === 'string' ? digest.status : '',
+            done: strings(digest.done),
+            todo: strings(digest.todo),
+            files: strings(artifacts?.files),
+            commits: strings(artifacts?.commits)
+        }
+    } catch {
+        return null
+    }
+}
+
 /**
- * Resolve a peer by id/prefix and return metadata + recent text messages.
+ * Resolve a peer by id/prefix: structured brief first, optional read-only evidence QA.
  * Read-only: never resumes inactive sessions (unlike `pingPeer`).
  */
 export async function inspectPeer(options: InspectPeerOptions): Promise<InspectPeerResult> {
@@ -673,15 +742,49 @@ export async function inspectPeer(options: InspectPeerOptions): Promise<InspectP
     const http = options.http ?? axios
 
     const jwt = await exchangeJwt(apiUrl, accessToken, http)
-    const sessions = await listSessions(apiUrl, jwt, http)
-    const matched = resolveSessionByPrefix(sessions, prefix)
-    const live = await getSession(apiUrl, jwt, matched.id, http)
-    const meta = live.metadata ?? matched.metadata ?? null
-    const messages = await fetchSessionMessages(apiUrl, jwt, matched.id, messageLimit, http)
+    const isFullUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(prefix)
+    const matched = isFullUuid ? null : resolveSessionByPrefix(await listSessions(apiUrl, jwt, http), prefix)
+    const targetId = matched ? matched.id : prefix
+    const live = await getSession(apiUrl, jwt, targetId, http)
+    const meta = live.metadata ?? matched?.metadata ?? null
+    const messages = await fetchSessionMessages(apiUrl, jwt, live.id, messageLimit, http)
+    const digest = await fetchSessionDigest(apiUrl, jwt, live.id, http)
+    const attachments = messages.flatMap((message) => message.attachments ?? [])
+    const question = options.question?.trim()
+    let answer: InspectPeerAnswer | null = null
+    if (question) {
+        try {
+            const response = await http.post(`${apiUrl}/api/voice/session-qa`, {
+                sessionId: live.id,
+                question,
+                mode: 'evidence'
+            }, {
+                headers: authHeaders(jwt),
+                timeout: 30_000,
+                validateStatus: () => true
+            })
+            if (response.status >= 200 && response.status < 300 && typeof response.data?.answer === 'string') {
+                answer = {
+                    question,
+                    answer: response.data.answer,
+                    model: typeof response.data.model === 'string' ? response.data.model : null
+                }
+            } else {
+                const detail = typeof response.data?.error === 'string' ? response.data.error : `HTTP ${response.status}`
+                answer = { question, answer: `[evidence_unavailable: ${detail}]`, model: null }
+            }
+        } catch (error) {
+            answer = {
+                question,
+                answer: `[evidence_unavailable: ${error instanceof Error ? error.message : String(error)}]`,
+                model: null
+            }
+        }
+    }
 
     return {
-        sessionId: matched.id,
-        name: resolvePeerSessionLabel({ ...matched, metadata: meta ?? matched.metadata ?? null }),
+        sessionId: live.id,
+        name: resolvePeerSessionLabel({ ...(matched ?? live), id: live.id, metadata: meta }),
         active: live.active,
         thinking: Boolean(live.thinking),
         flavor: typeof meta?.flavor === 'string' ? meta.flavor : null,
@@ -689,10 +792,13 @@ export async function inspectPeer(options: InspectPeerOptions): Promise<InspectP
         lifecycleState: typeof meta?.lifecycleState === 'string' ? meta.lifecycleState : null,
         updatedAt: typeof live.updatedAt === 'number'
             ? live.updatedAt
-            : typeof matched.updatedAt === 'number'
+            : typeof matched?.updatedAt === 'number'
                 ? matched.updatedAt
                 : null,
-        messages
+        messages,
+        digest,
+        attachments,
+        answer
     }
 }
 
@@ -707,15 +813,35 @@ export function formatInspectPeerReport(result: InspectPeerResult): string {
         `thinking: ${result.thinking}`,
         `lifecycle: ${result.lifecycleState ?? '(none)'}`,
         `cwd: ${result.path ?? '(unknown)'}`,
-        `updatedAt: ${result.updatedAt ?? '(unknown)'}`,
-        `messages (text snippets, newest page): ${result.messages.length}`
+        `updatedAt: ${result.updatedAt ?? '(unknown)'}`
     ]
+    if (result.digest) {
+        lines.push(
+            `digest.status: ${result.digest.status}`,
+            `digest.done: ${result.digest.done.join('；')}`,
+            `digest.todo: ${result.digest.todo.join('；')}`,
+            `artifacts.files: ${result.digest.files.join(', ')}`,
+            `artifacts.commits: ${result.digest.commits.join(' | ')}`
+        )
+    }
+    const attachmentLabel = (attachment: InspectPeerAttachment) =>
+        `${attachment.filename} (${attachment.mimeType ?? 'unknown'}) -> ${attachment.path ?? '(unknown)'}`
+    if (result.attachments?.length) {
+        lines.push(`attachments: ${result.attachments.map(attachmentLabel).join('; ')}`)
+    }
+    lines.push(`messages (text snippets, newest page): ${result.messages.length}`)
     if (result.messages.length === 0) {
         lines.push('(no extractable user/assistant text in this page)')
     } else {
         for (const message of result.messages) {
-            lines.push(`[${message.role}] ${message.text}`)
+            const annotations = message.attachments?.length
+                ? ` [attachments: ${message.attachments.map(attachmentLabel).join('; ')}]`
+                : ''
+            lines.push(`[${message.role}] ${message.text}${annotations}`)
         }
+    }
+    if (result.answer) {
+        lines.push(`evidence (q: ${result.answer.question}${result.answer.model ? `, model: ${result.answer.model}` : ''}):\n${result.answer.answer}`)
     }
     return lines.join('\n')
 }

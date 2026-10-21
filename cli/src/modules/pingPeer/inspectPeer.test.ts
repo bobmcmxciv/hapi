@@ -3,6 +3,7 @@ import {
     PingPeerError,
     formatInspectPeerReport,
     inspectPeer,
+    extractInspectMessageSnippet,
     type PingPeerSessionSummary
 } from './pingPeer'
 
@@ -32,6 +33,113 @@ function createHttpMock(handlers: {
 }
 
 describe('inspectPeer', () => {
+    it('keeps clean user/agy text and attachment paths, not injected context or preview URLs', () => {
+        expect(extractInspectMessageSnippet({
+            role: 'user',
+            content: {
+                text: '<hapi_user_context user="a">private</hapi_user_context>Inspect this',
+                attachments: [null, {}, { filename: 'error.png', mimeType: 'image/png', path: 'C:\\tmp\\error.png', previewUrl: 'secret' }]
+            }
+        })).toMatchObject({
+            role: 'user', text: 'Inspect this',
+            attachments: [{ filename: 'error.png', mimeType: 'image/png', path: 'C:\\tmp\\error.png' }]
+        })
+        expect(extractInspectMessageSnippet({
+            role: 'user', content: { text: '<hapi_user_context>private</hapi_user_context>', attachments: [{ path: '/tmp/file.txt' }] }
+        })).toMatchObject({
+            text: '', attachments: [{ filename: 'attachment', mimeType: null, path: '/tmp/file.txt' }]
+        })
+        expect(extractInspectMessageSnippet({
+            role: 'agent', content: { type: 'output', data: { type: 'agy_message', content: 'Fixed src/main.ts' } }
+        })?.text).toBe('Fixed src/main.ts')
+        for (const content of ['', ' \n ']) {
+            expect(extractInspectMessageSnippet({
+                role: 'agent', content: { type: 'output', data: { type: 'agy_message', content } }
+            })).toBeNull()
+        }
+    })
+
+    it('returns a structured brief and targeted evidence without resuming or sending messages', async () => {
+        const sessionId = 'evidence-peer'
+        const peer = { id: sessionId, active: false, metadata: { name: 'Scope fix', path: 'C:\\repo' } }
+        const attachment = { filename: 'error.png', mimeType: 'image/png', path: 'C:\\tmp\\error.png' }
+        const http = createHttpMock({
+            post: (url, body) => {
+                if (url.endsWith('/api/auth')) return { status: 200, data: { token: 'jwt' } }
+                if (url.endsWith('/api/voice/session-qa')) {
+                    expect(body).toEqual({ sessionId, question: 'Which error?', mode: 'evidence' })
+                    return { status: 200, data: { answer: 'src/main.ts: E_SCOPE', model: 'extractor' } }
+                }
+                throw new Error(`unexpected POST ${url}`)
+            },
+            get: (url) => {
+                if (url.endsWith('/api/sessions')) return { status: 200, data: { sessions: [peer] } }
+                if (url.endsWith(`/api/sessions/${sessionId}`)) return { status: 200, data: { session: peer } }
+                if (url.endsWith('/messages')) return {
+                    status: 200, data: { messages: [{
+                        id: 'user1', seq: 42, content: { role: 'user', content: { text: 'See error', attachments: [{ ...attachment, previewUrl: 'secret' }] } }
+                    }] }
+                }
+                if (url.endsWith(`/api/digests/sessions/${sessionId}`)) return {
+                    status: 200, data: { digest: {
+                        title: 'Scope fix', status: 'Fixed', done: ['Read logs', 'Fixed scope'], todo: ['Deploy'],
+                        artifacts: { files: ['src/main.ts'], commits: ['abc fix scope'] }
+                    } }
+                }
+                throw new Error(`unexpected GET ${url}`)
+            }
+        })
+        const result = await inspectPeer({
+            sessionIdPrefix: sessionId, question: ' Which error? ', apiUrl: 'http://hub.test', accessToken: 'tok', http: http as never
+        })
+        expect(result.digest).toEqual({
+            title: 'Scope fix', status: 'Fixed', done: ['Read logs', 'Fixed scope'], todo: ['Deploy'],
+            files: ['src/main.ts'], commits: ['abc fix scope']
+        })
+        expect(result.attachments).toEqual([attachment])
+        expect(result.messages[0]?.seq).toBe(42)
+        expect(result.answer).toEqual({ question: 'Which error?', answer: 'src/main.ts: E_SCOPE', model: 'extractor' })
+        const report = formatInspectPeerReport(result)
+        expect(report).toContain('digest.status: Fixed')
+        expect(report).toContain('digest.done: Read logs；Fixed scope')
+        expect(report).toContain('digest.todo: Deploy')
+        expect(report).toContain('artifacts.files: src/main.ts')
+        expect(report).toContain('artifacts.commits: abc fix scope')
+        expect(report).toContain('attachments: error.png (image/png) -> C:\\tmp\\error.png')
+        expect(report).toContain('[user] See error [attachments: error.png (image/png) -> C:\\tmp\\error.png]')
+        expect(report).toContain('evidence (q: Which error?, model: extractor):\nsrc/main.ts: E_SCOPE')
+        expect(report).not.toContain('secret')
+        expect(http.post).toHaveBeenCalledTimes(2)
+    })
+
+    it('preserves Tier 1 with a clear reason when evidence or digest is unavailable', async () => {
+        for (const failure of ['http', 'network']) {
+            const peer = { id: 'peer01', active: false, metadata: { name: 'Still readable' } }
+            const http = createHttpMock({
+                post: (url) => {
+                    if (url.endsWith('/api/auth')) return { status: 200, data: { token: 'jwt' } }
+                    if (failure === 'network') throw new Error('network offline')
+                    return { status: 503, data: { error: 'not configured' } }
+                },
+                get: (url) => {
+                    if (url.endsWith('/api/sessions')) return { status: 200, data: { sessions: [peer] } }
+                    if (url.endsWith('/api/sessions/peer01')) return { status: 200, data: { session: peer } }
+                    if (url.endsWith('/messages')) return { status: 200, data: { messages: [{
+                        content: { role: 'agent', content: { type: 'output', data: { type: 'agy_message', content: 'Last known fact' } } }
+                    }] } }
+                    throw new Error('digest unavailable')
+                }
+            })
+            const result = await inspectPeer({
+                sessionIdPrefix: peer.id, question: 'What happened?', apiUrl: 'http://hub.test', accessToken: 'tok', http: http as never
+            })
+            expect(result.digest).toBeNull()
+            expect(result.messages[0]?.text).toBe('Last known fact')
+            expect(result.answer?.answer).toBe(`[evidence_unavailable: ${failure === 'network' ? 'network offline' : 'not configured'}]`)
+            expect(formatInspectPeerReport(result)).toContain('Last known fact')
+        }
+    })
+
     beforeEach(() => {
         vi.clearAllMocks()
     })

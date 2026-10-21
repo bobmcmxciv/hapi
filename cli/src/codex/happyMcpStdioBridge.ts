@@ -173,6 +173,7 @@ export async function runHappyMcpStdioBridge(argv: string[]): Promise<void> {
       messageLimit: z.number().int().min(1).max(100).optional().describe(
         'Recent message page size (default 30, max 100). Text snippets only.'
       ),
+      question: z.string().trim().min(1).max(500).optional().describe('Optional specific question to extract factual evidence from the peer session via lightweight read-only QA'),
     });
 
     if (toolNames.has('inspect_peer')) {

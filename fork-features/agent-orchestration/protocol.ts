@@ -94,10 +94,17 @@ const ProjectedMessageBaseSchema = z.object({
     createdAt: z.number()
 })
 
+export const AgentAttachmentSchema = z.object({
+    filename: z.string().optional(),
+    mimeType: z.string().optional(),
+    path: z.string().optional()
+})
+
 export const AgentProjectedMessageSchema = z.discriminatedUnion('kind', [
     ProjectedMessageBaseSchema.extend({
         kind: z.literal('user'),
         text: z.string(),
+        attachments: z.array(AgentAttachmentSchema).optional(),
         sentFrom: z.string().optional(),
         fromSessionId: z.string().optional()
     }),

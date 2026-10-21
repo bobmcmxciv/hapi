@@ -123,8 +123,9 @@ export function buildSessionMaterial(params: {
     project: VoiceProjectView | null
     messages: TranscriptMessage[]
     now: number
+    fullTranscript?: boolean
 }): string {
-    const { session, digest, project, messages, now } = params
+    const { session, digest, project, messages, now, fullTranscript } = params
     const meta = session.metadata
     const parts: string[] = []
 
@@ -162,15 +163,15 @@ export function buildSessionMaterial(params: {
         parts.push(`# 所属项目\n${lines.join('\n')}`)
     }
 
-    const sinceSeq = digest?.sourceSeq ?? 0
+    const sinceSeq = fullTranscript ? 0 : (digest?.sourceSeq ?? 0)
     const lines: TranscriptLine[] = messages
         .filter((message) => message.seq > sinceSeq)
         .map(extractTranscriptLine)
         .filter((line): line is TranscriptLine => line !== null)
     if (lines.length > 0) {
-        const budget = digest ? TRANSCRIPT_BUDGET_WITH_DIGEST : TRANSCRIPT_BUDGET_NO_DIGEST
-        parts.push(`# ${digest ? '摘要之后的新对话' : '最近的对话'}\n${renderTranscript(lines, budget)}`)
-    } else if (digest) {
+        const budget = (digest && !fullTranscript) ? TRANSCRIPT_BUDGET_WITH_DIGEST : TRANSCRIPT_BUDGET_NO_DIGEST
+        parts.push(`# ${(digest && !fullTranscript) ? '摘要之后的新对话' : '最近的对话'}\n${renderTranscript(lines, budget)}`)
+    } else if (digest && !fullTranscript) {
         parts.push('# 摘要之后的新对话\n（没有新对话）')
     }
 

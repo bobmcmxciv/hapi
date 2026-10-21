@@ -35,7 +35,7 @@ function textFromBlocks(content: unknown): string {
 }
 
 /** 网关注入的记忆块、系统提醒等尖括号包裹的段落不是用户本人的话，去掉。 */
-function stripInjectedBlocks(text: string): string {
+export function stripInjectedBlocks(text: string): string {
     return text
         .replace(/<([a-z_][a-z0-9_-]*)(\s[^>]*)?>[\s\S]*?<\/\1>/gi, ' ')
         .replace(/\s+\n/g, '\n')
@@ -66,6 +66,10 @@ export function extractTranscriptLine(message: TranscriptMessage): TranscriptLin
 
     if (record.type === 'output' && data.type === 'assistant') {
         const text = textFromBlocks(asRecord(data.message)?.content).trim()
+        return text ? { seq: message.seq, role: 'assistant', text: clip(text, MAX_LINE_CHARS) } : null
+    }
+    if (record.type === 'output' && data.type === 'agy_message' && typeof data.content === 'string') {
+        const text = data.content.trim()
         return text ? { seq: message.seq, role: 'assistant', text: clip(text, MAX_LINE_CHARS) } : null
     }
     if (record.type === 'codex' && data.type === 'message' && typeof data.message === 'string') {

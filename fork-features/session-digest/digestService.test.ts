@@ -48,6 +48,19 @@ const idleSession = (id: string, extra: Partial<DigestSessionView['metadata']> =
 })
 
 describe('transcript', () => {
+    it('extracts agy final replies but skips empty placeholders', () => {
+        for (const content of ['', ' \n ']) {
+            expect(extractTranscriptLine({
+                seq: 1,
+                content: { role: 'agent', content: { type: 'output', data: { type: 'agy_message', content } } }
+            })).toBeNull()
+        }
+        expect(extractTranscriptLine({
+            seq: 2,
+            content: { role: 'agent', content: { type: 'output', data: { type: 'agy_message', content: ' Fixed src/main.ts \n' } } }
+        })).toEqual({ seq: 2, role: 'assistant', text: 'Fixed src/main.ts' })
+    })
+
     it('keeps user text and assistant text, drops tool results and injected blocks', () => {
         expect(extractTranscriptLine(user(1, '<hapi_user_context user="a">我的电脑</hapi_user_context>修一下'))).toEqual({ seq: 1, role: 'user', text: '修一下' })
         expect(extractTranscriptLine(assistant(2, '改好了'))).toEqual({ seq: 2, role: 'assistant', text: '改好了' })

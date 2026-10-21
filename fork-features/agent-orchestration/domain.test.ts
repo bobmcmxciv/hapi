@@ -80,6 +80,23 @@ function message(seq: number, content: unknown): DecryptedMessage {
 }
 
 describe('agent orchestration scope', () => {
+    test('compares Windows paths across hub platforms without crossing roots or machines', () => {
+        const root = session('root', 'C:\\Users\\Administrator\\hapi')
+        const child = session('child', 'c:\\users\\administrator\\HAPI\\sub')
+        expect(isSessionInAgentScope(root, child)).toBe(true)
+        expect(isSessionInAgentScope(child, root)).toBe(true)
+        expect(isDirectoryInAgentScope(root, 'C:\\Users\\Administrator\\hapi\\sub')).toBe(true)
+        expect(isDirectoryInAgentScope(child, 'C:/Users/Administrator/hapi')).toBe(true)
+        expect(isDirectoryInAgentScope(root, 'C:\\Users\\Administrator\\hapi-other')).toBe(false)
+        expect(isDirectoryInAgentScope(root, 'D:\\Users\\Administrator\\hapi')).toBe(false)
+        expect(isDirectoryInAgentScope(root, '/Users/Administrator/hapi')).toBe(false)
+        expect(isSessionInAgentScope(root, session('remote', child.metadata!.path, { machineId: 'machine-2' }))).toBe(false)
+        expect(isDirectoryInAgentScope(
+            session('unc', '\\\\server\\share\\repo'),
+            '\\\\SERVER\\SHARE\\repo\\sub'
+        )).toBe(true)
+    })
+
     test('allows same, ancestor, descendant, and shared worktree roots symmetrically', () => {
         const root = session('root', '/repo')
         const child = session('child', '/repo/sub')
@@ -135,6 +152,36 @@ describe('agent orchestration status', () => {
 })
 
 describe('agent message projection', () => {
+    test('projects agy replies and actions and removes injected user context and preview URLs', () => {
+        expect(projectAgentMessage(message(1, {
+            role: 'agent',
+            content: { type: 'output', data: { type: 'agy_message', content: 'Fixed src/main.ts' } }
+        }))).toEqual({ seq: 1, createdAt: 1, kind: 'assistant', text: 'Fixed src/main.ts' })
+        expect(projectAgentMessage(message(2, {
+            role: 'agent',
+            content: { type: 'output', data: { type: 'agy_tool_action', name: 'Read', content: 'src/main.ts' } }
+        }))).toEqual({ seq: 2, createdAt: 2, kind: 'tool', name: 'Read', summary: 'src/main.ts' })
+        expect(projectAgentMessage(message(3, {
+            role: 'agent',
+            content: { type: 'output', data: { type: 'agy_tool_action', input: { path: 'src/main.ts' } } }
+        }))).toEqual({ seq: 3, createdAt: 3, kind: 'tool', name: 'tool', summary: '{"path":"src/main.ts"}' })
+        expect(projectAgentMessage(message(4, {
+            role: 'user',
+            content: {
+                type: 'text',
+                text: '<hapi_user_context user="a">private context</hapi_user_context>Inspect this image',
+                attachments: [null, {}, { filename: 'error.png', mimeType: 'image/png', path: 'C:\\tmp\\error.png', previewUrl: 'secret' }]
+            }
+        }))).toEqual({
+            seq: 4, createdAt: 4, kind: 'user', text: 'Inspect this image',
+            attachments: [{ filename: 'error.png', mimeType: 'image/png', path: 'C:\\tmp\\error.png' }]
+        })
+        expect(projectAgentMessage(message(5, {
+            role: 'user',
+            content: { type: 'text', text: '<hapi_user_context>private context</hapi_user_context>' }
+        }))).toBeNull()
+    })
+
     test('normalizes user, assistant, and tool records without storage envelopes', () => {
         const user = projectAgentMessage(message(1, {
             role: 'user',

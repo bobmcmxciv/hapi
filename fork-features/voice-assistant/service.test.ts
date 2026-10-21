@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'bun:test'
 import type { TranscriptMessage } from '../session-digest/transcript'
 import { buildSessionMaterial, recentToolActivity, type VoiceDigestView, type VoiceSessionView } from './material'
-import { parseJsonObject } from './prompts'
+import { EVIDENCE_QA_SYSTEM_PROMPT, parseJsonObject } from './prompts'
 import { VoiceAssistant, VoiceAssistantUnavailableError, type VoiceLlmProvider } from './service'
 
 const NOW = 1_800_000_000_000
@@ -97,6 +97,46 @@ describe('voice-assistant material', () => {
 })
 
 describe('VoiceAssistant.ask', () => {
+    it('extracts evidence from only the target material in one call without routing', async () => {
+        const evidence = 'src/main.ts: observed E_SCOPE; tried win32.relative and scope passed.'
+        const primary = fakeProvider('primary', [evidence])
+        const sessions = [session('target01', 'Scope fix'), session('other001', 'Unrelated secret')]
+        const va = assistantWith({
+            sessions,
+            messages: {
+                target01: [user(1, 'Investigate E_SCOPE'), assistant(2, evidence)],
+                other001: [user(1, 'Do not include this other session')]
+            },
+            providers: [primary]
+        })
+        const result = await va.ask({
+            sessionId: 'target01',
+            question: 'Which error and attempted fix?',
+            mode: 'evidence',
+            candidates: [session('target01', 'Stale candidate'), sessions[1]!],
+            history: Array.from({ length: 6 }, (_, i) => ({ q: `question-${i}`, a: `answer-${i}` }))
+        })
+        expect(result).toEqual({ answer: evidence, model: 'primary-model', ms: 0, sessions: ['target01'] })
+        expect(primary.prompts).toHaveLength(1)
+        expect(primary.prompts[0]!.system).toBe(EVIDENCE_QA_SYSTEM_PROMPT)
+        expect(primary.prompts[0]!.prompt).toContain('Scope fix')
+        expect(primary.prompts[0]!.prompt).toContain(evidence)
+        expect(primary.prompts[0]!.prompt).toContain('question-2')
+        expect(primary.prompts[0]!.prompt).not.toContain('question-1')
+        expect(primary.prompts[0]!.prompt).not.toContain('Unrelated secret')
+        expect(primary.prompts[0]!.prompt).not.toContain('Stale candidate')
+    })
+
+    it('rejects a missing evidence target even if it appears in candidates', async () => {
+        const primary = fakeProvider('primary', [])
+        const va = assistantWith({ sessions: [], providers: [primary] })
+        await expect(va.ask({
+            sessionId: 'missing', question: 'What happened?', mode: 'evidence',
+            candidates: [session('missing', 'Stale')]
+        })).rejects.toThrow('Session not found')
+        expect(primary.prompts).toHaveLength(0)
+    })
+
     it('answers a question about the current session in one call, with the session material and the index', async () => {
         const primary = fakeProvider('primary', [JSON.stringify({ answer: '现在在写测试，还剩部署。', details: [] })])
         const sessions = [session('s1aaaaaa', '语音改造'), session('s2bbbbbb', '视频渲染', { thinking: true })]

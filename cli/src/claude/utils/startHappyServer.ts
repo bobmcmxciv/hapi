@@ -92,6 +92,7 @@ function createHapiMcpServer(
         messageLimit: z.number().int().min(1).max(100).optional().describe(
             'Recent message page size (default 30, max 100). Text snippets only.'
         ),
+        question: z.string().trim().min(1).max(500).optional().describe('Optional specific question to extract factual evidence from the peer session via lightweight read-only QA'),
     });
 
     const listPeersInputSchema: z.ZodTypeAny = z.object({
@@ -246,12 +247,13 @@ function createHapiMcpServer(
         description: INSPECT_PEER_TOOL_DESCRIPTION,
         title: 'Inspect Peer Session',
         inputSchema: inspectPeerInputSchema,
-    }, async (args: { sessionIdPrefix: string; messageLimit?: number }) => {
+    }, async (args: { sessionIdPrefix: string; messageLimit?: number; question?: string }) => {
         logger.debug('[hapiMCP] inspect_peer:', args.sessionIdPrefix);
         try {
             const result = await inspectPeer({
                 sessionIdPrefix: args.sessionIdPrefix,
                 messageLimit: args.messageLimit,
+                question: args.question,
             });
             return {
                 content: [

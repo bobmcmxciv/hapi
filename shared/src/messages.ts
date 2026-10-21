@@ -114,7 +114,7 @@ export function isRedundantGoalStatusEventContent(value: unknown): boolean {
 /**
  * Best-effort plain-text extraction from a stored agent message's `content`.
  *
- * Two structural shapes are common in this fork:
+ * Three structural shapes are common in this fork:
  *
  *  1. `codex` flavor:  content.type = 'codex',  content.data.type = 'message'
  *     -> assistant text at `content.data.message` (string).
@@ -122,6 +122,9 @@ export function isRedundantGoalStatusEventContent(value: unknown): boolean {
  *  2. `output` flavor (Claude SDK passthrough):  content.type = 'output',
  *     content.data.type = 'assistant'  -> text at
  *     `content.data.message.content[i].text` (array of `{type:'text', text}`).
+ *
+ *  3. `output` flavor (agy): content.data.type = 'agy_message'
+ *     -> assistant text at `content.data.content`; empty placeholders are skipped.
  *
  * Returns `null` when the content does not look like assistant *text*
  * (tool calls, tool results, reasoning, token counts, etc.) so callers can
@@ -140,7 +143,13 @@ export function extractAssistantPlainText(content: unknown): string | null {
 
     if (content.type === 'output') {
         const data = isObject(content.data) ? content.data : null
-        if (!data || data.type !== 'assistant') return null
+        if (!data) return null
+        if (data.type === 'agy_message') {
+            return typeof data.content === 'string' && data.content.trim().length > 0
+                ? data.content
+                : null
+        }
+        if (data.type !== 'assistant') return null
         const message = isObject(data.message) ? data.message : null
         const blocks = Array.isArray(message?.content) ? message.content : null
         if (!blocks) return null
