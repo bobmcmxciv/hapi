@@ -80,6 +80,12 @@ function extractRawUserTextContent(content: unknown): string | null {
     return parts.length > 0 ? parts.join('\n') : null
 }
 
+const HAPI_USER_CONTEXT_BLOCK_RE = /<hapi_user_context\b[^>]*>[\s\S]*?<\/hapi_user_context>\s*/g
+
+function stripInjectedUserContext(text: string): string {
+    return text.replace(HAPI_USER_CONTEXT_BLOCK_RE, '').trim()
+}
+
 /**
  * Returns true if a JSONL message should be classified as a user-role message
  * (i.e., text typed by a real human) rather than an agent-role message.
@@ -813,11 +819,12 @@ export class ApiSessionClient extends EventEmitter {
         let createdAt: number | undefined
 
         if (isExternalUserMessage(body)) {
+            const rawText = extractRawUserTextContent(body.message.content) ?? ''
             content = {
                 role: 'user',
                 content: {
                     type: 'text',
-                    text: extractRawUserTextContent(body.message.content) ?? ''
+                    text: stripInjectedUserContext(rawText) || rawText
                 },
                 meta: {
                     sentFrom: 'cli'
@@ -875,7 +882,11 @@ export class ApiSessionClient extends EventEmitter {
         const isUser = entry.type === 'USER_INPUT'
         // agy appends its own sections (<ADDITIONAL_METADATA>, <USER_SETTINGS_CHANGE>)
         // after the request block, so only the extracted request may be rendered.
-        const text = isUser ? (extractUserRequest(entry.content ?? '') ?? entry.content ?? '').trim() : undefined
+        // Also strip any <hapi_user_context> block injected by the Hub gateway so
+        // an echoed CLI user message never leaks raw XML context into the chat UI.
+        const text = isUser
+            ? stripInjectedUserContext(extractUserRequest(entry.content ?? '') ?? entry.content ?? '')
+            : undefined
 
         if (isUser && text) {
             this.socket.emit('message', {

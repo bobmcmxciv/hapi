@@ -386,8 +386,21 @@ export class MessageQueue2<T> {
             logger.debug(`[MessageQueue2] Collected batch of ${sameModeMessages.length} messages with mode hash: ${targetModeHash}`);
         }
 
-        // Join all messages with newlines
-        const combinedMessage = sameModeMessages.join('\n');
+        // Join all messages with newlines, deduplicating repeated identical
+        // <hapi_user_context> blocks injected by the Hub gateway across queued items.
+        const seenContextBlocks = new Set<string>();
+        const deduplicatedMessages = sameModeMessages.length > 1
+            ? sameModeMessages.map((msg) => msg.replace(
+                /<hapi_user_context\b[^>]*>[\s\S]*?<\/hapi_user_context>\s*/g,
+                (block) => {
+                    const normalized = block.trim();
+                    if (seenContextBlocks.has(normalized)) return '';
+                    seenContextBlocks.add(normalized);
+                    return block;
+                }
+            ))
+            : sameModeMessages;
+        const combinedMessage = deduplicatedMessages.join('\n');
 
         if (consumedLocalIds.length > 0) {
             this.onBatchConsumed?.(consumedLocalIds);

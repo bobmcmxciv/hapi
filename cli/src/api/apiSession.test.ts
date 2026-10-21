@@ -746,4 +746,26 @@ describe('IncomingMessageFilter (HAPI Bot R3 finding #1)', () => {
         expect(filter.accept({ id: 'a', seq: 8 })).toBe(true)
         expect(filter.accept({ id: 'b', seq: 9 })).toBe(true)
     })
+
+    it('strips <hapi_user_context> blocks when echoing USER_INPUT in sendAgySessionMessage', () => {
+        socketHarness.sockets.length = 0
+        const client = new ApiSessionClient('token', createSession({ namespace: 'default' }))
+        const socket = socketHarness.sockets[0]
+        if (!socket) throw new Error('expected socket')
+
+        client.sendAgySessionMessage({
+            type: 'USER_INPUT',
+            content: '<USER_REQUEST>\n<hapi_user_context user="admin">\ncontext line\n</hapi_user_context>\n\nReal user question\n</USER_REQUEST>'
+        })
+        const emitted = socket.emitted.find((entry) => entry.event === 'message')
+        expect(emitted?.args[0]).toEqual({
+            sid: '11111111-1111-4111-8111-111111111111',
+            message: {
+                role: 'user',
+                content: { type: 'text', text: 'Real user question' },
+                meta: { sentFrom: 'cli' }
+            }
+        })
+        client.close()
+    })
 })
