@@ -837,17 +837,19 @@ class AgyPtyLauncher extends RemoteLauncherBase {
                     // would let a LATER, unrelated action entry incorrectly consume
                     // it via shift() and mis-pair its tool card. Handle it via its
                     // own side channel instead (handleAskQuestion).
-                    const allToolCalls = entry.tool_calls ?? []
-                    this.pendingAgyToolCalls = allToolCalls.filter((tc) => !isAgyAskQuestionToolCall(tc))
-                    allToolCalls.forEach((toolCall, callIndex) => {
-                        if (isAgyAskQuestionToolCall(toolCall)) {
-                            // callIndex disambiguates the (unobserved in practice, but
-                            // not impossible) case of more than one ask_question call
-                            // in the same planner batch — without it both would
-                            // compute the same toolUseId and collide in agentState.
-                            this.handleAskQuestion(toolCall, entry.step_index, callIndex)
-                        }
-                    })
+                    if (hasText || hasToolCalls) {
+                        const allToolCalls = entry.tool_calls ?? []
+                        this.pendingAgyToolCalls = allToolCalls.filter((tc) => !isAgyAskQuestionToolCall(tc))
+                        allToolCalls.forEach((toolCall, callIndex) => {
+                            if (isAgyAskQuestionToolCall(toolCall)) {
+                                // callIndex disambiguates the (unobserved in practice, but
+                                // not impossible) case of more than one ask_question call
+                                // in the same planner batch — without it both would
+                                // compute the same toolUseId and collide in agentState.
+                                this.handleAskQuestion(toolCall, entry.step_index, callIndex)
+                            }
+                        })
+                    }
                     session.client.sendAgySessionMessage(entry, this.agySessionId ?? undefined)
                     return
                 }

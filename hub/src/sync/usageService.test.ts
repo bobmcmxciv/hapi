@@ -658,3 +658,66 @@ describe('usage service', () => {
         store.close()
     })
 })
+
+describe('OMP usage deduplication and model attribution', () => {
+    it('counts OMP assistant usage once and ignores null-model OMP token_count events', () => {
+        const store = new Store(':memory:')
+        try {
+            const session = store.sessions.getOrCreateSession(
+                'omp-usage-summary-test',
+                { path: '/tmp', host: 'vircs', flavor: 'omp' },
+                null,
+                'default'
+            )
+            addAgentMessage(store, session.id, {
+                type: 'output',
+                data: {
+                    type: 'assistant',
+                    uuid: 'omp-msg-1',
+                    providerMessageId: 'resp-1',
+                    timestamp: '2026-10-20T08:00:00Z',
+                    message: {
+                        role: 'assistant',
+                        model: 'cx2cc/gpt-5.6-sol',
+                        usage: {
+                            input_tokens: 1_000,
+                            output_tokens: 200,
+                            cache_read_input_tokens: 4_000
+                        }
+                    }
+                }
+            })
+            addAgentMessage(store, session.id, {
+                type: 'codex',
+                data: {
+                    type: 'token_count',
+                    model: null,
+                    info: {
+                        total: {
+                            inputTokens: 5_000,
+                            outputTokens: 200,
+                            cachedInputTokens: 4_000
+                        },
+                        last: {
+                            inputTokens: 5_000,
+                            outputTokens: 200,
+                            cachedInputTokens: 4_000
+                        }
+                    }
+                }
+            })
+
+            const result = getUsageSummary(store, 'default', 'all')
+            expect(result.totals.requests).toBe(1)
+            expect(result.totals.inputTokens).toBe(5_000)
+            expect(result.totals.outputTokens).toBe(200)
+            expect(result.totals.cacheReadTokens).toBe(4_000)
+            expect(result.totals.totalTokens).toBe(5_200)
+            expect(result.byModel).toEqual([
+                expect.objectContaining({ key: 'cx2cc/gpt-5.6-sol', requests: 1, totalTokens: 5_200 })
+            ])
+        } finally {
+            store.close()
+        }
+    })
+})

@@ -304,14 +304,15 @@ function extractUsageEvents(
     // Claude 专有的两支仍然只认 output 信封。
     if (outer.type === 'output' && data.type === 'assistant') {
         const message = data.message as Record<string, unknown> | undefined
-        const messageId = message?.id
+        const messageId = typeof message?.id === 'string' && message.id ? message.id : agent === 'omp' && typeof data.uuid === 'string' && data.uuid ? data.uuid : agent === 'omp' && typeof data.providerMessageId === 'string' && data.providerMessageId ? data.providerMessageId : undefined
         const model = message?.model
         if (typeof messageId !== 'string' || typeof model !== 'string' || model === '<synthetic>') return []
         const usage = message?.usage as Record<string, unknown> | undefined
         if (!usage) return []
         return [{
             kind: 'assistant',
-            ts,
+            ts: ts ?? new Date(createdAt).toISOString(),
+            ...(agent === 'omp' ? { inputIsUncached: true } : {}),
             messageId,
             model,
             inputTokens: Number(usage.input_tokens) || 0,
@@ -342,7 +343,11 @@ function extractUsageEvents(
 
     // —— Codex / Kimi / ACP 后端唯一的用量来源。口径搬自上游
     //    hub/src/sync/usageService.ts 的 parseUsageEvent。
+    //    注意：OMP 同时发 `assistant`（带真实 provider/model 与 usage）和
+    //    `token_count`（仅用于上下文进度条，model=null），若再计 `token_count`
+    //    会导致会话 model 为空时落入 `unknown`、有值时翻倍重复记账。
     if (data.type === 'token_count' || data.type === 'usage') {
+        if (agent === 'omp') return []
         // 导入的历史记录不是本机真实消耗，计进去会把同一批 token 记两遍。
         if (data.hapiUsageScope === 'imported-history') return []
         const info = asRecord(data.info) ?? data

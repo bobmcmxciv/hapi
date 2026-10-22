@@ -136,6 +136,29 @@ function generationStepIndexes(bytes: Uint8Array): number[] | null {
     return indexes
 }
 
+// ChatModelMetadata.model (field 3 varint enum) fallback when both
+// response_model (field 19) and model_display_name (field 21) are absent.
+const CHAT_MODEL_ENUM_FALLBACK: Readonly<Record<number, string>> = {
+    1318: 'gemini-3.8-flash',
+    1319: 'gemini-3.8-flash',
+    1320: 'gemini-3.8-flash',
+    1322: 'gemini-3.8-flash-tiered',
+    1400: 'claude-opus-5-5-low',
+    1401: 'claude-opus-5-5-medium',
+    1402: 'claude-opus-5-5-high',
+    1403: 'claude-sonnet-5-5-low',
+    1404: 'claude-sonnet-5-5-medium',
+    1405: 'claude-sonnet-5-5-high',
+    1417: 'gemini-4-argon',
+    1418: 'gemini-4-argon',
+    1419: 'gemini-4-argon',
+}
+
+function generationEnumModel(generation: Uint8Array): string | null {
+    const modelEnum = readField(generation, 3)
+    return typeof modelEnum === 'number' ? CHAT_MODEL_ENUM_FALLBACK[modelEnum] ?? null : null
+}
+
 function generationMetadata(data: unknown): {
     invocation: string; model: string | null; usage: AgyTokenUsage | null; stepIndexes: number[] | null
 } | null {
@@ -144,12 +167,13 @@ function generationMetadata(data: unknown): {
     const invocation = decodeText(readLengthDelimitedField(bytes, 4))
     if (!invocation) return null
     const generation = readLengthDelimitedField(bytes, 1)
-    // ChatModelMetadata.response_model = 19; model_display_name = 21.
-    // Prefer the wire id for stable per-model grouping, with display-name
-    // fallback for older conversations that did not persist response_model.
+    // ChatModelMetadata.response_model = 19; model_display_name = 21; model enum = 3.
+    // Prefer the wire id for stable per-model grouping, with display-name and enum
+    // fallbacks for older/partial conversations that did not persist response_model.
     const model = generation
         ? decodeText(readLengthDelimitedField(generation, 19))
             ?? decodeText(readLengthDelimitedField(generation, 21))
+            ?? generationEnumModel(generation)
         : null
     return {
         invocation, model, usage: generation ? generationUsage(generation) : null,

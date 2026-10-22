@@ -239,3 +239,21 @@ describe('resolveAgyTurnModels', () => {
         expect(queryRows).not.toHaveBeenCalled()
     })
 })
+
+describe('ChatModelMetadata field 3 enum fallback', () => {
+    it('falls back to the ChatModelMetadata enum when fields 19 and 21 are absent', () => {
+        const usage = Buffer.concat([countField(2, 500), countField(3, 120)])
+        const rows = [
+            step(1, 'inv-enum'),
+            generation(1, 'inv-enum', 'unused', Buffer.concat([
+                field(1, Buffer.concat([countField(3, 1318), field(4, usage)])),
+                field(4, 'inv-enum'),
+            ])),
+        ]
+        expect(resolveAgyTurnMetadataFromRows([1], rows).get(1)).toEqual({
+            model: 'gemini-3.8-flash',
+            usageId: 'generation:1',
+            usage: { input_tokens: 500, output_tokens: 120, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+        })
+    })
+})

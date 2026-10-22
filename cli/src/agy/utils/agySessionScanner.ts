@@ -36,6 +36,7 @@ export async function emitAgyEntriesWithModels(
         retryDelaysMs?: readonly number[]
         sleep?: Sleep
         signal?: AbortSignal
+        pendingUsageEntries?: Map<number, AgyTranscriptEntry>
     } = {},
 ): Promise<void> {
     const resolveTurns = options.resolveTurns ?? resolveAgyTurnMetadata
@@ -69,7 +70,47 @@ export async function emitAgyEntriesWithModels(
         if (options.signal?.aborted) break
     }
 
-    for (const entry of entries) onEntry(entry)
+    for (const entry of entries) {
+        if (options.pendingUsageEntries && entry.type === 'PLANNER_RESPONSE' && !entry.usage) {
+            options.pendingUsageEntries.set(entry.step_index, entry)
+        }
+        onEntry(entry)
+    }
+}
+
+export async function flushPendingAgyUsageEntries(
+    pendingUsageEntries: Map<number, AgyTranscriptEntry>,
+    onEntry: (entry: AgyTranscriptEntry) => void,
+    brainUuid: string | null,
+    options: {
+        resolveTurns?: ResolveTurns
+        stepIndexes?: readonly number[]
+    } = {},
+): Promise<void> {
+    if (!brainUuid || pendingUsageEntries.size === 0) return
+    const stepIndexes = options.stepIndexes ?? [...pendingUsageEntries.keys()]
+    if (stepIndexes.length === 0) return
+    const resolveTurns = options.resolveTurns ?? resolveAgyTurnMetadata
+    const turns = await resolveTurns(brainUuid, stepIndexes)
+    for (const stepIndex of stepIndexes) {
+        const pending = pendingUsageEntries.get(stepIndex)
+        if (!pending) continue
+        const turn = turns.get(stepIndex)
+        if (turn?.usage) {
+            pendingUsageEntries.delete(stepIndex)
+            onEntry({
+                ...pending,
+                content: '',
+
+                tool_calls: undefined,
+                model: turn.model ?? pending.model,
+                usage: turn.usage,
+                usageId: turn.usageId,
+            })
+        } else if (turn?.model && !pending.model) {
+            pending.model = turn.model
+        }
+    }
 }
 
 function brainLogPath(uuid: string): string {
@@ -108,6 +149,7 @@ class AgySessionScanner extends BaseSessionScanner<AgyTranscriptEntry> {
     private readonly onEntry: (entry: AgyTranscriptEntry) => void
     private foundBrainUuid: string | null = null
     private readonly modelSettlingAbortController = new AbortController()
+    private readonly pendingUsageEntries = new Map<number, AgyTranscriptEntry>()
 
     constructor(opts: CreateAgySessionScannerOpts) {
         super({ intervalMs: 5000 })
@@ -126,6 +168,7 @@ class AgySessionScanner extends BaseSessionScanner<AgyTranscriptEntry> {
     public override async cleanup(): Promise<void> {
         this.modelSettlingAbortController.abort()
         await super.cleanup()
+        await flushPendingAgyUsageEntries(this.pendingUsageEntries, this.onEntry, this.foundBrainUuid)
     }
 
     /** Switch to a new brain UUID (e.g. after a re-spawn, or a hook re-firing with the same UUID). */
@@ -140,6 +183,7 @@ class AgySessionScanner extends BaseSessionScanner<AgyTranscriptEntry> {
         if (this.foundBrainUuid === uuid) return
         logger.debug(`[agy-scanner] onNewSession: switching brain to ${uuid}`)
         this.foundBrainUuid = uuid
+        this.pendingUsageEntries.clear()
         this.invalidate()
     }
 
@@ -203,9 +247,18 @@ class AgySessionScanner extends BaseSessionScanner<AgyTranscriptEntry> {
         cursor: number
         nextCursor: number
     }): Promise<void> {
-        await emitAgyEntriesWithModels(stats.events, this.onEntry, this.foundBrainUuid, {
-            signal: this.modelSettlingAbortController.signal,
-        })
+        const priorPendingStepIndexes = [...this.pendingUsageEntries.keys()]
+        if (stats.events.length > 0) {
+            await emitAgyEntriesWithModels(stats.events, this.onEntry, this.foundBrainUuid, {
+                signal: this.modelSettlingAbortController.signal,
+                pendingUsageEntries: this.pendingUsageEntries,
+            })
+        }
+        if (priorPendingStepIndexes.length > 0 && !this.modelSettlingAbortController.signal.aborted) {
+            await flushPendingAgyUsageEntries(this.pendingUsageEntries, this.onEntry, this.foundBrainUuid, {
+                stepIndexes: priorPendingStepIndexes,
+            })
+        }
     }
 }
 

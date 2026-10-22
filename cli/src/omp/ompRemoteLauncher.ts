@@ -766,11 +766,13 @@ class OmpRemoteLauncher extends RemoteLauncherBase {
         this.trackEventTask((async () => {
             const state = await this.requireClient().request({ type: 'get_state' });
             this.persistRuntimeState(state);
+            const resolvedModel = state.model ?? this.currentModel;
+            const modelId = resolvedModel ? `${resolvedModel.provider}/${resolvedModel.id}` : null;
             const converted = convertAgentMessage({
                 ...message,
                 contextTokens: state.contextUsage?.tokens,
                 contextWindow: state.contextUsage?.contextWindow
-            });
+            }, modelId);
             if (converted) {
                 this.session.sendAgentMessage(converted);
             }

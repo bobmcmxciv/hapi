@@ -58,7 +58,7 @@ function parseUsageEvent(session: StoredSession, message: StoredMessage): UsageE
         if (inputTokens + outputTokens + cacheReadTokens + cacheCreationTokens <= 0) return null
         if (isAgy && (typeof data.messageId !== 'string' || !data.messageId)) return null
         const providerId = isAgy ? data.messageId
-            : typeof assistant?.id === 'string' ? assistant.id : message.id
+            : typeof assistant?.id === 'string' && assistant.id ? assistant.id : typeof data.uuid === 'string' && data.uuid ? data.uuid : message.id
         const model = typeof assistant?.model === 'string' && assistant.model.trim()
             ? assistant.model.trim()
             : isAgy ? 'unknown' : null
@@ -68,7 +68,7 @@ function parseUsageEvent(session: StoredSession, message: StoredMessage): UsageE
             sourceKey: `${isAgy ? 'agy' : 'claude'}|${providerId}`,
             sourceSeq: message.seq,
             createdAt: Number.isFinite(agyTimestamp) ? agyTimestamp : message.createdAt,
-            agent: isAgy ? 'agy' : 'claude',
+            agent: isAgy ? 'agy' : sessionAgent(session) === 'omp' ? 'omp' : 'claude',
             model,
             kind: 'delta',
             inputTokens,
@@ -89,6 +89,7 @@ function parseUsageEvent(session: StoredSession, message: StoredMessage): UsageE
         if (data.hapiUsageScope === 'imported-history') return null
         const info = asRecord(data.info) ?? data
         const agent = sessionAgent(session)
+        if (agent === 'omp') return null
         const explicitThreadId = typeof data.threadId === 'string'
             ? data.threadId
             : typeof data.thread_id === 'string'
@@ -335,7 +336,7 @@ export function getUsageSummary(
             }
         }
         if (duplicateCumulativeEvent || !isInRange(event) || inputTokens + outputTokens + cacheReadTokens + cacheCreationTokens <= 0) continue
-        const normalizedInputTokens = event.agent === 'claude' || event.agent === 'agy'
+        const normalizedInputTokens = event.agent === 'claude' || event.agent === 'agy' || event.agent === 'omp'
             ? inputTokens + cacheReadTokens + cacheCreationTokens
             : inputTokens
         addTotals(totals, normalizedInputTokens, outputTokens, cacheReadTokens, cacheCreationTokens)

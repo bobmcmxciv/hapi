@@ -14,7 +14,7 @@ import { describe, it, expect, beforeEach, afterEach, afterAll, vi } from 'vites
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir, homedir } from 'node:os'
-import { createAgySessionScanner, emitAgyEntriesWithModels } from './agySessionScanner'
+import { createAgySessionScanner, emitAgyEntriesWithModels, flushPendingAgyUsageEntries } from './agySessionScanner'
 import type { AgyTranscriptEntry } from './agyTranscriptTypes'
 
 vi.mock('node:os', async (importOriginal) => {
@@ -248,4 +248,58 @@ describe('AgySessionScanner — resume support', () => {
         await scanner.cleanup()
     })
 
+})
+
+describe('flushPendingAgyUsageEntries', () => {
+    const BRAIN_UUID = '00000000-0000-4000-8000-000000000099'
+
+    it('queues unresolved PLANNER_RESPONSE steps after initial retries and emits a usage-only entry when gen_metadata settles later', async () => {
+        const pendingUsageEntries = new Map<number, AgyTranscriptEntry>()
+        const emitted: AgyTranscriptEntry[] = []
+        const entry: AgyTranscriptEntry = {
+            ...JSON.parse(makeTranscriptLine(12, 'PLANNER_RESPONSE', 'Running tool first...')),
+            tool_calls: [{ name: 'read_file', args: { Path: '/tmp/a' } }],
+        }
+        const resolveTurns = vi.fn(async () => new Map([[12, null]]))
+
+        await emitAgyEntriesWithModels([entry], (e) => emitted.push(e), BRAIN_UUID, {
+            resolveTurns,
+            retryDelaysMs: [10],
+            sleep: async () => {},
+            pendingUsageEntries,
+        })
+
+        expect(emitted).toHaveLength(1)
+        expect(emitted[0].content).toBe('Running tool first...')
+        expect(emitted[0].usage).toBeUndefined()
+        expect(pendingUsageEntries.has(12)).toBe(true)
+
+        const settledUsage = {
+            input_tokens: 3400,
+            output_tokens: 410,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 98000,
+        }
+        const resolveLate = vi.fn(async () => new Map([[12, {
+            model: 'gemini-4-argon',
+            usage: settledUsage,
+            usageId: 'generation:5',
+        }]]))
+
+        await flushPendingAgyUsageEntries(pendingUsageEntries, (e) => emitted.push(e), BRAIN_UUID, {
+            resolveTurns: resolveLate,
+        })
+
+        expect(pendingUsageEntries.size).toBe(0)
+        expect(emitted).toHaveLength(2)
+        expect(emitted[1]).toMatchObject({
+            step_index: 12,
+            type: 'PLANNER_RESPONSE',
+            content: '',
+            tool_calls: undefined,
+            model: 'gemini-4-argon',
+            usage: settledUsage,
+            usageId: 'generation:5',
+        })
+    })
 })
