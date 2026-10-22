@@ -31,7 +31,10 @@ const prepareSchema = z.object({
     history: historySchema
 })
 
-const ttsSchema = z.object({ text: z.string().trim().min(1).max(600) })
+const ttsSchema = z.object({
+    text: z.string().trim().min(1).max(600),
+    voice: z.string().trim().min(1).max(64).optional(),
+})
 
 /** 录入用的原始 PCM（16 kHz s16le 单声道）：读一段 10~20 秒的话，上限 60 秒。 */
 const MAX_ENROLL_BYTES = 60 * 32_000
@@ -63,7 +66,7 @@ export function mountVoiceAssistantRoutes(app: Hono<WebAppEnv>, resolveViewer: R
         if (!viewer.ok) return viewer.response
         const parsed = ttsSchema.safeParse(await c.req.json().catch(() => null))
         if (!parsed.success) return c.json({ error: 'Invalid body' }, 400)
-        return await proxyVoiceTts(parsed.data.text, c.req.raw.signal)
+        return await proxyVoiceTts(parsed.data.text, c.req.raw.signal, fetch, parsed.data.voice)
     })
 
     // 只认本人的声音：声纹状态、录入、清除。声纹只存向量，不存录音。

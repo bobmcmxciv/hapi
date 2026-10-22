@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
-import { getVoiceTtsStatus, proxyVoiceTts } from './tts'
+import { VOXCPM_VOICE_CATALOG, getVoiceTtsStatus, proxyVoiceTts } from './tts'
 
 const saved = { url: process.env.HAPI_VOICE_TTS_URL, token: process.env.HAPI_VOICE_TTS_TOKEN }
 
@@ -35,6 +35,30 @@ describe('voice TTS relay', () => {
         expect(calls).toBe(2)
     })
 
+    it('surfaces available VoxCPM multi-voice list and engine from health check', async () => {
+        const fetchImpl = (async () => {
+            return Response.json({
+                ok: true,
+                voice: 'manbo',
+                engine: 'voxcpm2',
+                sampleRate: 16000,
+                voices: VOXCPM_VOICE_CATALOG,
+            })
+        }) as unknown as typeof fetch
+        const status = await getVoiceTtsStatus(fetchImpl, 9_000_000)
+        expect(status).toEqual({
+            available: true,
+            voice: 'manbo',
+            engine: 'voxcpm2',
+            sampleRate: 16000,
+            voices: [...VOXCPM_VOICE_CATALOG],
+        })
+        expect(status.voices?.map((v) => v.id)).toEqual([
+            'manbo', 'nian', 'dusk', 'almond', 'skadi2', 'aglina',
+            'surtr', 'helage', 'mizuki', 'kalts', 'amiya', 'closur',
+        ])
+    })
+
     it('forwards text with the server-side token and streams the audio back', async () => {
         const seen: Array<{ url: string; token: string | null; body: string }> = []
         const fetchImpl = (async (url: string, init: RequestInit) => {
@@ -46,6 +70,20 @@ describe('voice TTS relay', () => {
         expect(response.headers.get('x-sample-rate')).toBe('32000')
         expect(new Uint8Array(await response.arrayBuffer())).toEqual(new Uint8Array([1, 0, 2, 0]))
         expect(seen).toEqual([{ url: 'http://127.0.0.1:13019/tts', token: 'secret-token', body: JSON.stringify({ text: '你好。' }) }])
+    })
+
+    it('forwards optional voice id to upstream /tts endpoint', async () => {
+        const seen: Array<{ body: string }> = []
+        const fetchImpl = (async (_url: string, init: RequestInit) => {
+            seen.push({ body: String(init.body) })
+            return new Response(new Uint8Array([1, 0]), {
+                headers: { 'x-sample-rate': '16000', 'x-audio-format': 's16le', 'x-voice-id': 'nian' }
+            })
+        }) as unknown as typeof fetch
+        const response = await proxyVoiceTts('来吃火锅！', undefined, fetchImpl, 'nian')
+        expect(response.status).toBe(200)
+        expect(response.headers.get('x-voice-id')).toBe('nian')
+        expect(seen).toEqual([{ body: JSON.stringify({ text: '来吃火锅！', voice: 'nian' }) }])
     })
 
     it('answers 502 when the service is unreachable so the browser can fall back', async () => {

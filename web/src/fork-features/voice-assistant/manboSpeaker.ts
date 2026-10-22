@@ -1,7 +1,8 @@
 import type { ApiClient } from '@/api/client'
+import { readVoiceTtsCharacter } from './readerPreference'
 
 /**
- * Speaks streamed reply text with the hub's voice service (曼波).
+ * Speaks streamed reply text with the hub's VoxCPM voice service (曼波 + 明日方舟 11 位干员).
  *
  * Text arrives as deltas; complete sentences are synthesized one after another while earlier ones
  * play, so speech starts after the first sentence instead of the whole reply. Audio is raw s16le
@@ -21,6 +22,7 @@ export class ManboSpeaker {
     private readonly api: ApiClient
     private readonly context: AudioContext
     private readonly onFallback?: (reason: string) => void
+    private readonly voice?: string | null
     private pending = ''
     private readonly queue: string[] = []
     private working = false
@@ -36,11 +38,18 @@ export class ManboSpeaker {
      */
     private readonly defaultSampleRate: number
 
-    constructor(api: ApiClient, context: AudioContext, onFallback?: (reason: string) => void, defaultSampleRate?: number | null) {
+    constructor(
+        api: ApiClient,
+        context: AudioContext,
+        onFallback?: (reason: string) => void,
+        defaultSampleRate?: number | null,
+        voice?: string | null
+    ) {
         this.api = api
         this.context = context
         this.onFallback = onFallback
         this.defaultSampleRate = defaultSampleRate && defaultSampleRate > 0 ? defaultSampleRate : 32000
+        this.voice = voice
     }
 
     /** Add reply text; whole sentences are queued for speaking. */
@@ -121,7 +130,8 @@ export class ManboSpeaker {
 
     private async synthesize(sentence: string, generation: number): Promise<void> {
         this.abort = new AbortController()
-        const response = await this.api.openVoiceTtsStream(sentence, this.abort.signal)
+        const selectedVoice = this.voice ?? readVoiceTtsCharacter()
+        const response = await this.api.openVoiceTtsStream(sentence, this.abort.signal, selectedVoice)
         const sampleRate = Number(response.headers.get('x-sample-rate')) || this.defaultSampleRate
         const reader = response.body!.getReader()
         let carry: Uint8Array | null = null

@@ -1472,14 +1472,15 @@ export class ApiClient {
     }
 
     /** Streamed PCM (s16le mono, rate in `x-sample-rate`) for one piece of text, spoken by the hub's own voice. */
-    async openVoiceTtsStream(text: string, signal?: AbortSignal): Promise<Response> {
+    async openVoiceTtsStream(text: string, signal?: AbortSignal, voice?: string | null): Promise<Response> {
+        const trimmedVoice = voice?.trim() || undefined
         const send = (token: string | null) => fetch(this.buildUrl('/api/voice/tts'), {
             method: 'POST',
             headers: {
                 'content-type': 'application/json',
                 ...(token ? { authorization: `Bearer ${token}` } : {})
             },
-            body: JSON.stringify({ text }),
+            body: JSON.stringify(trimmedVoice ? { text, voice: trimmedVoice } : { text }),
             signal
         })
         let res = await send((this.getToken ? this.getToken() : null) ?? this.token)

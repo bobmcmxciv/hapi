@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ApiClient } from '@/api/client'
 import { ManboSpeaker } from './manboSpeaker'
+import { writeVoiceTtsCharacter } from './readerPreference'
 
 class FakeAudioContext {
     currentTime = 0
@@ -40,11 +41,13 @@ describe('ManboSpeaker', () => {
     beforeEach(() => {
         speak.mockReset()
         cancel.mockReset()
+        writeVoiceTtsCharacter('manbo')
         Object.defineProperty(window, 'speechSynthesis', { configurable: true, value: { speak, cancel, speaking: false } })
         vi.stubGlobal('SpeechSynthesisUtterance', class { lang = ''; constructor(public text: string) {} })
     })
 
     afterEach(() => {
+        writeVoiceTtsCharacter('manbo')
         vi.unstubAllGlobals()
     })
 
@@ -64,6 +67,18 @@ describe('ManboSpeaker', () => {
         expect(context.buffers[0]).toEqual({ frames: 2, sampleRate: 32000 })
         // Chunks are scheduled back to back, never overlapping.
         for (let i = 1; i < context.started.length; i += 1) expect(context.started[i]!).toBeGreaterThanOrEqual(context.started[i - 1]!)
+    })
+
+    it('forwards the selected VoxCPM voice character to openVoiceTtsStream', async () => {
+        writeVoiceTtsCharacter('skadi2')
+        const open = vi.fn(async (_text: string, _signal?: AbortSignal, _voice?: string | null) => pcmResponse([[1, 0]]))
+        const context = new FakeAudioContext()
+        const speaker = new ManboSpeaker({ openVoiceTtsStream: open } as unknown as ApiClient, context as unknown as AudioContext)
+
+        speaker.push('听见海浪了吗。')
+        await vi.waitFor(() => expect(open).toHaveBeenCalledTimes(1))
+        expect(open.mock.calls[0]![0]).toBe('听见海浪了吗。')
+        expect(open.mock.calls[0]![2]).toBe('skadi2')
     })
 
     it('keeps an odd trailing byte for the next chunk instead of dropping it', async () => {

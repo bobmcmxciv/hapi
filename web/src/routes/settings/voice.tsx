@@ -8,7 +8,7 @@ import { SettingsChoiceGroup, SettingsLinkRow, SettingsPageContent, SettingsSect
 import { SelectControl } from '@/components/ui/select-control'
 import { useVoiceSettings } from './useVoiceSettings'
 import { useVoiceToolMode } from '@/fork-features/voice-assistant/toolMode'
-import { useVoiceReader } from '@/fork-features/voice-assistant/readerPreference'
+import { VOXCPM_VOICE_OPTIONS, useVoiceReader, useVoiceTtsCharacter } from '@/fork-features/voice-assistant/readerPreference'
 import { useVoiceListenMode, type VoiceListenPreference } from '@/fork-features/voice-assistant/listenMode'
 import { VoiceprintSettings } from '@/fork-features/voice-assistant/VoiceprintSettings'
 
@@ -19,10 +19,12 @@ export default function SettingsVoicePage() {
     const [opening, setOpening] = useState<'greet' | 'brief'>(() => localStorage.getItem('hapi-voice-proactive') === 'true' ? 'brief' : 'greet')
     const [toolMode, setToolMode] = useVoiceToolMode()
     const [reader, setReader] = useVoiceReader()
+    const [ttsCharacter, setTtsCharacter] = useVoiceTtsCharacter()
     const [listenMode, setListenMode] = useVoiceListenMode()
     const listenOptions: VoiceListenPreference[] = ['auto', 'verified', 'manual']
     const selectedLanguage = voice.voiceLanguages.find((language) => language.code === voice.voiceLanguage)
     const selectedVoice = voice.voices.find((option) => option.id === voice.voiceId)
+    const selectedCharacter = VOXCPM_VOICE_OPTIONS.find((option) => option.id === ttsCharacter) ?? VOXCPM_VOICE_OPTIONS[0]
 
     const setVoiceOpening = (value: 'greet' | 'brief') => {
         setOpening(value)
@@ -121,12 +123,35 @@ export default function SettingsVoicePage() {
                             />
                         ) : null}
                         {voice.backend === 'qwen-realtime' ? (
-                            <SettingsChoiceGroup
-                                label={t('settings.voice.reader.label')}
-                                value={reader}
-                                options={(['manbo', 'builtin'] as const).map((value) => ({ value, label: t(`settings.voice.reader.${value}`), description: t(`settings.voice.reader.${value}.hint`) }))}
-                                onChange={setReader}
-                            />
+                            <>
+                                <SettingsChoiceGroup
+                                    label={t('settings.voice.reader.label')}
+                                    value={reader}
+                                    options={(['manbo', 'builtin'] as const).map((value) => ({ value, label: t(`settings.voice.reader.${value}`), description: t(`settings.voice.reader.${value}.hint`) }))}
+                                    onChange={setReader}
+                                />
+                                {reader === 'manbo' ? (
+                                    <label className="flex min-h-12 items-center justify-between gap-3 px-3 py-3">
+                                        <div className="min-w-0">
+                                            <div className="text-sm font-medium text-[var(--app-fg)]">{t('settings.voice.reader.character')}</div>
+                                            <div className="text-xs text-[var(--app-hint)]">{selectedCharacter?.subtitle ?? ''}</div>
+                                        </div>
+                                        <SelectControl
+                                            aria-label={t('settings.voice.reader.character')}
+                                            value={ttsCharacter}
+                                            onChange={(event) => setTtsCharacter(event.target.value)}
+                                            containerClassName="w-full max-w-[55%]"
+                                            className="rounded-lg border border-[var(--app-border)] bg-[var(--app-bg)] py-1.5 pl-2 text-sm text-[var(--app-fg)]"
+                                        >
+                                            {VOXCPM_VOICE_OPTIONS.map((option) => (
+                                                <option key={option.id} value={option.id}>
+                                                    {`${option.name} — ${option.subtitle}`}
+                                                </option>
+                                            ))}
+                                        </SelectControl>
+                                    </label>
+                                ) : null}
+                            </>
                         ) : null}
                         <SettingsChoiceGroup
                             label={t('settings.voice.opening.label')}

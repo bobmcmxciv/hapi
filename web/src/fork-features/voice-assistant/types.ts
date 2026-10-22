@@ -9,7 +9,16 @@ export type VoiceDelivery = 'queue' | 'steer'
 
 export type VoiceTarget = { id: string; title: string }
 
-export type VoiceTtsStatus = { available: boolean; voice: string | null; sampleRate: number | null; reason?: string }
+export type VoiceTtsOption = { id: string; name: string; subtitle?: string }
+
+export type VoiceTtsStatus = {
+    available: boolean
+    voice: string | null
+    voices?: VoiceTtsOption[]
+    engine?: string | null
+    sampleRate: number | null
+    reason?: string
+}
 
 export type VoiceSpeakerRecord = { at: number; seconds: number; score: number | null; decision: 'accept' | 'reject'; reason: string; enforced: boolean }
 
