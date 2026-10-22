@@ -14,7 +14,7 @@ import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from '
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import {
-    resolveAgyTurnMetadataFromRows,
+    extractAgyGenerationsFromRows,
     type AgyConversationRow,
 } from '../../cli/src/agy/utils/agyConversationModel'
 import type { AgyTokenUsage } from '../../cli/src/agy/utils/agyTranscriptTypes'
@@ -23,6 +23,7 @@ import { bumpMessageEpoch } from '../src/store/messages'
 
 export type ExportedAgyUsageRecord = {
     brainUuid: string
+    rootBrainUuid?: string
     stepIndex: number
     messageId: string
     model: string
@@ -77,6 +78,47 @@ export function exportAgyUsageFromConversations(
     if (!existsSync(convDir)) {
         throw new Error(`Conversations directory not found: ${convDir}`)
     }
+    const parentByBrain = new Map<string, string>()
+    const summariesPath = join(agyRootDir, 'conversation_summaries.db')
+    if (existsSync(summariesPath)) {
+        let sumDb: Database | null = null
+        try {
+            sumDb = new Database(summariesPath, { readonly: true })
+            const sumRows = sumDb
+                .query(
+                    `SELECT conversation_id, parent_conversation_id
+                     FROM conversation_summaries
+                     WHERE parent_conversation_id IS NOT NULL`
+                )
+                .all() as Array<{ conversation_id: string | null; parent_conversation_id: string | null }>
+            for (const row of sumRows) {
+                if (row.conversation_id && row.parent_conversation_id) {
+                    parentByBrain.set(row.conversation_id.toLowerCase(), row.parent_conversation_id.toLowerCase())
+                }
+            }
+        } catch {
+            // ignore unreadable summaries db
+        } finally {
+            try {
+                sumDb?.close()
+            } catch {
+                // ignore
+            }
+        }
+    }
+    const resolveRootBrain = (uuid: string): string | undefined => {
+        let cur = parentByBrain.get(uuid)
+        if (!cur) return undefined
+        const visited = new Set<string>([uuid])
+        while (cur && !visited.has(cur)) {
+            visited.add(cur)
+            const next = parentByBrain.get(cur)
+            if (!next) return cur
+            cur = next
+        }
+        return cur
+    }
+
     const records: ExportedAgyUsageRecord[] = []
     const files = readdirSync(convDir).sort()
 
@@ -84,6 +126,7 @@ export function exportAgyUsageFromConversations(
         const match = UUID_FILE_RE.exec(file)
         if (!match) continue
         const brainUuid = match[1].toLowerCase()
+        const rootBrainUuid = resolveRootBrain(brainUuid)
         const dbPath = join(convDir, file)
         let fallbackIso = new Date().toISOString()
         try {
@@ -94,7 +137,6 @@ export function exportAgyUsageFromConversations(
 
         const stepTimestamps = readTranscriptStepTimestamps(agyRootDir, brainUuid)
         let rows: AgyConversationRow[] = []
-        let stepIndexes: number[] = []
         let db: Database | null = null
         try {
             db = new Database(dbPath, { readonly: true })
@@ -114,10 +156,6 @@ export function exportAgyUsageFromConversations(
                     idx: Number(row.idx),
                     data: Buffer.from(row.data!),
                 }))
-            stepIndexes = rows
-                .filter((row) => row.kind === 'step')
-                .map((row) => row.idx)
-                .sort((a, b) => a - b)
         } catch {
             continue
         } finally {
@@ -128,30 +166,17 @@ export function exportAgyUsageFromConversations(
             }
         }
 
-        if (stepIndexes.length === 0) continue
-        const resolved = resolveAgyTurnMetadataFromRows(stepIndexes, rows)
-        const seenUsageIds = new Set<string>()
-
-        for (const stepIndex of stepIndexes) {
-            const turn = resolved.get(stepIndex)
-            if (!turn?.usage) continue
-            const total =
-                turn.usage.input_tokens +
-                turn.usage.output_tokens +
-                turn.usage.cache_creation_input_tokens +
-                turn.usage.cache_read_input_tokens
-            if (total <= 0) continue
-            const suffix = turn.usageId ?? String(stepIndex)
-            if (seenUsageIds.has(suffix)) continue
-            seenUsageIds.add(suffix)
-
+        const generations = extractAgyGenerationsFromRows(rows)
+        for (const gen of generations) {
+            const stepIndex = gen.stepIndex ?? gen.idx
             records.push({
                 brainUuid,
+                ...(rootBrainUuid ? { rootBrainUuid } : {}),
                 stepIndex,
-                messageId: `agy:${brainUuid}:${suffix}`,
-                model: turn.model ?? 'unknown',
-                timestamp: stepTimestamps.get(stepIndex) ?? fallbackIso,
-                usage: turn.usage,
+                messageId: `agy:${brainUuid}:${gen.usageId}`,
+                model: gen.model ?? 'unknown',
+                timestamp: (gen.stepIndex !== null ? stepTimestamps.get(gen.stepIndex) : undefined) ?? fallbackIso,
+                usage: gen.usage,
             })
         }
     }
@@ -244,8 +269,12 @@ export function applyAgyUsageBackfill(
             sessionRows.find((row) => row.id === 'antigravity-history-vircs')?.id ?? null
         let createdHistorySessionId: string | null = null
 
+        const resolveTargetSession = (rec: ExportedAgyUsageRecord): string | undefined =>
+            brainToSession.get(rec.brainUuid) ??
+            (rec.rootBrainUuid ? brainToSession.get(rec.rootBrainUuid) : undefined)
+
         const missingRecords = records.filter((rec) => !existingUsageMessageIds.has(rec.messageId))
-        const needsHistorySession = missingRecords.some((rec) => !brainToSession.has(rec.brainUuid))
+        const needsHistorySession = missingRecords.some((rec) => !resolveTargetSession(rec))
 
         if (needsHistorySession && !historySessionId) {
             historySessionId = 'antigravity-history-vircs'
@@ -300,7 +329,7 @@ export function applyAgyUsageBackfill(
 
             const tx = db.transaction(() => {
                 for (const rec of missingRecords) {
-                    const targetSessionId = brainToSession.get(rec.brainUuid) ?? historySessionId!
+                    const targetSessionId = resolveTargetSession(rec) ?? historySessionId!
                     let seq = nextSeqBySession.get(targetSessionId)
                     if (seq === undefined) {
                         const row = maxSeqStmt.get(targetSessionId) as { maxSeq: number } | null

@@ -375,7 +375,7 @@ class AgyPtyLauncher extends RemoteLauncherBase {
         // If the session already carries an agySessionId (passed in from the
         // hub on resume), pre-seed it so the first spawn can --conversation to it.
         this.agySessionId = session.sessionId
-        session.setKillHandler(() => this.abort())
+        session.setKillHandler(() => this.requestExit('exit', () => this.abort()))
     }
 
     protected createDisplay(context: RemoteLauncherDisplayContext): React.ReactElement {
@@ -575,6 +575,7 @@ class AgyPtyLauncher extends RemoteLauncherBase {
     }
 
     private async completeAgentRun(): Promise<void> {
+        await this.scanner?.flush?.()
         this.releaseUnechoedWebDelivery()
         this.activeWebPrompt = null
         this.disarmQuotaDetector()

@@ -939,7 +939,7 @@ export class ApiSessionClient extends EventEmitter {
                 model: entry.model,
                 ...(entry.created_at ? { timestamp: entry.created_at } : {}),
                 ...(conversationId != null && entry.step_index != null ? {
-                    messageId: `agy:${conversationId}:${entry.usageId ?? entry.step_index}`,
+                    messageId: entry.usageId?.startsWith('agy:') ? entry.usageId : `agy:${conversationId}:${entry.usageId ?? entry.step_index}`,
                     usage: entry.usage,
                 } : {}),
             }

@@ -1852,4 +1852,26 @@ describe('agyPtyLauncher ask_question safety: invalidate stale pending questions
             message: 'agy PTY exited before delivery could be confirmed',
         })
     })
+
+    it('sets exitReason to exit when session kill handler is invoked so stop does not respawn a zombie PTY', async () => {
+        harness.exitReason = null
+        harness.respawnRounds = 2
+        const { session } = createSessionStub()
+        let capturedKillHandler: (() => void | Promise<void>) | null = null
+        session.setKillHandler = (h: () => void | Promise<void>) => {
+            capturedKillHandler = h
+        }
+        let launchCount = 0
+        harness.afterNextMessage = async () => {
+            launchCount += 1
+            await capturedKillHandler?.()
+        }
+
+        const reason = await agyPtyLauncher(session as never)
+        harness.respawnRounds = 1
+
+        expect(reason).toBe('exit')
+        expect(harness.exitReason).toBe('exit')
+        expect(launchCount).toBe(1)
+    })
 })

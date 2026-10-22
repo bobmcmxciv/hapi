@@ -4,7 +4,7 @@ import { homedir } from "node:os"
 import { BaseSessionScanner } from "@/modules/common/session/BaseSessionScanner"
 import { logger } from "@/lib"
 import type { AgyTranscriptEntry } from "./agyTranscriptTypes"
-import { resolveAgyTurnMetadata } from "./agyConversationModel"
+import { queryAgyGenerationsWithSubagents, resolveAgyTurnMetadata, type AgyBrainGenerationRecord } from "./agyConversationModel"
 
 const AGY_BRAIN_DIR = join(homedir(), '.gemini', 'antigravity-cli', 'brain')
 const LOG_REL_PATH = join('.system_generated', 'logs', 'transcript_full.jsonl')
@@ -133,6 +133,7 @@ export async function createAgySessionScanner(opts: CreateAgySessionScannerOpts)
     await scanner.start()
     return {
         cleanup: () => scanner.cleanup(),
+        flush: () => scanner.flush(),
         // Returns the known brain UUID, or null if the scanner has not been
         // told about one yet (via a resume seed or onNewSession()).
         getBrainUuid: () => scanner.getBrainUuid(),
@@ -150,6 +151,19 @@ class AgySessionScanner extends BaseSessionScanner<AgyTranscriptEntry> {
     private foundBrainUuid: string | null = null
     private readonly modelSettlingAbortController = new AbortController()
     private readonly pendingUsageEntries = new Map<number, AgyTranscriptEntry>()
+    private readonly emittedGenerationIds = new Set<string>()
+
+    private readonly emitEntry = (entry: AgyTranscriptEntry): void => {
+        if (entry.type === 'PLANNER_RESPONSE' && entry.usage && entry.usageId) {
+            const fullId = entry.usageId.startsWith('agy:')
+                ? entry.usageId.toLowerCase()
+                : this.foundBrainUuid
+                    ? `agy:${this.foundBrainUuid.toLowerCase()}:${entry.usageId}`
+                    : null
+            if (fullId) this.emittedGenerationIds.add(fullId)
+        }
+        this.onEntry(entry)
+    }
 
     constructor(opts: CreateAgySessionScannerOpts) {
         super({ intervalMs: 5000 })
@@ -168,7 +182,8 @@ class AgySessionScanner extends BaseSessionScanner<AgyTranscriptEntry> {
     public override async cleanup(): Promise<void> {
         this.modelSettlingAbortController.abort()
         await super.cleanup()
-        await flushPendingAgyUsageEntries(this.pendingUsageEntries, this.onEntry, this.foundBrainUuid)
+        await flushPendingAgyUsageEntries(this.pendingUsageEntries, this.emitEntry, this.foundBrainUuid)
+        await this.syncBrainGenerations()
     }
 
     /** Switch to a new brain UUID (e.g. after a re-spawn, or a hook re-firing with the same UUID). */
@@ -184,6 +199,7 @@ class AgySessionScanner extends BaseSessionScanner<AgyTranscriptEntry> {
         logger.debug(`[agy-scanner] onNewSession: switching brain to ${uuid}`)
         this.foundBrainUuid = uuid
         this.pendingUsageEntries.clear()
+        this.emittedGenerationIds.clear()
         this.invalidate()
     }
 
@@ -207,6 +223,10 @@ class AgySessionScanner extends BaseSessionScanner<AgyTranscriptEntry> {
             this.seedProcessedKeys(keys)
         }
         this.setCursor(logPath, nextCursor)
+        const existingGens = await queryAgyGenerationsWithSubagents(this.foundBrainUuid)
+        for (const gen of existingGens) {
+            this.emittedGenerationIds.add(`agy:${gen.brainUuid.toLowerCase()}:${gen.usageId}`)
+        }
     }
 
     /**
@@ -249,16 +269,28 @@ class AgySessionScanner extends BaseSessionScanner<AgyTranscriptEntry> {
     }): Promise<void> {
         const priorPendingStepIndexes = [...this.pendingUsageEntries.keys()]
         if (stats.events.length > 0) {
-            await emitAgyEntriesWithModels(stats.events, this.onEntry, this.foundBrainUuid, {
+            await emitAgyEntriesWithModels(stats.events, this.emitEntry, this.foundBrainUuid, {
                 signal: this.modelSettlingAbortController.signal,
                 pendingUsageEntries: this.pendingUsageEntries,
             })
         }
         if (priorPendingStepIndexes.length > 0 && !this.modelSettlingAbortController.signal.aborted) {
-            await flushPendingAgyUsageEntries(this.pendingUsageEntries, this.onEntry, this.foundBrainUuid, {
+            await flushPendingAgyUsageEntries(this.pendingUsageEntries, this.emitEntry, this.foundBrainUuid, {
                 stepIndexes: priorPendingStepIndexes,
             })
         }
+        if (!this.modelSettlingAbortController.signal.aborted) {
+            await this.syncBrainGenerations()
+        }
+    }
+
+    private async syncBrainGenerations(): Promise<void> {
+        await syncAgyBrainGenerations(
+            this.foundBrainUuid,
+            this.emittedGenerationIds,
+            this.pendingUsageEntries,
+            this.emitEntry,
+        )
     }
 }
 
@@ -269,6 +301,38 @@ class AgySessionScanner extends BaseSessionScanner<AgyTranscriptEntry> {
 function generateKey(entry: AgyTranscriptEntry): string {
     return `${entry.step_index}:${entry.type}`
 }
+
+export async function syncAgyBrainGenerations(
+    brainUuid: string | null,
+    emittedGenerationIds: Set<string>,
+    pendingUsageEntries: Map<number, AgyTranscriptEntry>,
+    onEntry: (entry: AgyTranscriptEntry) => void,
+    queryGenerations: (uuid: string | null | undefined) => Promise<AgyBrainGenerationRecord[]> = queryAgyGenerationsWithSubagents,
+): Promise<void> {
+    if (!brainUuid) return
+    const rootUuid = brainUuid.toLowerCase()
+    const generations = await queryGenerations(rootUuid)
+    for (const gen of generations) {
+        const fullId = `agy:${gen.brainUuid.toLowerCase()}:${gen.usageId}`
+        if (emittedGenerationIds.has(fullId)) continue
+        emittedGenerationIds.add(fullId)
+        if (gen.brainUuid.toLowerCase() === rootUuid && gen.stepIndex !== null) {
+            pendingUsageEntries.delete(gen.stepIndex)
+        }
+        onEntry({
+            step_index: gen.stepIndex ?? gen.idx,
+            source: 'MODEL',
+            type: 'PLANNER_RESPONSE',
+            status: 'DONE',
+            created_at: new Date().toISOString(),
+            content: '',
+            model: gen.model ?? undefined,
+            usage: gen.usage,
+            usageId: fullId,
+        })
+    }
+}
+
 
 // extractBodyText / extractUserRequest / normalizeUserInput below are NOT
 // discovery helpers (the scanner no longer discovers brains by content —

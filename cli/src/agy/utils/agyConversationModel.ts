@@ -276,6 +276,126 @@ export function resolveAgyTurnModelsFromRows(
         .map(([idx, metadata]) => [idx, metadata?.model ?? null]))
 }
 
+export type AgyGenerationRecord = {
+    idx: number
+    invocation: string
+    model: string | null
+    usage: AgyTokenUsage
+    usageId: string
+    stepIndexes: number[] | null
+    stepIndex: number | null
+}
+
+export function extractAgyGenerationsFromRows(
+    rows: readonly AgyConversationRow[],
+): AgyGenerationRecord[] {
+    const stepIndexes = rows
+        .filter((row) => row.kind === 'step' && Number.isSafeInteger(row.idx))
+        .map((row) => row.idx)
+        .sort((a, b) => a - b)
+    const resolved = stepIndexes.length > 0 ? resolveAgyTurnMetadataFromRows(stepIndexes, rows) : new Map<number, AgyTurnMetadata | null>()
+    const stepByUsageId = new Map<string, number>()
+    for (const stepIdx of stepIndexes) {
+        const turn = resolved.get(stepIdx)
+        if (turn?.usageId && !stepByUsageId.has(turn.usageId)) {
+            stepByUsageId.set(turn.usageId, stepIdx)
+        }
+    }
+
+    const out: AgyGenerationRecord[] = []
+    for (const row of rows) {
+        if (row.kind !== 'generation' || !Number.isSafeInteger(row.idx)) continue
+        const metadata = generationMetadata(row.data)
+        if (!metadata?.usage) continue
+        const total =
+            metadata.usage.input_tokens +
+            metadata.usage.output_tokens +
+            metadata.usage.cache_creation_input_tokens +
+            metadata.usage.cache_read_input_tokens
+        if (total <= 0) continue
+        const usageId = `generation:${row.idx}`
+        const explicitStep = metadata.stepIndexes && metadata.stepIndexes.length > 0 ? metadata.stepIndexes[0] : null
+        out.push({
+            idx: row.idx,
+            invocation: metadata.invocation,
+            model: metadata.model,
+            usage: metadata.usage,
+            usageId,
+            stepIndexes: metadata.stepIndexes,
+            stepIndex: stepByUsageId.get(usageId) ?? explicitStep,
+        })
+    }
+    return out.sort((a, b) => a.idx - b.idx)
+}
+
+export type AgyBrainGenerationRecord = Pick<AgyGenerationRecord, 'idx' | 'stepIndex' | 'usageId' | 'model' | 'usage'> & Partial<Pick<AgyGenerationRecord, 'invocation' | 'stepIndexes'>> & {
+    brainUuid: string
+}
+
+export async function queryAgyGenerationsWithSubagents(
+    brainUuid: string | null | undefined,
+    agyRootDir: string = join(homedir(), '.gemini', 'antigravity-cli'),
+): Promise<AgyBrainGenerationRecord[]> {
+    if (!brainUuid || !CANONICAL_UUID_RE.test(brainUuid)) return []
+    const rootUuid = brainUuid.toLowerCase()
+    const brainUuids = [rootUuid]
+    const summariesPath = join(agyRootDir, 'conversation_summaries.db')
+    try {
+        const { Database } = await import('bun:sqlite')
+        const sumDb = new Database(summariesPath, { readonly: true })
+        try {
+            const subRows = sumDb.query(`
+                WITH RECURSIVE tree(cid) AS (
+                    VALUES (?)
+                    UNION ALL
+                    SELECT lower(cs.conversation_id)
+                    FROM conversation_summaries cs
+                    JOIN tree t ON lower(cs.parent_conversation_id) = t.cid
+                    WHERE cs.conversation_id IS NOT NULL AND cs.conversation_id != ''
+                )
+                SELECT DISTINCT cid FROM tree
+            `).all(rootUuid) as Array<{ cid: string }>
+            for (const row of subRows) {
+                if (row.cid && CANONICAL_UUID_RE.test(row.cid) && !brainUuids.includes(row.cid)) {
+                    brainUuids.push(row.cid)
+                }
+            }
+        } finally {
+            sumDb.close()
+        }
+    } catch {
+        // summaries db optional or locked
+    }
+
+    const results: AgyBrainGenerationRecord[] = []
+    const convDir = join(agyRootDir, 'conversations')
+    for (const cid of brainUuids) {
+        try {
+            const { Database } = await import('bun:sqlite')
+            const db = new Database(join(convDir, `${cid}.db`), { readonly: true })
+            let rows: AgyConversationRow[] = []
+            try {
+                rows = db.query(`
+                    SELECT 'step' AS kind, idx, metadata AS data
+                    FROM steps
+                    WHERE step_type = 15
+                    UNION ALL
+                    SELECT 'generation' AS kind, idx, data
+                    FROM gen_metadata
+                `).all() as AgyConversationRow[]
+            } finally {
+                db.close()
+            }
+            for (const gen of extractAgyGenerationsFromRows(rows)) {
+                results.push({ ...gen, brainUuid: cid })
+            }
+        } catch {
+            // ignore missing/locked conversation db
+        }
+    }
+    return results
+}
+
 export async function resolveAgyTurnModels(
     brainUuid: string | null | undefined,
     stepIndexes: readonly number[],

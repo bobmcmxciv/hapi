@@ -14,7 +14,7 @@ import { describe, it, expect, beforeEach, afterEach, afterAll, vi } from 'vites
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir, homedir } from 'node:os'
-import { createAgySessionScanner, emitAgyEntriesWithModels, flushPendingAgyUsageEntries } from './agySessionScanner'
+import { createAgySessionScanner, emitAgyEntriesWithModels, flushPendingAgyUsageEntries, syncAgyBrainGenerations } from './agySessionScanner'
 import type { AgyTranscriptEntry } from './agyTranscriptTypes'
 
 vi.mock('node:os', async (importOriginal) => {
@@ -300,6 +300,58 @@ describe('flushPendingAgyUsageEntries', () => {
             model: 'gemini-4-argon',
             usage: settledUsage,
             usageId: 'generation:5',
+        })
+    })
+
+    it('syncAgyBrainGenerations emits both late root generations and subagent generations once with full agy:<brainUuid>:generation:<idx> usageId', async () => {
+        const rootUuid = '00000000-0000-4000-8000-000000000099'
+        const subUuid = '00000000-0000-4000-8000-0000000000aa'
+        const emittedIds = new Set<string>(['agy:00000000-0000-4000-8000-000000000099:generation:1'])
+        const pendingUsageEntries = new Map<number, AgyTranscriptEntry>([
+            [15, JSON.parse(makeTranscriptLine(15, 'PLANNER_RESPONSE', 'tool turn')) as AgyTranscriptEntry],
+        ])
+        const emitted: AgyTranscriptEntry[] = []
+        const queryGenerations = vi.fn(async () => [
+            {
+                brainUuid: rootUuid,
+                idx: 1,
+                stepIndex: 10,
+                usageId: 'generation:1',
+                model: 'gemini-4-argon',
+                usage: { input_tokens: 100, output_tokens: 10, cache_creation_input_tokens: 0, cache_read_input_tokens: 500 },
+            },
+            {
+                brainUuid: rootUuid,
+                idx: 2,
+                stepIndex: 15,
+                usageId: 'generation:2',
+                model: 'gemini-4-argon',
+                usage: { input_tokens: 200, output_tokens: 20, cache_creation_input_tokens: 0, cache_read_input_tokens: 1000 },
+            },
+            {
+                brainUuid: subUuid,
+                idx: 0,
+                stepIndex: 2,
+                usageId: 'generation:0',
+                model: 'gemini-3.8-flash-tiered',
+                usage: { input_tokens: 300, output_tokens: 30, cache_creation_input_tokens: 0, cache_read_input_tokens: 1500 },
+            },
+        ])
+
+        await syncAgyBrainGenerations(rootUuid, emittedIds, pendingUsageEntries, (e) => emitted.push(e), queryGenerations)
+        await syncAgyBrainGenerations(rootUuid, emittedIds, pendingUsageEntries, (e) => emitted.push(e), queryGenerations)
+
+        expect(pendingUsageEntries.has(15)).toBe(false)
+        expect(emitted).toHaveLength(2)
+        expect(emitted[0]).toMatchObject({
+            step_index: 15,
+            model: 'gemini-4-argon',
+            usageId: `agy:${rootUuid}:generation:2`,
+        })
+        expect(emitted[1]).toMatchObject({
+            step_index: 2,
+            model: 'gemini-3.8-flash-tiered',
+            usageId: `agy:${subUuid}:generation:0`,
         })
     })
 })

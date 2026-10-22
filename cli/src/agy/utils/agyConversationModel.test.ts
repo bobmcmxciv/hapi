@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { resolveAgyTurnModels, resolveAgyTurnModelsFromRows, resolveAgyTurnMetadataFromRows } from './agyConversationModel'
+import { extractAgyGenerationsFromRows, resolveAgyTurnModels, resolveAgyTurnModelsFromRows, resolveAgyTurnMetadataFromRows } from './agyConversationModel'
 
 function varint(value: number): Buffer {
     const bytes: number[] = []
@@ -255,5 +255,42 @@ describe('ChatModelMetadata field 3 enum fallback', () => {
             usageId: 'generation:1',
             usage: { input_tokens: 500, output_tokens: 120, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
         })
+    })
+
+    it('extractAgyGenerationsFromRows returns all non-zero generations sorted by idx with linked stepIndex', () => {
+        const usage1 = Buffer.concat([countField(2, 500), countField(3, 120)])
+        const usage2 = Buffer.concat([countField(2, 800), countField(3, 90), countField(5, 4000)])
+        const rows = [
+            step(3, 'inv-1'),
+            generation(2, 'inv-2', 'unused', Buffer.concat([
+                field(1, Buffer.concat([field(19, 'gemini-4-argon'), field(4, usage2)])),
+                field(2, Buffer.concat([varint(7), varint(8)])),
+                field(4, 'inv-2'),
+            ])),
+            generation(1, 'inv-1', 'unused', Buffer.concat([
+                field(1, Buffer.concat([countField(3, 1318), field(4, usage1)])),
+                field(4, 'inv-1'),
+            ])),
+        ]
+        expect(extractAgyGenerationsFromRows(rows)).toEqual([
+            {
+                idx: 1,
+                invocation: 'inv-1',
+                model: 'gemini-3.8-flash',
+                usage: { input_tokens: 500, output_tokens: 120, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+                usageId: 'generation:1',
+                stepIndexes: null,
+                stepIndex: 3,
+            },
+            {
+                idx: 2,
+                invocation: 'inv-2',
+                model: 'gemini-4-argon',
+                usage: { input_tokens: 800, output_tokens: 90, cache_creation_input_tokens: 0, cache_read_input_tokens: 4000 },
+                usageId: 'generation:2',
+                stepIndexes: [7, 8],
+                stepIndex: 7,
+            },
+        ])
     })
 })
