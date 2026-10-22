@@ -698,7 +698,7 @@ async function fetchSessionMessages(
     const out = extractRows(rows)
     if (out.length < limit && rows.length >= limit && limit < MAX_INSPECT_MESSAGE_LIMIT) {
         const fallbackResp = await http.get(
-            ${apiUrl}/api/sessions//messages,
+            `${apiUrl}/api/sessions/${encodeURIComponent(sessionId)}/messages`,
             {
                 headers: authHeaders(jwt),
                 params: { limit: MAX_INSPECT_MESSAGE_LIMIT },
