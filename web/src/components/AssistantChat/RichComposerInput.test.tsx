@@ -9,7 +9,11 @@ import {
     type RichComposerInputHandle,
     segmentsFromEditor,
 } from './RichComposerInput'
-import { serializeComposerSegments } from '@/lib/composerSegments'
+import {
+    isAndroidUserAgent,
+    isRichComposerMentionsEnabled,
+    serializeComposerSegments,
+} from '@/lib/composerSegments'
 
 function selectionOffset(root: HTMLElement): number {
     const selection = window.getSelection()
@@ -345,5 +349,57 @@ describe('IME 组合期间的占位符', () => {
         fireEvent.compositionStart(editor)
         fireEvent.compositionEnd(editor)
         expect(screen.queryByText('给 HAPI 发消息')).toBeTruthy()
+    })
+})
+
+describe('IME composition DOM protection & Android native textarea fallback', () => {
+    afterEach(() => {
+        cleanup()
+        window.localStorage.removeItem('hapi.composer.richMentions')
+    })
+
+    it('does not replace active IME composition DOM nodes during parent value updates', () => {
+        const { rerender } = render(
+            <RichComposerInput
+                value=""
+                placeholder="给 HAPI 发消息"
+                onValueChange={() => {}}
+                onMirrorChange={() => {}}
+            />
+        )
+        const editor = screen.getByTestId('rich-composer-input')
+        fireEvent.compositionStart(editor)
+        const composingNode = document.createTextNode('正在语音输入')
+        editor.replaceChildren(composingNode)
+        fireEvent.input(editor)
+
+        rerender(
+            <RichComposerInput
+                value="external-sync"
+                placeholder="给 HAPI 发消息"
+                onValueChange={() => {}}
+                onMirrorChange={() => {}}
+            />
+        )
+        expect(editor.firstChild).toBe(composingNode)
+        expect(editor.textContent).toBe('正在语音输入')
+    })
+
+    it('disables rich contenteditable composer by default on Android User-Agent', () => {
+        const androidUa =
+            'Mozilla/5.0 (Linux; Android 15; Pixel 9) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36'
+        const iosUa =
+            'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1'
+
+        expect(isAndroidUserAgent(androidUa)).toBe(true)
+        expect(isAndroidUserAgent(iosUa)).toBe(false)
+        expect(isRichComposerMentionsEnabled(androidUa)).toBe(false)
+        expect(isRichComposerMentionsEnabled(iosUa)).toBe(true)
+
+        window.localStorage.setItem('hapi.composer.richMentions', '1')
+        expect(isRichComposerMentionsEnabled(androidUa)).toBe(true)
+
+        window.localStorage.setItem('hapi.composer.richMentions', '0')
+        expect(isRichComposerMentionsEnabled(iosUa)).toBe(false)
     })
 })

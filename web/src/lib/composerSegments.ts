@@ -286,21 +286,35 @@ export function insertSegmentsInComposerSegments(
     }
 }
 
+export function isAndroidUserAgent(userAgent?: string): boolean {
+    const ua = userAgent ?? (typeof navigator !== 'undefined' ? navigator.userAgent : '')
+    return /\bAndroid\b/i.test(ua)
+}
+
 /**
- * Rich segmented composer is the product default (same as v1 @ autocomplete:
- * no user opt-in). Emergency kill-switch only:
+ * Rich segmented composer is the product default on desktop/iOS.
+ * On Android, third-party IMEs (Sogou, Baidu, iFlytek, WeChat IME, Xiaoyi)
+ * abort long-press spacebar voice input ("录音失败") on `<div contentEditable>`
+ * because Chromium exposes `kContentEditable` instead of `kTextArea` and
+ * DOM/Selection updates during space-to-voice transition trigger `restartInput`.
+ * Android therefore defaults to the native `<textarea>` unless explicitly opted in
+ * via `localStorage` `hapi.composer.richMentions=1` or `?richMentions=1`.
+ * Emergency kill-switch on any platform:
  *   localStorage `hapi.composer.richMentions=0` or `?richMentions=0`
  *   or build `VITE_RICH_COMPOSER_MENTIONS=false`
  */
-export function isRichComposerMentionsEnabled(): boolean {
+export function isRichComposerMentionsEnabled(userAgent?: string): boolean {
     if (typeof window === 'undefined') return true
     try {
-        if (window.localStorage.getItem('hapi.composer.richMentions') === '0') return false
-        if (new URLSearchParams(window.location.search).get('richMentions') === '0') return false
+        const stored = window.localStorage.getItem('hapi.composer.richMentions')
+        const param = new URLSearchParams(window.location.search).get('richMentions')
+        if (stored === '0' || param === '0') return false
+        if (stored === '1' || param === '1') return true
     } catch {
         // ignore storage / URL access failures
     }
     if (import.meta.env.VITE_RICH_COMPOSER_MENTIONS === 'false') return false
+    if (isAndroidUserAgent(userAgent)) return false
     return true
 }
 

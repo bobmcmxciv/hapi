@@ -16,6 +16,7 @@ import { loadVoicePersonalityFromStorage } from '@/hooks/useVoicePersonality'
 import { readVoiceToolMode } from '@/fork-features/voice-assistant/toolMode'
 import { deliverVoiceSessionContextAfterConnect, isVoiceProactiveSummaryEnabled } from '@/lib/voiceContextStream'
 import { readStoredVoiceSelection } from '@/lib/voicePickerPreferences'
+import { isAndroidUserAgent } from '@/lib/composerSegments'
 import type { VoiceSession, VoiceSessionConfig, StatusCallback } from './types'
 import type { ApiClient } from '@/api/client'
 import type { Session } from '@/types/api'
@@ -36,6 +37,7 @@ interface GeminiLiveState {
     wsBaseUrl: string | null
     modelSpeaking: boolean
     micMuted: boolean
+    textInputFocused: boolean
 }
 
 const state: GeminiLiveState = {
@@ -47,7 +49,19 @@ const state: GeminiLiveState = {
     apiKey: null,
     wsBaseUrl: null,
     modelSpeaking: false,
-    micMuted: false
+    micMuted: false,
+    textInputFocused: false
+}
+
+function isEditableTextTarget(target: EventTarget | null): boolean {
+    if (!target || typeof HTMLElement === 'undefined' || !(target instanceof HTMLElement)) return false
+    if (target.isContentEditable) return true
+    const tag = target.tagName
+    return tag === 'TEXTAREA' || tag === 'INPUT'
+}
+
+function applyMicState(): void {
+    state.recorder?.setMuted(state.micMuted || state.modelSpeaking || state.textInputFocused)
 }
 
 function cleanup() {
@@ -240,7 +254,7 @@ class GeminiLiveVoiceSessionImpl implements VoiceSession {
                         // Model is generating — mute mic to prevent barge-in from noise
                         if (!state.modelSpeaking) {
                             state.modelSpeaking = true
-                            state.recorder?.setMuted(true)
+                            applyMicState()
                         }
                         for (const part of serverContent.modelTurn.parts) {
                             if (part.inlineData?.data) {
@@ -255,7 +269,7 @@ class GeminiLiveVoiceSessionImpl implements VoiceSession {
                         console.log('[GeminiLive] Turn complete')
                         // Restore to user's chosen mute state, not unconditionally unmuted
                         state.modelSpeaking = false
-                        state.recorder?.setMuted(state.micMuted)
+                        applyMicState()
                     }
                 }
 
@@ -356,6 +370,7 @@ function sendAudioChunk(base64Pcm: string): void {
 async function startAudioCapture(playbackContext: AudioContext): Promise<void> {
     state.player = new GeminiAudioPlayer(playbackContext)
     state.recorder = new GeminiAudioRecorder()
+    applyMicState()
 
     await state.recorder.start(
         (pcm16Chunk) => sendAudioChunk(pcm16Chunk),
@@ -366,7 +381,7 @@ async function startAudioCapture(playbackContext: AudioContext): Promise<void> {
     )
 
     // Apply mute state after recorder has a stream — safe to call either way
-    state.recorder.setMuted(state.micMuted)
+    applyMicState()
 }
 
 // --- React component ---
@@ -430,10 +445,30 @@ export function GeminiLiveVoiceSession({
     useEffect(() => {
         state.micMuted = micMuted
         if (state.recorder) {
-            state.recorder.setMuted(micMuted)
+            applyMicState()
         }
     }, [micMuted])
 
+    useEffect(() => {
+        if (typeof document === 'undefined' || !isAndroidUserAgent()) return
+        const syncFocusState = () => {
+            const focused = isEditableTextTarget(document.activeElement)
+            if (state.textInputFocused !== focused) {
+                state.textInputFocused = focused
+                if (state.recorder) {
+                    applyMicState()
+                }
+            }
+        }
+        document.addEventListener('focusin', syncFocusState)
+        document.addEventListener('focusout', syncFocusState)
+        syncFocusState()
+        return () => {
+            document.removeEventListener('focusin', syncFocusState)
+            document.removeEventListener('focusout', syncFocusState)
+            state.textInputFocused = false
+        }
+    }, [])
 
     // Cleanup on unmount
     useEffect(() => {

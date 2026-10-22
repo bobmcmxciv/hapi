@@ -38,25 +38,88 @@ export class GeminiAudioRecorder {
   private sourceNode: MediaStreamAudioSourceNode | null = null;
   private workletNode: AudioWorkletNode | null = null;
   private scriptNode: ScriptProcessorNode | null = null;
+  private muted = false;
+  private started = false;
+  private onErrorCallback: ((error: Error) => void) | undefined;
+  private acquiringPromise: Promise<void> | null = null;
 
-  async start(onChunk: (base64Pcm: string) => void, onError?: (error: Error) => void): Promise<void> {
-    try {
-      this.mediaStream = await navigator.mediaDevices.getUserMedia({
+  private releaseMediaStream(): void {
+    if (this.sourceNode) {
+      try {
+        this.sourceNode.disconnect();
+      } catch {
+        // ignore disconnect errors
+      }
+      this.sourceNode = null;
+    }
+    if (this.mediaStream) {
+      this.mediaStream.getTracks().forEach((track) => {
+        track.onended = null;
+        track.stop();
+      });
+      this.mediaStream = null;
+    }
+  }
+
+  private connectSourceToGraph(): void {
+    if (!this.audioContext || !this.mediaStream) return;
+    if (this.sourceNode) {
+      try {
+        this.sourceNode.disconnect();
+      } catch {
+        // ignore disconnect errors
+      }
+    }
+    this.sourceNode = this.audioContext.createMediaStreamSource(this.mediaStream);
+    if (this.workletNode) {
+      this.sourceNode.connect(this.workletNode);
+    } else if (this.scriptNode) {
+      this.sourceNode.connect(this.scriptNode);
+    }
+  }
+
+  private async ensureMediaStream(): Promise<void> {
+    if (this.mediaStream || this.muted || !this.started) return;
+    if (this.acquiringPromise) return this.acquiringPromise;
+
+    this.acquiringPromise = (async () => {
+      const stream = await navigator.mediaDevices.getUserMedia({
         audio: { sampleRate: 16000, channelCount: 1 }
       });
 
+      if (this.muted || !this.started || !this.audioContext) {
+        stream.getTracks().forEach((track) => track.stop());
+        return;
+      }
+
+      this.mediaStream = stream;
       this.mediaStream.getTracks().forEach((track) => {
         track.onended = () => {
-          if (onError) onError(new Error('Microphone disconnected'));
+          if (this.onErrorCallback) this.onErrorCallback(new Error('Microphone disconnected'));
         };
       });
+
+      if (this.audioContext.state === 'suspended') {
+        await this.audioContext.resume();
+      }
+
+      this.connectSourceToGraph();
+    })().finally(() => {
+      this.acquiringPromise = null;
+    });
+
+    return this.acquiringPromise;
+  }
+
+  async start(onChunk: (base64Pcm: string) => void, onError?: (error: Error) => void): Promise<void> {
+    try {
+      this.started = true;
+      this.onErrorCallback = onError;
 
       this.audioContext = new AudioContext({ sampleRate: 16000 });
       if (this.audioContext.state === 'suspended') {
         await this.audioContext.resume();
       }
-
-      this.sourceNode = this.audioContext.createMediaStreamSource(this.mediaStream);
 
       try {
         const workletUrl = createWorkletUrl();
@@ -65,6 +128,7 @@ export class GeminiAudioRecorder {
 
         this.workletNode = new AudioWorkletNode(this.audioContext, 'pcm-recorder-processor');
         this.workletNode.port.onmessage = (event) => {
+          if (this.muted) return;
           const pcm16 = float32ToPcm16(event.data.samples);
           const base64 = arrayBufferToBase64(pcm16);
           onChunk(base64);
@@ -74,35 +138,34 @@ export class GeminiAudioRecorder {
         // frames through the worklet node and port.onmessage fires.
         const sink = this.audioContext.createGain();
         sink.gain.value = 0;
-        this.sourceNode.connect(this.workletNode);
         this.workletNode.connect(sink);
         sink.connect(this.audioContext.destination);
       } catch (e) {
         console.warn('[GeminiLive] AudioWorklet failed, falling back to ScriptProcessorNode', e);
         this.scriptNode = this.audioContext.createScriptProcessor(4096, 1, 1);
         this.scriptNode.onaudioprocess = (event) => {
+          if (this.muted) return;
           const inputData = event.inputBuffer.getChannelData(0);
           const pcm16 = float32ToPcm16(new Float32Array(inputData));
           const base64 = arrayBufferToBase64(pcm16);
           onChunk(base64);
         };
-        this.sourceNode.connect(this.scriptNode);
         this.scriptNode.connect(this.audioContext.destination);
       }
+
+      if (!this.muted) {
+        await this.ensureMediaStream();
+      }
     } catch (e) {
+      this.stop();
       if (onError) onError(e instanceof Error ? e : new Error(String(e)));
       throw e;
     }
   }
 
   stop(): void {
-    if (this.mediaStream) {
-      this.mediaStream.getTracks().forEach(track => {
-        track.onended = null;
-        track.stop();
-      });
-      this.mediaStream = null;
-    }
+    this.started = false;
+    this.releaseMediaStream();
 
     if (this.scriptNode) {
       this.scriptNode.disconnect();
@@ -114,11 +177,6 @@ export class GeminiAudioRecorder {
       this.workletNode = null;
     }
 
-    if (this.sourceNode) {
-      this.sourceNode.disconnect();
-      this.sourceNode = null;
-    }
-
     if (this.audioContext) {
       this.audioContext.close();
       this.audioContext = null;
@@ -126,9 +184,16 @@ export class GeminiAudioRecorder {
   }
 
   setMuted(muted: boolean): void {
-    if (this.mediaStream) {
-      this.mediaStream.getAudioTracks().forEach(track => {
-        track.enabled = !muted;
+    this.muted = muted;
+    if (muted) {
+      this.releaseMediaStream();
+      return;
+    }
+    if (this.started && !this.mediaStream) {
+      void this.ensureMediaStream().catch((err) => {
+        if (this.onErrorCallback) {
+          this.onErrorCallback(err instanceof Error ? err : new Error(String(err)));
+        }
       });
     }
   }

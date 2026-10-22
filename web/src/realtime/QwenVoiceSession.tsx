@@ -13,6 +13,7 @@ import { resolveQwenRealtimeVoice } from '@hapi/protocol/voicePickerCatalog'
 import { buildResolvedVoiceSystemPrompt } from '@/lib/voicePersonalitySession'
 import { deliverVoiceSessionContextAfterConnect, isVoiceProactiveSummaryEnabled } from '@/lib/voiceContextStream'
 import { readStoredVoiceSelection } from '@/lib/voicePickerPreferences'
+import { isAndroidUserAgent } from '@/lib/composerSegments'
 import type { VoiceSession, VoiceSessionConfig, StatusCallback } from './types'
 import type { ApiClient } from '@/api/client'
 import type { Session } from '@/types/api'
@@ -32,6 +33,7 @@ interface QwenState {
     apiKey: string | null
     wsBaseUrl: string | null
     micMuted: boolean
+    textInputFocused: boolean
     /** fork(voice-assistant): how this session listens, and whether the talk button is held. */
     listen: VoiceListenPreference
     talking: boolean
@@ -49,6 +51,7 @@ const state: QwenState = {
     apiKey: null,
     wsBaseUrl: null,
     micMuted: false,
+    textInputFocused: false,
     listen: 'auto',
     talking: false,
     talkStartedAt: 0,
@@ -60,9 +63,22 @@ const BARGE_IN_SUSTAIN_MS = 700
 /** Push-to-talk: a press shorter than this is a slip, not a turn. */
 const MIN_TALK_MS = 300
 
-/** Push-to-talk keeps the mic closed unless the talk button is held. */
+function isEditableTextTarget(target: EventTarget | null): boolean {
+    if (!target || typeof HTMLElement === 'undefined' || !(target instanceof HTMLElement)) return false
+    if (target.isContentEditable) return true
+    const tag = target.tagName
+    return tag === 'TEXTAREA' || tag === 'INPUT'
+}
+
+/** Push-to-talk keeps the mic closed unless the talk button is held.
+ *  On Android, also release the mic while a text input is focused so third-party
+ *  IMEs (Sogou/Baidu/iFlytek/WeChat) can record voice input without conflict. */
 function applyMicState(): void {
-    state.recorder?.setMuted(state.micMuted || (state.listen === 'manual' && !state.talking))
+    state.recorder?.setMuted(
+        state.micMuted
+        || (state.listen === 'manual' && !state.talking)
+        || (state.textInputFocused && !state.talking)
+    )
 }
 
 function stopSpeakingNow(): void {
@@ -482,6 +498,7 @@ class QwenVoiceSessionImpl implements VoiceSession {
 async function startAudioCapture(playbackContext: AudioContext): Promise<void> {
     state.player = new GeminiAudioPlayer(playbackContext)
     state.recorder = new GeminiAudioRecorder()
+    applyMicState()
 
     await state.recorder.start(
         (base64Pcm) => {
@@ -558,6 +575,27 @@ export function QwenVoiceSession({
             applyMicState()
         }
     }, [micMuted])
+
+    useEffect(() => {
+        if (typeof document === 'undefined' || !isAndroidUserAgent()) return
+        const syncFocusState = () => {
+            const focused = isEditableTextTarget(document.activeElement)
+            if (state.textInputFocused !== focused) {
+                state.textInputFocused = focused
+                if (state.recorder) {
+                    applyMicState()
+                }
+            }
+        }
+        document.addEventListener('focusin', syncFocusState)
+        document.addEventListener('focusout', syncFocusState)
+        syncFocusState()
+        return () => {
+            document.removeEventListener('focusin', syncFocusState)
+            document.removeEventListener('focusout', syncFocusState)
+            state.textInputFocused = false
+        }
+    }, [])
 
     useEffect(() => {
         return () => { cleanup() }

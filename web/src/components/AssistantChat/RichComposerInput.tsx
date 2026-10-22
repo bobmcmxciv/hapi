@@ -744,6 +744,16 @@ export const RichComposerInput = forwardRef<RichComposerInputHandle, Props>(func
 
     useLayoutEffect(() => {
         if (value === lastEmittedRef.current) return
+        if (composingRef.current) return
+        const root = rootRef.current
+        if (
+            root
+            && lastEmittedRef.current !== null
+            && serializeComposerSegments(segmentsFromEditor(root)) === value
+        ) {
+            lastEmittedRef.current = value
+            return
+        }
         syncFromValue(value)
     }, [value, syncFromValue])
 
