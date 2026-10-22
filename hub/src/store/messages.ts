@@ -541,7 +541,9 @@ export function getImmediateQueuedLocalMessages(
           AND scheduled_at IS NULL
         ORDER BY seq ASC
     `).all(sessionId) as DbMessageRow[]
-    return rows.map(toStoredMessage)
+    return rows
+        .map(toStoredMessage)
+        .filter((msg) => (msg.content as { role?: string } | null)?.role !== 'agent')
 }
 
 /**

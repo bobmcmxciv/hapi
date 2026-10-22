@@ -146,4 +146,32 @@ describe('ManboSpeaker', () => {
         await new Promise((resolve) => setTimeout(resolve, 20))
         expect(open).not.toHaveBeenCalled()
     })
+
+    it('schedules initial chunk with 280ms jitter cushion and applies smooth cosine fade-in on discontinuity', async () => {
+        const chunkBytes: number[] = []
+        for (let i = 0; i < 64; i += 1) {
+            chunkBytes.push(0x00, 0x40) // 16384 in s16le
+        }
+        const open = vi.fn(async (_text: string, _signal?: AbortSignal) => pcmResponse([chunkBytes, chunkBytes], 16000))
+        const channels: Float32Array[] = []
+        class JitterFakeAudioContext extends FakeAudioContext {
+            override createBuffer(_channels: number, frames: number, sampleRate: number) {
+                this.buffers.push({ frames, sampleRate })
+                const data = new Float32Array(frames)
+                channels.push(data)
+                return { duration: frames / sampleRate, getChannelData: () => data }
+            }
+        }
+        const context = new JitterFakeAudioContext()
+        const speaker = new ManboSpeaker({ openVoiceTtsStream: open } as unknown as ApiClient, context as unknown as AudioContext)
+        speaker.push('测试防破音缓冲。')
+        await vi.waitFor(() => expect(context.started.length).toBe(2))
+        expect(context.started[0]).toBeCloseTo(0.28, 3)
+        expect(context.started[1]).toBeCloseTo(0.28 + 64 / 16000, 4)
+        // First chunk starts from silence -> first sample is faded to 0, interior sample is untouched (0.5).
+        expect(channels[0]![0]).toBeCloseTo(0, 5)
+        expect(channels[0]![32]).toBeCloseTo(0.5, 5)
+        // Second chunk is contiguous -> first sample is not faded (0.5).
+        expect(channels[1]![0]).toBeCloseTo(0.5, 5)
+    })
 })

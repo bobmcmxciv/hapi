@@ -322,9 +322,14 @@ export function applyAgyUsageBackfill(
             const nextSeqBySession = new Map<string, number>()
             const touchedSessions = new Set<string>()
 
+            // Backfilled rows are agent messages (not queued user prompts), so local_id must be NULL
+            // and invoked_at must be stamped; otherwise getImmediateQueuedLocalMessages() would treat
+            // them as uninvoked user prompts and replay them on every 5s session heartbeat.
+            db.query(`UPDATE messages SET invoked_at = created_at, local_id = NULL WHERE local_id LIKE 'backfill:%'`).run()
+
             const insertMsgStmt = db.query(
-                `INSERT INTO messages (id, session_id, content, created_at, seq, local_id)
-                 VALUES (?, ?, ?, ?, ?, ?)`
+                `INSERT INTO messages (id, session_id, content, created_at, seq, local_id, invoked_at)
+                 VALUES (?, ?, ?, ?, ?, NULL, ?)`
             )
 
             const tx = db.transaction(() => {
@@ -361,7 +366,7 @@ export function applyAgyUsageBackfill(
                         encodeMessageContent(envelope),
                         createdAt,
                         seq,
-                        `backfill:${rec.messageId}`
+                        createdAt
                     )
                     insertedMessages += 1
                 }

@@ -250,7 +250,8 @@ export class ApiSessionClient extends EventEmitter {
     private pendingMessages: { message: UserMessage; localId?: string }[] = []
     private pendingMessageCallback: ((message: UserMessage, localId?: string) => void) | null = null
     private cancelQueuedMessageCallback: ((localId: string) => boolean) | null = null
-    private readonly incomingFilter = new IncomingMessageFilter()
+    private readonly incomingFilter = new IncomingMessageFilter(4096)
+    private readonly seenUserLocalIds = new Set<string>()
     private backfillInFlight: Promise<void> | null = null
     private needsBackfill = false
     private hasConnectedOnce = false
@@ -459,6 +460,9 @@ export class ApiSessionClient extends EventEmitter {
                     const removed = (data.body.localId && this.cancelQueuedMessageCallback)
                         ? this.cancelQueuedMessageCallback(data.body.localId)
                         : false
+                    if (removed && data.body.localId) {
+                        this.seenUserLocalIds.delete(data.body.localId)
+                    }
                     ack?.({ removed })
                     return
                 }
@@ -695,6 +699,12 @@ export class ApiSessionClient extends EventEmitter {
     }
 
     private enqueueUserMessage(message: UserMessage, localId?: string): void {
+        if (localId) {
+            if (this.seenUserLocalIds.has(localId)) {
+                return
+            }
+            this.seenUserLocalIds.add(localId)
+        }
         if (this.pendingMessageCallback) {
             this.pendingMessageCallback(message, localId)
         } else {

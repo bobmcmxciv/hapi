@@ -17,6 +17,17 @@ const SOFT_BREAK = /[，,：:]/
 const SOFT_BREAK_MIN_CHARS = 24
 /** ...as long as that leaves a fragment of at least this many characters. */
 const SOFT_BREAK_MIN_PREFIX = 8
+/**
+ * Initial Web Audio lookahead cushion (280ms, ~3.5 x 80ms VoxCPM chunks) when starting a fresh
+ * sentence or recovering from a network stall. Absorbs 250-300ms TCP tunnel arrival jitter so
+ * playback never underruns mid-sentence.
+ */
+const INITIAL_JITTER_BUFFER_SEC = 0.28
+/**
+ * Short raised-cosine ramp (3ms) applied at the start of a fresh run or after an underrun so
+ * resuming from silence never produces a hard step impulse ("popping / crackling mic").
+ */
+const DISCONTINUITY_FADE_SEC = 0.003
 
 export class ManboSpeaker {
     private readonly api: ApiClient
@@ -158,10 +169,19 @@ export class ManboSpeaker {
         const buffer = this.context.createBuffer(1, frames, sampleRate)
         const channel = buffer.getChannelData(0)
         for (let i = 0; i < frames; i += 1) channel[i] = view.getInt16(i * 2, true) / 32768
+        const isDiscontinuous = this.nextStartTime <= this.context.currentTime
+        if (isDiscontinuous && frames >= 16) {
+            const fadeFrames = Math.min(Math.floor(sampleRate * DISCONTINUITY_FADE_SEC), Math.floor(frames / 4))
+            for (let i = 0; i < fadeFrames; i += 1) {
+                channel[i] = channel[i]! * 0.5 * (1 - Math.cos((Math.PI * i) / fadeFrames))
+            }
+        }
         const source = this.context.createBufferSource()
         source.buffer = buffer
         source.connect(this.context.destination)
-        const startAt = Math.max(this.context.currentTime + 0.02, this.nextStartTime)
+        const startAt = isDiscontinuous
+            ? this.context.currentTime + INITIAL_JITTER_BUFFER_SEC
+            : Math.max(this.context.currentTime + 0.005, this.nextStartTime)
         source.start(startAt)
         this.nextStartTime = startAt + buffer.duration
         this.sources.add(source)
