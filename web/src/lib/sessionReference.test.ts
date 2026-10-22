@@ -197,6 +197,145 @@ describe('matchSessionsForMention', () => {
         ])
         expect(hits.map((s) => s.id)).not.toContain('ccc-old')
     })
+
+    it('prioritizes current-directory active sessions first on empty query and hides unrelated inactive sessions', () => {
+        const mixedSessions = [
+            makeSession({
+                id: 'other-dir-inactive-newest',
+                active: false,
+                updatedAt: 999,
+                metadata: {
+                    path: 'C:\\Users\\Administrator\\unrelated-project',
+                    name: 'Unrelated recent inactive session',
+                    machineId: 'machine-vircs',
+                },
+            }),
+            makeSession({
+                id: 'other-machine-active',
+                active: true,
+                updatedAt: 900,
+                metadata: {
+                    path: '/Users/bob/other',
+                    name: 'Remote machine active session',
+                    machineId: 'machine-mac',
+                },
+            }),
+            makeSession({
+                id: 'same-machine-other-dir-active',
+                active: true,
+                updatedAt: 800,
+                metadata: {
+                    path: 'C:\\Users\\Administrator\\cx2cc',
+                    name: 'Other repo active session',
+                    machineId: 'machine-vircs',
+                },
+            }),
+            makeSession({
+                id: 'same-dir-inactive',
+                active: false,
+                updatedAt: 700,
+                metadata: {
+                    path: 'C:\\Users\\Administrator\\hapi',
+                    name: 'HAPI finished investigation',
+                    machineId: 'machine-vircs',
+                },
+            }),
+            makeSession({
+                id: 'same-dir-active-older',
+                active: true,
+                updatedAt: 500,
+                metadata: {
+                    path: 'c:/users/administrator/hapi/',
+                    name: 'HAPI active worker 1',
+                    machineId: 'machine-vircs',
+                },
+            }),
+            makeSession({
+                id: 'same-dir-worktree-active-newer',
+                active: true,
+                updatedAt: 600,
+                metadata: {
+                    path: 'C:\\Users\\Administrator\\hapi\\.worktrees\\feat-x',
+                    worktree: {
+                        basePath: 'C:\\Users\\Administrator\\hapi',
+                        branch: 'feat-x',
+                        name: 'feat-x',
+                    },
+                    name: 'HAPI active worktree worker 2',
+                    machineId: 'machine-vircs',
+                },
+            }),
+            makeSession({
+                id: 'empty-stub',
+                active: false,
+                updatedAt: 1000,
+                metadata: {
+                    path: 'C:\\Users\\Administrator\\hapi',
+                    machineId: 'machine-vircs',
+                },
+            }),
+        ]
+
+        const hits = matchSessionsForMention(mixedSessions, '', {
+            currentDirectory: 'C:\\Users\\Administrator\\hapi',
+            currentMachineId: 'machine-vircs',
+            limit: 10,
+        })
+
+        expect(hits.map((s) => s.id)).toEqual([
+            'same-dir-worktree-active-newer',
+            'same-dir-active-older',
+            'same-dir-inactive',
+            'same-machine-other-dir-active',
+            'other-machine-active',
+        ])
+    })
+
+    it('prioritizes current-directory active sessions ahead of other directories when searching with a query', () => {
+        const searchSessions = [
+            makeSession({
+                id: 'other-dir-active-exact',
+                active: true,
+                updatedAt: 900,
+                metadata: {
+                    path: '/work/other',
+                    name: 'plan',
+                    machineId: 'machine-1',
+                },
+            }),
+            makeSession({
+                id: 'same-dir-inactive-match',
+                active: false,
+                updatedAt: 800,
+                metadata: {
+                    path: '/work/hapi',
+                    name: 'plan migration',
+                    machineId: 'machine-1',
+                },
+            }),
+            makeSession({
+                id: 'same-dir-active-match',
+                active: true,
+                updatedAt: 400,
+                metadata: {
+                    path: '/work/hapi',
+                    name: 'draft plan for usage page',
+                    machineId: 'machine-1',
+                },
+            }),
+        ]
+
+        const hits = matchSessionsForMention(searchSessions, 'plan', {
+            currentDirectory: '/work/hapi',
+            currentMachineId: 'machine-1',
+        })
+
+        expect(hits.map((s) => s.id)).toEqual([
+            'same-dir-active-match',
+            'same-dir-inactive-match',
+            'other-dir-active-exact',
+        ])
+    })
 })
 
 describe('parseSessionPathHref', () => {

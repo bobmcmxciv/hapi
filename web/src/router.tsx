@@ -738,9 +738,13 @@ function SessionPage() {
             // v1: plain-text expansion (same grammar as Copy reference) — #1213.
             // v2: segmented rich composer with inline session tokens — #1215.
             // Match via sessionMatchesQuery (share/sidebar); label/insert via getSessionTitle.
+            const currentSessionDirectory = session?.metadata?.worktree?.basePath ?? session?.metadata?.path ?? null
+            const currentSessionMachineId = session?.metadata?.machineId ?? null
             const sessionHits = matchSessionsForMention(allSessions, search, {
                 excludeId: sessionId,
                 limit: 20,
+                currentDirectory: currentSessionDirectory,
+                currentMachineId: currentSessionMachineId,
                 resolveMachineLabel: resolveMentionMachineLabel,
             }).map((s) => {
                 const title = getSessionTitle(s)
@@ -787,6 +791,9 @@ function SessionPage() {
         agentType,
         api,
         sessionId,
+        session?.metadata?.worktree?.basePath,
+        session?.metadata?.path,
+        session?.metadata?.machineId,
         allSessions,
         resolveMentionMachineLabel,
         getSkillSuggestions,
