@@ -679,20 +679,38 @@ async function fetchSessionMessages(
             : `HTTP ${response.status}`
         throw new PingPeerError('not_found', `failed to load messages for ${sessionId} (${detail})`)
     }
-    const rows = Array.isArray(response.data?.messages) ? response.data.messages : []
-    const out: InspectPeerMessage[] = []
-    for (const row of rows) {
-        if (!isObject(row)) continue
-        const snippet = extractInspectMessageSnippet(row.content)
-        if (!snippet) continue
-        out.push({
-            ...snippet,
-            id: typeof row.id === 'string' ? row.id : snippet.id,
-            seq: typeof row.seq === 'number' ? row.seq : null,
-            createdAt: typeof row.createdAt === 'number' ? row.createdAt : null
-        })
+    const extractRows = (rawRows: unknown[]): InspectPeerMessage[] => {
+        const extracted: InspectPeerMessage[] = []
+        for (const row of rawRows) {
+            if (!isObject(row)) continue
+            const snippet = extractInspectMessageSnippet(row.content)
+            if (!snippet) continue
+            extracted.push({
+                ...snippet,
+                id: typeof row.id === 'string' ? row.id : snippet.id,
+                seq: typeof row.seq === 'number' ? row.seq : null,
+                createdAt: typeof row.createdAt === 'number' ? row.createdAt : null
+            })
+        }
+        return extracted
     }
-    return out
+    const rows = Array.isArray(response.data?.messages) ? response.data.messages : []
+    const out = extractRows(rows)
+    if (out.length < limit && rows.length >= limit && limit < MAX_INSPECT_MESSAGE_LIMIT) {
+        const fallbackResp = await http.get(
+            ${apiUrl}/api/sessions//messages,
+            {
+                headers: authHeaders(jwt),
+                params: { limit: MAX_INSPECT_MESSAGE_LIMIT },
+                timeout: 20_000,
+                validateStatus: () => true
+            }
+        )
+        if (fallbackResp.status >= 200 && fallbackResp.status < 300 && Array.isArray(fallbackResp.data?.messages)) {
+            return extractRows(fallbackResp.data.messages).slice(-limit)
+        }
+    }
+    return out.slice(-limit)
 }
 
 async function fetchSessionDigest(

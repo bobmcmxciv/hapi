@@ -47,8 +47,10 @@ export function parseInspectPeerArgs(args: string[]): ParsedInspectPeerArgs {
             result.help = true
             continue
         }
-        if (arg === '--ask' || arg.startsWith('--ask=')) {
-            const value = arg === '--ask' ? args[++i] : arg.slice('--ask='.length)
+        if (arg === '--ask' || arg.startsWith('--ask=') || arg === '--question' || arg.startsWith('--question=')) {
+            const value = (arg === '--ask' || arg === '--question')
+                ? args[++i]
+                : arg.slice(arg.indexOf('=') + 1)
             if (!value?.trim() || value.startsWith('--')) {
                 throw new PingPeerError('bad_args', '--ask requires a question')
             }
