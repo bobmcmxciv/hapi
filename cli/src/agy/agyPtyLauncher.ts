@@ -1,4 +1,5 @@
 import React from "react"
+import { existsSync, readFileSync } from "node:fs"
 import { AgySession } from "./session"
 import { RemoteModeDisplay } from "@/ui/ink/RemoteModeDisplay"
 import { agyPty } from "./agyPty"
@@ -781,6 +782,30 @@ class AgyPtyLauncher extends RemoteLauncherBase {
             onSwitch: () => this.handleSwitchRequest()
         })
 
+        const activeTaskLogs = new Map<string, { logPath: string; lastLine: string }>()
+        const taskLogTimer = setInterval(() => {
+            if (activeTaskLogs.size === 0) return
+            for (const [taskId, state] of activeTaskLogs) {
+                try {
+                    if (!existsSync(state.logPath)) continue
+                    const raw = readFileSync(state.logPath, 'utf8')
+                    const lines = raw.split(/\r?\n/).map((l) => l.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').trim()).filter(Boolean)
+                    const latest = lines[lines.length - 1]
+                    if (latest && latest !== state.lastLine) {
+                        state.lastLine = latest
+                        const clipped = latest.length > 160 ? `${latest.slice(0, 160)}…` : latest
+                        session.client.sendAgySessionMessage({
+                            type: 'PLANNER_RESPONSE',
+                            step_index: -1,
+                            content: `Inside the ${taskId} log: ${clipped}`,
+                        } as never, this.agySessionId ?? undefined)
+                    }
+                } catch {
+                    // ignore transient read errors
+                }
+            }
+        }, 15_000)
+        taskLogTimer.unref?.()
         const resumeBrainUuid = this.agySessionId ?? undefined
         this.scanner = await createAgySessionScanner({
             resumeBrainUuid,
@@ -836,6 +861,22 @@ class AgyPtyLauncher extends RemoteLauncherBase {
                 const toolCall = AGY_NON_TOOL_ACTION_TYPES.has(entry.type)
                     ? undefined
                     : this.pendingAgyToolCalls.shift()
+                const actionContent = entry.content ?? ''
+                if (entry.type === 'SYSTEM_MESSAGE') {
+                    if (actionContent.includes('All your subagents and background tasks have been stopped')) {
+                        activeTaskLogs.clear()
+                    } else {
+                        const doneTask = actionContent.match(/task-(\d+)/)
+                        if (doneTask) activeTaskLogs.delete(`task-${doneTask[1]}`)
+                    }
+                } else {
+                    const logMatch = actionContent.match(/Task logs are available at:\s*file:\/\/\/([^\r\n]+)/i)
+                    const taskMatch = actionContent.match(/task-(\d+)/)
+                    if (logMatch && taskMatch) {
+                        const rawPath = decodeURIComponent(logMatch[1].trim())
+                        activeTaskLogs.set(`task-${taskMatch[1]}`, { logPath: rawPath, lastLine: '' })
+                    }
+                }
                 session.client.sendAgySessionMessage(entry, this.agySessionId ?? undefined, toolCall)
             }
         })
@@ -890,6 +931,8 @@ class AgyPtyLauncher extends RemoteLauncherBase {
             })
         } finally {
             this.clearDiscoveryTimeoutWarning()
+            clearInterval(taskLogTimer)
+            activeTaskLogs.clear()
             session.setLiveModelHandler(null)
             if (this.outputWaiter) {
                 clearTimeout(this.outputWaiter.timer)
