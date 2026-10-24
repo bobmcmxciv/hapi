@@ -53,10 +53,18 @@ describe('voice TTS relay', () => {
             sampleRate: 16000,
             voices: [...VOXCPM_VOICE_CATALOG],
         })
-        expect(status.voices?.map((v) => v.id)).toEqual([
+        expect(status.voices?.length).toBe(94)
+        const ids = status.voices?.map((v) => v.id) ?? []
+        expect(ids.slice(0, 12)).toEqual([
             'manbo', 'nian', 'dusk', 'almond', 'skadi2', 'aglina',
             'surtr', 'helage', 'mizuki', 'kalts', 'amiya', 'closur',
         ])
+        expect(ids).toContain('wisadel')
+        expect(ids).toContain('perlica')
+        expect(ids).toContain('furina')
+        expect(ids).toContain('firefly')
+        expect(ids).toContain('sunchang')
+        expect(ids).toContain('jinlei')
     })
 
     it('forwards text with the server-side token and streams the audio back', async () => {

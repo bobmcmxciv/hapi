@@ -143,10 +143,14 @@ export default function SettingsVoicePage() {
                                             containerClassName="w-full max-w-[55%]"
                                             className="rounded-lg border border-[var(--app-border)] bg-[var(--app-bg)] py-1.5 pl-2 text-sm text-[var(--app-fg)]"
                                         >
-                                            {VOXCPM_VOICE_OPTIONS.map((option) => (
-                                                <option key={option.id} value={option.id}>
-                                                    {`${option.name} — ${option.subtitle}`}
-                                                </option>
+                                            {Array.from(new Set(VOXCPM_VOICE_OPTIONS.map((v) => v.group))).map((group) => (
+                                                <optgroup key={group} label={group}>
+                                                    {VOXCPM_VOICE_OPTIONS.filter((v) => v.group === group).map((option) => (
+                                                        <option key={option.id} value={option.id}>
+                                                            {`${option.name} — ${option.subtitle}`}
+                                                        </option>
+                                                    ))}
+                                                </optgroup>
                                             ))}
                                         </SelectControl>
                                     </label>
