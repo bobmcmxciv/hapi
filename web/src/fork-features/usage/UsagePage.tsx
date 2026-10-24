@@ -40,6 +40,12 @@ export type UsageModelSummary = {
     cacheReadInputTokens: number
 }
 
+export type UsageModelGroup = UsageModelSummary & {
+    /** 归并到该主模型下的不同子变体（按各自 token 总量降序）。
+     *  仅当 variants.length > 1 时渲染展开按钮与子列表；单不重复模型（variants.length === 1）直接平铺显示。 */
+    variants: UsageModelSummary[]
+}
+
 /** 一台机器的用量小结（与 hub fork-features/usage/usageAggregate.ts 同构）。 */
 export type UsageHostSummary = {
     host: string
@@ -109,6 +115,110 @@ export function cacheHitRate(m: Omit<UsageModelSummary, 'model'>): number | null
 
 export function formatHitRate(rate: number | null): string {
     return rate === null ? '—' : `${(rate * 100).toFixed(1)}%`
+}
+
+/**
+ * 将同一模型的不同渠道前缀、推理档位后缀、日期快照与大小写/连字符变体归并为标准模型名。
+ * 例如：
+ * - `claude-opus-5-5` / `claude-opus-5-5-high` / `claude-opus-5-5-medium` / `opus5.5` / `opus5.5-high` → `claude-opus-5-5`
+ * - `claude-opus-4.7` / `claude-opus-4-7` → `claude-opus-4-7`
+ * - `anthropic/claude-4.6-opus-20260205` / `anthropic/claude-opus-4.6` / `claude-opus-4-6` → `claude-opus-4-6`
+ * - `cx2cc/gpt-6.1-sol` / `cx2cc-ecs/gpt-6.1-sol` / `gpt-6.1-sol` → `gpt-6.1-sol`
+ * - `Deepseek-v4-pro` / `deepseek-v4-pro` → `deepseek-v4-pro`
+ * - `gemini-3.8-flash-tiered` / `gemini-3.8-flash` → `gemini-3.8-flash`
+ */
+export function canonicalizeModelName(rawModel: string): string {
+    let normalized = rawModel.trim().toLowerCase()
+    if (!normalized) return rawModel
+
+    normalized = normalized.replace(/^[^/]+\//, '')
+    normalized = normalized.replace(/-20\d{6}$/, '')
+
+    while (/-(low|medium|high|xhigh|max|minimal|thinking|nothinking|tiered)$/.test(normalized)) {
+        normalized = normalized.replace(/-(low|medium|high|xhigh|max|minimal|thinking|nothinking|tiered)$/, '')
+    }
+
+    const claudeFamilyFirst = normalized.match(/^(?:claude[-_]?)?(opus|sonnet|haiku|fable)[-_]?(\d+)(?:[.-](\d+))?$/)
+    if (claudeFamilyFirst) {
+        const [, family, major, minor] = claudeFamilyFirst
+        return minor !== undefined ? `claude-${family}-${major}-${minor}` : `claude-${family}-${major}`
+    }
+
+    const claudeVersionFirst = normalized.match(/^claude[-_]?(\d+)(?:[.-](\d+))?[-_](opus|sonnet|haiku|fable)$/)
+    if (claudeVersionFirst) {
+        const [, major, minor, family] = claudeVersionFirst
+        return minor !== undefined ? `claude-${family}-${major}-${minor}` : `claude-${family}-${major}`
+    }
+
+    return normalized
+}
+
+/**
+ * 将同一模型的不同后缀/渠道变体（如 `claude-opus-5-5`、`claude-opus-5-5-high`、`opus5.5`）
+ * 聚合为一条主模型记录，并在 `variants` 中保留去重后的原始变体明细（按总量降序）。
+ * 大小写完全相同的同名项直接合并，不产生多余的假子项。
+ */
+export function groupUsageModels(models: UsageModelSummary[]): UsageModelGroup[] {
+    const groups = new Map<string, {
+        summary: UsageModelSummary
+        variantsByLower: Map<string, UsageModelSummary>
+    }>()
+
+    for (const item of models) {
+        const canonical = canonicalizeModelName(item.model)
+        const variantKey = item.model.trim().toLowerCase()
+        let entry = groups.get(canonical)
+        if (!entry) {
+            entry = {
+                summary: {
+                    model: canonical,
+                    requestCount: 0,
+                    inputTokens: 0,
+                    outputTokens: 0,
+                    cacheCreationInputTokens: 0,
+                    cacheReadInputTokens: 0,
+                },
+                variantsByLower: new Map(),
+            }
+            groups.set(canonical, entry)
+        }
+        entry.summary.requestCount += item.requestCount
+        entry.summary.inputTokens += item.inputTokens
+        entry.summary.outputTokens += item.outputTokens
+        entry.summary.cacheCreationInputTokens += item.cacheCreationInputTokens
+        entry.summary.cacheReadInputTokens += item.cacheReadInputTokens
+
+        const existingVariant = entry.variantsByLower.get(variantKey)
+        if (!existingVariant) {
+            entry.variantsByLower.set(variantKey, {
+                model: item.model.trim(),
+                requestCount: item.requestCount,
+                inputTokens: item.inputTokens,
+                outputTokens: item.outputTokens,
+                cacheCreationInputTokens: item.cacheCreationInputTokens,
+                cacheReadInputTokens: item.cacheReadInputTokens,
+            })
+        } else {
+            // 若仅大小写不同（如 Deepseek-v4-pro 与 deepseek-v4-pro），优先保留全小写或先出现的规范名并累加数值
+            if (item.model.trim() === variantKey) {
+                existingVariant.model = variantKey
+            }
+            existingVariant.requestCount += item.requestCount
+            existingVariant.inputTokens += item.inputTokens
+            existingVariant.outputTokens += item.outputTokens
+            existingVariant.cacheCreationInputTokens += item.cacheCreationInputTokens
+            existingVariant.cacheReadInputTokens += item.cacheReadInputTokens
+        }
+    }
+
+    return [...groups.values()]
+        .map(({ summary, variantsByLower }) => ({
+            ...summary,
+            variants: [...variantsByLower.values()].sort(
+                (a, b) => modelTotal(b) - modelTotal(a) || a.model.localeCompare(b.model)
+            ),
+        }))
+        .sort((a, b) => modelTotal(b) - modelTotal(a) || a.model.localeCompare(b.model))
 }
 
 // 固定色板，和现有 UI 对齐不引入图表库，只用 CSS 横向堆叠条。
@@ -206,8 +316,25 @@ function MachineUsageBoard(props: {
     )
 }
 
-function UsageBar(props: { model: UsageModelSummary; maxTotal: number }) {
-    const { model, maxTotal } = props
+function VariantChevron(props: { expanded: boolean }) {
+    return (
+        <svg
+            viewBox="0 0 16 16"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.75"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            aria-hidden="true"
+            className={cn('h-3.5 w-3.5 shrink-0 text-[var(--app-hint)] transition-transform', props.expanded && 'rotate-90')}
+        >
+            <path d="M6 4l4 4-4 4" />
+        </svg>
+    )
+}
+
+function StackedBarTrack(props: { model: UsageModelSummary; maxTotal: number; compact?: boolean }) {
+    const { model, maxTotal, compact } = props
     const total = modelTotal(model)
     const widthPct = maxTotal > 0 ? Math.max(1, (total / maxTotal) * 100) : 0
     const segments = [
@@ -216,30 +343,81 @@ function UsageBar(props: { model: UsageModelSummary; maxTotal: number }) {
         { key: 'cacheCreation', value: model.cacheCreationInputTokens, color: SEGMENT_COLORS.cacheCreation },
         { key: 'cacheRead', value: model.cacheReadInputTokens, color: SEGMENT_COLORS.cacheRead }
     ]
+    return (
+        <div className={cn('flex w-full overflow-hidden rounded-full bg-[var(--app-subtle-bg)]', compact ? 'h-2' : 'h-3')}>
+            <div className="flex h-full overflow-hidden rounded-full" style={{ width: `${widthPct}%` }}>
+                {segments.map((seg) => {
+                    const segPct = total > 0 ? (seg.value / total) * 100 : 0
+                    if (segPct <= 0) return null
+                    return (
+                        <div
+                            key={seg.key}
+                            style={{ width: `${segPct}%`, backgroundColor: seg.color }}
+                            title={`${seg.key}: ${formatTokens(seg.value)}`}
+                        />
+                    )
+                })}
+            </div>
+        </div>
+    )
+}
+
+function UsageBar(props: {
+    group: UsageModelGroup
+    maxTotal: number
+    expanded: boolean
+    onToggleExpand: () => void
+}) {
+    const { t } = useTranslation()
+    const { group, maxTotal, expanded, onToggleExpand } = props
+    const total = modelTotal(group)
+    const hasVariants = group.variants.length > 1
 
     return (
         <div className="space-y-1.5">
             <div className="flex items-baseline justify-between gap-3">
-                <div className="font-medium">{model.model}</div>
+                {hasVariants ? (
+                    <button
+                        type="button"
+                        onClick={onToggleExpand}
+                        aria-expanded={expanded}
+                        aria-label={expanded
+                            ? t('usage.collapseVariants', { model: group.model })
+                            : t('usage.expandVariants', { model: group.model, count: group.variants.length })}
+                        className="inline-flex min-w-0 items-center gap-1.5 text-left font-medium hover:text-[var(--app-link)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--app-link)] rounded"
+                    >
+                        <VariantChevron expanded={expanded} />
+                        <span className="truncate">{group.model}</span>
+                        <span className="shrink-0 rounded-full bg-[var(--app-subtle-bg)] px-1.5 py-0.5 text-[11px] font-normal text-[var(--app-hint)]">
+                            {t('usage.modelVariants', { count: group.variants.length })}
+                        </span>
+                    </button>
+                ) : (
+                    <div className="font-medium">{group.model}</div>
+                )}
                 <div className="text-sm text-[var(--app-hint)]">
-                    {formatTokens(total)} tokens · {model.requestCount.toLocaleString()}
+                    {formatTokens(total)} tokens · {group.requestCount.toLocaleString()}
                 </div>
             </div>
-            <div className="flex h-3 w-full overflow-hidden rounded-full bg-[var(--app-subtle-bg)]">
-                <div className="flex h-full overflow-hidden rounded-full" style={{ width: `${widthPct}%` }}>
-                    {segments.map((seg) => {
-                        const segPct = total > 0 ? (seg.value / total) * 100 : 0
-                        if (segPct <= 0) return null
+            <StackedBarTrack model={group} maxTotal={maxTotal} />
+            {hasVariants && expanded ? (
+                <div className="mt-2 space-y-2 border-l-2 border-[var(--app-border)] pl-3">
+                    {group.variants.map((variant) => {
+                        const variantTotal = modelTotal(variant)
                         return (
-                            <div
-                                key={seg.key}
-                                style={{ width: `${segPct}%`, backgroundColor: seg.color }}
-                                title={`${seg.key}: ${formatTokens(seg.value)}`}
-                            />
+                            <div key={variant.model} className="space-y-1">
+                                <div className="flex items-baseline justify-between gap-3 text-xs">
+                                    <div className="font-mono text-[var(--app-hint)]">{variant.model}</div>
+                                    <div className="tabular-nums text-[var(--app-hint)]">
+                                        {formatTokens(variantTotal)} tokens · {variant.requestCount.toLocaleString()}
+                                    </div>
+                                </div>
+                                <StackedBarTrack model={variant} maxTotal={Math.max(1, total)} compact />
+                            </div>
                         )
                     })}
                 </div>
-            </div>
+            ) : null}
         </div>
     )
 }
@@ -264,7 +442,11 @@ function Legend() {
     )
 }
 
-function ModelTable(props: { models: UsageModelSummary[] }) {
+function ModelTable(props: {
+    groups: UsageModelGroup[]
+    expandedModels: ReadonlySet<string>
+    onToggleExpand: (model: string) => void
+}) {
     const { t } = useTranslation()
     return (
         <div className="overflow-x-auto">
@@ -282,18 +464,60 @@ function ModelTable(props: { models: UsageModelSummary[] }) {
                     </tr>
                 </thead>
                 <tbody>
-                    {props.models.map((m) => (
-                        <tr key={m.model} className="border-b border-[var(--app-divider)] last:border-0">
-                            <td className="py-1.5 pr-3 font-medium">{m.model}</td>
-                            <td className="py-1.5 pr-3 text-right">{m.requestCount.toLocaleString()}</td>
-                            <td className="py-1.5 pr-3 text-right">{formatTokens(m.inputTokens)}</td>
-                            <td className="py-1.5 pr-3 text-right">{formatTokens(m.outputTokens)}</td>
-                            <td className="py-1.5 pr-3 text-right">{formatTokens(m.cacheCreationInputTokens)}</td>
-                            <td className="py-1.5 pr-3 text-right">{formatTokens(m.cacheReadInputTokens)}</td>
-                            <td className="py-1.5 pr-3 text-right tabular-nums">{formatHitRate(cacheHitRate(m))}</td>
-                            <td className="py-1.5 text-right font-medium">{formatTokens(modelTotal(m))}</td>
-                        </tr>
-                    ))}
+                    {props.groups.flatMap((group) => {
+                        const hasVariants = group.variants.length > 1
+                        const expanded = hasVariants && props.expandedModels.has(group.model)
+                        const mainRow = (
+                            <tr key={group.model} className="border-b border-[var(--app-divider)] last:border-0">
+                                <td className="py-1.5 pr-3 font-medium">
+                                    {hasVariants ? (
+                                        <button
+                                            type="button"
+                                            onClick={() => props.onToggleExpand(group.model)}
+                                            aria-expanded={expanded}
+                                            aria-label={expanded
+                                                ? t('usage.collapseVariants', { model: group.model })
+                                                : t('usage.expandVariants', { model: group.model, count: group.variants.length })}
+                                            className="inline-flex items-center gap-1.5 text-left font-medium hover:text-[var(--app-link)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--app-link)] rounded"
+                                        >
+                                            <VariantChevron expanded={expanded} />
+                                            <span>{group.model}</span>
+                                            <span className="rounded-full bg-[var(--app-subtle-bg)] px-1.5 py-0.5 text-[11px] font-normal text-[var(--app-hint)]">
+                                                {t('usage.modelVariants', { count: group.variants.length })}
+                                            </span>
+                                        </button>
+                                    ) : (
+                                        group.model
+                                    )}
+                                </td>
+                                <td className="py-1.5 pr-3 text-right">{group.requestCount.toLocaleString()}</td>
+                                <td className="py-1.5 pr-3 text-right">{formatTokens(group.inputTokens)}</td>
+                                <td className="py-1.5 pr-3 text-right">{formatTokens(group.outputTokens)}</td>
+                                <td className="py-1.5 pr-3 text-right">{formatTokens(group.cacheCreationInputTokens)}</td>
+                                <td className="py-1.5 pr-3 text-right">{formatTokens(group.cacheReadInputTokens)}</td>
+                                <td className="py-1.5 pr-3 text-right tabular-nums">{formatHitRate(cacheHitRate(group))}</td>
+                                <td className="py-1.5 text-right font-medium">{formatTokens(modelTotal(group))}</td>
+                            </tr>
+                        )
+                        if (!expanded) return [mainRow]
+                        const variantRows = group.variants.map((variant) => (
+                            <tr
+                                key={`${group.model}::${variant.model}`}
+                                data-testid={`model-variant-row-${group.model}`}
+                                className="border-b border-[var(--app-divider)] bg-[var(--app-subtle-bg)]/40 text-xs text-[var(--app-hint)] last:border-0"
+                            >
+                                <td className="py-1 pr-3 pl-6 font-mono">{variant.model}</td>
+                                <td className="py-1 pr-3 text-right tabular-nums">{variant.requestCount.toLocaleString()}</td>
+                                <td className="py-1 pr-3 text-right tabular-nums">{formatTokens(variant.inputTokens)}</td>
+                                <td className="py-1 pr-3 text-right tabular-nums">{formatTokens(variant.outputTokens)}</td>
+                                <td className="py-1 pr-3 text-right tabular-nums">{formatTokens(variant.cacheCreationInputTokens)}</td>
+                                <td className="py-1 pr-3 text-right tabular-nums">{formatTokens(variant.cacheReadInputTokens)}</td>
+                                <td className="py-1 pr-3 text-right tabular-nums">{formatHitRate(cacheHitRate(variant))}</td>
+                                <td className="py-1 text-right font-medium tabular-nums">{formatTokens(modelTotal(variant))}</td>
+                            </tr>
+                        ))
+                        return [mainRow, ...variantRows]
+                    })}
                 </tbody>
             </table>
         </div>
@@ -319,6 +543,16 @@ export default function UsagePage() {
     const [customEnd, setCustomEnd] = useState('')
     const [datePickerOpen, setDatePickerOpen] = useState(false)
     const [host, setHost] = useState('')
+    const [expandedModels, setExpandedModels] = useState<Set<string>>(() => new Set())
+
+    const toggleExpandModel = (model: string) => {
+        setExpandedModels((current) => {
+            const next = new Set(current)
+            if (next.has(model)) next.delete(model)
+            else next.add(model)
+            return next
+        })
+    }
 
     const hasCustomRange = Boolean(customStart && customEnd)
 
@@ -368,8 +602,9 @@ export default function UsagePage() {
         refetchInterval: 60_000
     })
 
-    const models = usageQuery.data?.models ?? []
-    const maxTotal = models.reduce((max, m) => Math.max(max, modelTotal(m)), 0)
+    const rawModels = usageQuery.data?.models ?? []
+    const modelGroups = useMemo(() => groupUsageModels(rawModels), [rawModels])
+    const maxTotal = modelGroups.reduce((max, m) => Math.max(max, modelTotal(m)), 0)
     const totals = usageQuery.data?.totals
     const hosts = usageQuery.data?.hosts ?? []
 
@@ -487,7 +722,7 @@ export default function UsagePage() {
                     </Card>
                 )}
 
-                {usageQuery.isSuccess && models.length === 0 && (
+                {usageQuery.isSuccess && modelGroups.length === 0 && (
                     <Card>
                         <CardHeader>
                             <CardTitle>{t('usage.empty.title')}</CardTitle>
@@ -498,7 +733,7 @@ export default function UsagePage() {
                     </Card>
                 )}
 
-                {usageQuery.isSuccess && models.length > 0 && totals && (
+                {usageQuery.isSuccess && modelGroups.length > 0 && totals && (
                     <>
                         <Card>
                             <CardHeader>
@@ -523,8 +758,14 @@ export default function UsagePage() {
                                     </span>
                                 </div>
                                 <Legend />
-                                {models.map((m) => (
-                                    <UsageBar key={m.model} model={m} maxTotal={maxTotal} />
+                                {modelGroups.map((group) => (
+                                    <UsageBar
+                                        key={group.model}
+                                        group={group}
+                                        maxTotal={maxTotal}
+                                        expanded={expandedModels.has(group.model)}
+                                        onToggleExpand={() => toggleExpandModel(group.model)}
+                                    />
                                 ))}
                             </CardContent>
                         </Card>
@@ -534,7 +775,11 @@ export default function UsagePage() {
                                 <CardTitle>{t('usage.detail')}</CardTitle>
                             </CardHeader>
                             <CardContent>
-                                <ModelTable models={models} />
+                                <ModelTable
+                                    groups={modelGroups}
+                                    expandedModels={expandedModels}
+                                    onToggleExpand={toggleExpandModel}
+                                />
                             </CardContent>
                         </Card>
                     </>

@@ -2,7 +2,15 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { I18nProvider } from '@/lib/i18n-context'
-import UsagePage, { cacheHitRate, formatHitRate, formatTokens, localDayEndExclusiveIso, localDayStartIso } from './UsagePage'
+import UsagePage, {
+    cacheHitRate,
+    canonicalizeModelName,
+    formatHitRate,
+    formatTokens,
+    groupUsageModels,
+    localDayEndExclusiveIso,
+    localDayStartIso,
+} from './UsagePage'
 
 vi.mock('@/lib/app-context', () => ({ useAppContext: () => ({ baseUrl: 'http://hub', token: 'jwt', user: { id: 1 } }) }))
 vi.mock('@tanstack/react-router', () => ({ useNavigate: () => vi.fn() }))
@@ -71,6 +79,92 @@ describe('UsagePage', () => {
             const withRange = calls.find(url => url.includes('since=') && url.includes('until='))
             expect(withRange).toBeTruthy()
         })
+    })
+
+    it('将同模型的不同后缀/渠道归并，仅对多变体模型提供展开子列表，单不重复模型直接平铺不展开', async () => {
+        const bodyWithVariants = {
+            ...summaryBody,
+            models: [
+                {
+                    model: 'claude-opus-5-5',
+                    requestCount: 100,
+                    inputTokens: 10_000,
+                    outputTokens: 20_000,
+                    cacheCreationInputTokens: 0,
+                    cacheReadInputTokens: 970_000,
+                },
+                {
+                    model: 'claude-opus-5-5-high',
+                    requestCount: 20,
+                    inputTokens: 2_000,
+                    outputTokens: 5_000,
+                    cacheCreationInputTokens: 0,
+                    cacheReadInputTokens: 93_000,
+                },
+                {
+                    model: 'opus5.5',
+                    requestCount: 5,
+                    inputTokens: 1_000,
+                    outputTokens: 2_000,
+                    cacheCreationInputTokens: 0,
+                    cacheReadInputTokens: 7_000,
+                },
+                {
+                    model: 'claude-fable-5',
+                    requestCount: 42,
+                    inputTokens: 1_000,
+                    outputTokens: 2_000,
+                    cacheCreationInputTokens: 500,
+                    cacheReadInputTokens: 500_000,
+                },
+            ],
+        }
+        vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(bodyWithVariants), { status: 200 })))
+        renderPage()
+
+        // 主模型 claude-opus-5-5 与单模型 claude-fable-5 显示在主列表
+        expect((await screen.findAllByText('claude-opus-5-5')).length).toBeGreaterThan(0)
+        expect(screen.getAllByText('claude-fable-5').length).toBeGreaterThan(0)
+
+        // 默认折叠时，子变体 claude-opus-5-5-high / opus5.5 不占顶层行
+        expect(screen.queryByText('claude-opus-5-5-high')).toBeNull()
+        expect(screen.queryByText('opus5.5')).toBeNull()
+
+        // 单不重复模型 claude-fable-5 没有展开按钮
+        expect(screen.queryByRole('button', { name: /claude-fable-5/ })).toBeNull()
+
+        // 点击展开 claude-opus-5-5 后显示 3 个子变体明细
+        const expandButtons = screen.getAllByRole('button', { name: /Show 3 model variants for claude-opus-5-5/ })
+        expect(expandButtons.length).toBeGreaterThan(0)
+        fireEvent.click(expandButtons[0]!)
+
+        expect(screen.getAllByText('claude-opus-5-5-high').length).toBeGreaterThan(0)
+        expect(screen.getAllByText('opus5.5').length).toBeGreaterThan(0)
+        expect(screen.getAllByTestId('model-variant-row-claude-opus-5-5')).toHaveLength(3)
+    })
+})
+
+describe('canonicalizeModelName & groupUsageModels', () => {
+    it('归并推理档位后缀、渠道前缀、日期快照与 Claude 命名顺序', () => {
+        expect(canonicalizeModelName('opus5.5')).toBe('claude-opus-5-5')
+        expect(canonicalizeModelName('opus5.5-high')).toBe('claude-opus-5-5')
+        expect(canonicalizeModelName('claude-opus-5-5-medium')).toBe('claude-opus-5-5')
+        expect(canonicalizeModelName('claude-opus-4.7')).toBe('claude-opus-4-7')
+        expect(canonicalizeModelName('anthropic/claude-4.6-opus-20260205')).toBe('claude-opus-4-6')
+        expect(canonicalizeModelName('cx2cc/gpt-6.1-sol')).toBe('gpt-6.1-sol')
+        expect(canonicalizeModelName('Deepseek-v4-pro')).toBe('deepseek-v4-pro')
+        expect(canonicalizeModelName('gemini-3.8-flash-tiered')).toBe('gemini-3.8-flash')
+    })
+
+    it('仅大小写不同的同名模型直接合并为单个变体（不产生多余展开项）', () => {
+        const grouped = groupUsageModels([
+            { model: 'deepseek-v4-pro', requestCount: 10, inputTokens: 100, outputTokens: 50, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 },
+            { model: 'Deepseek-v4-pro', requestCount: 5, inputTokens: 20, outputTokens: 10, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 },
+        ])
+        expect(grouped).toHaveLength(1)
+        expect(grouped[0]!.model).toBe('deepseek-v4-pro')
+        expect(grouped[0]!.requestCount).toBe(15)
+        expect(grouped[0]!.variants).toHaveLength(1)
     })
 })
 

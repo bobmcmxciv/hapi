@@ -31,4 +31,20 @@ describe('buildTrendLines', () => {
         // A model with nothing under this metric is dropped instead of drawn flat at zero.
         expect(output.map(line => line.key)).toEqual(['small'])
     })
+
+    it('merges series that map to the same canonical model', () => {
+        const data = {
+            unit: 'day' as const,
+            buckets: ['a', 'b'],
+            series: [
+                series('claude-opus-5-5', [100, 200]),
+                series('claude-opus-5-5-high', [30, 40]),
+                series('opus5.5', [10, 20]),
+            ]
+        }
+        const lines = buildTrendLines(data, 'total', 'Other')
+        expect(lines).toEqual([
+            { key: 'claude-opus-5-5', label: 'claude-opus-5-5', slot: 1, values: [140, 260] }
+        ])
+    })
 })

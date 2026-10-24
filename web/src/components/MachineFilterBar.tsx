@@ -20,6 +20,7 @@ import {
 } from '@/components/machinePresentation'
 import { cn } from '@/lib/utils'
 import { useTranslation } from '@/lib/use-translation'
+import { useLongPress } from '@/hooks/useLongPress'
 import { MachineIconPicker } from '@/fork-features/machine-icons/MachineIconPicker'
 import { useListPrefs } from '@/fork-features/list-prefs/listPrefs'
 import type { MachineLayout } from '@/fork-features/list-prefs/listPrefs'
@@ -80,11 +81,17 @@ function MachineFilterChip(props: {
     onSelect: (id: string) => void
     onRenameRequest?: (machine: MachineFilterItem) => void
     layout: MachineLayout
+    healthPopupOpen: boolean
+    onHealthPopupOpenChange: (open: boolean) => void
 }) {
     const { t } = useTranslation()
-    const { machine, selected, onSelect, onRenameRequest } = props
+    const { machine, selected, onSelect, onRenameRequest, healthPopupOpen, onHealthPopupOpenChange } = props
     const tooltipId = useId()
-    const hasHealth = machine.healthPresentation && machine.healthPresentation.metrics.length > 0
+    const containerRef = useRef<HTMLSpanElement>(null)
+    const touchActiveRef = useRef(false)
+    const touchClearTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+    const [tooltipAlign, setTooltipAlign] = useState<'start' | 'end'>('start')
+    const hasHealth = Boolean(machine.healthPresentation && machine.healthPresentation.metrics.length > 0)
 
     const osLabel = resolveMachineOsLabel(machine.platform)
     const osText = osLabel.kind === 'i18n' ? t(osLabel.key) : osLabel.value
@@ -92,12 +99,109 @@ function MachineFilterChip(props: {
     const titleLine = [machine.label, iconText, osText, machine.owner].filter(Boolean).join(' · ')
     const canRename = Boolean(machine.canRename && onRenameRequest)
     const title = canRename ? `${titleLine}\n${t('sessions.machineFilter.renameTooltip')}` : titleLine
-    const handleContextMenu = canRename
-        ? (event: ReactMouseEvent) => {
+
+    const updateTooltipAlign = useCallback(() => {
+        const el = containerRef.current
+        if (!el || typeof window === 'undefined') return
+        const rect = el.getBoundingClientRect()
+        const groupRect = el.closest('[role="group"]')?.getBoundingClientRect()
+        const rightLimit = groupRect && groupRect.width > 0 ? groupRect.right : window.innerWidth - 8
+        const leftLimit = groupRect && groupRect.width > 0 ? groupRect.left : 8
+        if (rect.left + 256 > rightLimit && rect.right - 256 >= leftLimit - 8) {
+            setTooltipAlign('end')
+        } else {
+            setTooltipAlign('start')
+        }
+    }, [])
+
+    useEffect(() => {
+        return () => {
+            if (touchClearTimerRef.current) {
+                clearTimeout(touchClearTimerRef.current)
+            }
+        }
+    }, [])
+
+    useEffect(() => {
+        if (!healthPopupOpen) return
+        updateTooltipAlign()
+        const closeOnOutsidePointer = (event: PointerEvent) => {
+            if (!containerRef.current?.contains(event.target as Node)) {
+                onHealthPopupOpenChange(false)
+            }
+        }
+        const closeOnEscape = (event: KeyboardEvent) => {
+            if (event.key === 'Escape') {
+                onHealthPopupOpenChange(false)
+            }
+        }
+        document.addEventListener('pointerdown', closeOnOutsidePointer)
+        document.addEventListener('keydown', closeOnEscape)
+        return () => {
+            document.removeEventListener('pointerdown', closeOnOutsidePointer)
+            document.removeEventListener('keydown', closeOnEscape)
+        }
+    }, [healthPopupOpen, onHealthPopupOpenChange, updateTooltipAlign])
+
+    const longPress = useLongPress({
+        interaction: 'touch-only-native-click',
+        threshold: 450,
+        longPressEnabled: hasHealth || canRename,
+        onLongPress: () => {
+            if (hasHealth) {
+                updateTooltipAlign()
+                onHealthPopupOpenChange(true)
+            } else if (canRename) {
+                onRenameRequest!(machine)
+            }
+        },
+        onClick: () => {
+            if (selected && hasHealth) {
+                updateTooltipAlign()
+                onHealthPopupOpenChange(!healthPopupOpen)
+            } else if (healthPopupOpen) {
+                onHealthPopupOpenChange(false)
+            }
+            onSelect(machine.id)
+        }
+    })
+
+    const markTouchActive = () => {
+        if (touchClearTimerRef.current) {
+            clearTimeout(touchClearTimerRef.current)
+            touchClearTimerRef.current = null
+        }
+        touchActiveRef.current = true
+    }
+
+    const scheduleTouchClear = () => {
+        if (touchClearTimerRef.current) {
+            clearTimeout(touchClearTimerRef.current)
+        }
+        touchClearTimerRef.current = setTimeout(() => {
+            touchActiveRef.current = false
+            touchClearTimerRef.current = null
+        }, 700)
+    }
+
+    const handleContextMenu = (event: ReactMouseEvent<HTMLButtonElement>) => {
+        longPress.onContextMenu(event)
+        if (event.defaultPrevented || touchActiveRef.current) {
             event.preventDefault()
+            if (hasHealth) {
+                updateTooltipAlign()
+                onHealthPopupOpenChange(true)
+            } else if (canRename) {
+                onRenameRequest!(machine)
+            }
+            return
+        }
+        if (canRename) {
+            event.preventDefault()
+            onHealthPopupOpenChange(false)
             onRenameRequest!(machine)
         }
-        : undefined
+    }
 
     const content = (
         <>
@@ -111,10 +215,24 @@ function MachineFilterChip(props: {
         return (
             <button
                 type="button"
-                onClick={() => onSelect(machine.id)}
+                onClick={longPress.onClick}
+                onTouchStart={(event) => {
+                    markTouchActive()
+                    longPress.onTouchStart(event)
+                }}
+                onTouchEnd={(event) => {
+                    scheduleTouchClear()
+                    longPress.onTouchEnd(event)
+                }}
+                onTouchMove={longPress.onTouchMove}
+                onTouchCancel={(event) => {
+                    scheduleTouchClear()
+                    longPress.onTouchCancel(event)
+                }}
                 onContextMenu={handleContextMenu}
                 aria-pressed={selected}
                 title={title}
+                style={{ WebkitTouchCallout: 'none' }}
                 className={cn(chipShellClass, chipContentClass, props.layout !== 'grid' && 'w-auto px-2', selected ? chipSelectedClass : chipIdleClass)}
             >
                 {content}
@@ -127,11 +245,27 @@ function MachineFilterChip(props: {
     const button = (
         <button
             type="button"
-            onClick={() => onSelect(machine.id)}
+            onClick={longPress.onClick}
+            onPointerEnter={updateTooltipAlign}
+            onTouchStart={(event) => {
+                markTouchActive()
+                longPress.onTouchStart(event)
+            }}
+            onTouchEnd={(event) => {
+                scheduleTouchClear()
+                longPress.onTouchEnd(event)
+            }}
+            onTouchMove={longPress.onTouchMove}
+            onTouchCancel={(event) => {
+                scheduleTouchClear()
+                longPress.onTouchCancel(event)
+            }}
             onContextMenu={handleContextMenu}
             aria-pressed={selected}
+            aria-expanded={healthPopupOpen}
             aria-describedby={tooltipId}
             title={title}
+            style={{ WebkitTouchCallout: 'none' }}
             className={cn(chipContentClass, props.layout !== 'grid' && 'w-auto', 'rounded-lg px-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--app-link)]')}
         >
             {content}
@@ -139,20 +273,41 @@ function MachineFilterChip(props: {
     )
 
     return (
-        // CPU/RAM details live in a hover popup so the chip stays compact;
-        // hidden below the md breakpoint (touch devices). The `before:` bridge
-        // spans the mt-1 gap so the popup stays open while the pointer enters it.
+        // CPU/RAM details live in a hover popup on desktop and open via touch
+        // long-press (any chip) or tapping the already-selected chip on touch
+        // devices. The `before:` bridge spans the mt-1 gap so the popup stays
+        // open while the pointer enters it.
         // `[&>span:first-child]` 把 HoverTooltip 的 target 包装 span 撑满网格
         // 单元，否则 chip 缩成内容宽，计数列对不齐。
         <HoverTooltip
             id={tooltipId}
             target={button}
             side="bottom"
-            align="start"
+            align={tooltipAlign}
+            open={healthPopupOpen}
+            containerRef={containerRef}
             className={cn(chipShellClass, props.layout !== 'grid' && 'w-auto', '[&>span:first-child]:w-full [&>span:first-child]:min-w-0', selected ? chipSelectedClass : chipIdleClass)}
-            tooltipClassName="pointer-events-auto before:absolute before:inset-x-0 before:-top-1 before:h-1 before:content-[''] px-3 py-2 min-w-[16rem] max-md:hidden"
+            tooltipClassName={cn(
+                "pointer-events-auto before:absolute before:inset-x-0 before:-top-1 before:h-1 before:content-[''] px-3 py-2 min-w-[16rem] max-w-[calc(100vw-1rem)]",
+                !healthPopupOpen && 'max-md:hidden'
+            )}
         >
             <MachineHealthTooltipBody presentation={machine.healthPresentation!} />
+            {healthPopupOpen && canRename ? (
+                <div className="mt-2 border-t border-[var(--app-border)] pt-1.5">
+                    <button
+                        type="button"
+                        onClick={(event) => {
+                            event.stopPropagation()
+                            onHealthPopupOpenChange(false)
+                            onRenameRequest!(machine)
+                        }}
+                        className="w-full rounded px-1.5 py-1 text-left text-xs font-medium text-[var(--app-link)] transition-colors hover:bg-[var(--app-subtle-bg)] active:bg-[var(--app-subtle-bg)]"
+                    >
+                        {t('sessions.machineFilter.renameAction')}
+                    </button>
+                </div>
+            ) : null}
         </HoverTooltip>
     )
 }
@@ -272,6 +427,7 @@ export function MachineFilterBar(props: {
 }) {
     const { t } = useTranslation()
     const [renameTarget, setRenameTarget] = useState<MachineFilterItem | null>(null)
+    const [openHealthMachineId, setOpenHealthMachineId] = useState<string | null>(null)
     const { grouped, sections } = useMemo(() => groupMachinesByOwner(props.machines), [props.machines])
     const { machineLayout } = useListPrefs()
     const onRenameRequest = props.onRenameMachine
@@ -281,7 +437,10 @@ export function MachineFilterBar(props: {
     const allChip = (
         <button
             type="button"
-            onClick={() => props.onChange(null)}
+            onClick={() => {
+                setOpenHealthMachineId(null)
+                props.onChange(null)
+            }}
             aria-pressed={props.value === null}
             className={cn(chipShellClass, chipContentClass, props.value === null ? chipSelectedClass : chipIdleClass)}
         >
@@ -299,8 +458,18 @@ export function MachineFilterBar(props: {
                     machine={machine}
                     layout={machineLayout}
                     selected={props.value === machine.id}
-                    onSelect={props.onChange}
+                    onSelect={(id) => {
+                        setOpenHealthMachineId((current) => (id === props.value && current === id ? current : null))
+                        props.onChange(id)
+                    }}
                     onRenameRequest={onRenameRequest}
+                    healthPopupOpen={openHealthMachineId === machine.id}
+                    onHealthPopupOpenChange={(open) => {
+                        setOpenHealthMachineId((current) => {
+                            if (open) return machine.id
+                            return current === machine.id ? null : current
+                        })
+                    }}
                 />
             ))}
         </div>

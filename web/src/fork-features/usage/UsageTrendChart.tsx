@@ -25,6 +25,71 @@ const METRICS: TrendMetric[] = ['total', 'input', 'output', 'cacheRead', 'cacheC
 const SLOT_COUNT = 8
 export const MAX_NAMED_SERIES = SLOT_COUNT - 1
 
+/**
+ * 将同一模型的不同渠道前缀、推理档位后缀、日期快照与大小写/连字符变体归并为标准模型名。
+ * 例如：
+ * - `claude-opus-5-5` / `claude-opus-5-5-high` / `claude-opus-5-5-medium` / `opus5.5` / `opus5.5-high` → `claude-opus-5-5`
+ * - `claude-opus-4.7` / `claude-opus-4-7` → `claude-opus-4-7`
+ * - `anthropic/claude-4.6-opus-20260205` / `anthropic/claude-opus-4.6` / `claude-opus-4-6` → `claude-opus-4-6`
+ * - `cx2cc/gpt-6.1-sol` / `cx2cc-ecs/gpt-6.1-sol` / `gpt-6.1-sol` → `gpt-6.1-sol`
+ * - `Deepseek-v4-pro` / `deepseek-v4-pro` → `deepseek-v4-pro`
+ * - `gemini-3.8-flash-tiered` / `gemini-3.8-flash` → `gemini-3.8-flash`
+ */
+export function canonicalizeModelName(rawModel: string): string {
+    let normalized = rawModel.trim().toLowerCase()
+    if (!normalized) return rawModel
+
+    normalized = normalized.replace(/^[^/]+\//, '')
+    normalized = normalized.replace(/-20\d{6}$/, '')
+
+    while (/-(low|medium|high|xhigh|max|minimal|thinking|nothinking|tiered)$/.test(normalized)) {
+        normalized = normalized.replace(/-(low|medium|high|xhigh|max|minimal|thinking|nothinking|tiered)$/, '')
+    }
+
+    const claudeFamilyFirst = normalized.match(/^(?:claude[-_]?)?(opus|sonnet|haiku|fable)[-_]?(\d+)(?:[.-](\d+))?$/)
+    if (claudeFamilyFirst) {
+        const [, family, major, minor] = claudeFamilyFirst
+        return minor !== undefined ? `claude-${family}-${major}-${minor}` : `claude-${family}-${major}`
+    }
+
+    const claudeVersionFirst = normalized.match(/^claude[-_]?(\d+)(?:[.-](\d+))?[-_](opus|sonnet|haiku|fable)$/)
+    if (claudeVersionFirst) {
+        const [, major, minor, family] = claudeVersionFirst
+        return minor !== undefined ? `claude-${family}-${major}-${minor}` : `claude-${family}-${major}`
+    }
+
+    return normalized
+}
+
+function mergeSeriesByCanonicalModel(seriesList: TimeseriesSeries[]): TimeseriesSeries[] {
+    const byModel = new Map<string, TimeseriesSeries>()
+    for (const item of seriesList) {
+        const key = canonicalizeModelName(item.model)
+        const existing = byModel.get(key)
+        if (!existing) {
+            byModel.set(key, {
+                model: key,
+                inputTokens: [...item.inputTokens],
+                outputTokens: [...item.outputTokens],
+                cacheCreationInputTokens: [...item.cacheCreationInputTokens],
+                cacheReadInputTokens: [...item.cacheReadInputTokens],
+                requestCount: [...item.requestCount],
+            })
+        } else {
+            for (let i = 0; i < item.inputTokens.length; i += 1) {
+                existing.inputTokens[i] = (existing.inputTokens[i] ?? 0) + (item.inputTokens[i] ?? 0)
+                existing.outputTokens[i] = (existing.outputTokens[i] ?? 0) + (item.outputTokens[i] ?? 0)
+                existing.cacheCreationInputTokens[i] = (existing.cacheCreationInputTokens[i] ?? 0) + (item.cacheCreationInputTokens[i] ?? 0)
+                existing.cacheReadInputTokens[i] = (existing.cacheReadInputTokens[i] ?? 0) + (item.cacheReadInputTokens[i] ?? 0)
+                existing.requestCount[i] = (existing.requestCount[i] ?? 0) + (item.requestCount[i] ?? 0)
+            }
+        }
+    }
+    const seriesTotal = (s: TimeseriesSeries): number =>
+        metricValues(s, 'total').reduce((sum, v) => sum + v, 0)
+    return [...byModel.values()].sort((a, b) => seriesTotal(b) - seriesTotal(a))
+}
+
 function metricValues(series: TimeseriesSeries, metric: TrendMetric): number[] {
     switch (metric) {
         case 'input': return series.inputTokens
@@ -39,8 +104,9 @@ function metricValues(series: TimeseriesSeries, metric: TrendMetric): number[] {
 /** 取当前指标下总量最大的 7 个模型，其余并成「其他」。颜色跟模型走：按总量
  *  （不随指标变）排定的位置分配，切指标不会给同一条线换色。 */
 export function buildTrendLines(data: TimeseriesResponse, metric: TrendMetric, otherLabel: string): Array<{ key: string; label: string; slot: number; values: number[] }> {
-    const named = data.series.slice(0, MAX_NAMED_SERIES)
-    const rest = data.series.slice(MAX_NAMED_SERIES)
+    const mergedSeries = mergeSeriesByCanonicalModel(data.series)
+    const named = mergedSeries.slice(0, MAX_NAMED_SERIES)
+    const rest = mergedSeries.slice(MAX_NAMED_SERIES)
     const lines = named.map((series, index) => ({ key: series.model, label: series.model, slot: index + 1, values: metricValues(series, metric) }))
     if (rest.length > 0) {
         const values = data.buckets.map((_, i) => rest.reduce((sum, series) => sum + metricValues(series, metric)[i]!, 0))

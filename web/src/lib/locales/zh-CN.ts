@@ -98,6 +98,7 @@ export default {
   'sessions.machineFilter.renameTitle': '机器设置 · {name}',
   'sessions.machineFilter.renameHint': '别名对所有账号可见；留空恢复为主机名。',
   'sessions.machineFilter.renameTooltip': '右键设置别名和图标',
+  'sessions.machineFilter.renameAction': '设置别名和图标',
   // fork(session-digest)
   'sessions.foldArchived.on': '折叠所有已归档会话',
   'sessions.foldArchived.off': '展开已归档会话',
@@ -1447,6 +1448,9 @@ export default {
   'usage.table.hitRate': '命中率',
   'usage.cacheHitRate': '缓存命中率',
   'usage.cacheHitRateHint': '缓存读取 ÷ 总输入（输入 + 缓存写入 + 缓存读取）',
+  'usage.modelVariants': '{count} 个子项',
+  'usage.expandVariants': '展开 {model} 的 {count} 个子模型',
+  'usage.collapseVariants': '收起 {model} 的子模型',
 
   // fork-features/subscription：订阅配额与余额面板
   'subscription.title': '订阅与余额',

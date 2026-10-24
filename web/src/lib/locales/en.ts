@@ -98,6 +98,7 @@ export default {
   'sessions.machineFilter.renameTitle': 'Machine settings · {name}',
   'sessions.machineFilter.renameHint': 'The alias is visible to every account; leave empty to fall back to the hostname.',
   'sessions.machineFilter.renameTooltip': 'Right-click to set an alias and icon',
+  'sessions.machineFilter.renameAction': 'Set alias & icon',
   // fork(session-digest)
   'sessions.foldArchived.on': 'Fold all archived sessions',
   'sessions.foldArchived.off': 'Unfold archived sessions',
@@ -1448,6 +1449,9 @@ export default {
   'usage.table.hitRate': 'Hit rate',
   'usage.cacheHitRate': 'Cache hit rate',
   'usage.cacheHitRateHint': 'Cache read ÷ total input (input + cache creation + cache read)',
+  'usage.modelVariants': '{count} variants',
+  'usage.expandVariants': 'Show {count} model variants for {model}',
+  'usage.collapseVariants': 'Hide model variants for {model}',
 
   // fork-features/subscription: quota & balance panel
   'subscription.title': 'Subscriptions & balances',

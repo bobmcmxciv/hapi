@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { MachineFilterItem } from './MachineFilterBar'
 import { MachineFilterBar, MachineFilterMenu, getMachineFilterMenuClampStyle, groupMachinesByOwner } from './MachineFilterBar'
@@ -285,6 +285,80 @@ describe('MachineFilterBar', () => {
 
         fireEvent.contextMenu(screen.getByRole('button', { name: /stray 4/ }))
         expect(screen.queryByRole('dialog')).toBeNull()
+    })
+
+    it('opens the health popup on touch long-press without switching the selected machine', () => {
+        vi.useFakeTimers()
+        try {
+            const onChange = vi.fn()
+            renderBar({ value: null, onChange })
+
+            const chip = screen.getByRole('button', { name: /Teemo 2/ })
+            const tooltip = document.getElementById(chip.getAttribute('aria-describedby')!)!
+            expect(chip.getAttribute('aria-expanded')).toBe('false')
+            expect(tooltip.className).toContain('max-md:hidden')
+
+            fireEvent.touchStart(chip, { touches: [{ clientX: 20, clientY: 20 }] })
+            act(() => {
+                vi.advanceTimersByTime(500)
+            })
+            fireEvent.touchEnd(chip)
+            fireEvent.click(chip, { detail: 1 })
+
+            expect(chip.getAttribute('aria-expanded')).toBe('true')
+            expect(tooltip.className).toContain('opacity-100')
+            expect(tooltip.className).toContain('visible')
+            expect(tooltip.className).not.toContain('max-md:hidden')
+            expect(onChange).not.toHaveBeenCalled()
+        } finally {
+            vi.useRealTimers()
+        }
+    })
+
+    it('toggles the health popup when tapping an already-selected machine chip and dismisses on outside pointerdown or Escape', () => {
+        const onChange = vi.fn()
+        renderBar({ value: 'machine-2', onChange })
+
+        const chip = screen.getByRole('button', { name: /Teemo 2/ })
+        const tooltip = document.getElementById(chip.getAttribute('aria-describedby')!)!
+        expect(chip.getAttribute('aria-expanded')).toBe('false')
+
+        fireEvent.click(chip)
+        expect(onChange).toHaveBeenCalledWith('machine-2')
+        expect(chip.getAttribute('aria-expanded')).toBe('true')
+        expect(tooltip.className).not.toContain('max-md:hidden')
+
+        fireEvent.pointerDown(document.body)
+        expect(chip.getAttribute('aria-expanded')).toBe('false')
+        expect(tooltip.className).toContain('max-md:hidden')
+
+        fireEvent.click(chip)
+        expect(chip.getAttribute('aria-expanded')).toBe('true')
+        fireEvent.keyDown(document, { key: 'Escape' })
+        expect(chip.getAttribute('aria-expanded')).toBe('false')
+
+        fireEvent.click(chip)
+        expect(chip.getAttribute('aria-expanded')).toBe('true')
+        fireEvent.click(screen.getByRole('button', { name: /Mint 3/ }))
+        expect(chip.getAttribute('aria-expanded')).toBe('false')
+    })
+
+    it('provides a rename action inside the touch-opened health popup instead of hijacking touch contextmenu', async () => {
+        const onRenameMachine = vi.fn().mockResolvedValue(undefined)
+        renderBar({ onRenameMachine })
+
+        const chip = screen.getByRole('button', { name: /Teemo 2/ })
+        fireEvent.touchStart(chip, { touches: [{ clientX: 16, clientY: 16 }] })
+        fireEvent.contextMenu(chip)
+        fireEvent.touchEnd(chip)
+
+        // Touch contextmenu opens the health popup rather than jumping straight into the rename dialog
+        expect(chip.getAttribute('aria-expanded')).toBe('true')
+        expect(screen.queryByRole('dialog')).toBeNull()
+
+        fireEvent.click(screen.getByRole('button', { name: 'Set alias & icon' }))
+        expect(chip.getAttribute('aria-expanded')).toBe('false')
+        expect(await screen.findByPlaceholderText('TEEMO-PC')).toBeTruthy()
     })
 })
 
