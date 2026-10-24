@@ -5,7 +5,12 @@ import { fetchQwenToken } from '@/api/voice'
 import { GeminiAudioRecorder } from './gemini/audioRecorder'
 import { GeminiAudioPlayer } from './gemini/audioPlayer'
 import { getRealtimeClientTool, noteVoiceToolCall, onVoiceResponseWithoutTool, onVoiceUserTranscript } from './realtimeClientTools'
-import { readVoiceToolMode } from '@/fork-features/voice-assistant/toolMode'
+import {
+    readVoiceToolMode,
+    VOICE_TOOL_MODE_CHANGE_EVENT,
+    type VoiceAssistantToolMode
+} from '@/fork-features/voice-assistant/toolMode'
+import { buildVoiceToolModeBlock } from '@hapi/protocol/voice-personality'
 import { readVoiceReader } from '@/fork-features/voice-assistant/readerPreference'
 import { readVoiceListenMode, type VoiceListenPreference } from '@/fork-features/voice-assistant/listenMode'
 import { ManboSpeaker } from '@/fork-features/voice-assistant/manboSpeaker'
@@ -138,6 +143,37 @@ function sendEvent(type: string, payload?: Record<string, unknown>): void {
 class QwenVoiceSessionImpl implements VoiceSession {
     private api: ApiClient
     private currentInstructions: string | null = null
+    private currentToolMode: VoiceAssistantToolMode = 'readonly'
+    private unsubscribeToolMode: (() => void) | null = null
+
+    private attachToolModeListener(): void {
+        this.detachToolModeListener()
+        const onModeChange = () => {
+            const nextMode = readVoiceToolMode()
+            if (nextMode === this.currentToolMode) return
+            const prevBlock = buildVoiceToolModeBlock(this.currentToolMode)
+            const nextBlock = buildVoiceToolModeBlock(nextMode)
+            this.currentToolMode = nextMode
+            sendEvent('hapi.voice.tool_mode', { mode: nextMode })
+            if (this.currentInstructions !== null) {
+                this.currentInstructions = this.currentInstructions.includes(prevBlock)
+                    ? this.currentInstructions.replace(prevBlock, nextBlock)
+                    : `${this.currentInstructions}${nextBlock}`
+                sendEvent('session.update', { session: { instructions: this.currentInstructions } })
+            }
+        }
+        window.addEventListener(VOICE_TOOL_MODE_CHANGE_EVENT, onModeChange)
+        window.addEventListener('storage', onModeChange)
+        this.unsubscribeToolMode = () => {
+            window.removeEventListener(VOICE_TOOL_MODE_CHANGE_EVENT, onModeChange)
+            window.removeEventListener('storage', onModeChange)
+        }
+    }
+
+    private detachToolModeListener(): void {
+        this.unsubscribeToolMode?.()
+        this.unsubscribeToolMode = null
+    }
 
     constructor(api: ApiClient) {
         this.api = api
@@ -155,6 +191,7 @@ class QwenVoiceSessionImpl implements VoiceSession {
         // buildResolvedVoiceSystemPrompt returns the user-customised prompt when set; with empty prefs
         // it falls back to VOICE_SYSTEM_PROMPT + buildVoiceLanguageBlock(language) (general language handling).
         const toolMode = readVoiceToolMode()
+        this.currentToolMode = toolMode
         state.listen = readVoiceListenMode()
         this.currentInstructions = buildResolvedVoiceSystemPrompt({
             language: config.language,
@@ -238,6 +275,7 @@ class QwenVoiceSessionImpl implements VoiceSession {
 
             ws.onopen = () => {
                 if (DEBUG) console.log('[Qwen] WebSocket connected')
+                this.attachToolModeListener()
                 if (this.currentInstructions) {
                     sendEvent('session.update', { session: { instructions: this.currentInstructions } })
                 }
@@ -430,6 +468,7 @@ class QwenVoiceSessionImpl implements VoiceSession {
             ws.onclose = (event) => {
                 if (state.ws !== ws) return
                 if (DEBUG) console.log('[Qwen] WebSocket closed:', event.code, event.reason)
+                this.detachToolModeListener()
                 cleanup()
                 resetRealtimeSessionState()
                 if (!sessionReady) {
@@ -444,6 +483,7 @@ class QwenVoiceSessionImpl implements VoiceSession {
     }
 
     async endSession(): Promise<void> {
+        this.detachToolModeListener()
         this.currentInstructions = null
         cleanup()
         resetRealtimeSessionState()

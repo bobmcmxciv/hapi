@@ -1,7 +1,12 @@
 import { getCurrentRealtimeSessionId } from './RealtimeSession'
 import { VOICE_CONFIG } from './voiceConfig'
 import type { ApiClient } from '@/api/client'
-import { readVoiceToolMode } from '@/fork-features/voice-assistant/toolMode'
+import {
+    classifyVoiceModeSwitch,
+    readVoiceToolMode,
+    writeVoiceToolMode,
+    type VoiceAssistantToolMode
+} from '@/fork-features/voice-assistant/toolMode'
 import {
     getVoiceInstructionDraft,
     sendVoiceInstructionDraft,
@@ -43,6 +48,7 @@ export function resetVoiceAssistantState() {
     lastSettled = null
     lastUserTranscript = ''
     previousUserTranscript = ''
+    modeAtTranscriptStart = 'readonly'
     transcriptSeq = 0
     draftedFromSeq = 0
     toolCalledSinceTranscript = false
@@ -52,7 +58,7 @@ function rememberTurn(q: string, a: string) {
     voiceHistory = [...voiceHistory, { q, a }].slice(-MAX_VOICE_HISTORY)
 }
 
-const READ_ONLY_REFUSAL = 'error (read-only mode: voice cannot send anything to the agent or answer permission requests. Tell the user they can switch voice to assistant mode in Settings, Voice.)'
+const READ_ONLY_REFUSAL = 'error (read-only mode: voice cannot send anything to the agent or answer permission requests. Tell the user they can say "批准操作" or "切换到工作模式" to enter work mode, or switch it in Settings, Voice.)'
 
 function errorText(error: unknown): string {
     return error instanceof Error ? error.message : String(error)
@@ -116,9 +122,38 @@ async function settlePendingDraft(text: string): Promise<string | null> {
     return await settleDraft(intent.decision, intent.delivery)
 }
 
+async function applyVoiceToolMode(
+    targetMode: VoiceAssistantToolMode,
+    options?: { isApprovePhrase?: boolean; previousMode?: VoiceAssistantToolMode }
+): Promise<string> {
+    const previousMode = options?.previousMode ?? readVoiceToolMode()
+    if (targetMode === 'readonly') {
+        setVoiceInstructionDraft(null)
+        writeVoiceToolMode('readonly')
+        return 'switched to read-only mode (只读模式已开启) [tell the user briefly that voice is now in read-only mode and will not send messages]'
+    }
+    if (previousMode === 'assistant' && options?.isApprovePhrase) {
+        const sessionId = getCurrentRealtimeSessionId()
+        const requests = sessionId ? sessionStore?.getSession(sessionId)?.agentState?.requests : undefined
+        const requestId = requests ? Object.keys(requests)[0] : undefined
+        if (sessionId && sessionStore && requestId) {
+            try {
+                await sessionStore.approvePermission(sessionId, requestId)
+                return "done [DO NOT say anything else, simply say 'done']"
+            } catch (error) {
+                console.error('[Voice] Failed to approve permission via voice mode command:', error)
+                return 'error (failed to allow permission)'
+            }
+        }
+    }
+    writeVoiceToolMode('assistant')
+    return 'switched to assistant/work mode (已切换到工作模式，现在可以发送消息和批准操作) [tell the user briefly that voice is now in work mode and can send messages]'
+}
+
 // fork(voice-assistant): what the user actually said, from the realtime model's input transcription.
 let lastUserTranscript = ''
 let previousUserTranscript = ''
+let modeAtTranscriptStart: VoiceAssistantToolMode = 'readonly'
 let transcriptSeq = 0
 let draftedFromSeq = 0
 let toolCalledSinceTranscript = false
@@ -140,6 +175,17 @@ export async function onVoiceUserTranscript(transcript: string): Promise<void> {
     lastUserTranscript = transcript.trim()
     transcriptSeq += 1
     toolCalledSinceTranscript = false
+    const modeSwitch = classifyVoiceModeSwitch(lastUserTranscript)
+    modeAtTranscriptStart = readVoiceToolMode()
+    if (modeSwitch) {
+        if (modeSwitch.mode === 'readonly') {
+            setVoiceInstructionDraft(null)
+            if (readVoiceToolMode() !== 'readonly') writeVoiceToolMode('readonly')
+        } else if (readVoiceToolMode() !== 'assistant') {
+            writeVoiceToolMode('assistant')
+        }
+        if (!modeSwitch.trailingText) return
+    }
     if (readVoiceToolMode() !== 'assistant' || !getVoiceInstructionDraft()) return
     const intent = classifyConfirmation(lastUserTranscript)
     if (intent) await settleDraft(intent.decision, intent.delivery)
@@ -154,10 +200,18 @@ export async function onVoiceResponseWithoutTool(): Promise<string | null> {
     // Each utterance is drafted at most once, and only the newest one.
     if (transcriptSeq === draftedFromSeq) return null
     const utterance = lastUserTranscript
-    if (!utterance || !INSTRUCTION_PATTERN.test(utterance) || getVoiceInstructionDraft()) return null
+    const modeSwitch = utterance ? classifyVoiceModeSwitch(utterance) : null
+    const candidateUtterance = modeSwitch?.mode === 'assistant' && modeSwitch.trailingText
+        ? modeSwitch.trailingText
+        : utterance
+    const isInstruction = Boolean(
+        candidateUtterance
+        && (INSTRUCTION_PATTERN.test(candidateUtterance) || Boolean(modeSwitch?.mode === 'assistant' && modeSwitch.trailingText))
+    )
+    if (!candidateUtterance || !isInstruction || getVoiceInstructionDraft()) return null
     toolCalledSinceTranscript = true
     draftedFromSeq = transcriptSeq
-    const result = await realtimeClientTools.prepareInstruction({ instruction: utterance })
+    const result = await realtimeClientTools.prepareInstruction({ instruction: candidateUtterance })
     return `(System note, not from the user) The user's last sentence was an instruction for an agent and has now been drafted; do not carry it out yourself. ${result}`
 }
 
@@ -260,6 +314,14 @@ export const realtimeClientTools = {
     askSessionStatus: async (parameters: unknown) => {
         const question = (parameters as { question?: unknown })?.question
         if (typeof question !== 'string' || !question.trim()) return 'error (missing question)'
+        const modeSwitch = classifyVoiceModeSwitch(question)
+        if (modeSwitch) {
+            const reply = await applyVoiceToolMode(modeSwitch.mode, { isApprovePhrase: modeSwitch.isApprovePhrase })
+            if (modeSwitch.mode === 'assistant' && modeSwitch.trailingText) {
+                return await realtimeClientTools.prepareInstruction({ instruction: modeSwitch.trailingText })
+            }
+            return reply
+        }
         const settled = await settlePendingDraft(question)
         if (settled) return settled
         const sessionId = getCurrentRealtimeSessionId()
@@ -284,6 +346,22 @@ export const realtimeClientTools = {
      * nothing; the draft waits for confirmInstruction (or the on-screen card).
      */
     prepareInstruction: async (parameters: unknown) => {
+        const rawInstruction = typeof (parameters as { instruction?: unknown })?.instruction === 'string'
+            ? ((parameters as { instruction: string }).instruction).trim()
+            : ''
+        const directModeSwitch = rawInstruction ? classifyVoiceModeSwitch(rawInstruction) : null
+        if (directModeSwitch) {
+            const reply = await applyVoiceToolMode(directModeSwitch.mode, { isApprovePhrase: directModeSwitch.isApprovePhrase })
+            if (!directModeSwitch.trailingText || directModeSwitch.mode === 'readonly') {
+                return reply
+            }
+            parameters = { ...(parameters as Record<string, unknown>), instruction: directModeSwitch.trailingText }
+        } else if (readVoiceToolMode() === 'readonly' && lastUserTranscript) {
+            const transcriptModeSwitch = classifyVoiceModeSwitch(lastUserTranscript)
+            if (transcriptModeSwitch?.mode === 'assistant') {
+                writeVoiceToolMode('assistant')
+            }
+        }
         if (readVoiceToolMode() === 'readonly') return READ_ONLY_REFUSAL
         const params = parameters as { instruction?: unknown; target?: unknown }
         if (typeof params?.instruction !== 'string' || !params.instruction.trim()) return 'error (missing instruction)'
@@ -350,6 +428,34 @@ export const realtimeClientTools = {
         // The draft already says whether to interrupt; an explicit delivery is the user overriding it.
         const override = params.delivery === 'steer' || params.delivery === 'queue' ? params.delivery : undefined
         return await settleDraft(params.decision, override)
+    },
+
+    /** fork(voice-assistant): switch between read-only mode ('readonly') and work/assistant mode ('assistant') by voice. */
+    setVoiceToolMode: async (parameters: unknown) => {
+        const rawMode = (parameters as { mode?: unknown })?.mode
+        const normalized = typeof rawMode === 'string' ? rawMode.trim().toLowerCase() : ''
+        let targetMode: VoiceAssistantToolMode | null = null
+        if (normalized === 'assistant' || normalized === 'work' || normalized === 'working' || normalized === 'write') {
+            targetMode = 'assistant'
+        } else if (normalized === 'readonly' || normalized === 'read-only' || normalized === 'read_only' || normalized === 'read') {
+            targetMode = 'readonly'
+        } else if (lastUserTranscript) {
+            const classified = classifyVoiceModeSwitch(lastUserTranscript)
+            if (classified) targetMode = classified.mode
+        }
+        if (!targetMode) {
+            return "error (invalid mode parameter, expected 'assistant' or 'readonly')"
+        }
+        const classifiedLast = lastUserTranscript ? classifyVoiceModeSwitch(lastUserTranscript) : null
+        const previousMode = lastUserTranscript ? modeAtTranscriptStart : readVoiceToolMode()
+        const reply = await applyVoiceToolMode(targetMode, {
+            isApprovePhrase: classifiedLast?.isApprovePhrase,
+            previousMode
+        })
+        if (targetMode === 'assistant' && classifiedLast?.trailingText && !getVoiceInstructionDraft()) {
+            return await realtimeClientTools.prepareInstruction({ instruction: classifiedLast.trailingText })
+        }
+        return reply
     }
 }
 

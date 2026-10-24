@@ -11,7 +11,7 @@ import {
     resetVoiceAssistantState
 } from '@/realtime/realtimeClientTools'
 import { composeVoiceInstructionText, getVoiceInstructionDraft } from './instructionDraft'
-import { readVoiceToolMode, writeVoiceToolMode } from './toolMode'
+import { classifyVoiceModeSwitch, readVoiceToolMode, writeVoiceToolMode } from './toolMode'
 
 function fakeApi() {
     return {
@@ -241,5 +241,49 @@ describe('voice assistant client tools', () => {
 
     it('leaves the text unchanged when the spoken original equals the instruction', () => {
         expect(composeVoiceInstructionText({ instruction: '跑测试', original: '跑测试' })).toBe('跑测试')
+    })
+
+    it('classifies spoken commands to switch between read-only and work/assistant mode', () => {
+        expect(classifyVoiceModeSwitch('批准操作')).toEqual({ mode: 'assistant', isApprovePhrase: true })
+        expect(classifyVoiceModeSwitch('Luna，切换到工作模式吧')).toEqual({ mode: 'assistant' })
+        expect(classifyVoiceModeSwitch('允许发送消息')).toEqual({ mode: 'assistant' })
+        expect(classifyVoiceModeSwitch('退出只读模式')).toEqual({ mode: 'assistant' })
+        expect(classifyVoiceModeSwitch('切换回只读模式')).toEqual({ mode: 'readonly' })
+        expect(classifyVoiceModeSwitch('退出工作模式')).toEqual({ mode: 'readonly' })
+        expect(classifyVoiceModeSwitch('只读模式')).toEqual({ mode: 'readonly' })
+        expect(classifyVoiceModeSwitch('批准操作，让它把测试跑一下')).toEqual({
+            mode: 'assistant',
+            isApprovePhrase: true,
+            trailingText: '让它把测试跑一下'
+        })
+    })
+
+    it('switches from read-only to assistant mode via voice command and back to read-only mode', async () => {
+        expect(readVoiceToolMode()).toBe('readonly')
+
+        await onVoiceUserTranscript('批准操作')
+        expect(readVoiceToolMode()).toBe('assistant')
+
+        const switchReply = await realtimeClientTools.setVoiceToolMode({ mode: 'assistant' })
+        expect(switchReply).toContain('switched to assistant/work mode')
+        expect(readVoiceToolMode()).toBe('assistant')
+
+        const draftReply = await realtimeClientTools.prepareInstruction({ instruction: '跟做视频那个说渲染先等等' })
+        expect(draftReply).toContain('Draft ready')
+        expect(getVoiceInstructionDraft()).not.toBeNull()
+
+        const backReply = await realtimeClientTools.setVoiceToolMode({ mode: 'readonly' })
+        expect(backReply).toContain('switched to read-only mode')
+        expect(readVoiceToolMode()).toBe('readonly')
+        expect(getVoiceInstructionDraft()).toBeNull()
+    })
+
+    it('switches to assistant mode and drafts trailing instruction in one compound spoken command', async () => {
+        expect(readVoiceToolMode()).toBe('readonly')
+
+        const reply = await realtimeClientTools.askSessionStatus({ question: '批准操作，跟做视频那个说渲染先等等' })
+        expect(readVoiceToolMode()).toBe('assistant')
+        expect(reply).toContain('Draft ready')
+        expect(getVoiceInstructionDraft()?.target.id).toBe('target-1')
     })
 })

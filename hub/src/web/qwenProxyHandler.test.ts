@@ -197,7 +197,36 @@ describe('createQwenProxyWebSocketHandler tool mode (fork voice-assistant)', () 
     }
 
     test('a read-only connection gets only the lookup tool upstream', () => {
-        expect(setupToolsFor('readonly')).toEqual(['askSessionStatus'])
+        expect(setupToolsFor('readonly')).toEqual(['askSessionStatus', 'setVoiceToolMode'])
+    })
+
+    test('translates client hapi.voice.tool_mode into a hub-owned session.update with updated tools', () => {
+        const handler = createQwenProxyWebSocketHandler(FakeWebSocket)
+        const client = new FakeClient({ apiKey: 'k', model: 'qwen3.5-omni-flash-realtime', toolMode: 'readonly' }) as unknown as ServerWebSocket<unknown> & FakeClient
+        handler.open(client)
+        const upstream = lastUpstream!
+        upstream.deliver({ type: 'session.created' })
+        upstream.deliver({ type: 'session.updated', session: {} })
+
+        handler.message(client, JSON.stringify({ type: 'hapi.voice.tool_mode', mode: 'assistant' }))
+        const lastSent = JSON.parse(upstream.sent.at(-1) as string) as { type: string; session: { tools: Array<{ type?: string; name: string }>; tool_choice?: unknown } }
+        expect(lastSent.type).toBe('session.update')
+        expect(lastSent.session).not.toHaveProperty('tool_choice')
+        expect(lastSent.session.tools.every((t) => t.type === 'function')).toBe(true)
+        expect(lastSent.session.tools.map((t) => t.name)).toEqual([
+            'processPermissionRequest',
+            'askSessionStatus',
+            'prepareInstruction',
+            'confirmInstruction',
+            'setVoiceToolMode'
+        ])
+
+        handler.message(client, JSON.stringify({ type: 'hapi.voice.tool_mode', mode: 'readonly' }))
+        const backToReadonly = JSON.parse(upstream.sent.at(-1) as string) as { type: string; session: { tools: Array<{ type?: string; name: string }>; tool_choice?: unknown } }
+        expect(backToReadonly.type).toBe('session.update')
+        expect(backToReadonly.session).not.toHaveProperty('tool_choice')
+        expect(backToReadonly.session.tools.every((t) => t.type === 'function')).toBe(true)
+        expect(backToReadonly.session.tools.map((t) => t.name)).toEqual(['askSessionStatus', 'setVoiceToolMode'])
     })
 
     test('an assistant connection gets draft/confirm instead of direct send', () => {

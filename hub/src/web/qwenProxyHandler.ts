@@ -6,7 +6,7 @@
 // a deterministic fake for the upstream connection.
 
 import type { ServerWebSocket } from 'bun'
-import { buildQwenSessionUpdateMessage, isQwenSafeClientFrame, type VoiceListenMode, type VoiceToolMode } from '@hapi/protocol/voice'
+import { buildQwenSessionUpdateMessage, isQwenSafeClientFrame, voiceToolDefinitionsFor, type VoiceListenMode, type VoiceToolMode } from '@hapi/protocol/voice'
 import { openSpeakerGate, type OpenSpeakerGate, type SpeakerGateLike } from '../../../fork-features/voice-assistant/speakerGate'
 
 type WebSocketCtor = new (url: string, opts?: unknown) => WebSocketLike
@@ -170,12 +170,38 @@ export function createQwenProxyWebSocketHandler(
             const upstream = upstreamMap.get(clientWs)
             if (upstream?.readyState !== WS_OPEN) return
 
+            let outboundMessage: string | ArrayBuffer | Uint8Array = message
+            if (typeof message === 'string') {
+                try {
+                    const parsed = JSON.parse(message) as { type?: unknown; mode?: unknown }
+                    if (
+                        parsed?.type === 'hapi.voice.tool_mode'
+                        && (parsed.mode === 'readonly' || parsed.mode === 'assistant')
+                    ) {
+                        const tools = voiceToolDefinitionsFor(parsed.mode).map((t) => ({
+                            type: 'function' as const,
+                            name: t.name,
+                            description: t.description,
+                            parameters: t.parameters
+                        }))
+                        outboundMessage = JSON.stringify({
+                            type: 'session.update',
+                            session: {
+                                tools
+                            }
+                        })
+                    }
+                } catch {
+                    // Non-JSON frames are handled below
+                }
+            }
+
             // Hold client frames until DashScope has acknowledged the hub-owned session.update.
             // Without this gate, the client could race response.create / conversation.item.create /
             // instruction-only session.update past the lockdown of tools/voice/instructions and run
             // the upstream session under the provider default config or partially-applied state.
             if (setupAckedMap.get(clientWs) !== true) {
-                const frameSize = typeof message === 'string' ? message.length : (message as ArrayBuffer | Uint8Array).byteLength
+                const frameSize = typeof outboundMessage === 'string' ? outboundMessage.length : (outboundMessage as ArrayBuffer | Uint8Array).byteLength
                 const total = (pendingClientBytes.get(clientWs) ?? 0) + frameSize
                 if (total > MAX_PENDING_BYTES) {
                     try { clientWs.close(1009, 'Setup-gate frame budget exceeded') } catch { /* */ }
@@ -184,12 +210,12 @@ export function createQwenProxyWebSocketHandler(
                 pendingClientBytes.set(clientWs, total)
                 if (typeof message === 'string') gateMap.get(clientWs)?.clientFrame(message)
                 const queue = pendingClientFrames.get(clientWs) ?? []
-                queue.push(message)
+                queue.push(outboundMessage)
                 pendingClientFrames.set(clientWs, queue)
                 return
             }
             if (typeof message === 'string') gateMap.get(clientWs)?.clientFrame(message)
-            upstream.send(message)
+            upstream.send(outboundMessage)
         },
         close(clientWs, code, reason) {
             dropGate(clientWs)

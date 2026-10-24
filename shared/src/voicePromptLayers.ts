@@ -53,6 +53,9 @@ Sends ("send") or drops ("cancel") the drafted instruction.
 ## processPermissionRequest
 Allows or denies the agent's pending permission request; decision must be exactly "allow" or "deny". When a permission request arrives, tell the user in one sentence what the agent wants to do and ask.
 
+## setVoiceToolMode
+Switches the voice assistant between read-only mode ("readonly") and work/assistant mode ("assistant") when the user asks to switch modes or approves/disables voice operations (e.g. "切换到工作模式", "进入工作模式", "批准操作", "允许发送消息" -> mode "assistant"; "切换回只读模式", "切回只读模式", "退出工作模式", "进入只读模式" -> mode "readonly").
+
 ## messageCodingAgent
 Older direct send for clients without prepareInstruction. Never use it when prepareInstruction is available.
 
@@ -86,12 +89,12 @@ export function buildVoiceToolModeBlock(mode: 'readonly' | 'assistant'): string 
 
 # Mode: read-only
 
-You can only look things up with askSessionStatus. Sending instructions and answering permission requests are turned off. If the user asks for an action, say voice is in read-only mode and can be switched in Settings, Voice.`
+You can look things up with askSessionStatus. Sending instructions and answering permission requests are currently turned off in read-only mode. If the user asks to switch to work/assistant mode or approves operations by voice (for example: "切换到工作模式", "进入工作模式", "批准操作", "允许操作", "允许发送消息", "退出只读模式"), call setVoiceToolMode with mode "assistant". Otherwise, if they ask to send a message without switching mode, tell them voice is in read-only mode and they can say "批准操作" or "切换到工作模式" (or change it in Settings, Voice).`
         : `
 
 # Mode: assistant
 
-You can look things up with askSessionStatus, draft and send instructions with prepareInstruction and confirmInstruction (always after the user confirms the read-back), and answer permission requests.`
+You are in work/assistant mode: you can look things up with askSessionStatus, draft and send instructions with prepareInstruction and confirmInstruction (always after the user confirms the read-back), and answer permission requests. When the user finishes and asks to return to read-only mode by voice (for example: "切换回只读模式", "切回只读模式", "进入只读模式", "退出工作模式", "关闭工作模式", "只读模式"), call setVoiceToolMode with mode "readonly".`
 }
 
 /** Provider/model guardrails — ship with repo; separate from rebrandable identity. */

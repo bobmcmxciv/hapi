@@ -11,12 +11,12 @@ import { buildVoiceToolModeBlock, getVoicePlatformFixturesPreview } from './voic
 const names = (mode: Parameters<typeof voiceToolDefinitionsFor>[0]) => voiceToolDefinitionsFor(mode).map((tool) => tool.name)
 
 describe('voice tool modes', () => {
-    test('read-only sessions can only look things up', () => {
-        expect(names('readonly')).toEqual(['askSessionStatus'])
+    test('read-only sessions can look things up and switch mode by voice', () => {
+        expect(names('readonly')).toEqual(['askSessionStatus', 'setVoiceToolMode'])
     })
 
     test('assistant sessions draft and confirm instructions instead of sending directly', () => {
-        expect(names('assistant')).toEqual(['processPermissionRequest', 'askSessionStatus', 'prepareInstruction', 'confirmInstruction'])
+        expect(names('assistant')).toEqual(['processPermissionRequest', 'askSessionStatus', 'prepareInstruction', 'confirmInstruction', 'setVoiceToolMode'])
         expect(names('assistant')).not.toContain('messageCodingAgent')
     })
 
@@ -29,13 +29,13 @@ describe('voice tool modes', () => {
     test('the hub-owned Qwen session.update carries only the mode tools', () => {
         const msg = buildQwenSessionUpdateMessage(undefined, undefined, undefined, 'readonly')
         const tools = (msg.session as { tools: Array<{ name: string }> }).tools
-        expect(tools.map((tool) => tool.name)).toEqual(['askSessionStatus'])
+        expect(tools.map((tool) => tool.name)).toEqual(['askSessionStatus', 'setVoiceToolMode'])
     })
 
     test('the Gemini setup carries only the mode tools', () => {
         const msg = buildGeminiLiveSetupMessage(undefined, undefined, undefined, { toolMode: 'readonly' })
         const declarations = (msg.setup.tools as Array<{ functionDeclarations: Array<{ name: string }> }>)[0]!.functionDeclarations
-        expect(declarations.map((tool) => tool.name)).toEqual(['askSessionStatus'])
+        expect(declarations.map((tool) => tool.name)).toEqual(['askSessionStatus', 'setVoiceToolMode'])
     })
 })
 
@@ -50,9 +50,11 @@ describe('voice prompt routing', () => {
         expect(fixtures).not.toContain('You MUST call the messageCodingAgent tool for ANY request')
     })
 
-    test('the mode block tells the model what is turned off', () => {
+    test('the mode block tells the model what is turned off and how to switch mode by voice', () => {
         expect(buildVoiceToolModeBlock('readonly')).toContain('read-only')
+        expect(buildVoiceToolModeBlock('readonly')).toContain('setVoiceToolMode')
         expect(buildVoiceToolModeBlock('assistant')).toContain('confirmInstruction')
+        expect(buildVoiceToolModeBlock('assistant')).toContain('setVoiceToolMode')
     })
 })
 

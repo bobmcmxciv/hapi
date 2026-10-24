@@ -200,6 +200,23 @@ export const VOICE_TOOLS = [
                 }
             }
         }
+    },
+    {
+        type: 'client' as const,
+        name: 'setVoiceToolMode',
+        description: "Switch the voice assistant between read-only mode ('readonly') and work/assistant mode ('assistant') when the user asks to switch modes or approves/disables voice operations.",
+        expects_response: true,
+        response_timeout_secs: 15,
+        parameters: {
+            type: 'object',
+            required: ['mode'],
+            properties: {
+                mode: {
+                    type: 'string',
+                    description: "'assistant' to switch to work/assistant mode (allows sending messages and approving operations); 'readonly' to switch back to read-only mode."
+                }
+            }
+        }
     }
 ]
 
@@ -211,8 +228,8 @@ export const VOICE_TOOLS = [
 export type VoiceToolMode = 'readonly' | 'assistant' | 'legacy'
 
 const VOICE_TOOL_NAMES_BY_MODE: Record<VoiceToolMode, readonly string[]> = {
-    readonly: ['askSessionStatus'],
-    assistant: ['askSessionStatus', 'prepareInstruction', 'confirmInstruction', 'processPermissionRequest'],
+    readonly: ['askSessionStatus', 'setVoiceToolMode'],
+    assistant: ['askSessionStatus', 'prepareInstruction', 'confirmInstruction', 'processPermissionRequest', 'setVoiceToolMode'],
     legacy: ['messageCodingAgent', 'processPermissionRequest']
 }
 
