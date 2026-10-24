@@ -38,6 +38,9 @@ const QUOTA_SCREEN_CONTEXT = "How's the CLI experience so far? Help us improve:"
 // first PreInvocation/PreToolUse hook firing) without leaving the user in
 // the dark for an excessive stretch if discovery is genuinely broken.
 const DISCOVERY_TIMEOUT_MS = 60_000
+const AGY_DELIVERY_ECHO_TIMEOUT_MS = 10_000
+const AGY_INTERRUPT_SETTLE_MS = 5_000
+const AGY_TURN_STALL_TIMEOUT_MS = 90_000
 
 function stripTerminalControlSequences(raw: string): string {
     let clean = ''
@@ -87,6 +90,8 @@ type PendingWebDelivery = {
     localIds: string[]
     submitted: boolean
     observedBeforeSubmit: string | null
+    submittedAt?: number
+    retriedAfterInterrupt?: boolean
 }
 
 function parseAttachmentMessage(text: string, separator: '\n\n' | '\n'): {
@@ -151,7 +156,12 @@ class AgyPtyLauncher extends RemoteLauncherBase {
     // Persisted here so re-spawns (crash recovery) resume the same conversation.
     private agySessionId: string | null = null
     // Live PTY controls (raw keystroke injection) for turn-interrupt
-    private ptyControls: { sendKeys: (data: string) => void; invalidateInputReady: () => void } | null = null
+    private ptyControls: { sendKeys: (data: string) => void; invalidateInputReady: () => void; notifyInterrupt?: () => void } | null = null
+    private transcriptTurnOpen = false
+    private lastTurnActivityAt = 0
+    private deliveryEchoTimer: ReturnType<typeof setTimeout> | null = null
+    private interruptRetryTimer: ReturnType<typeof setTimeout> | null = null
+    private activeTaskLogs = new Map<string, { logPath: string; lastLine: string }>()
     private agentRunInProgress = false
     private agentRunReserved = false
     private ptyGeneration = 0
@@ -336,7 +346,107 @@ class AgyPtyLauncher extends RemoteLauncherBase {
         })
     }
 
+    private clearDeliveryEchoTimer(): void {
+        if (this.deliveryEchoTimer) {
+            clearTimeout(this.deliveryEchoTimer)
+            this.deliveryEchoTimer = null
+        }
+        if (this.interruptRetryTimer) {
+            clearTimeout(this.interruptRetryTimer)
+            this.interruptRetryTimer = null
+        }
+    }
+
+    private isTurnBusy(): boolean {
+        const now = Date.now()
+        if (
+            this.pendingWebDelivery?.submitted
+            && !this.deliveryConfirmedByTurnProgress
+            && this.pendingWebDelivery.submittedAt !== undefined
+            && now - this.pendingWebDelivery.submittedAt < AGY_DELIVERY_ECHO_TIMEOUT_MS
+        ) {
+            return true
+        }
+        if (
+            this.transcriptTurnOpen
+            && this.lastTurnActivityAt > 0
+            && now - this.lastTurnActivityAt < AGY_TURN_STALL_TIMEOUT_MS
+        ) {
+            return true
+        }
+        return false
+    }
+
+    private armDeliveryEchoWatchdog(pending: PendingWebDelivery): void {
+        if (!this.agySessionId) return
+        if (this.deliveryEchoTimer) {
+            clearTimeout(this.deliveryEchoTimer)
+            this.deliveryEchoTimer = null
+        }
+        this.deliveryEchoTimer = setTimeout(() => {
+            this.deliveryEchoTimer = null
+            if (this.pendingWebDelivery !== pending || !pending.submitted || this.deliveryConfirmedByTurnProgress) {
+                return
+            }
+            if (!pending.retriedAfterInterrupt && this.ptyControls) {
+                pending.retriedAfterInterrupt = true
+                this.transcriptTurnOpen = false
+                logger.warn('[agy-pty]: submitted message was not echoed to transcript within 10s (previous turn likely still pending in agy executor); sending Ctrl-C and retrying once')
+                this.ptyControls.sendKeys('\x03')
+                this.ptyControls.notifyInterrupt?.()
+                this.interruptRetryTimer = setTimeout(() => {
+                    this.interruptRetryTimer = null
+                    if (this.pendingWebDelivery !== pending || this.deliveryConfirmedByTurnProgress || !this.ptyControls) {
+                        return
+                    }
+                    const payload = pending.message.includes('\n')
+                        ? `\x1b[200~${pending.message}\x1b[201~`
+                        : pending.message
+                    this.ptyControls.invalidateInputReady()
+                    this.ptyControls.sendKeys('\x15')
+                    this.ptyControls.sendKeys(payload)
+                    this.interruptRetryTimer = setTimeout(() => {
+                        this.interruptRetryTimer = null
+                        if (this.pendingWebDelivery !== pending || this.deliveryConfirmedByTurnProgress || !this.ptyControls) {
+                            return
+                        }
+                        pending.submittedAt = Date.now()
+                        this.ptyControls.sendKeys('\r')
+                        this.armDeliveryEchoWatchdog(pending)
+                    }, 150)
+                    this.interruptRetryTimer.unref?.()
+                }, AGY_INTERRUPT_SETTLE_MS)
+                this.interruptRetryTimer.unref?.()
+                return
+            }
+            logger.warn('[agy-pty]: submitted message remained unconfirmed after retry; releasing delivery boundary to prevent queue deadlock')
+            this.transcriptTurnOpen = false
+            this.releaseUnechoedWebDelivery()
+            this.ptyControls?.notifyInterrupt?.()
+        }, AGY_DELIVERY_ECHO_TIMEOUT_MS)
+        this.deliveryEchoTimer.unref?.()
+    }
+
+    private handleIncomingUserMessage(deliveryMode?: string): void {
+        if (!this.ptyControls) return
+        const isBusy = this.agentRunInProgress || this.transcriptTurnOpen
+        const isStalledTurn = this.transcriptTurnOpen
+            && this.lastTurnActivityAt > 0
+            && Date.now() - this.lastTurnActivityAt >= AGY_TURN_STALL_TIMEOUT_MS
+        if ((deliveryMode === 'steer' && isBusy) || isStalledTurn) {
+            logger.debug(`[agy-pty]: interrupting in-flight turn for incoming user message (deliveryMode=${deliveryMode ?? 'default'}, stalled=${isStalledTurn})`)
+            this.transcriptTurnOpen = false
+            this.activeTaskLogs.clear()
+            if (this.pendingWebDelivery && !this.deliveryConfirmedByTurnProgress) {
+                this.finishPendingWebDelivery()
+            }
+            this.ptyControls.sendKeys('\x03')
+            this.ptyControls.notifyInterrupt?.()
+        }
+    }
+
     private finishPendingWebDelivery(): void {
+        this.clearDeliveryEchoTimer()
         this.pendingWebDelivery = null
         this.deliveryConfirmedByTurnProgress = false
         const resolve = this.pendingWebDeliveryResolved
@@ -360,6 +470,8 @@ class AgyPtyLauncher extends RemoteLauncherBase {
         const pending = this.pendingWebDelivery
         if (!pending) return
         pending.submitted = true
+        pending.submittedAt = Date.now()
+        this.armDeliveryEchoWatchdog(pending)
         const observed = pending.observedBeforeSubmit
         pending.observedBeforeSubmit = null
         if (observed !== null) this.observeUserInput(observed)
@@ -390,6 +502,12 @@ class AgyPtyLauncher extends RemoteLauncherBase {
 
     private async handleAbortRequest(): Promise<void> {
         logger.debug('[agy-pty]: handleAbortRequest (interrupt)')
+        this.transcriptTurnOpen = false
+        this.activeTaskLogs.clear()
+        this.clearDeliveryEchoTimer()
+        if (this.pendingWebDelivery) {
+            this.finishPendingWebDelivery()
+        }
         const prompt = this.activeWebPrompt
         this.activeWebPrompt = null
         if (prompt !== null) {
@@ -406,6 +524,7 @@ class AgyPtyLauncher extends RemoteLauncherBase {
         if (this.ptyControls) {
             logger.debug('[agy-pty]: Sending interrupt key (Ctrl-C) to PTY')
             this.ptyControls.sendKeys('\x03')
+            this.ptyControls.notifyInterrupt?.()
         } else {
             logger.debug('[agy-pty]: No PTY controls active, falling back to aborting the controller')
             await this.abort()
@@ -637,6 +756,7 @@ class AgyPtyLauncher extends RemoteLauncherBase {
                 hookPort: this.session.hookPort,
                 hookToken: this.session.hookToken,
                 signal,
+                isTurnBusy: () => this.isTurnBusy(),
                 nextMessage: async () => {
                     await this.waitForPendingWebDelivery(signal)
                     if (signal.aborted || this.exitReason) return null
@@ -735,6 +855,9 @@ class AgyPtyLauncher extends RemoteLauncherBase {
                     this.agentRunReserved = false
                     this.activeWebPrompt = null
                     this.disarmQuotaDetector()
+                    this.transcriptTurnOpen = false
+                    this.activeTaskLogs.clear()
+                    this.clearDeliveryEchoTimer()
                     // A respawn establishes a new PTY generation. No pending
                     // permission or question belongs to that replacement process,
                     // so invalidate every approval card owned by the exited PTY.
@@ -783,7 +906,8 @@ class AgyPtyLauncher extends RemoteLauncherBase {
             onSwitch: () => this.handleSwitchRequest()
         })
 
-        const activeTaskLogs = new Map<string, { logPath: string; lastLine: string }>()
+        const activeTaskLogs = this.activeTaskLogs
+        activeTaskLogs.clear()
         const taskLogTimer = setInterval(() => {
             if (activeTaskLogs.size === 0) return
             for (const [taskId, state] of activeTaskLogs) {
@@ -812,18 +936,24 @@ class AgyPtyLauncher extends RemoteLauncherBase {
             resumeBrainUuid,
             onEntry: (entry) => {
                 if (entry.type === 'USER_INPUT') {
+                    this.lastTurnActivityAt = Date.now()
+                    this.transcriptTurnOpen = true
                     if (!this.observeUserInput(entry.content ?? '')) {
                         session.client.sendAgySessionMessage(entry, this.agySessionId ?? undefined)
                     }
                     return
                 }
-                if (entry.type === 'PLANNER_RESPONSE' && this.pendingWebDelivery?.submitted) {
-                    this.deliveryConfirmedByTurnProgress = true
-                }
                 const hasText = (entry.content ?? '').trim().length > 0
                 const hasToolCalls = (entry.tool_calls?.length ?? 0) > 0
                 const hasUsage = entry.type === 'PLANNER_RESPONSE' && Boolean((entry as { usage?: unknown }).usage)
                 if (!hasText && !hasToolCalls && !hasUsage) return
+                if (hasText || hasToolCalls) {
+                    this.lastTurnActivityAt = Date.now()
+                }
+                if (entry.type === 'PLANNER_RESPONSE' && (hasText || hasToolCalls) && this.pendingWebDelivery?.submitted) {
+                    this.deliveryConfirmedByTurnProgress = true
+                    this.clearDeliveryEchoTimer()
+                }
                 if (entry.type === 'PLANNER_RESPONSE') {
                     // A planner step declares the tool CALLS (name + args) for the
                     // action entries that immediately follow it — one per call, in
@@ -850,6 +980,7 @@ class AgyPtyLauncher extends RemoteLauncherBase {
                                 this.handleAskQuestion(toolCall, entry.step_index, callIndex)
                             }
                         })
+                        this.transcriptTurnOpen = hasToolCalls
                     }
                     session.client.sendAgySessionMessage(entry, this.agySessionId ?? undefined)
                     return
@@ -880,6 +1011,11 @@ class AgyPtyLauncher extends RemoteLauncherBase {
                         activeTaskLogs.set(`task-${taskMatch[1]}`, { logPath: rawPath, lastLine: '' })
                     }
                 }
+                if (entry.type === 'ERROR_MESSAGE') {
+                    this.transcriptTurnOpen = false
+                } else if (!AGY_NON_TOOL_ACTION_TYPES.has(entry.type)) {
+                    this.transcriptTurnOpen = true
+                }
                 session.client.sendAgySessionMessage(entry, this.agySessionId ?? undefined, toolCall)
             }
         })
@@ -900,9 +1036,13 @@ class AgyPtyLauncher extends RemoteLauncherBase {
             this.scanner?.onNewSession(uuid)
             this.clearDiscoveryTimeoutWarning()
             this.detachPreInvocationHook()
+            if (this.pendingWebDelivery?.submitted && !this.deliveryConfirmedByTurnProgress) {
+                this.armDeliveryEchoWatchdog(this.pendingWebDelivery)
+            }
         }
         session.addSessionFoundCallback(handleSessionFound)
         session.setLiveModelHandler((model) => this.applyLiveModel(model))
+        session.setIncomingUserMessageHandler?.((deliveryMode) => this.handleIncomingUserMessage(deliveryMode))
 
         try {
             await this.runRespawnLoop({
@@ -936,6 +1076,8 @@ class AgyPtyLauncher extends RemoteLauncherBase {
             this.clearDiscoveryTimeoutWarning()
             clearInterval(taskLogTimer)
             activeTaskLogs.clear()
+            this.clearDeliveryEchoTimer()
+            session.setIncomingUserMessageHandler?.(null)
             session.setLiveModelHandler(null)
             if (this.outputWaiter) {
                 clearTimeout(this.outputWaiter.timer)

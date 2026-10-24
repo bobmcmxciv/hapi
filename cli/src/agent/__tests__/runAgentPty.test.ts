@@ -806,6 +806,41 @@ describe('runAgentPty', () => {
         expect(harness.m.kill).toHaveBeenCalled()
     })
 
+    it('defers the silence watchdog while isTurnBusy() returns true and completes run even without busy marker', async () => {
+        vi.useFakeTimers()
+        let busy = true
+        const done = deferred<{ message: string } | null>()
+        const onAgentRunCompleted = vi.fn()
+        const promise = runAgentPty(makeOpts({
+            promptMarkers: ['? for shortcuts'],
+            busyMarkers: ['Generating'],
+            idleMarkers: ['? for shortcuts'],
+            requirePromptMarker: true,
+            isTurnBusy: () => busy,
+            nextMessage: vi.fn()
+                .mockResolvedValueOnce({ message: 'first' })
+                .mockImplementationOnce(() => done.promise),
+            onAgentRunCompleted,
+        }))
+
+        harness.triggerData('? for shortcuts')
+        await vi.advanceTimersByTimeAsync(520)
+        expect(harness.m.write).toHaveBeenCalledWith('first')
+
+        // Even after 3000ms of silence without a busy marker, isTurnBusy()=true keeps the turn open.
+        await vi.advanceTimersByTimeAsync(3000)
+        expect(onAgentRunCompleted).not.toHaveBeenCalled()
+
+        // Once isTurnBusy() flips false, the next silence window completes the run even without a busy marker.
+        busy = false
+        await vi.advanceTimersByTimeAsync(3000)
+        expect(onAgentRunCompleted).toHaveBeenCalledTimes(1)
+
+        done.resolve(null)
+        await promise
+        vi.useRealTimers()
+    })
+
     it('writes a message only once (no 3x duplicate paste) when verifyPromptAfterResize already verified the prompt', async () => {
         const msg1 = deferred<{ message: string } | null>()
         const msg2 = deferred<{ message: string } | null>()

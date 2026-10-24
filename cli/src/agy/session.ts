@@ -14,6 +14,7 @@ type LocalLaunchFailure = {
 
 export class AgySession extends AgentSessionBase<AgyMode> {
     private liveModelHandler: ((model: SessionModel) => Promise<void>) | null = null;
+    private incomingUserMessageHandler: ((deliveryMode?: string) => void) | null = null;
     readonly startedBy: 'runner' | 'terminal';
     /**
      * Additional workspace carrying HAPI hooks without modifying HOME or the
@@ -118,6 +119,14 @@ export class AgySession extends AgentSessionBase<AgyMode> {
 
     setModel = (model: SessionModel): void => {
         this.model = model;
+    };
+
+    setIncomingUserMessageHandler = (handler: ((deliveryMode?: string) => void) | null): void => {
+        this.incomingUserMessageHandler = handler;
+    };
+
+    notifyIncomingUserMessage = (deliveryMode?: string): void => {
+        this.incomingUserMessageHandler?.(deliveryMode);
     };
 
     setLiveModelHandler = (handler: ((model: SessionModel) => Promise<void>) | null): void => {

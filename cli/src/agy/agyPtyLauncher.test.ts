@@ -1853,6 +1853,85 @@ describe('agyPtyLauncher ask_question safety: invalidate stale pending questions
         })
     })
 
+    it('sends Ctrl-C and retries once when a submitted message is not echoed within 10s on a known brain session', async () => {
+        vi.useFakeTimers()
+        harness.exitReason = null
+        const { session } = createSessionStub()
+        ;(session as { sessionId: string | null }).sessionId = '11111111-2222-3333-4444-555555555555'
+        const secondMsg = deferred<{ message: string } | null>()
+        vi.mocked(session.queue.waitForMessagesAndGetAsString)
+            .mockResolvedValueOnce({
+                message: 'retry after stuck turn',
+                mode: 'default',
+                isolate: false,
+                hash: 'default',
+                items: [{ message: 'retry after stuck turn', localId: 'loc-stuck-1' }],
+            } as never)
+            .mockImplementationOnce(() => secondMsg.promise as never)
+
+        harness.afterNextMessage = async (opts) => {
+            await opts.onMessageSubmitted?.('retry after stuck turn')
+            await vi.advanceTimersByTimeAsync(10_000)
+            expect(harness.sendKeys).toHaveBeenCalledWith('\x03')
+            await vi.advanceTimersByTimeAsync(5_200)
+            expect(harness.sendKeys).toHaveBeenCalledWith('\x15')
+            expect(harness.sendKeys).toHaveBeenCalledWith('retry after stuck turn')
+            expect(harness.sendKeys).toHaveBeenCalledWith('\r')
+            const onEntry = harness.scannerOpts!.onEntry as (e: unknown) => void
+            onEntry({
+                type: 'USER_INPUT',
+                step_index: 5,
+                content: '<USER_REQUEST>\nretry after stuck turn\n</USER_REQUEST>',
+            })
+        }
+
+        const launcherPromise = agyPtyLauncher(session as never)
+        await vi.advanceTimersByTimeAsync(100)
+        harness.exitReason = 'exit'
+        secondMsg.resolve(null)
+        await launcherPromise
+        expect(session.client.emitMessagesConsumed).toHaveBeenCalledWith(['loc-stuck-1'])
+        vi.useRealTimers()
+    })
+
+    it('keeps isTurnBusy() true across synthetic usage-only PLANNER_RESPONSE entries while tool calls are running', async () => {
+        harness.exitReason = 'exit'
+        const { session } = createSessionStub()
+        vi.mocked(session.queue.waitForMessagesAndGetAsString).mockResolvedValueOnce(null as never)
+        harness.afterNextMessage = () => {
+            const onEntry = harness.scannerOpts!.onEntry as (e: unknown) => void
+            onEntry({
+                type: 'USER_INPUT',
+                step_index: 1,
+                content: '<USER_REQUEST>\nrun tools\n</USER_REQUEST>',
+            })
+            expect(ptyOptsCaptured.isTurnBusy()).toBe(true)
+            onEntry({
+                type: 'PLANNER_RESPONSE',
+                step_index: 2,
+                content: 'Calling tool',
+                tool_calls: [{ name: 'run_command', args: { CommandLine: 'echo hi' } }],
+            })
+            expect(ptyOptsCaptured.isTurnBusy()).toBe(true)
+            // Synthetic usage-only entry emitted during subagent/generation sync
+            onEntry({
+                type: 'PLANNER_RESPONSE',
+                step_index: 2,
+                content: '',
+                usage: { input_tokens: 100, output_tokens: 50 },
+            })
+            expect(ptyOptsCaptured.isTurnBusy()).toBe(true)
+            // Final response with text and no tool_calls closes the turn
+            onEntry({
+                type: 'PLANNER_RESPONSE',
+                step_index: 3,
+                content: 'Done.',
+            })
+            expect(ptyOptsCaptured.isTurnBusy()).toBe(false)
+        }
+        await agyPtyLauncher(session as never)
+    })
+
     it('sets exitReason to exit when session kill handler is invoked so stop does not respawn a zombie PTY', async () => {
         harness.exitReason = null
         harness.respawnRounds = 2

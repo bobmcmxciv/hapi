@@ -83,6 +83,15 @@ export type RunAgentPtyOpts = {
     authSettleMs?: number
     /** Idle window (ms) used to decide output has settled. */
     idleReadyMs?: number
+    /** Silence window (ms) while thinking before forcing idle. Default 3000. */
+    idleSilenceMs?: number
+    /**
+     * Optional callback returning true while the underlying agent turn is
+     * known to still be running (e.g. from a live transcript stream). When true,
+     * the output-silence watchdog re-arms instead of prematurely forcing idle
+     * during silent inference or tool execution.
+     */
+    isTurnBusy?: () => boolean
     /**
      * Output substrings shown while the agent is actively working (e.g. claude's
      * "esc to interrupt" footer / spinner). When seen, `onThinkingChange(true)`.
@@ -145,6 +154,8 @@ export type RunAgentPtyOpts = {
     registerControls?: (controls: {
         resize: (cols: number, rows: number) => void
         sendKeys: (data: string) => void
+        /** Notify the driver that an out-of-band interrupt (Ctrl-C) was sent. */
+        notifyInterrupt?: () => void
         /** Mark the current prompt consumed by an out-of-band TUI interaction. */
         invalidateInputReady: () => void
     }) => void
@@ -230,13 +241,13 @@ export async function runAgentPty(opts: RunAgentPtyOpts): Promise<void> {
     // really over → force idle. Scoped to agents with a busy marker (claude): agy
     // can sit silent mid-inference (no animated spinner), so it keeps marker-only
     // clearing and no silence watchdog.
-    const IDLE_SILENCE_MS = 3000
+    const IDLE_SILENCE_MS = opts.idleSilenceMs ?? 3000
     let idleWatchdog: ReturnType<typeof setTimeout> | null = null
     let agentRunActive = false
     let agentRunSawBusyMarker = false
     let agentRunBoundaryTask: Promise<void> = Promise.resolve()
-    const completeAgentRun = (): void => {
-        if (!agentRunActive || !agentRunSawBusyMarker) return
+    const completeAgentRun = (force = false): void => {
+        if (!agentRunActive || (!force && !agentRunSawBusyMarker)) return
         agentRunActive = false
         agentRunSawBusyMarker = false
         agentRunBoundaryTask = Promise.resolve(opts.onAgentRunCompleted?.()).catch((error) => {
@@ -254,13 +265,17 @@ export async function runAgentPty(opts: RunAgentPtyOpts): Promise<void> {
         idleWatchdog = setTimeout(() => {
             idleWatchdog = null
             if (thinking) {
+                if (opts.isTurnBusy?.()) {
+                    armIdleWatchdog()
+                    return
+                }
                 logger.debug(`${debugPrefix} idle watchdog: ${IDLE_SILENCE_MS}ms of silence; forcing idle`)
                 thinking = false
                 // The turn really ended even though no idle marker arrived, so the
                 // prompt is usable again — let the next queued message proceed.
                 inputReady = true
                 opts.onThinkingChange?.(false)
-                completeAgentRun()
+                completeAgentRun(true)
             }
         }, IDLE_SILENCE_MS)
         idleWatchdog.unref?.()
@@ -345,6 +360,13 @@ export async function runAgentPty(opts: RunAgentPtyOpts): Promise<void> {
         stdinVerified = true
         await sleep(150)
         await opts.onBeforeMessageSubmit?.(message)
+        // Re-clear readiness right before Enter so composer echo frames emitted
+        // while typing the message (which still contain the idle footer) cannot
+        // leave inputReady=true after submission.
+        if (agentRunActive && !agentRunSawBusyMarker) {
+            inputReady = false
+            promptBuffer = ''
+        }
         manager.write('\r')
         await sleep(50)
     }
@@ -456,6 +478,16 @@ export async function runAgentPty(opts: RunAgentPtyOpts): Promise<void> {
             sendKeys: (data: string) => {
                 if (!manager.isRunning || !data) return
                 manager.write(data)
+            },
+            notifyInterrupt: () => {
+                if (!manager.isRunning) return
+                lastOutputAt = Date.now()
+                if (thinking) {
+                    armIdleWatchdog()
+                } else {
+                    inputReady = true
+                    completeAgentRun(true)
+                }
             },
             invalidateInputReady: () => {
                 inputReady = false

@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs"
 import { open, stat } from "node:fs/promises"
 import { join } from "node:path"
 import { homedir } from "node:os"
@@ -8,6 +9,7 @@ import { queryAgyGenerationsWithSubagents, resolveAgyTurnMetadata, type AgyBrain
 
 const AGY_BRAIN_DIR = join(homedir(), '.gemini', 'antigravity-cli', 'brain')
 const LOG_REL_PATH = join('.system_generated', 'logs', 'transcript_full.jsonl')
+const COMPACT_LOG_REL_PATH = join('.system_generated', 'logs', 'transcript.jsonl')
 
 const MODEL_SETTLING_RETRY_DELAYS_MS = [100, 200, 300] as const
 
@@ -114,7 +116,10 @@ export async function flushPendingAgyUsageEntries(
 }
 
 function brainLogPath(uuid: string): string {
-    return join(AGY_BRAIN_DIR, uuid, LOG_REL_PATH)
+    const fullPath = join(AGY_BRAIN_DIR, uuid, LOG_REL_PATH)
+    if (existsSync(fullPath)) return fullPath
+    const compactPath = join(AGY_BRAIN_DIR, uuid, COMPACT_LOG_REL_PATH)
+    return existsSync(compactPath) ? compactPath : fullPath
 }
 
 type CreateAgySessionScannerOpts = {

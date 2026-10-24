@@ -257,6 +257,8 @@ export async function runAgy(opts: {
     };
 
     session.onUserMessage((message, localId) => {
+        const deliveryMode = (message.meta as { deliveryMode?: string } | undefined)?.deliveryMode;
+        sessionWrapperRef.current?.notifyIncomingUserMessage(deliveryMode);
         const formatted = formatAgyUserMessage(message.content.text, message.content.attachments);
         const mode: AgyMode = {
             permissionMode: currentPermissionMode,

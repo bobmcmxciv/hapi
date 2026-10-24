@@ -27,10 +27,13 @@ export type AgyPtyOpts = {
     onAgentRunCompleted?: () => void | Promise<void>
     onExit?: (code: number | null) => void
     onAuthFailure?: () => void
+    isTurnBusy?: () => boolean
+    idleSilenceMs?: number
     registerControls?: (controls: {
         resize: (cols: number, rows: number) => void
         sendKeys: (data: string) => void
         invalidateInputReady: () => void
+        notifyInterrupt?: () => void
     }) => void
     /**
      * Additional workspace containing HAPI's .agents/hooks.json. The actual
@@ -156,6 +159,8 @@ export async function agyPty(opts: AgyPtyOpts): Promise<void> {
         onAgentRunCompleted: opts.onAgentRunCompleted,
         onExit: opts.onExit,
         onAuthFailure: opts.onAuthFailure,
+        isTurnBusy: opts.isTurnBusy,
+        idleSilenceMs: opts.idleSilenceMs,
         registerControls: opts.registerControls,
     })
 }
