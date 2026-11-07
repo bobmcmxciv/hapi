@@ -8,8 +8,8 @@
  */
 
 import { isKnownFlavor, type LocalResumeTarget, type ResumableSession, type SessionEndReason } from '@hapi/protocol'
-import type { CursorChatStoreStatus, CursorMigrateOutcome, CursorMigrateToAcpRequest, GeneratedBlobChunkRequest, ImportableSessionProvider, ImportProviderSessionResponse, ListCcSwitchProvidersResponse, ListImportableSessionsResponse, MessageDeliveryMode, MessagesResponse, QueuedStateResponse, SlashCommandsResponse } from '@hapi/protocol/apiTypes'
-import type { AgentFlavor, ClaudeLaunch, CodexCollaborationMode, CopilotAgentMode, DecryptedMessage, PermissionMode, Session, SyncEvent } from '@hapi/protocol/types'
+import type { CursorChatStoreStatus, CursorMigrateOutcome, CursorMigrateToAcpRequest, GeneratedBlobChunkRequest, ImportableSessionProvider, ImportProviderSessionResponse, ListCcSwitchProvidersResponse, ListImportableSessionsResponse, MessageDeliveryMode, MessagesResponse, PrepareP2pFileTransferRpcRequest, PrepareP2pFileTransferRpcResponse, QueuedStateResponse, SignalP2pFileTransferRpcRequest, SignalP2pFileTransferRpcResponse, SlashCommandsResponse } from '@hapi/protocol/apiTypes'
+import type { AgentFlavor, ClaudeLaunch, CodexCollaborationMode, CopilotAgentMode, DecryptedMessage, PermissionMode, Session, SessionPatch, SyncEvent } from '@hapi/protocol/types'
 import { unwrapRoleWrappedRecordEnvelope } from '@hapi/protocol/messages'
 import type { Server } from 'socket.io'
 import { randomUUID } from 'node:crypto'
@@ -105,7 +105,7 @@ export type ResumeSessionResult =
 
 export type ReopenSessionResult =
     | { type: 'success'; sessionId: string; resumed: boolean; cursorSessionProtocol?: 'acp' | 'stream-json' }
-    | { type: 'error'; message: string; code: 'session_not_found' | 'access_denied' | 'no_machine_online' | 'resume_unavailable' | 'resume_failed' | 'metadata_conflict' }
+    | { type: 'error'; message: string; code: 'session_not_found' | 'access_denied' | 'no_machine_online' | 'resume_unavailable' | 'resume_failed' | 'metadata_conflict'; rollbackSafe?: boolean }
     | { type: 'incomplete'; message: string; missing: [string, ...string[]] }
 
 export type LocalResumeTargetResult =
@@ -115,6 +115,10 @@ export type LocalResumeTargetResult =
 export type LocalHandoffResult =
     | { type: 'success' }
     | { type: 'error'; message: string; code: 'session_not_found' | 'access_denied' | 'already_local' | 'handoff_failed' }
+
+export type ArchiveSessionResult =
+    | { type: 'success'; alreadyArchived: boolean }
+    | { type: 'error'; message: string; code: 'session_still_running' | 'archive_failed' }
 
 export type ClearOpencodeSessionResult =
     | { type: 'success'; sessionId: string }
@@ -184,7 +188,7 @@ export class SyncEngine {
     private readonly messageService: MessageService
     private readonly rpcGateway: RpcGateway
     private inactivityTimer: NodeJS.Timeout | null = null
-    /** Sessions that emitted `session-ready` (Cursor ACP or validated Pi get_state). */
+    /** Sessions that emitted validated native `session-ready` for the current runtime. */
     private readonly sessionReadyIds = new Set<string>()
     /** Same-ID PTY rows with a resume currently in flight. */
     private readonly ptyResumeInFlightIds = new Set<string>()
@@ -202,13 +206,24 @@ export class SyncEngine {
     private readonly opencodeClearTails = new Map<string, Promise<ClearOpencodeSessionResult>>()
     /** Serialize fork/rewind per session so concurrent native rollbacks cannot stack. */
     private readonly historyActionsInFlight = new Set<string>()
+    /**
+     * FIFO serialization of per-session lifecycle ops (stop/restart/archive/
+     * resume/reopen). Entries are {kind, promise}; a queued request whose kind
+     * matches the latest queued op joins that op (dedupe) instead of
+     * re-executing, while a different kind chains behind it so concurrent
+     * clicks and cross-op races can never interleave a spawn with a stop.
+     */
+    private readonly sessionLifecycleTails = new Map<string, { kind: string; promise: Promise<unknown> }>()
 
     constructor(
         private readonly store: Store,
         private readonly io: Server,
         rpcRegistry: RpcRegistry,
         sseManager: SSEManager,
-        decorateMessageForCli?: (content: unknown) => unknown
+        decorateMessageForCli?: (
+            content: unknown,
+            sessionContext?: { host?: string | null; path?: string | null; machineId?: string | null }
+        ) => unknown
     ) {
         this.eventPublisher = new EventPublisher(sseManager, (event) => this.resolveNamespace(event))
         this.sessionCache = new SessionCache(store, this.eventPublisher)
@@ -405,8 +420,12 @@ export class SyncEngine {
         return this.messageService.getQueuedState(sessionId, localIds)
     }
 
-    getSessionExport(sessionId: string, session: Session): HapiSessionExportResult {
-        return this.messageService.getSessionExport(sessionId, session)
+    getSessionExport(
+        sessionId: string,
+        session: Session,
+        options?: number | { limit?: number; offset?: number }
+    ): HapiSessionExportResult {
+        return this.messageService.getSessionExport(sessionId, session, options)
     }
 
     getDeliverableMessagesAfter(sessionId: string, options: { afterSeq: number; limit: number; now: number }): DecryptedMessage[] {
@@ -417,7 +436,7 @@ export class SyncEngine {
         if (event.type === 'session-updated' && event.sessionId) {
             // Closes the second half of #884: when a CLI handler emits a
             // structured patch (todos / teamState / metadata / agentState),
-            // apply it in place and forward the patch as-is. This skips both
+            // apply it in place and forward the accepted cached todos. This skips both
             // the DB re-read AND the full-Session SSE broadcast that the
             // legacy no-data path went through. Web clients hit
             // getSessionPatch's truthy path and patch the cache instead of
@@ -441,8 +460,15 @@ export class SyncEngine {
                 : false
 
             if (patchApplied) {
-                this.eventPublisher.emit(event)
                 const after = this.sessionCache.getSession(event.sessionId)
+                const patch = event.data as SessionPatch
+                this.eventPublisher.emit(after && patch.todos !== undefined ? {
+                    ...event,
+                    data: {
+                        ...patch,
+                        todos: { version: after.todosUpdatedAt ?? 0, value: after.todos ?? [] }
+                    }
+                } : event)
                 if (after?.metadata && !this.hasSameAgentSessionIds(beforeMetadata, after.metadata)) {
                     if (!this.canRunCursorDedup(after)) {
                         return
@@ -1526,14 +1552,76 @@ async uploadScratchlistAttachment(
         }
     }
 
-    async stopSessionOnMachine(machineId: string, sessionId: string): Promise<void> {
-        const status = await this.rpcGateway.stopRunnerSession(machineId, sessionId)
-        if (status === 'still_alive') {
-            throw new Error('Session process is still alive')
+    private hasPendingPtyResume(sessionId: string, namespace: string): boolean {
+        const session = this.sessionCache.getSessionByNamespace(sessionId, namespace)
+        if (session?.agentState?.startingMode !== 'pty') return false
+        const tail = this.sessionLifecycleTails.get(sessionId)
+        // PTY callers rely on an immediate refusal: waiting for the owner here
+        // can deadlock callers holding its spawn/readiness gate. Include the
+        // queued tail before the async implementation writes its durable marker.
+        return this.ptyResumeInFlightIds.has(sessionId)
+            || tail?.kind === 'reopen'
+            || tail?.kind.startsWith('resume:') === true
+    }
+
+    /**
+     * Serialize per-session lifecycle operations (stop/archive/restart/
+     * resume/reopen) on a FIFO tail per session. Ops sharing the same `kind`
+     * join the queued operation (true dedupe — a rapid double-click produces
+     * one runtime action); different kinds execute in arrival order so a stop
+     * and a spawn can never interleave. The tail slot is cleared only after
+     * the queued op settles, so a caller arriving mid-run joins or chains
+     * behind the in-flight op rather than racing it.
+     */
+    private enqueueSessionLifecycleOp<T>(sessionId: string, kind: string, op: () => Promise<T>): Promise<T> {
+        const tail = this.sessionLifecycleTails.get(sessionId)
+        if (tail && tail.kind === kind) {
+            return tail.promise as Promise<T>
+        }
+        const previous = tail ? tail.promise : Promise.resolve()
+        const next = previous.catch(() => undefined).then(op)
+        this.sessionLifecycleTails.set(sessionId, { kind, promise: next })
+        void next.then(
+            () => {
+                if (this.sessionLifecycleTails.get(sessionId)?.promise === next) {
+                    this.sessionLifecycleTails.delete(sessionId)
+                }
+            },
+            () => {
+                if (this.sessionLifecycleTails.get(sessionId)?.promise === next) {
+                    this.sessionLifecycleTails.delete(sessionId)
+                }
+            }
+        )
+        return next
+    }
+
+    private async cleanupOmpWrapper(sessionId: string): Promise<void> {
+        try {
+            await this.rpcGateway.killSession(sessionId)
+        } catch (error) {
+            // A missing wrapper still requires the runner's ownership proof.
+            if (!(error instanceof RpcTargetMissingError)) throw error
         }
     }
 
+    async stopSessionOnMachine(machineId: string, sessionId: string): Promise<void> {
+        return this.enqueueSessionLifecycleOp(sessionId, `stop:${machineId}`, async () => {
+            if (this.sessionCache.getSession(sessionId)?.metadata?.flavor === 'omp') await this.cleanupOmpWrapper(sessionId)
+            const status = await this.rpcGateway.stopRunnerSession(machineId, sessionId)
+            if (status === 'still_alive') {
+                throw new Error('Session process is still alive')
+            }
+        })
+    }
+
     async restartSession(sessionId: string, namespace: string, ccSwitchProviderId?: string): Promise<ResumeSessionResult> {
+        return this.enqueueSessionLifecycleOp(sessionId, `restart:${ccSwitchProviderId ?? ''}`, () =>
+            this.restartSessionInner(sessionId, namespace, ccSwitchProviderId)
+        )
+    }
+
+    private async restartSessionInner(sessionId: string, namespace: string, ccSwitchProviderId?: string): Promise<ResumeSessionResult> {
         const access = this.sessionCache.resolveSessionAccess(sessionId, namespace)
         if (!access.ok) {
             return {
@@ -1572,8 +1660,22 @@ async uploadScratchlistAttachment(
             }
         }
 
-        // Runner 的 stop-session handler 等待整个进程树退出后才应答；之后才允许重新 spawn。
-        const stopStatus = await this.rpcGateway.stopRunnerSession(machineId, access.sessionId)
+        // Runner's stop-session handler waits for the whole tracked process
+        // tree to exit before answering; only then is a respawn allowed.
+        // RPC failures and `still_alive` both refuse the restart — never
+        // spawn a second instance over an unverified runtime.
+        let stopStatus: 'stopped' | 'already_gone' | 'still_alive'
+        try {
+            if (access.session.metadata?.flavor === 'omp') await this.cleanupOmpWrapper(access.sessionId)
+            stopStatus = await this.rpcGateway.stopRunnerSession(machineId, access.sessionId)
+        } catch (error) {
+            return {
+                type: 'error',
+                message: error instanceof Error ? error.message : 'Failed to stop session before restart',
+                code: 'resume_failed',
+                rollbackSafe: true
+            }
+        }
         if (stopStatus === 'still_alive') {
             return {
                 type: 'error',
@@ -1585,46 +1687,101 @@ async uploadScratchlistAttachment(
         if (this.getSession(access.sessionId)?.active) {
             this.handleSessionEnd({ sid: access.sessionId, time: Date.now(), reason: 'terminated' })
         }
-        return await this.resumeSession(access.sessionId, namespace, { ccSwitchProviderId })
+        return await this.resumeSessionInner(access.sessionId, namespace, { ccSwitchProviderId })
+    }
+    async archiveSession(sessionId: string): Promise<ArchiveSessionResult> {
+        return this.enqueueSessionLifecycleOp(sessionId, 'archive', () =>
+            this.archiveSessionInner(sessionId)
+        )
     }
 
-    async archiveSession(sessionId: string): Promise<void> {
-        // tiann/hapi#916: when the CLI is already gone (e.g. after a
-        // hub-restart cascade SIGTERMed the runner but the in-memory
-        // `active` flag has not been reconciled yet) the kill-RPC throws
-        // and the route used to surface that as HTTP 500. Treat the
-        // missing target as a benign condition: still flip the session's
-        // lifecycleState to `archived` in the hub-side metadata so the
-        // UI does not see a half-cleaned zombie, and continue to mark
-        // it inactive in the cache. Real RPC errors (timeout, protocol
-        // failure) still propagate as 5xx.
+    /**
+     * User-requested exit. Order is deliberate and must not be weakened:
+     *
+     *   1. `killSession` — RPC to the wrapper's own cleanup path. For native
+     *      (OMP) sessions this awaits session-owned child cleanup before the
+     *      wrapper may exit. A missing target is benign (wrapper already
+     *      gone); every other RPC failure propagates as `archive_failed`.
+     *   2. `stopRunnerSession` — the runner is the process-ownership
+     *      authority and verifies session-owned cleanup (excluding shared
+     *      native brokers). `still_alive` or an RPC failure refuses the archive;
+     *      session is NEVER marked inactive or archived on unverified cleanup,
+     *      including an offline runner.
+     *   3. Only after both verifications does the row go inactive and
+     *      archived — a wrapper-exit tombstone alone is not resource proof.
+     *
+     * The op is idempotent: repeated calls re-run both verification steps,
+     * so retrying after a partial cleanup still establishes it. Returns
+     * `alreadyArchived` so the route can keep its idempotent response shape.
+     */
+    private async archiveSessionInner(sessionId: string): Promise<ArchiveSessionResult> {
+        const before = this.sessionCache.getSession(sessionId)
+            ?? this.sessionCache.refreshSession(sessionId)
+        const alreadyArchived = before
+            ? !before.active && before.metadata?.lifecycleState === 'archived'
+            : false
+        let unreachableReason: string | null = null
+
+        // Step 1 — session-owned cleanup via the kill RPC (tiann/hapi#916:
+        // a missing CLI target is benign; real RPC failures surface).
         try {
             await this.rpcGateway.killSession(sessionId)
         } catch (error) {
             if (error instanceof RpcTargetMissingError) {
-                this.sessionCache.markSessionArchivedFromHub(sessionId, 'Archived from hub (CLI unreachable)')
+                unreachableReason = 'Archived from hub (CLI unreachable)'
             } else {
-                throw error
+                return {
+                    type: 'error',
+                    message: error instanceof Error ? error.message : 'Failed to stop session process',
+                    code: 'archive_failed'
+                }
             }
         }
+
+        // Step 2 — runner-side process-ownership verification. Runs on EVERY
+        // call, including already-archived rows, so a retry after a partial
+        // cleanup still converges the runner state.
+        const machineId = before?.metadata?.machineId
+        if (!machineId && (unreachableReason !== null || before?.metadata?.flavor === 'omp')) {
+            return { type: 'error', message: 'Session machine is unavailable; cleanup cannot be verified', code: 'archive_failed' }
+        }
+        if (machineId) {
+            try {
+                const status = await this.rpcGateway.stopRunnerSession(machineId, sessionId)
+                if (status === 'still_alive') {
+                    return {
+                        type: 'error',
+                        message: 'Session cleanup could not be verified; archive refused',
+                        code: 'session_still_running'
+                    }
+                }
+            } catch (error) {
+                return {
+                    type: 'error',
+                    message: error instanceof Error ? error.message : 'Failed to verify session cleanup',
+                    code: 'archive_failed'
+                }
+            }
+        }
+
+        // Step 3 — cleanup verified: mark inactive, then persist the archive
+        // marker. This runs ONLY on the explicit archive path — never in
+        // handleSessionEnd/expireInactive — so naturally-ended or timed-out
+        // sessions are never mistaken for user-archived ones.
         this.handleSessionEnd({ sid: sessionId, time: Date.now() })
-        // Persist an explicit archive marker so the web can hide user-archived
-        // sessions. This runs ONLY here, on the explicit archive path — NOT in
-        // the shared handleSessionEnd/expireInactive — so naturally-ended or
-        // timed-out sessions are never mistaken for user-archived ones.
-        const machineId = this.sessionCache.getSession(sessionId)?.metadata?.machineId
-        if (machineId && typeof (this.rpcGateway as { stopRunnerSession?: unknown }).stopRunnerSession === 'function') {
-            await this.rpcGateway.stopRunnerSession(machineId, sessionId).catch(() => {})
+        if (unreachableReason !== null) {
+            this.sessionCache.markSessionArchivedFromHub(sessionId, unreachableReason)
         }
         this.markSessionArchived(sessionId)
+        return { type: 'success', alreadyArchived }
     }
 
     private markSessionArchived(sessionId: string): void {
         for (let attempt = 0; attempt < 2; attempt += 1) {
             const latest = this.sessionCache.getSession(sessionId)
                 ?? this.sessionCache.refreshSession(sessionId)
-            if (!latest) return
-            if (latest.metadata?.archivedAt != null) return
+            if (!latest) throw new Error('Session not found while archiving')
+            if (latest.metadata?.archivedAt != null && latest.metadata.lifecycleState === 'archived') return
 
             const now = Date.now()
             const nextMetadata = {
@@ -1647,9 +1804,11 @@ async uploadScratchlistAttachment(
                 return
             }
             if (result.result !== 'version-mismatch') {
-                return
+                throw new Error('Failed to persist session archive metadata')
             }
+            this.sessionCache.refreshSession(sessionId)
         }
+        throw new Error('Session was modified concurrently while archiving')
     }
 
     /**
@@ -1774,7 +1933,11 @@ async uploadScratchlistAttachment(
         const migratorOpts: CursorLegacyMigratorOptions = {}
         return new CursorLegacyMigrator(migratorOpts, {
             archiveSession: async (sessionId) => {
-                await this.archiveSession(sessionId)
+                // Migrator contract throws on failure; adapt the result union.
+                const result = await this.archiveSession(sessionId)
+                if (result.type === 'error') {
+                    throw new Error(result.message)
+                }
             },
             // NOTE: no awaitSessionInactive injection — handleSessionEnd()
             // synchronously sets cache.active=false inside archiveSession,
@@ -2420,9 +2583,12 @@ async uploadScratchlistAttachment(
 
         const agentSessionId = this.resolveAgentResumeId(session, namespace)
         if (!agentSessionId) {
+            const message = this.resolveFlavor(session) === 'omp'
+                ? 'OMP native session ID is missing from metadata, so HAPI cannot reopen this row. Open the session in the native agent instead: run `omp` in the session directory and pick it from the resume list, or `omp --resume` with the native session id.'
+                : 'Resume session ID unavailable. Start a new session in this directory, or retry after the agent has initialized.'
             return {
                 type: 'error',
-                message: 'Resume session ID unavailable. Start a new session in this directory, or retry after the agent has initialized.',
+                message,
                 code: 'resume_unavailable'
             }
         }
@@ -2778,6 +2944,17 @@ async uploadScratchlistAttachment(
     }
 
     async resumeSession(sessionId: string, namespace: string, opts?: { permissionMode?: PermissionMode; ccSwitchProviderId?: string }): Promise<ResumeSessionResult> {
+        if (this.hasPendingPtyResume(sessionId, namespace)) {
+            return { type: 'error', message: 'PTY resume is already in progress', code: 'resume_failed' }
+        }
+        // Kind includes the requested overrides so a resume with different
+        // options serializes behind (never merges into) a pending one.
+        return this.enqueueSessionLifecycleOp(sessionId, `resume:${opts?.permissionMode ?? ''}:${opts?.ccSwitchProviderId ?? ''}`, () =>
+            this.resumeSessionInner(sessionId, namespace, opts)
+        )
+    }
+
+    private async resumeSessionInner(sessionId: string, namespace: string, opts?: { permissionMode?: PermissionMode; ccSwitchProviderId?: string }): Promise<ResumeSessionResult> {
         const access = this.sessionCache.resolveSessionAccess(sessionId, namespace)
         if (!access.ok) {
             return {
@@ -2824,6 +3001,9 @@ async uploadScratchlistAttachment(
             initialSession = this.sessionCache.getSessionByNamespace(access.sessionId, namespace) ?? initialSession
         }
         if (initialSession.active) {
+            if (initialSession.metadata?.flavor === 'omp' && await this.waitForSessionReady(access.sessionId) !== 'ready') {
+                return { type: 'error', message: 'OMP runtime is connected but native readiness is unverified; retry after cleanup or restart', code: 'resume_failed', rollbackSafe: false }
+            }
             return { type: 'success', sessionId: access.sessionId }
         }
 
@@ -2865,7 +3045,7 @@ async uploadScratchlistAttachment(
         const targetMachine = this.resolveOnlineMachineForSession(
             session,
             namespace,
-            { strictMachineId: flavor === 'cursor' || (flavor === 'pi' && resumeToken !== undefined) }
+            { strictMachineId: flavor === 'cursor' || flavor === 'omp' || (flavor === 'pi' && resumeToken !== undefined) }
         )
         if (!targetMachine) {
             return { type: 'error', message: 'No machine online', code: 'no_machine_online' }
@@ -2956,6 +3136,9 @@ async uploadScratchlistAttachment(
             // replacement process's readiness barrier.
             this.sessionReadyIds.delete(access.sessionId)
         }
+        if (flavor === 'omp') {
+            this.sessionReadyIds.delete(access.sessionId)
+        }
         let piResumeSucceeded = false
         this.sessionCache.setSessionResuming(access.sessionId, true)
         try {
@@ -3000,6 +3183,14 @@ async uploadScratchlistAttachment(
                 }
                 return { type: 'error', message: spawnResult.message, code: 'resume_failed' }
             }
+            if (flavor === 'omp' && spawnResult.sessionId !== access.sessionId) {
+                return {
+                    type: 'error',
+                    message: 'OMP runner returned a different HAPI session ID; refusing to merge or replace history',
+                    code: 'resume_failed', rollbackSafe: false
+                }
+            }
+
 
             if (requiresPiNativeReady && spawnResult.sessionId !== access.sessionId) {
                 const removed = await this.terminateUnexpectedPiTemp(
@@ -3019,6 +3210,18 @@ async uploadScratchlistAttachment(
 
             const becameActive = await this.waitForSessionActive(spawnResult.sessionId)
             if (!becameActive) {
+                if (flavor === 'omp') {
+                    try {
+                        await this.cleanupOmpWrapper(access.sessionId)
+                        const status = await this.rpcGateway.stopRunnerSession(targetMachine.id, access.sessionId)
+                        if (status === 'still_alive') {
+                            return { type: 'error', message: 'OMP resume failed and cleanup is unverified', code: 'resume_failed', rollbackSafe: false }
+                        }
+                        this.handleSessionEnd({ sid: access.sessionId, time: Date.now(), reason: 'error' })
+                    } catch (error) {
+                        return { type: 'error', message: error instanceof Error ? error.message : 'OMP resume cleanup failed', code: 'resume_failed', rollbackSafe: false }
+                    }
+                }
                 if (resumedStartingMode === 'pty') {
                     const current = this.sessionCache.getSessionByNamespace(access.sessionId, namespace)
                     const stopped = current
@@ -3050,6 +3253,7 @@ async uploadScratchlistAttachment(
 
             const needsReadyBeforeSuccess = resumedStartingMode === 'pty'
                 || requiresPiNativeReady
+                || flavor === 'omp'
                 || (
                     spawnResult.sessionId !== access.sessionId
                     && flavor === 'cursor'
@@ -3058,9 +3262,10 @@ async uploadScratchlistAttachment(
             if (needsReadyBeforeSuccess) {
                 const readyResult = await this.waitForSessionReady(spawnResult.sessionId)
                 if (readyResult !== 'ready') {
-                    if (resumedStartingMode === 'pty' && readyResult === 'timeout') {
+                    if (flavor === 'omp' || (resumedStartingMode === 'pty' && readyResult === 'timeout')) {
                         let status: 'stopped' | 'already_gone' | 'still_alive'
                         try {
+                            if (flavor === 'omp') await this.cleanupOmpWrapper(spawnResult.sessionId)
                             status = await this.rpcGateway.stopRunnerSession(
                                 targetMachine.id,
                                 spawnResult.sessionId
@@ -3076,9 +3281,20 @@ async uploadScratchlistAttachment(
                             }
                             inactive = true
                         } else if (status === 'stopped') {
-                            inactive = await this.waitForSessionInactive(spawnResult.sessionId)
+                            if (flavor === 'omp') {
+                                this.handleSessionEnd({ sid: spawnResult.sessionId, time: Date.now(), reason: 'error' })
+                                inactive = true
+                            } else {
+                                inactive = await this.waitForSessionInactive(spawnResult.sessionId)
+                            }
                         }
                         if (!inactive) {
+                            if (flavor === 'omp') {
+                                return {
+                                    type: 'error', message: 'OMP native resume timed out and the child is still active',
+                                    code: 'resume_failed', rollbackSafe: false,
+                                }
+                            }
                             this.ptyResumeQuarantinedIds.add(access.sessionId)
                             try {
                                 await this.writePtyResumeAttempt(access.sessionId, namespace, {
@@ -3130,6 +3346,10 @@ async uploadScratchlistAttachment(
                             ? readyResult === 'ended'
                                 ? 'Session ended before the agent PTY became ready'
                                 : 'Session failed to become ready'
+                        : flavor === 'omp'
+                            ? readyResult === 'ended'
+                                ? 'OMP session ended before native resume completed'
+                                : 'OMP session failed to become native-ready'
                         : readyResult === 'ended'
                             ? 'Session ended before Cursor ACP load completed'
                             : 'Session failed to become ready'
@@ -3151,8 +3371,12 @@ async uploadScratchlistAttachment(
 
             this.sessionCache.markSessionActive(spawnResult.sessionId)
             const resumedSession = this.sessionCache.getSession(spawnResult.sessionId)
-            if (resumedSession?.metadata?.archivedAt != null || resumedSession?.metadata?.lifecycleState === 'archived') {
-                await this.sessionCache.clearSessionArchiveMetadata(spawnResult.sessionId).catch(() => {})
+            if (resumedStartingMode !== 'pty' && (resumedSession?.metadata?.archivedAt != null || resumedSession?.metadata?.lifecycleState === 'archived')) {
+                try {
+                    await this.sessionCache.clearSessionArchiveMetadata(spawnResult.sessionId)
+                } catch (error) {
+                    return { type: 'error', message: error instanceof Error ? error.message : 'Failed to clear archive metadata', code: 'resume_failed', rollbackSafe: false }
+                }
             }
             piResumeSucceeded = true
             if (requiresPiNativeReady) await this.writePiResumeAttempt(access.sessionId, namespace, null)
@@ -3210,6 +3434,15 @@ async uploadScratchlistAttachment(
      * needed to resume is missing.
      */
     async reopenSession(sessionId: string, namespace: string): Promise<ReopenSessionResult> {
+        if (this.hasPendingPtyResume(sessionId, namespace)) {
+            return { type: 'error', message: 'PTY resume is already in progress', code: 'resume_failed' }
+        }
+        return this.enqueueSessionLifecycleOp(sessionId, 'reopen', () =>
+            this.reopenSessionInner(sessionId, namespace)
+        )
+    }
+
+    private async reopenSessionInner(sessionId: string, namespace: string): Promise<ReopenSessionResult> {
         const access = this.sessionCache.resolveSessionAccess(sessionId, namespace)
         if (!access.ok) {
             return {
@@ -3276,6 +3509,10 @@ async uploadScratchlistAttachment(
         }
 
         if (session.active) {
+            if (metadata?.flavor === 'omp') {
+                const result = await this.resumeSessionInner(access.sessionId, namespace)
+                if (result.type === 'error') return result
+            }
             return { type: 'success', sessionId: access.sessionId, resumed: false }
         }
 
@@ -3302,14 +3539,14 @@ async uploadScratchlistAttachment(
             }
 
             let applied: { cursorSessionProtocol?: 'acp' | 'stream-json' } = {}
-            // Pi and PTY resumes both reuse the original HAPI row. Keep the archive
+            // Pi, OMP and PTY resumes reuse the original HAPI row. Keep the archive
             // snapshot persisted until the CLI successfully bootstraps that row as
             // running; this avoids an inactive, non-archived gap if the Hub restarts
             // before spawn — the in-memory snapshot below cannot survive that, and
             // ptyResumeAttempt carries no copy of it. The CLI's sessionFactory
             // re-stamps lifecycleState='running' on boot and does not carry over
             // archivedBy/archiveReason, so the row still leaves the archived state.
-            if (metadata.flavor !== 'pi' && !isPtyResume) {
+            if (metadata.flavor !== 'pi' && metadata.flavor !== 'omp' && !isPtyResume) {
                 try {
                     applied = await this.sessionCache.clearSessionArchiveMetadata(access.sessionId)
                 } catch (error) {
@@ -3318,7 +3555,7 @@ async uploadScratchlistAttachment(
                 }
             }
 
-            const resumeResult = await this.resumeSession(access.sessionId, namespace)
+            const resumeResult = await this.resumeSessionInner(access.sessionId, namespace)
             if (resumeResult.type === 'error') {
                 // Never restore archived metadata over a live Pi child. A live
                 // row blocks retry by itself and must remain visible as active.
@@ -3326,8 +3563,9 @@ async uploadScratchlistAttachment(
                 if (resumeResult.rollbackSafe !== false && !current?.active) {
                     try {
                         await this.sessionCache.restoreSessionArchiveMetadata(access.sessionId, archiveSnapshot)
-                    } catch {
-                        // Swallow restore failures - the resume error is the more important signal.
+                    } catch (error) {
+                        const detail = error instanceof Error ? error.message : 'unknown persistence error'
+                        return { ...resumeResult, message: `${resumeResult.message}; failed to restore archive metadata: ${detail}`, rollbackSafe: false }
                     }
                 }
                 return resumeResult
@@ -3344,7 +3582,7 @@ async uploadScratchlistAttachment(
         // Not active and not archived (e.g. brand-new session that has not yet connected,
         // or one that ended without writing archive metadata). Forward to resume so the
         // operator still gets one-click revival.
-        const resumeResult = await this.resumeSession(access.sessionId, namespace)
+        const resumeResult = await this.resumeSessionInner(access.sessionId, namespace)
         if (resumeResult.type === 'error') {
             return resumeResult
         }
@@ -3889,6 +4127,22 @@ async uploadScratchlistAttachment(
         timeoutMs?: number
     ): Promise<RpcGeneratedBlobChunkResponse> {
         return await this.rpcGateway.readGeneratedBlobChunk(sessionId, request, timeoutMs)
+    }
+
+    async prepareP2pFileTransfer(
+        sessionId: string,
+        request: PrepareP2pFileTransferRpcRequest,
+        timeoutMs?: number
+    ): Promise<PrepareP2pFileTransferRpcResponse> {
+        return await this.rpcGateway.prepareP2pFileTransfer(sessionId, request, timeoutMs)
+    }
+
+    async signalP2pFileTransfer(
+        sessionId: string,
+        request: SignalP2pFileTransferRpcRequest,
+        timeoutMs?: number
+    ): Promise<SignalP2pFileTransferRpcResponse> {
+        return await this.rpcGateway.signalP2pFileTransfer(sessionId, request, timeoutMs)
     }
 
     async listDirectory(sessionId: string, path: string): Promise<RpcListDirectoryResponse> {

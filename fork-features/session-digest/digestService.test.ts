@@ -229,6 +229,100 @@ describe('DigestService', () => {
         expect(service.store.getSession('s')?.title).toBe('机器图标')
         expect(service.setCompleted('s', false).completedAt).toBeNull()
     })
+
+    it('manual refresh synchronously updates an outdated session title in the same pass without affecting other sessions', async () => {
+        const target = idleSession('target', { name: '最初第一句话截断的旧标题' })
+        const other = idleSession('other', { name: '另一个会话标题' })
+        const { service, renames, calls } = setup({
+            sessions: [target, other],
+            messages: {
+                target: [user(1, '修一下文件直传'), assistant(2, '已完成 WebRTC 直传与票据兜底')],
+                other: [user(1, '无关内容')]
+            },
+            reply: JSON.stringify({
+                title: 'HAPI 文件直传与票据优化',
+                done: ['完成 WebRTC 直传'],
+                status: '已验证通过',
+                todo: [],
+                suggestComplete: true
+            })
+        })
+        // Even when background autoRename is off, an explicit manual refresh updates the session title
+        service.updateSettings({ autoRename: false })
+        service.requestSession('target')
+        expect(await service.tick()).toBe('session:target')
+        expect(calls).toHaveLength(1)
+        expect(renames).toEqual([{ id: 'target', name: 'HAPI 文件直传与票据优化' }])
+        expect(target.metadata?.name).toBe('HAPI 文件直传与票据优化')
+        expect(service.store.getSession('target')?.title).toBe('HAPI 文件直传与票据优化')
+        expect(service.store.getSession('target')?.autoName).toBe('HAPI 文件直传与票据优化')
+        expect(other.metadata?.name).toBe('另一个会话标题')
+    })
+
+    it('does not overwrite a manual rename made while the manual digest LLM call was in flight, and deduplicates repeated clicks', async () => {
+        const gate = Promise.withResolvers<void>()
+        const target = idleSession('target', { name: '旧标题' })
+        const { service, renames, calls } = setup({
+            sessions: [target],
+            messages: { target: [user(1, '总结我')] },
+            holdFirstCall: gate.promise
+        })
+
+        service.requestSession('target')
+        const running = service.tick()
+        expect(service.sessionState('target')).toBe('running')
+
+        // Duplicate click while already running must not queue a second back-to-back run
+        service.requestSession('target')
+        expect(service.sessionState('target')).toBe('running')
+
+        // User manually renames the session while the LLM request is in flight
+        target.metadata!.name = '用户在生成期间手改的新名字'
+
+        gate.resolve()
+        expect(await running).toBe('session:target')
+        expect(calls).toHaveLength(1)
+        expect(renames).toEqual([])
+        expect(target.metadata?.name).toBe('用户在生成期间手改的新名字')
+        // Digest content itself is still saved
+        expect(service.store.getSession('target')?.title).toBe('机器图标')
+    })
+
+    it('preserves existing session title and digest when manual refresh fails or returns empty title', async () => {
+        const target = idleSession('target', { name: '既有标题' })
+        const { service, renames, store } = setup({
+            sessions: [target],
+            messages: { target: [user(1, '总结我')] },
+            reply: 'invalid-json-output'
+        })
+        store.saveSession({
+            ...store.getSession('target') ?? {
+                sessionId: 'target',
+                title: '上次有效摘要标题',
+                done: ['步骤1'],
+                status: '进行中',
+                todo: [],
+                suggestComplete: false,
+                completed: false,
+                completedAt: null,
+                sourceSeq: 1,
+                sourceUpdatedAt: 1000,
+                model: 'gpt-6-luna',
+                generatedAt: 900,
+                autoName: '上次有效摘要标题',
+                error: null,
+                errorCount: 0,
+                lastAttemptAt: 900,
+                artifacts: null
+            }
+        })
+        service.requestSession('target')
+        expect(await service.tick()).toBe('session:target')
+        expect(renames).toEqual([])
+        expect(target.metadata?.name).toBe('既有标题')
+        expect(store.getSession('target')?.title).toBe('上次有效摘要标题')
+        expect(store.getSession('target')?.done).toEqual(['步骤1'])
+    })
 })
 
 describe('project overview inputs (artifacts, listing, readme)', () => {

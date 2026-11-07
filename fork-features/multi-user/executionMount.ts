@@ -20,11 +20,21 @@ import { createSessionMachineResolver, createSessionPathResolver, pathWithinScop
 import { createSseEventFilterFactory } from './sseVisibility'
 import { streamSSE } from 'hono/streaming'
 import { randomUUID } from 'node:crypto'
+import { parseBlobDownloadRoutePath, verifyBlobDownloadTicket } from '../../hub/src/blobs'
 
 export async function gatewayAccountId(request: Request, secret: Uint8Array): Promise<number | null> {
     const authorization = request.headers.get('authorization')
-    const queryToken = new URL(request.url).searchParams.get('token')
+    const url = new URL(request.url)
+    const queryToken = url.searchParams.get('token')
     const token = authorization?.startsWith('Bearer ') ? authorization.slice(7) : queryToken
+    if (!token && (request.method === 'GET' || request.method === 'HEAD')) {
+        const ticket = url.searchParams.get('ticket')
+        const blobRoute = ticket ? parseBlobDownloadRoutePath(url.pathname) : null
+        if (ticket && blobRoute) {
+            const verified = verifyBlobDownloadTicket(ticket, blobRoute, secret)
+            return verified.ok && typeof verified.claims.gaid === 'number' ? verified.claims.gaid : null
+        }
+    }
     if (!token) return null
     try {
         const verified = await jwtVerify(token, secret, { algorithms: ['HS256'] })

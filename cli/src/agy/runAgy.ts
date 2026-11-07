@@ -22,6 +22,7 @@ import { shellJoin } from '@/modules/common/shellQuote';
 import { getHappyCliCommand } from '@/utils/spawnHappyCLI';
 import { extractToolName, extractToolInput, extractToolUseId } from '@/claude/utils/startHookServer';
 import { buildHapiMcpBridge } from '@/codex/utils/buildHapiMcpBridge';
+import { createOmpUsageMonitor, ensureOmpUsageExtension } from '@/omp/utils/ompUsageMonitor';
 
 export async function runAgy(opts: {
     startedBy?: 'runner' | 'terminal';
@@ -81,6 +82,10 @@ export async function runAgy(opts: {
     let currentPermissionMode: PermissionMode = opts.permissionMode ?? 'request-review';
     let sessionModel: SessionModel = initialModel;
     let sessionEffort: SessionEffort | undefined = opts.effort ?? undefined;
+    const delegatedUsage = createOmpUsageMonitor({
+        sessionId: session.sessionId,
+        onUsage: (event) => session.sendClaudeSessionMessage(event)
+    });
 
     // PTY-mode tool-approval bridge: start a hook server and wire up the agy
     // permission handler. Null in non-PTY modes (no hook is registered).
@@ -117,7 +122,10 @@ export async function runAgy(opts: {
         session,
         logTag: 'agy',
         stopKeepAlive: () => sessionWrapperRef.current?.stopKeepAlive(),
-        onBeforeClose: () => { sessionWrapperRef.current?.kill(); },
+        onBeforeClose: async () => {
+            sessionWrapperRef.current?.kill();
+            await delegatedUsage.cleanup();
+        },
         onAfterClose: () => {
             agyPermissionHandler?.cancelAll('Session ended');
             hookServer?.stop();
@@ -139,6 +147,8 @@ export async function runAgy(opts: {
     let crashed = false;
 
     try {
+        await ensureOmpUsageExtension();
+        await delegatedUsage.start();
         if (isPtyMode) {
         // Best-effort: reclaim carriers left behind by sessions whose
         // owning process has since died (crash, kill -9 — anything that

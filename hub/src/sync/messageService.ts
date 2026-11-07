@@ -81,6 +81,68 @@ function isExportVisibleStoredMessage(message: StoredMessageForDelivery): boolea
     return isClaudeChatVisibleMessage({ type: data.type, subtype: data.subtype })
 }
 
+function extractExportAgentData(message: StoredMessageForDelivery): Record<string, unknown> | null {
+    const record = unwrapRoleWrappedRecordEnvelope(message.content)
+    if (record?.role !== 'agent' || !isObject(record.content)) return null
+    if (record.content.type !== 'codex' || !isObject(record.content.data)) return null
+    return record.content.data
+}
+
+function collapseSupersededExportMessages(messages: StoredMessageForDelivery[]): StoredMessageForDelivery[] {
+    const lastAgentRunUpdateIndexByCard = new Map<string, number>()
+    for (let index = 0; index < messages.length; index += 1) {
+        const data = extractExportAgentData(messages[index])
+        if (!data || data.type !== 'agent-run-update') continue
+        const cardKey = typeof data.cardId === 'string' && data.cardId
+            ? data.cardId
+            : typeof data.agentId === 'string' && data.agentId
+                ? data.agentId
+                : null
+        if (cardKey) {
+            lastAgentRunUpdateIndexByCard.set(cardKey, index)
+        }
+    }
+
+    const seenInProgressToolCallIds = new Set<string>()
+    const collapsed: StoredMessageForDelivery[] = []
+    for (let index = 0; index < messages.length; index += 1) {
+        const message = messages[index]
+        const data = extractExportAgentData(message)
+        if (data?.type === 'agent-run-update') {
+            const cardKey = typeof data.cardId === 'string' && data.cardId
+                ? data.cardId
+                : typeof data.agentId === 'string' && data.agentId
+                    ? data.agentId
+                    : null
+            const status = typeof data.status === 'string' ? data.status : 'running'
+            const lastIndex = cardKey ? lastAgentRunUpdateIndexByCard.get(cardKey) : undefined
+            if (
+                lastIndex !== undefined
+                && index < lastIndex
+                && (status === 'running' || status === 'pending')
+            ) {
+                continue
+            }
+        } else if (data?.type === 'tool-call' && typeof data.callId === 'string' && data.callId) {
+            const status = typeof data.status === 'string' ? data.status : 'in_progress'
+            if (status === 'in_progress' || status === 'pending') {
+                if (seenInProgressToolCallIds.has(data.callId) && data.progress === undefined) {
+                    continue
+                }
+                seenInProgressToolCallIds.add(data.callId)
+            } else if (
+                (status === 'completed' || status === 'failed')
+                && seenInProgressToolCallIds.delete(data.callId)
+                && data.progress === undefined
+            ) {
+                continue
+            }
+        }
+        collapsed.push(message)
+    }
+    return collapsed
+}
+
 function getNormalizedDeliveryMode(
     metadata: unknown,
     requestedDeliveryMode: MessageDeliveryMode | undefined,
@@ -123,8 +185,27 @@ export class MessageService {
         private readonly io: Server,
         private readonly publisher: EventPublisher,
         private readonly onSessionActivity?: (sessionId: string, updatedAt: number) => void,
-        private readonly decorateForCli: (content: unknown) => unknown = content => content
+        private readonly decorateForCli: (
+            content: unknown,
+            sessionContext?: { host?: string | null; path?: string | null; machineId?: string | null }
+        ) => unknown = content => content
     ) {
+    }
+
+    private getCliDecorationContext(
+        sessionId: string
+    ): { host?: string | null; path?: string | null; machineId?: string | null } | undefined {
+        const stored = this.store.sessions.getSession(sessionId)
+        const metadata = isObject(stored?.metadata) ? stored.metadata : null
+        const host = typeof metadata?.host === 'string' && metadata.host.trim() ? metadata.host.trim() : null
+        const path = typeof metadata?.path === 'string' && metadata.path.trim() ? metadata.path.trim() : null
+        const machineId = typeof metadata?.machineId === 'string' && metadata.machineId.trim()
+            ? metadata.machineId.trim()
+            : typeof stored?.machineId === 'string' && stored.machineId.trim()
+                ? stored.machineId.trim()
+                : null
+        if (!host && !path && !machineId) return undefined
+        return { host, path, machineId }
     }
 
     private forgetScheduledMatureNotified(localIds: Iterable<string>): void {
@@ -153,25 +234,34 @@ export class MessageService {
     getSessionExport(
         sessionId: string,
         session: Session,
-        limit: number = SESSION_EXPORT_MESSAGE_LIMIT
+        options: number | { limit?: number; offset?: number } = SESSION_EXPORT_MESSAGE_LIMIT
     ): HapiSessionExportResult {
-        const messages = this.store.messages.getAllMessages(sessionId)
-            .filter(isExportVisibleStoredMessage)
-            .sort((a, b) => {
-                const aAt = a.invokedAt ?? a.createdAt
-                const bAt = b.invokedAt ?? b.createdAt
-                return aAt !== bAt ? aAt - bAt : a.seq - b.seq
-            })
-            .map(toDecryptedMessage)
+        const isPaged = typeof options === 'object' && options !== null
+        const limit = typeof options === 'number'
+            ? options
+            : options.limit ?? SESSION_EXPORT_MESSAGE_LIMIT
+        const offset = isPaged ? Math.max(0, options.offset ?? 0) : 0
 
-        if (messages.length > limit) {
+        const sorted = collapseSupersededExportMessages(
+            this.store.messages.getAllMessages(sessionId)
+                .filter(isExportVisibleStoredMessage)
+                .sort((a, b) => {
+                    const aAt = a.invokedAt ?? a.createdAt
+                    const bAt = b.invokedAt ?? b.createdAt
+                    return aAt !== bAt ? aAt - bAt : a.seq - b.seq
+                })
+        )
+
+        if (!isPaged && sorted.length > limit) {
             return {
                 type: 'too-large',
-                count: messages.length,
+                count: sorted.length,
                 limit
             }
         }
 
+        const messages = (isPaged ? sorted.slice(offset, offset + limit) : sorted)
+            .map(toDecryptedMessage)
         // Chronological ASC for archive readability (store list is DESC).
         const scratchlist = this.store.scratchlist.list(sessionId)
             .slice()
@@ -393,11 +483,12 @@ export class MessageService {
             options.now,
             options.limit
         )
+        const decorationContext = this.getCliDecorationContext(sessionId)
         return stored.map((message) => ({
             id: message.id,
             seq: message.seq,
             localId: message.localId,
-            content: this.decorateForCli(contentForDeferredDelivery(message.content)),
+            content: this.decorateForCli(contentForDeferredDelivery(message.content), decorationContext),
             createdAt: message.createdAt,
             invokedAt: message.invokedAt,
             scheduledAt: message.scheduledAt
@@ -684,7 +775,7 @@ export class MessageService {
                         seq: msg.seq,
                         createdAt: msg.createdAt,
                         localId: msg.localId,
-                        content: this.decorateForCli(cliContent)
+                        content: this.decorateForCli(cliContent, this.getCliDecorationContext(actualSessionId))
                     }
                 }
             }
@@ -840,7 +931,7 @@ export class MessageService {
                         seq: msg.seq,
                         createdAt: msg.createdAt,
                         localId: msg.localId,
-                        content: this.decorateForCli(contentForDeferredDelivery(msg.content))
+                        content: this.decorateForCli(contentForDeferredDelivery(msg.content), this.getCliDecorationContext(msg.sessionId))
                     }
                 }
             }

@@ -44,6 +44,11 @@ import type {
     FileReadResponse,
     FileWriteResponse,
     GitCommandResponse,
+    GeneratedBlobDownloadTicketResponse,
+    CreateP2pFileTransferResponse,
+    P2pIceCandidateInit,
+    P2pSessionDescriptionInit,
+    SignalP2pFileTransferRpcResponse,
     GrokModelsResponse,
     CopilotModelsResponse,
     GrokReasoningEffortResponse,
@@ -498,6 +503,143 @@ export class ApiClient {
     async getGeneratedFileBlob(sessionId: string, fileId: string, options: GeneratedBlobFetchOptions = {}): Promise<Blob> {
         const url = this.buildUrl(`/api/sessions/${encodeURIComponent(sessionId)}/generated-files/${encodeURIComponent(fileId)}`)
         return await this.fetchGeneratedBlob(url, options)
+    }
+
+    /**
+     * Request a short-lived, single-file download ticket for native browser
+     * downloading (`<a href download>`), riding out `202` upload/pull progress
+     * states until the hub holds the ready file on disk. Returns `null` when
+     * the hub runs without a blob store (`501`) so callers can fall back to
+     * `getGeneratedFileBlob`.
+     */
+    async acquireGeneratedFileDownloadTicket(
+        sessionId: string,
+        fileId: string,
+        options: GeneratedBlobFetchOptions = {}
+    ): Promise<{ url: string; fileName: string; mimeType: string; size: number; expiresAt: number } | null> {
+        const url = this.buildUrl(
+            `/api/sessions/${encodeURIComponent(sessionId)}/generated-files/${encodeURIComponent(fileId)}/download-ticket`
+        )
+        const startedAt = Date.now()
+        let lastProgressAt = startedAt
+        let lastReceived = -1
+        let attempt = 0
+        let refreshed = false
+        let overrideToken: string | null | undefined = undefined
+
+        for (;;) {
+            if (options.signal?.aborted) {
+                throw new DOMException('Aborted', 'AbortError')
+            }
+            const headers = new Headers()
+            const liveToken = this.getToken ? this.getToken() : null
+            const authToken = overrideToken !== undefined
+                ? (overrideToken ?? (liveToken ?? this.token))
+                : (liveToken ?? this.token)
+            if (authToken) {
+                headers.set('authorization', `Bearer ${authToken}`)
+            }
+
+            let res: Response
+            try {
+                res = await fetch(url, { method: 'POST', headers, signal: options.signal })
+            } catch (error) {
+                if (options.signal?.aborted || (error instanceof DOMException && error.name === 'AbortError')) {
+                    throw error
+                }
+                if (attempt < BLOB_FETCH_RETRIES) {
+                    attempt += 1
+                    await delay(BLOB_FETCH_RETRY_DELAY_MS * attempt)
+                    continue
+                }
+                throw error
+            }
+
+            if (res.status === 501) {
+                return null
+            }
+            if (res.ok && res.status !== 202) {
+                const body = await res.json() as GeneratedBlobDownloadTicketResponse
+                return {
+                    url: this.buildUrl(body.downloadPath),
+                    fileName: body.fileName,
+                    mimeType: body.mimeType,
+                    size: body.size,
+                    expiresAt: body.expiresAt
+                }
+            }
+            if (res.status === 202) {
+                let pending: { state?: string; received?: number; size?: number | null; retryAfterMs?: number } = {}
+                try {
+                    pending = await res.json() as typeof pending
+                } catch {
+                    // keep defaults
+                }
+                const received = typeof pending.received === 'number' ? pending.received : 0
+                const size = typeof pending.size === 'number' ? pending.size : null
+                options.onProgress?.({ state: pending.state === 'uploading' ? 'uploading' : 'fetching', received, size })
+                const now = Date.now()
+                if (received !== lastReceived) {
+                    lastReceived = received
+                    lastProgressAt = now
+                }
+                if (now - lastProgressAt > BLOB_PENDING_STALL_MS || now - startedAt > BLOB_PENDING_TOTAL_MS) {
+                    throw new ApiError('Transfer stalled', 202, 'blob_stalled', 'The file is still being transferred from the machine that sent it. Try again later.')
+                }
+                const poll = typeof pending.retryAfterMs === 'number' ? pending.retryAfterMs : BLOB_PENDING_DEFAULT_POLL_MS
+                await delay(Math.min(BLOB_PENDING_MAX_POLL_MS, Math.max(BLOB_PENDING_MIN_POLL_MS, poll)))
+                attempt = 0
+                continue
+            }
+            if (res.status === 401 && !refreshed && this.onUnauthorized) {
+                refreshed = true
+                const next = await this.onUnauthorized()
+                if (next) {
+                    this.token = next
+                    overrideToken = next
+                    continue
+                }
+            }
+            if (isRetryableBlobStatus(res.status) && attempt < BLOB_FETCH_RETRIES) {
+                attempt += 1
+                await delay(BLOB_FETCH_RETRY_DELAY_MS * attempt)
+                continue
+            }
+            throw new ApiError(`HTTP ${res.status}`, res.status, undefined, await res.text().catch(() => undefined))
+        }
+    }
+
+    async createP2pFileTransfer(
+        sessionId: string,
+        fileId: string,
+        signal?: AbortSignal
+    ): Promise<CreateP2pFileTransferResponse> {
+        return await this.request<CreateP2pFileTransferResponse>(
+            `/api/sessions/${encodeURIComponent(sessionId)}/generated-files/${encodeURIComponent(fileId)}/p2p`,
+            { method: 'POST', signal }
+        )
+    }
+
+    async signalP2pFileTransfer(
+        sessionId: string,
+        fileId: string,
+        transferId: string,
+        body: {
+            action?: 'signal' | 'cancel' | 'complete' | 'renew'
+            answer?: P2pSessionDescriptionInit
+            candidates?: P2pIceCandidateInit[]
+            reason?: string
+        },
+        signal?: AbortSignal
+    ): Promise<SignalP2pFileTransferRpcResponse> {
+        return await this.request<SignalP2pFileTransferRpcResponse>(
+            `/api/sessions/${encodeURIComponent(sessionId)}/generated-files/${encodeURIComponent(fileId)}/p2p/${encodeURIComponent(transferId)}/signal`,
+            {
+                method: 'POST',
+                body: JSON.stringify(body),
+                signal
+            }
+        )
     }
 
     /**

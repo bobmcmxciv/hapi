@@ -81,6 +81,32 @@ describe('SessionCache startup todo backfill', () => {
         expect(cache.getSession(session.id)?.todos).toHaveLength(2)
     })
 
+    it('replays native OMP results, ignoring failed clears and persisting successful empty snapshots', () => {
+        const store = new Store(':memory:')
+        try {
+            const session = store.sessions.getOrCreateSession('omp-backfill', { path: '/tmp', host: 'h' }, null, 'default')
+            const result = (phases: unknown[], isError = false) => ({ role: 'agent', content: {
+                type: 'output', data: { type: 'user', message: { content: [{ type: 'tool_result', is_error: isError,
+                    content: { toolName: 'todo', content: [], details: { op: 'view', phases } }
+                }] } }
+            } })
+            store.messages.addMessage(session.id, result([{ name: 'Repair', tasks: [{ content: 'Backfill', status: 'abandoned' }] }]))
+            store.messages.addMessage(session.id, result([], true))
+            const cache = new SessionCache(store, createPublisher([]))
+            cache.refreshSession(session.id)
+            expect(cache.getSession(session.id)?.todos).toEqual([
+                { id: 'plan-1', content: 'Backfill', status: 'completed', priority: 'medium' }
+            ])
+            expect(store.sessions.getSession(session.id)?.todos).toEqual(cache.getSession(session.id)?.todos)
+            store.messages.addMessage(session.id, result([]))
+            cache.rebuildTodosFromTranscript(session.id)
+            expect(cache.getSession(session.id)?.todos).toEqual([])
+            expect(store.sessions.getSession(session.id)?.todos).toEqual([])
+        } finally {
+            store.close()
+        }
+    })
+
     it('stops the background backfill when asked', async () => {
         const store = new Store(':memory:')
         const session = store.sessions.getOrCreateSession('todo-stopped', { path: '/tmp', host: 'h' }, null, 'default')

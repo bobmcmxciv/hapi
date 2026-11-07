@@ -336,6 +336,7 @@ type SubagentState = {
     lastResultText?: string;
     terminalStatus?: string;
     startEmitted: boolean;
+    lastProgressSignature?: string;
     seenMessages: Set<string>;
     tools: Map<string, ToolLifecycle>;
 };
@@ -862,6 +863,7 @@ export class OmpRpcEventAdapter {
         const parentUuid = this.lastDisplayId;
         const timestamp = new Date(toolResult.timestamp ?? Date.now()).toISOString();
         const toolOutput = {
+            toolName: toolResult.toolName,
             content: toolResult.content,
             details: toolResult.details
         };
@@ -902,7 +904,9 @@ export class OmpRpcEventAdapter {
             args: parsed.data.args
         };
         this.tools.set(tool.id, tool);
-        this.emitToolLifecycle(output, tool, 'in_progress');
+        if (!this.inProgressToolCards.has(tool.id)) {
+            this.emitToolLifecycle(output, tool, 'in_progress');
+        }
         this.callbacks.onInkMessage(`Tool call: ${tool.name}`, 'tool');
     }
 
@@ -945,6 +949,9 @@ export class OmpRpcEventAdapter {
             executionFailed: parsed.data.isError === true
         };
         this.tools.set(tool.id, tool);
+        if (this.inProgressToolCards.delete(tool.id)) {
+            return;
+        }
         this.emitToolLifecycle(output, tool, tool.executionFailed ? 'failed' : 'completed');
     }
 
@@ -1024,6 +1031,13 @@ export class OmpRpcEventAdapter {
         if (!parsed.success) {
             this.invalidEvent('notice', parsed.error);
             return;
+        }
+        // Persistence relocation changes the native ID/file during a live turn.
+        // Query OMP's authoritative state now, even if notice display is filtered.
+        if (parsed.data.source === 'session-persistence'
+            && (raw.reason === 'open-elsewhere' || raw.reason === 'replaced' || raw.reason === 'contested')
+            && typeof raw.from === 'string' && typeof raw.to === 'string') {
+            this.callbacks.onSessionInfoUpdate();
         }
         output.onStructuredEvent({
             type: 'omp-notice',
@@ -1207,30 +1221,52 @@ export class OmpRpcEventAdapter {
         const assistant = AssistantMessageSchema.safeParse(message);
         if (assistant.success) {
             const model = `${assistant.data.provider}/${assistant.data.model}`;
-            const usage = this.toAgentUsage(assistant.data.usage);
+            let pendingUsage: AgentUsage | undefined = this.toAgentUsage(assistant.data.usage);
+            const takeUsage = (): AgentUsage | undefined => {
+                const next = pendingUsage;
+                pendingUsage = undefined;
+                return next;
+            };
             const assistantText = this.textFromContent(assistant.data.content);
             if (assistantText.length > 0) {
                 state.lastResultText = assistantText;
             }
             for (const block of assistant.data.content) {
                 if (block.type === 'text' && typeof block.text === 'string' && block.text.length > 0) {
-                    this.emitSubagentTrace(output, state, { type: 'text', text: block.text, model, usage });
+                    const usage = takeUsage();
+                    this.emitSubagentTrace(output, state, {
+                        type: 'text',
+                        text: block.text,
+                        model,
+                        ...(usage ? { usage } : {})
+                    });
                 } else if (block.type === 'thinking' && typeof block.thinking === 'string' && block.thinking.length > 0) {
-                    this.emitSubagentTrace(output, state, { type: 'reasoning', text: block.thinking, model, usage });
+                    const usage = takeUsage();
+                    this.emitSubagentTrace(output, state, {
+                        type: 'reasoning',
+                        text: block.thinking,
+                        model,
+                        ...(usage ? { usage } : {})
+                    });
                 } else if (
                     block.type === 'toolCall'
                     && typeof block.id === 'string'
                     && typeof block.name === 'string'
                 ) {
-                    this.emitSubagentTrace(output, state, {
-                        type: 'tool_call',
-                        id: block.id,
-                        name: block.name,
-                        input: block.arguments,
-                        status: 'in_progress',
-                        model,
-                        usage
-                    });
+                    const cardKey = `${state.id}:${block.id}`;
+                    if (!this.inProgressToolCards.has(cardKey)) {
+                        this.trackInProgressCard(output, cardKey, 'in_progress');
+                        const usage = takeUsage();
+                        this.emitSubagentTrace(output, state, {
+                            type: 'tool_call',
+                            id: block.id,
+                            name: block.name,
+                            input: block.arguments,
+                            status: 'in_progress',
+                            model,
+                            ...(usage ? { usage } : {})
+                        });
+                    }
                 }
             }
             if (assistant.data.errorMessage) {
@@ -1254,6 +1290,7 @@ export class OmpRpcEventAdapter {
                 status: toolResult.data.isError ? 'failed' : 'completed'
             });
             state.tools.delete(toolResult.data.toolCallId);
+            this.inProgressToolCards.delete(`${state.id}:${toolResult.data.toolCallId}`);
         }
     }
 
@@ -1279,7 +1316,15 @@ export class OmpRpcEventAdapter {
             executionFailed: event.isError === true || existing?.executionFailed
         };
         state.tools.set(tool.id, tool);
-        this.trackInProgressCard(output, `${state.id}:${tool.id}`, status);
+        const cardKey = `${state.id}:${tool.id}`;
+        if (status === 'in_progress') {
+            if (this.inProgressToolCards.has(cardKey)) {
+                return;
+            }
+            this.trackInProgressCard(output, cardKey, status);
+        } else if (this.inProgressToolCards.delete(cardKey)) {
+            return;
+        }
         this.emitSubagentTrace(output, state, {
             type: 'tool_call',
             id: tool.id,
@@ -1371,6 +1416,23 @@ export class OmpRpcEventAdapter {
             : currentTool
                 ? `Using ${currentTool}`
                 : status === 'running' ? 'Running' : status;
+        const activityKind = retryState.success ? 'retry' : currentTool ? 'tool' : status;
+        const summary = state.description ?? state.assignment ?? state.task ?? state.agent;
+        const signature = JSON.stringify({
+            status,
+            activity,
+            activityKind,
+            summary,
+            parentToolCallId: state.parentToolCallId ?? null,
+            retryState: retryState.success ? retryState.data : null,
+            retryFailure: retryFailure.success ? retryFailure.data : null
+        });
+        if (status === 'running' && state.lastProgressSignature === signature) {
+            return;
+        }
+        if (output.enabled) {
+            state.lastProgressSignature = signature;
+        }
         output.onAgentRunEvent({
             type: 'agent-run-update',
             agentId: state.id,
@@ -1379,8 +1441,8 @@ export class OmpRpcEventAdapter {
             status,
             statusText: activity,
             activity,
-            activityKind: retryState.success ? 'retry' : currentTool ? 'tool' : status,
-            summary: state.description ?? state.assignment ?? state.task ?? state.agent,
+            activityKind,
+            summary,
             parentToolCallId: state.parentToolCallId,
             progress,
             retryState: retryState.success ? retryState.data : undefined,
@@ -1390,6 +1452,7 @@ export class OmpRpcEventAdapter {
     }
 
     private emitSubagentTerminal(output: OmpEventProjection, state: SubagentState, status: string): void {
+        state.lastProgressSignature = undefined;
         const normalizedStatus = status === 'aborted' ? 'canceled' : status;
         const activity = normalizedStatus === 'completed'
             ? 'Completed'

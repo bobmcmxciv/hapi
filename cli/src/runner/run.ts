@@ -389,6 +389,8 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
       confirmedSessionId?: string;
       pid: number;
       processStartMarker: string;
+      requiresCleanupReceipt?: boolean;
+      cleanupVerified?: boolean;
     };
     const resumeProcessFile = `${configuration.runnerStateFile}.resume-processes.json`;
     const persistedResumeProcesses = (() => {
@@ -408,6 +410,8 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
             confirmedSessionId: typeof record.confirmedSessionId === 'string' ? record.confirmedSessionId : undefined,
             pid: record.pid,
             processStartMarker: record.processStartMarker,
+            requiresCleanupReceipt: record.requiresCleanupReceipt === true,
+            cleanupVerified: record.cleanupVerified === true,
           }]];
         }));
       } catch (error) {
@@ -420,8 +424,10 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
       try {
         writeFileSync(tmp, JSON.stringify([...persistedResumeProcesses.values()]));
         renameSync(tmp, resumeProcessFile);
+        return true;
       } catch (error) {
         logger.debug('[RUNNER RUN] Failed to persist resume processes:', error);
+        return false;
       }
     };
     for (const [pid, record] of [...persistedResumeProcesses]) {
@@ -431,14 +437,14 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
       if (generation === 'verified') {
         pidToRequestedSessionId.set(pid, record.requestedSessionId);
         if (record.confirmedSessionId) pidToConfirmedSessionId.set(pid, record.confirmedSessionId);
-      } else if (generation === 'exited') {
+      } else if (generation === 'exited' && !(record.requiresCleanupReceipt && !record.cleanupVerified)) {
         persistedResumeProcesses.delete(pid);
         rememberVerifiedExit(record.requestedSessionId);
         if (record.confirmedSessionId) rememberVerifiedExit(record.confirmedSessionId);
       } else {
-        // PID is live but generation probing failed: keep the durable record and
-        // fail closed instead of manufacturing verified-exit evidence.
-        logger.debug(`[RUNNER RUN] Could not verify process generation for PID ${pid}; keeping persisted resume quarantine`);
+        // Retain ownership when PID probing or native disposal cannot be verified.
+        // Root exit alone does not prove that session resources were disposed.
+        logger.debug(`[RUNNER RUN] Could not verify resource cleanup for PID ${pid}; keeping persisted resume quarantine`);
       }
     }
     persistResumeProcesses();
@@ -503,6 +509,7 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
         const persisted = persistedResumeProcesses.get(pid);
         if (persisted) {
           persisted.confirmedSessionId = sessionId;
+          persisted.requiresCleanupReceipt = sessionMetadata.flavor === 'omp';
           persistResumeProcesses();
         } else {
           const startMarker = getProcessStartMarker(pid);
@@ -514,6 +521,7 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
               requestedSessionId: reqId,
               confirmedSessionId: sessionId,
               processStartMarker: startMarker,
+              requiresCleanupReceipt: sessionMetadata.flavor === 'omp',
             });
             persistResumeProcesses();
           }
@@ -540,7 +548,7 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
         // terminal-launched children report `startedBy: 'terminal'`, so
         // anything claiming `'runner'` here must be the second case and
         // should be ignored + terminated instead of silently promoted.
-        if (sessionMetadata.startedBy === 'runner') {
+        if (sessionMetadata.startedBy === 'runner' && sessionMetadata.flavor !== 'omp') {
           logger.debug(
             `[RUNNER RUN] Ignoring late webhook from orphaned runner-spawned PID ${pid} (session ${sessionId}). Terminating child.`
           );
@@ -565,6 +573,18 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
         invalidateVerifiedExit(sessionId);
         invalidateVerifiedExit(`PID-${pid}`);
         pidToTrackedSession.set(pid, trackedSession);
+        const processStartMarker = getProcessStartMarker(pid);
+        if (processStartMarker) {
+          persistedResumeProcesses.set(pid, {
+            requestedSessionId: sessionId,
+            confirmedSessionId: sessionId,
+            pid,
+            processStartMarker,
+            requiresCleanupReceipt: sessionMetadata.flavor === 'omp'
+          });
+          pidToConfirmedSessionId.set(pid, sessionId);
+          persistResumeProcesses();
+        }
         logger.debug(`[RUNNER RUN] Registered externally-started session ${sessionId}`);
       }
     };
@@ -855,7 +875,8 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
             persistedResumeProcesses.set(pid, {
               requestedSessionId: trackedSession.requestedHappySessionId,
               pid,
-              processStartMarker
+              processStartMarker,
+              requiresCleanupReceipt: agent === 'omp',
             });
             persistResumeProcesses();
           }
@@ -901,18 +922,12 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
             pidToAwaiter.delete(pid);
             pidToErrorAwaiter.delete(pid);
 
-            // Remove the tracked session entry so a late-arriving webhook
-            // from this orphaned PID cannot be silently promoted into a
-            // ghost session by onHappySessionWebhook().
-            pidToTrackedSession.delete(pid);
-
-            // Terminate the entire process tree (wrapper + agent
-            // grandchildren).  Using killProcessByChildProcess instead of
-            // a bare SIGTERM ensures that detached grandchild processes
-            // (the actual claude/codex agent) are also reaped, and that
-            // SIGTERM → SIGKILL escalation kicks in if needed.
-            if (happyProcess) {
-              void killProcessByChildProcess(happyProcess);
+            // Native OMP can own a shared broker beneath its process tree.
+            // Keep its ownership and accept its late webhook so an explicit
+            // native cleanup can still complete; never blindly /T this tree.
+            if (agent !== 'omp') {
+              pidToTrackedSession.delete(pid);
+              if (happyProcess) void killProcessByChildProcess(happyProcess);
             }
 
             // If this was a worktree session, the worktree can only be
@@ -1006,6 +1021,22 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
         if (session.happySessionId === sessionId ||
           session.requestedHappySessionId === sessionId ||
           (sessionId.startsWith('PID-') && pid === parseInt(sessionId.replace('PID-', '')))) {
+          const ownership = persistedResumeProcesses.get(pid);
+          const nativeSession = ownership?.requiresCleanupReceipt
+            || session.happySessionMetadataFromLocalWebhook?.flavor === 'omp';
+          if (nativeSession && !ownership?.cleanupVerified) {
+            logger.debug(`[RUNNER RUN] Refusing to terminate OMP ${sessionId} before native cleanup acknowledgement`);
+            return 'still_alive';
+          }
+          if (ownership) {
+            const marker = getProcessStartMarker(pid);
+            if (marker === null && isProcessAlive(pid)) return 'still_alive';
+            if (marker !== ownership.processStartMarker) {
+              onChildExited(pid);
+              alreadyGoneAny = true;
+              continue;
+            }
+          }
 
           if (session.startedBy === 'runner' && session.childProcess) {
             try {
@@ -1069,10 +1100,19 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
         const requestedSessionId = pidToRequestedSessionId.get(pid) ?? persisted?.requestedSessionId;
         const confirmedSessionId = pidToConfirmedSessionId.get(pid) ?? persisted?.confirmedSessionId;
         if (requestedSessionId !== sessionId && confirmedSessionId !== sessionId) continue;
+        if (persisted?.requiresCleanupReceipt && !persisted.cleanupVerified) {
+          logger.debug(`[RUNNER RUN] Native cleanup was not verified for ${sessionId}; retaining ownership`);
+          return 'still_alive';
+        }
         if (isProcessAlive(pid)) {
           if (!persisted) return 'still_alive';
           const currentMarker = getProcessStartMarker(pid);
-          if (currentMarker === null) return 'still_alive';
+          if (currentMarker === null) {
+            if (isProcessAlive(pid)) return 'still_alive';
+            onChildExited(pid);
+            alreadyGoneAny = true;
+            continue;
+          }
           if (currentMarker !== persisted.processStartMarker) {
             persistedResumeProcesses.delete(pid);
             persistResumeProcesses();
@@ -1116,6 +1156,20 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
     // Handle child process exit
     const onChildExited = (pid: number) => {
       const session = pidToTrackedSession.get(pid);
+      const ownership = persistedResumeProcesses.get(pid);
+      if ((ownership?.requiresCleanupReceipt || session?.happySessionMetadataFromLocalWebhook?.flavor === 'omp')
+        && !ownership?.cleanupVerified) {
+        logger.debug(`[RUNNER RUN] Wrapper ${pid} exited without native cleanup proof; retaining session ownership`);
+        const id = ownership?.requestedSessionId ?? session?.requestedHappySessionId ?? session?.happySessionId;
+        if (id) spawnSession.recoverChild(id, {
+          type: 'error',
+          errorMessage: 'Previous OMP session exited without verified resource cleanup; cannot start another instance'
+        });
+        pidToTrackedSession.delete(pid);
+        pidToAwaiter.delete(pid);
+        pidToErrorAwaiter.delete(pid);
+        return;
+      }
       const requestedSessionId = session?.requestedHappySessionId ?? pidToRequestedSessionId.get(pid);
       if (requestedSessionId) rememberVerifiedExit(requestedSessionId);
       const confirmedSessionId = session?.happySessionId ?? pidToConfirmedSessionId.get(pid);
@@ -1141,6 +1195,17 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
       stopSession,
       spawnSession,
       requestShutdown: () => requestShutdown('hapi-cli'),
+      onSessionCleanupVerified: (sessionId, pid, processStartMarker) => {
+        const ownership = persistedResumeProcesses.get(pid);
+        if (!ownership
+          || (ownership.requestedSessionId !== sessionId && ownership.confirmedSessionId !== sessionId)
+          || ownership.processStartMarker !== processStartMarker
+          || getProcessStartMarker(pid) !== processStartMarker) return false;
+        ownership.cleanupVerified = true;
+        if (persistResumeProcesses()) return true;
+        ownership.cleanupVerified = false;
+        return false;
+      },
       onHappySessionWebhook
     });
 
@@ -1636,10 +1701,13 @@ export function buildCliArgs(
   }
   const startingMode = options.startingMode || 'remote';
   args.push('--hapi-starting-mode', startingMode, '--started-by', 'runner');
-  // Codex, Cursor ACP, OpenCode, Pi native resume, and Claude message-level
-  // forks reuse the original HAPI row via --existing-session-id.
+  // Codex, Cursor ACP, OpenCode, Pi native resume, OMP, and Claude message-level
+  // forks reuse the original HAPI row via --existing-session-id. Without it the
+  // child bootstraps a fresh hub row, so an archived-session reopen lands on a
+  // different session id and the hub has to merge two rows (and the runner
+  // loses same-row spawn dedupe and stop attribution).
   if (agent === 'codex' || agent === 'cursor' || agent === 'pi'
-      || agent === 'opencode'
+      || agent === 'opencode' || agent === 'omp'
       || (agentCommand === 'claude' && options.forkSession)) {
     const existingSessionId = options.existingSessionId ?? options.sessionId;
     if (existingSessionId) {

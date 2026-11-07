@@ -255,6 +255,7 @@ export class ApiSessionClient extends EventEmitter {
     private backfillInFlight: Promise<void> | null = null
     private needsBackfill = false
     private hasConnectedOnce = false
+    private replaySessionReadyOnReconnect = false
     readonly rpcHandlerManager: RpcHandlerManager
     private readonly terminalManager: TerminalManager
     private agentTerminalResize: ((cols: number, rows: number) => void) | null = null
@@ -364,6 +365,9 @@ export class ApiSessionClient extends EventEmitter {
                 time: Date.now(),
                 thinking: false
             })
+            if (this.replaySessionReadyOnReconnect) {
+                this.emitSessionReady({ replayOnReconnect: true })
+            }
         })
 
         this.socket.on('rpc-request', async (data: { method: string; params: string }, callback: (response: string) => void) => {
@@ -1147,14 +1151,21 @@ export class ApiSessionClient extends EventEmitter {
         })
     }
 
-    /** Hub waits for this before mergeSessions on Cursor ACP reopen (tiann/hapi#939). */
-    emitSessionReady(): void {
+    /** Announces native startup readiness independently of the idle chat event. */
+    emitSessionReady(options?: { replayOnReconnect?: boolean }): void {
+        const replayOnReconnect = options?.replayOnReconnect === true
+        this.replaySessionReadyOnReconnect = replayOnReconnect
         this.emitOrQueue(() => {
+            if (replayOnReconnect && !this.replaySessionReadyOnReconnect) return
             this.socket.emit('session-ready', {
                 sid: this.sessionId,
                 time: Date.now()
             })
         }, 'droppable')
+    }
+
+    clearSessionReady(): void {
+        this.replaySessionReadyOnReconnect = false
     }
 
     emitMessagesConsumed(localIds: string[], options?: { clearQueuedThinkingGrace?: boolean }): void {

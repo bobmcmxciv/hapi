@@ -28,13 +28,14 @@ import { SyncEngine } from './syncEngine'
  * (CLI resume re-stamps `metadata.cursorSessionId`).
  */
 describe('SyncEngine.handleRealtimeEvent dedup-on-metadata-change', () => {
-    function makeEngine(): { engine: SyncEngine; cache: SessionCache; dedupCalls: string[] } {
+    function makeEngine(): { engine: SyncEngine; cache: SessionCache; dedupCalls: string[]; events: SyncEvent[] } {
         const store = new Store(':memory:')
+        const events: SyncEvent[] = []
         const engine = new SyncEngine(
             store,
             {} as never,
             new RpcRegistry(),
-            { broadcast() {} } as never
+            { broadcast(event: SyncEvent) { events.push(event) } } as never
         )
         const cache = (engine as unknown as { sessionCache: SessionCache }).sessionCache
         const dedupCalls: string[] = []
@@ -46,7 +47,7 @@ describe('SyncEngine.handleRealtimeEvent dedup-on-metadata-change', () => {
             // store fixtures and is covered by sessionCache tests.
             void originalDedup
         }
-        return { engine, cache, dedupCalls }
+        return { engine, cache, dedupCalls, events }
     }
 
     it('triggers dedup when a structured metadata patch changes the agent session id', () => {
@@ -101,6 +102,27 @@ describe('SyncEngine.handleRealtimeEvent dedup-on-metadata-change', () => {
         engine.handleRealtimeEvent(event)
 
         expect(dedupCalls).toEqual([])
+    })
+
+    it('publishes accepted cached todos instead of forwarding a stale input snapshot', () => {
+        const { engine, cache, events } = makeEngine()
+        const created = cache.getOrCreateSession('omp-cached-todos', { path: '/tmp', host: 'h' }, null, 'default')
+        const todos = [{ content: 'Latest OMP task', status: 'in_progress' as const, priority: 'medium' as const, id: '1' }]
+        engine.handleRealtimeEvent({
+            type: 'session-updated', sessionId: created.id,
+            data: { todos: { version: 100, value: todos } } satisfies SessionPatch
+        })
+        events.length = 0
+        engine.handleRealtimeEvent({
+            type: 'session-updated', sessionId: created.id,
+            data: { todos: { version: 99, value: [] }, thinking: true } satisfies SessionPatch
+        })
+        expect(cache.getSession(created.id)?.todos).toEqual(todos)
+        expect(cache.getSession(created.id)?.thinking).toBe(true)
+        expect(events).toEqual([expect.objectContaining({
+            type: 'session-updated', sessionId: created.id,
+            data: { todos: { version: 100, value: todos }, thinking: true }
+        })])
     })
 
     it('triggers dedup on the legacy refresh fallback path (no patch data)', () => {

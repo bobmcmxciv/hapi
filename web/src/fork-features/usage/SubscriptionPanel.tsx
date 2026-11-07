@@ -110,6 +110,7 @@ const SEVERITY_TEXT_CLASS: Record<SubscriptionWindow['severity'], string> = {
 const PROVIDER_LABELS: Record<string, string> = {
     anthropic: 'Claude',
     antigravity: 'Antigravity',
+    devin: 'Devin',
     cx2cc: 'cx2cc',
     deepseek: 'DeepSeek',
     kimi: 'Kimi',

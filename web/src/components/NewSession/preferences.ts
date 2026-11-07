@@ -146,7 +146,7 @@ export function resolvePreferredLaunchSettings(
     const modelValues = agent === 'claude' && Array.isArray(dynamicClaudeModels)
         ? [...staticModelValues, ...dynamicClaudeModels]
         : staticModelValues
-    const model = modelValues.length > 0 && agent !== 'codex' && agent !== 'copilot' && !claudeCatalogPending
+    const model = modelValues.length > 0 && agent !== 'codex' && agent !== 'copilot' && agent !== 'agy' && !claudeCatalogPending
         ? resolvePreferredOptionValue(preferredModel, modelValues, 'auto')
         : preferredModel
     const fallbackEffort = preferred?.effort ?? machineDefaults?.effort ?? 'auto'

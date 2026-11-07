@@ -69,35 +69,89 @@ export function isHapiRunnerProcess(pid: number): boolean {
   return isRunnerCommand(result.stdout?.toString() ?? '');
 }
 
-function killProcessWindows(pid: number, force: boolean): boolean {
-  if (!isProcessAlive(pid)) {
-    return true;
-  }
-
-  const args = ['/T', '/PID', pid.toString()];
-  if (force) {
-    args.unshift('/F');
-  }
-  try {
-    const result = spawn.sync('taskkill', args, {
-      stdio: 'pipe',
-      windowsHide: true
-    });
-    if (result.error) {
-      return false;
+async function killProcessWindows(pid: number, force: boolean): Promise<boolean> {
+  // Keep OS handles for the observed generations: a disappearing root or a
+  // recycled PID is not evidence that its original descendants have exited.
+  const script = `
+$ErrorActionPreference = 'Stop'
+$owned = [Collections.Generic.List[Diagnostics.Process]]::new()
+try {
+    $root = [Diagnostics.Process]::GetProcessById(${pid})
+    $null = $root.Handle
+    $rootStart = $root.StartTime.ToUniversalTime().Ticks
+    $owned.Add($root)
+    $parents = [Collections.Generic.HashSet[int]]::new()
+    $null = $parents.Add(${pid})
+    $parentStarts = [Collections.Generic.Dictionary[int,long]]::new()
+    $parentStarts.Add(${pid}, $rootStart)
+    $all = @(Get-CimInstance Win32_Process | Select-Object ProcessId, ParentProcessId)
+    do {
+        $added = $false
+        foreach ($entry in $all) {
+            $id = [int]$entry.ProcessId
+            if ($parents.Contains([int]$entry.ParentProcessId) -and -not $parents.Contains($id)) {
+                try {
+                    $child = [Diagnostics.Process]::GetProcessById($id)
+                    $null = $child.Handle
+                    $childStart = $child.StartTime.ToUniversalTime().Ticks
+                    if ($childStart -ge $parentStarts[[int]$entry.ParentProcessId]) {
+                        $owned.Add($child)
+                        $null = $parents.Add($id)
+                        $parentStarts.Add($id, $childStart)
+                        $added = $true
+                    } else { $child.Dispose() }
+                } catch [ArgumentException] { }
+            }
+        }
+    } while ($added)
+    try { & taskkill.exe ${force ? '/F ' : ''}/T /PID ${pid} *> $null } catch { }
+    $deadline = [DateTime]::UtcNow.AddMilliseconds(${force ? 2000 : 1000})
+    do {
+        $alive = @($owned | Where-Object { -not $_.HasExited })
+        if ($alive.Count -eq 0) { break }
+        Start-Sleep -Milliseconds 25
+    } while ([DateTime]::UtcNow -lt $deadline)
+    if ($alive.Count -gt 0) {
+        for ($i = $owned.Count - 1; $i -ge 0; $i--) {
+            if (-not $owned[$i].HasExited) {
+                try { $owned[$i].Kill() } catch { }
+            }
+        }
+        $deadline = [DateTime]::UtcNow.AddSeconds(2)
+        do {
+            $alive = @($owned | Where-Object { -not $_.HasExited })
+            if ($alive.Count -eq 0) { break }
+            Start-Sleep -Milliseconds 25
+        } while ([DateTime]::UtcNow -lt $deadline)
     }
-
-    if (result.status === 0) {
-      return true;
-    }
-
-    // Process teardown on Windows is racy: by the time taskkill runs, the target
-    // may already be gone, which commonly surfaces as non-zero exit codes
-    // (including 128 in some shells). Treat this as success if PID is no longer alive.
-    return !isProcessAlive(pid);
-  } catch {
-    return false;
-  }
+    if ($alive.Count -eq 0) { Write-Output 'HAPI_TREE_EXITED' }
+} catch {
+    [Console]::Error.WriteLine($_.Exception.Message)
+} finally {
+    foreach ($entry in $owned) { $entry.Dispose() }
+}`;
+  const { promise, resolve } = Promise.withResolvers<boolean>();
+  const child = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
+    stdio: ['ignore', 'pipe', 'pipe'],
+    windowsHide: true
+  });
+  let output = '';
+  let settled = false;
+  const finish = (success: boolean) => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(timer);
+    resolve(success);
+  };
+  const timer = setTimeout(() => {
+    child.kill('SIGKILL');
+    finish(false);
+  }, 15_000);
+  child.stdout?.on('data', (chunk: Buffer) => { output += chunk.toString(); });
+  child.stderr?.resume();
+  child.once('error', () => finish(false));
+  child.once('close', (code) => finish(code === 0 && output.trim() === 'HAPI_TREE_EXITED'));
+  return promise;
 }
 
 export async function killProcess(pid: number, force: boolean = false): Promise<boolean> {
@@ -168,10 +222,10 @@ async function killProcessTree(pid: number, force: boolean): Promise<boolean> {
   return pids.every((candidate) => !isProcessAlive(candidate));
 }
 
-/** Kill a PID and all descendants, verifying the complete tree is gone. */
+/** Kill a PID and its observed descendants, awaiting OS-confirmed termination. */
 export async function killProcessTreeByPid(pid: number, force: boolean = false): Promise<boolean> {
   if (!Number.isFinite(pid) || pid <= 0) return false;
-  if (isWindows()) return killProcess(pid, force);
+  if (isWindows()) return killProcessWindows(pid, force);
   return killProcessTree(pid, force);
 }
 

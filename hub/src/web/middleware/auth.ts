@@ -1,7 +1,7 @@
 import type { MiddlewareHandler } from 'hono'
 import { z } from 'zod'
 import { jwtVerify } from 'jose'
-
+import { parseBlobDownloadRoutePath, verifyBlobDownloadTicket } from '../../blobs'
 export type WebAppEnv = {
     Variables: {
         userId: number
@@ -32,6 +32,27 @@ export function createAuthMiddleware(jwtSecret: Uint8Array): MiddlewareHandler<W
         const tokenFromHeader = authorization?.startsWith('Bearer ') ? authorization.slice('Bearer '.length) : undefined
         const tokenFromQuery = path === '/api/events' ? c.req.query().token : undefined
         const token = tokenFromHeader ?? tokenFromQuery
+
+        if (!token && (c.req.method === 'GET' || c.req.method === 'HEAD')) {
+            const ticket = c.req.query('ticket')
+            const blobRoute = ticket ? parseBlobDownloadRoutePath(path) : null
+            if (ticket && blobRoute) {
+                const verifiedTicket = verifyBlobDownloadTicket(ticket, blobRoute, jwtSecret)
+                if (!verifiedTicket.ok) {
+                    return c.json({
+                        error: verifiedTicket.reason === 'expired' ? 'Download ticket expired' : 'Invalid download ticket',
+                        reason: verifiedTicket.reason === 'expired' ? 'ticket-expired' : 'invalid-ticket'
+                    }, 401)
+                }
+                c.set('userId', verifiedTicket.claims.uid)
+                c.set('namespace', verifiedTicket.claims.ns)
+                if (typeof verifiedTicket.claims.gaid === 'number') {
+                    c.set('deliveryMetadata', { gatewayAccountId: verifiedTicket.claims.gaid })
+                }
+                await next()
+                return
+            }
+        }
 
         if (!token) {
             return c.json({ error: 'Missing authorization token' }, 401)

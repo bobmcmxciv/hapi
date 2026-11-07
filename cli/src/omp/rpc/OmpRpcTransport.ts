@@ -3,6 +3,7 @@ import type { Writable } from 'node:stream';
 import { logger } from '@/ui/logger';
 import { killProcessByChildProcess } from '@/utils/process';
 import { parseOmpInboundLine } from './schemas';
+import { resolveOmpLaunchCommand } from '../utils/config';
 import type {
     OmpCommand,
     OmpCommandType,
@@ -17,7 +18,7 @@ import type {
 
 const DEFAULT_READY_TIMEOUT_MS = 30_000;
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
-const DEFAULT_CLOSE_GRACE_MS = 1_500;
+const DEFAULT_CLOSE_GRACE_MS = 30_000;
 const MAX_STDERR_CHARS = 100_000;
 /** HAPI_OMP_RPC_TRACE=1：把收发的 RPC 帧（message_update 除外）截断后写进 debug 日志，排查协议问题用。 */
 const TRACE_FRAMES = process.env.HAPI_OMP_RPC_TRACE === '1';
@@ -107,7 +108,7 @@ export function buildOmpRpcSpawnOptions(config: OmpRpcSpawnConfig): SpawnOptions
         cwd: config.cwd,
         env: config.env,
         stdio: ['pipe', 'pipe', 'pipe'],
-        shell: process.platform === 'win32',
+        shell: false,
         windowsHide: process.platform === 'win32'
     };
 }
@@ -136,6 +137,11 @@ export class OmpRpcTransport {
     private closePromise: Promise<void> | null = null;
     private writeTail: Promise<void> = Promise.resolve();
     private closeReason: Error | null = null;
+    private processExit: { pid?: number; code: number | null; signal: string | null } | null = null;
+
+    get exitInfo(): { pid?: number; code: number | null; signal: string | null } | null {
+        return this.processExit;
+    }
 
     private constructor(
         config: OmpRpcSpawnConfig,
@@ -169,9 +175,10 @@ export class OmpRpcTransport {
         } = {}
     ): Promise<OmpRpcTransport> {
         const transport = new OmpRpcTransport(config, {
-            spawnProcess: options.dependencies?.spawnProcess ?? ((command, args, spawnOptions) => (
-                spawn(command, args, spawnOptions) as ChildProcessWithoutNullStreams
-            )),
+            spawnProcess: options.dependencies?.spawnProcess ?? ((command, args, spawnOptions) => {
+                const resolved = resolveOmpLaunchCommand(command);
+                return spawn(resolved.command, [...resolved.args, ...args], spawnOptions) as ChildProcessWithoutNullStreams;
+            }),
             killProcess: options.dependencies?.killProcess ?? killProcessByChildProcess
         });
         try {
@@ -288,8 +295,10 @@ export class OmpRpcTransport {
         reason: Error = new OmpRpcStateError('OMP RPC transport closed'),
         graceMs: number = DEFAULT_CLOSE_GRACE_MS
     ): Promise<void> {
-        if (this.stateValue === 'closed') {
-            return Promise.resolve();
+        if (this.stateValue === 'closed' && this.processExit) {
+            return this.processExit.code === 0 && this.processExit.signal === null
+                ? Promise.resolve()
+                : Promise.reject(new OmpRpcStateError(`OMP disposal failed (code=${this.processExit.code}, signal=${this.processExit.signal})${this.stderr ? `: ${this.stderr.trim()}` : ''}`));
         }
         if (this.closePromise) {
             return this.closePromise;
@@ -320,6 +329,7 @@ export class OmpRpcTransport {
         });
 
         this.child.on('close', (code, signal) => {
+            this.processExit = { pid: this.child.pid, code, signal };
             const detail = `OMP RPC process exited (code=${code ?? 'null'}, signal=${signal ?? 'null'})`;
             const reason = new OmpRpcStateError(`${detail}${this.stderr ? `: ${this.stderr.trim()}` : ''}`);
             if (this.stateValue !== 'closing' && this.stateValue !== 'closed') {
@@ -555,7 +565,7 @@ export class OmpRpcTransport {
         logger.debug('[omp-rpc] fatal transport error', error);
         this.settleReady(error);
         this.rejectAll(error);
-        void this.close(error, 0);
+        void this.close(error).catch((closeError) => logger.warn('[omp-rpc] Native cleanup failed', closeError));
     }
 
     private rejectAll(error: Error): void {
@@ -585,12 +595,16 @@ export class OmpRpcTransport {
             // Process may already have closed its stdin.
         }
 
-        const exitedCleanly = await this.waitForExit(graceMs);
-        if (!exitedCleanly && this.stateValue !== 'closed') {
-            await this.dependencies.killProcess(this.child);
-            await this.waitForExit(1_000);
+        // EOF is OMP's disposal protocol: it releases session-owned resources and
+        // flushes its journal before exiting. Never tree-kill here: the detached
+        // launch broker can be our descendant but belongs to other sessions too.
+        if (!await this.waitForExit(graceMs > 0 ? graceMs : DEFAULT_CLOSE_GRACE_MS)) {
+            this.closePromise = null;
+            throw new OmpRpcStateError(`Timed out waiting for OMP native disposal${this.stderr ? `: ${this.stderr.trim()}` : ''}`);
         }
-        this.finishClosed(reason);
+        if (!this.processExit || this.processExit.code !== 0 || this.processExit.signal !== null) {
+            throw new OmpRpcStateError(`OMP native disposal was not confirmed (code=${this.processExit?.code}, signal=${this.processExit?.signal})${this.stderr ? `: ${this.stderr.trim()}` : ''}`);
+        }
     }
 
     private async waitForExit(timeoutMs: number): Promise<boolean> {

@@ -44,12 +44,18 @@ export function containsGatewayMemoryContext(text: string): boolean {
     return stripGatewayMemoryContext(text) !== text.trim()
 }
 
+export type GatewayMemorySessionContext = {
+    host?: string | null
+    path?: string | null
+    machineId?: string | null
+}
+
 export function createGatewayMemoryDelivery(store: MultiUserGatewayStore): {
-    decorateForCli(content: unknown): unknown
+    decorateForCli(content: unknown, sessionContext?: GatewayMemorySessionContext): unknown
     sanitizeMetadata(metadata: unknown): unknown
 } {
     return {
-        decorateForCli(content) {
+        decorateForCli(content, sessionContext) {
             if (!isRecord(content) || content.role !== 'user') return content
             const meta = isRecord(content.meta) ? content.meta : null
             const accountId = typeof meta?.gatewayAccountId === 'number' ? meta.gatewayAccountId : null
@@ -58,9 +64,20 @@ export function createGatewayMemoryDelivery(store: MultiUserGatewayStore): {
             const account = store.getAccount(accountId)
             const memory = account?.memory?.trim()
             if (!account || !memory) return content
+            const runnerHost = typeof sessionContext?.host === 'string' && sessionContext.host.trim()
+                ? sessionContext.host.trim()
+                : null
+            const runnerPath = typeof sessionContext?.path === 'string' && sessionContext.path.trim()
+                ? sessionContext.path.trim()
+                : null
+            const hostAttr = runnerHost ? ` runner_host="${runnerHost.replaceAll('"', '&quot;')}"` : ''
+            const runnerHostLine = runnerHost
+                ? `Current HAPI Runner execution host (local machine running this session): ${runnerHost}${runnerPath ? ` (cwd: ${runnerPath})` : ''}. Do NOT confuse this local runner host with other user-owned or target machines listed below.`
+                : 'Note: Machines listed below are user-declared account context, NOT necessarily the current HAPI Runner execution host.'
             const context = [
-                `${OPEN_TAG} user="${account.username.replaceAll('"', '&quot;')}">`,
-                'This is user-managed context injected by the HAPI gateway. Resolve first-person references using it:',
+                `${OPEN_TAG} user="${account.username.replaceAll('"', '&quot;')}"${hostAttr}>`,
+                'This is user-managed account context injected by the HAPI gateway. Resolve first-person references using it:',
+                runnerHostLine,
                 memory,
                 CLOSE_TAG
             ].join('\n')

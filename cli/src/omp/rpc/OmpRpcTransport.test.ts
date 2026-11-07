@@ -54,6 +54,7 @@ function createFakeProcess(stdinOverride?: Writable): {
     child.stderr = stderr;
     child.kill = vi.fn().mockReturnValue(true);
     Object.defineProperty(child, 'pid', { value: 4242 });
+    stdin.once('finish', () => queueMicrotask(() => child.emit('close', 0, null)));
     return { child, frames };
 }
 
@@ -284,7 +285,7 @@ describe('OmpRpcTransport', () => {
         child.stdout.write('not-json\n');
         await expect(pending).rejects.toBeInstanceOf(OmpRpcProtocolError);
         await vi.waitFor(() => expect(transport.state).toBe('closed'));
-        expect(killProcess).toHaveBeenCalledOnce();
+        expect(killProcess).not.toHaveBeenCalled();
     });
 
     it('rejects a mismatched response command and closes the transport', async () => {
@@ -343,7 +344,8 @@ describe('OmpRpcTransport', () => {
                 expect((outcome.reason as Error).message).toContain('stdin failed');
             }
         }
-        await vi.waitFor(() => expect(transport.state).toBe('closed'));
+        child.emit('close', 0, null);
+        await transport.close();
     });
 
     it('keeps caller cancellation separate from the OMP abort command', async () => {
@@ -406,7 +408,7 @@ describe('OmpRpcTransport', () => {
         expect(transport.state).toBe('closed');
     });
 
-    it('makes close idempotent and escalates only once', async () => {
+    it('makes close idempotent and never kills the shared broker tree', async () => {
         const { child } = createFakeProcess();
         const { dependencies, killProcess } = createDependencies(child);
         const connecting = OmpRpcTransport.connect(
@@ -423,7 +425,8 @@ describe('OmpRpcTransport', () => {
         await Promise.all([first, second]);
 
         expect(transport.state).toBe('closed');
-        expect(killProcess).toHaveBeenCalledOnce();
+        expect(killProcess).not.toHaveBeenCalled();
+        expect(transport.exitInfo).toEqual({ pid: 4242, code: 0, signal: null });
     });
 
     it('fails startup when the ready frame misses its deadline', async () => {
@@ -434,6 +437,24 @@ describe('OmpRpcTransport', () => {
             { cwd: '/workspace' },
             { readyTimeoutMs: 10, dependencies }
         )).rejects.toThrow('Timed out waiting 10ms');
-        expect(killProcess).toHaveBeenCalledOnce();
+        expect(killProcess).not.toHaveBeenCalled();
+    });
+
+    it('does not claim closed when native disposal misses the deadline', async () => {
+        const { child } = createFakeProcess();
+        child.stdin.removeAllListeners('finish');
+        const transport = await connectFake(child);
+        await expect(transport.close(new Error('stop'), 5)).rejects.toThrow('Timed out waiting for OMP native disposal');
+        expect(transport.state).toBe('closing');
+        expect(transport.exitInfo).toBeNull();
+        child.emit('close', 0, null);
+        await expect(transport.close()).resolves.toBeUndefined();
+    });
+
+    it('surfaces a nonzero native exit instead of acknowledging disposal', async () => {
+        const { child } = createFakeProcess();
+        const transport = await connectFake(child);
+        child.emit('close', 1, null);
+        await expect(transport.close()).rejects.toThrow('OMP disposal failed');
     });
 });

@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { resolveOmpLaunchCommand } from '../utils/config';
 import { parseOmpResponseData } from './schemas';
 import {
     OmpRpcRequestError,
@@ -61,10 +62,11 @@ export async function probeOmpVersion(
     command: string = 'omp',
     env?: NodeJS.ProcessEnv
 ): Promise<OmpVersion> {
-    const child = spawn(command, ['--version'], {
+    const resolved = resolveOmpLaunchCommand(command);
+    const child = spawn(resolved.command, [...resolved.args, '--version'], {
         env,
         stdio: ['ignore', 'pipe', 'pipe'],
-        shell: process.platform === 'win32',
+        shell: false,
         windowsHide: process.platform === 'win32'
     });
     child.stdout.setEncoding('utf8');
@@ -168,6 +170,10 @@ export class OmpRpcClient {
 
     get stderrText(): string {
         return this.transport.stderrText;
+    }
+
+    get exitInfo(): OmpRpcTransport['exitInfo'] {
+        return this.transport.exitInfo;
     }
 
     onEvent(listener: (event: OmpInboundEvent) => void): () => void {

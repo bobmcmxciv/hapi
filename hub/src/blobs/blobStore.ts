@@ -92,6 +92,13 @@ export class BlobStorageFullError extends Error {
     }
 }
 
+export class BlobSessionMismatchError extends Error {
+    constructor(readonly ownerSessionId: string, readonly requestedSessionId: string) {
+        super('Blob belongs to another session')
+        this.name = 'BlobSessionMismatchError'
+    }
+}
+
 export type BlobStoreOptions = {
     /** Total bytes of finished blobs kept before the least-recently-used are evicted. */
     maxBytes?: number
@@ -145,6 +152,7 @@ export class BlobStore {
     private readonly locks = new Map<string, Promise<unknown>>()
     private readonly options: ResolvedOptions
     private readonly touched = new Map<string, number>()
+    private readonly readyWaiters = new Map<string, Set<(record: BlobRecord | null) => void>>()
 
     private constructor(readonly dir: string, options: BlobStoreOptions) {
         this.options = { ...DEFAULT_OPTIONS, ...options }
@@ -177,6 +185,51 @@ export class BlobStore {
     stat(kind: GeneratedBlobKind, id: string): BlobRecord | null {
         const record = this.records.get(blobKey(kind, id))
         return record ? { ...record } : null
+    }
+
+    /**
+     * Wait up to `timeoutMs` for an uploading blob to become `ready`.
+     * Resolves immediately if already `ready`, when the final byte lands, or
+     * with the current record (or `null` if discarded) when `timeoutMs` expires.
+     */
+    async waitForReady(kind: GeneratedBlobKind, id: string, timeoutMs: number): Promise<BlobRecord | null> {
+        const current = this.stat(kind, id)
+        if (!current || current.state === 'ready' || timeoutMs <= 0) {
+            return current
+        }
+        const key = blobKey(kind, id)
+        const { promise, resolve } = Promise.withResolvers<BlobRecord | null>()
+        let waiters = this.readyWaiters.get(key)
+        if (!waiters) {
+            waiters = new Set()
+            this.readyWaiters.set(key, waiters)
+        }
+        let timer: ReturnType<typeof setTimeout> | null = null
+        const onDone = (record: BlobRecord | null) => {
+            if (timer) {
+                clearTimeout(timer)
+                timer = null
+            }
+            waiters?.delete(onDone)
+            if (waiters && waiters.size === 0) {
+                this.readyWaiters.delete(key)
+            }
+            resolve(record)
+        }
+        waiters.add(onDone)
+        timer = setTimeout(() => {
+            onDone(this.stat(kind, id))
+        }, timeoutMs)
+        return await promise
+    }
+
+    private notifyReadyWaiters(key: string, record: BlobRecord | null): void {
+        const waiters = this.readyWaiters.get(key)
+        if (!waiters) return
+        this.readyWaiters.delete(key)
+        for (const waiter of [...waiters]) {
+            waiter(record ? { ...record } : null)
+        }
     }
 
     list(): BlobRecord[] {
@@ -217,6 +270,9 @@ export class BlobStore {
         return await this.withLock(blobKey(kind, id), async () => {
             const key = blobKey(kind, id)
             let record = this.records.get(key)
+            if (record && record.sessionId !== null && meta.sessionId !== null && record.sessionId !== meta.sessionId) {
+                throw new BlobSessionMismatchError(record.sessionId, meta.sessionId)
+            }
             if (record?.state === 'ready') {
                 return { ...record }
             }
@@ -296,6 +352,7 @@ export class BlobStore {
             }
             await this.writeMeta(record)
             if (record.state === 'ready') {
+                this.notifyReadyWaiters(key, record)
                 await this.prune()
             }
             return { ...record }
@@ -358,8 +415,10 @@ export class BlobStore {
     }
 
     private async discard(kind: GeneratedBlobKind, id: string): Promise<void> {
-        this.records.delete(blobKey(kind, id))
-        this.touched.delete(blobKey(kind, id))
+        const key = blobKey(kind, id)
+        this.records.delete(key)
+        this.touched.delete(key)
+        this.notifyReadyWaiters(key, null)
         await rm(this.partPath(kind, id), { force: true }).catch(() => {})
         await rm(this.finalPath(kind, id), { force: true }).catch(() => {})
         await rm(this.metaPath(kind, id), { force: true }).catch(() => {})

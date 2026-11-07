@@ -164,7 +164,8 @@ async function readFileHeader(path: string, size: number): Promise<Buffer> {
  * *replacement* process keep serving snapshots the *previous* one wrote.
  */
 function getSentFilesDir(): string {
-    return join(tmpdir(), SENT_FILES_DIR_NAME, SENT_FILES_STORE_VERSION)
+    const override = process.env.HAPI_SENT_FILES_DIR?.trim()
+    return override || join(tmpdir(), SENT_FILES_DIR_NAME, SENT_FILES_STORE_VERSION)
 }
 
 /** Snapshot ids reach the filesystem, so refuse anything that is not an opaque

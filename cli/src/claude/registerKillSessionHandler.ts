@@ -22,6 +22,8 @@ interface KillSessionResponse {
 export interface KillSessionLifecycle {
     cleanupAndExit: () => Promise<void>;
     setArchiveReason?: (reason: string) => void;
+    prepareShutdown?: () => Promise<void>;
+    releaseShutdownAck?: () => void;
 }
 
 export function registerKillSessionHandler(
@@ -42,14 +44,18 @@ export function registerKillSessionHandler(
         // those archives now stay labelled `'Hub restart'` (the new default).
         lifecycle.setArchiveReason?.('User terminated');
 
-        // This will start the cleanup process
-        void lifecycle.cleanupAndExit();
-
-        // We should still be able to respond to the client, though they
-        // should optimistically assume the session is dead.
+        // Preparation must leave the RPC socket open. Native disposal and the
+        // metadata durability barrier finish before success can be reported.
+        await lifecycle.prepareShutdown?.();
+        setImmediate(() => {
+            lifecycle.releaseShutdownAck?.();
+            void lifecycle.cleanupAndExit();
+        });
         return {
             success: true,
-            message: 'Killing hapi CLI process'
+            message: lifecycle.prepareShutdown
+                ? 'Session cleanup confirmed; CLI exit scheduled'
+                : 'Session shutdown scheduled'
         };
     });
 }

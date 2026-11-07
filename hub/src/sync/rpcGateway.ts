@@ -24,6 +24,10 @@ import type {
     GeneratedBlobChunkResponse,
     GeneratedFileResponse,
     GeneratedImageResponse,
+    PrepareP2pFileTransferRpcRequest,
+    PrepareP2pFileTransferRpcResponse,
+    SignalP2pFileTransferRpcRequest,
+    SignalP2pFileTransferRpcResponse,
     CopilotModelsResponse,
     GrokModelsResponse,
     GrokReasoningEffortResponse,
@@ -94,6 +98,8 @@ export type RpcWriteFileResponse = FileWriteResponse
 export type RpcGeneratedImageResponse = GeneratedImageResponse
 export type RpcGeneratedFileResponse = GeneratedFileResponse
 export type RpcGeneratedBlobChunkResponse = GeneratedBlobChunkResponse
+export type RpcPrepareP2pFileTransferResponse = PrepareP2pFileTransferRpcResponse
+export type RpcSignalP2pFileTransferResponse = SignalP2pFileTransferRpcResponse
 export type RpcUploadFileResponse = UploadFileResponse
 export type RpcDeleteUploadResponse = DeleteUploadResponse
 export type RpcDirectoryEntry = DirectoryEntry
@@ -182,7 +188,13 @@ export class RpcGateway {
     }
 
     async killSession(sessionId: string): Promise<void> {
-        await this.sessionRpc(sessionId, RPC_METHODS.KillSession, {})
+        const result = await this.sessionRpc(sessionId, RPC_METHODS.KillSession, {})
+        if (result && typeof result === 'object' && 'success' in result && result.success === true) return
+        if (result && typeof result === 'object') {
+            if ('error' in result && typeof result.error === 'string') throw new Error(result.error)
+            if ('message' in result && typeof result.message === 'string') throw new Error(result.message)
+        }
+        throw new Error('Session cleanup was not acknowledged')
     }
 
     async stopRunnerSession(machineId: string, sessionId: string): Promise<'stopped' | 'already_gone' | 'still_alive'> {
@@ -387,6 +399,32 @@ export class RpcGateway {
             request,
             timeoutMs
         ) as RpcGeneratedBlobChunkResponse
+    }
+
+    async prepareP2pFileTransfer(
+        sessionId: string,
+        request: PrepareP2pFileTransferRpcRequest,
+        timeoutMs: number = 8_000
+    ): Promise<RpcPrepareP2pFileTransferResponse> {
+        return await this.sessionRpc(
+            sessionId,
+            RPC_METHODS.PrepareP2pFileTransfer,
+            request,
+            timeoutMs
+        ) as RpcPrepareP2pFileTransferResponse
+    }
+
+    async signalP2pFileTransfer(
+        sessionId: string,
+        request: SignalP2pFileTransferRpcRequest,
+        timeoutMs: number = 8_000
+    ): Promise<RpcSignalP2pFileTransferResponse> {
+        return await this.sessionRpc(
+            sessionId,
+            RPC_METHODS.SignalP2pFileTransfer,
+            request,
+            timeoutMs
+        ) as RpcSignalP2pFileTransferResponse
     }
 
     async listDirectory(sessionId: string, path: string): Promise<RpcListDirectoryResponse> {

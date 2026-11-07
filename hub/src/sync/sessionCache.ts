@@ -409,7 +409,7 @@ export class SessionCache {
         if (patch.permissionMode !== undefined) session.permissionMode = patch.permissionMode
         if (patch.collaborationMode !== undefined) session.collaborationMode = patch.collaborationMode
         if (patch.backgroundTaskCount !== undefined) session.backgroundTaskCount = patch.backgroundTaskCount
-        if (patch.todos !== undefined) {
+        if (patch.todos !== undefined && patch.todos.version >= (session.todosUpdatedAt ?? 0)) {
             session.todos = patch.todos.value
             session.todosUpdatedAt = patch.todos.version
         }
@@ -451,7 +451,10 @@ export class SessionCache {
 
         const wasActive = session.active
         const wasThinking = session.thinking
-        if (!this.resumingSessionIds.has(session.id) && (session.metadata?.lifecycleState === 'archived' || session.metadata?.archivedAt != null)) {
+        // lifecycleState is written by the CLI before cleanup completes (notably
+        // /clear). Keep accepting liveness until the hub commits archivedAt after
+        // verified exit; otherwise a live clear source appears safe to replace.
+        if (!this.resumingSessionIds.has(session.id) && session.metadata?.archivedAt != null) {
             return
         }
         const previousActiveTurnStartedAt = session.activeTurnStartedAt
@@ -869,18 +872,11 @@ export class SessionCache {
     }
 
     /**
-     * tiann/hapi#916: hub-side write of the archive-metadata fields normally
-     * authored by the CLI's `archiveAndClose`. Called by `syncEngine.archiveSession`
-     * when the kill-RPC fails because the CLI is unreachable (e.g. the
-     * hub-restart cascade already killed it). Without this, the route would
-     * either 500 (pre-fix) or silently return ok=true while leaving
-     * `lifecycleState=running` on disk — both confuse the operator.
-     *
-     * Idempotent: if `lifecycleState` is already `archived` we return without
-     * touching the row to avoid resetting `lifecycleStateSince`. Best-effort:
-     * if every retry hits `version-mismatch` (genuine contention) the original
-     * `archiveSession` flow still marks the session inactive in cache via
-     * `handleSessionEnd`, just without flipping the persisted lifecycle.
+     * Persist archive provenance when the session RPC target was missing.
+     * The caller MUST first obtain runner-side cleanup verification; missing
+     * sockets or inactive cache entries alone are not process-exit evidence.
+     * Preserve the original timestamp/provenance on repeated archive calls.
+     * Persistence errors and exhausted version retries surface to the caller.
      */
     markSessionArchivedFromHub(sessionId: string, reason: string): void {
         for (let attempt = 0; attempt < METADATA_RETRY_ATTEMPTS; attempt += 1) {

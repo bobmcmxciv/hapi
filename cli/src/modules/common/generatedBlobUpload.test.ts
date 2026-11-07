@@ -274,4 +274,76 @@ describe('scheduleGeneratedBlobUpload', () => {
         expect(await b).toBe('ready')
         expect(order).toEqual(['a', 'b'])
     })
+
+    it('lets a small single-chunk blob bypass an in-flight multi-chunk upload via the bounded fast lane', async () => {
+        const finishedOrder: string[] = []
+        const largePausedAtSecondChunk = Promise.withResolvers<void>()
+        const largeSecondChunkGate = Promise.withResolvers<void>()
+        const largeBytes = payload(2500)
+        const smallBytes = payload(400)
+        const sources: Record<string, GeneratedBlobSource> = {
+            large: {
+                size: largeBytes.length,
+                mimeType: 'application/octet-stream',
+                fileName: 'large.bin',
+                read: async (offset, length) => {
+                    if (offset > 0) {
+                        largePausedAtSecondChunk.resolve()
+                        await largeSecondChunkGate.promise
+                    }
+                    return new Uint8Array(largeBytes.subarray(offset, offset + length))
+                },
+                sha256: async () => createHash('sha256').update(largeBytes).digest('hex')
+            },
+            small: sourceFor(smallBytes)
+        }
+
+        const uploadedSizes = new Map<string, number>()
+        registerGeneratedBlobSource('file', {
+            open: async (id) => sources[id] ?? null,
+            markUploaded: async (id) => {
+                finishedOrder.push(id)
+            }
+        })
+
+        configureGeneratedBlobUploader({
+            ...fastConfig({
+                chunkBytes: 1000,
+                fetch: async (input, init) => {
+                    const url = new URL(String(input))
+                    const id = url.pathname.split('/').at(-1)!
+                    if (init?.method === 'GET') {
+                        return new Response(JSON.stringify({
+                            success: true,
+                            state: 'missing',
+                            received: 0,
+                            size: null
+                        }), { status: 200, headers: { 'content-type': 'application/json' } })
+                    }
+                    const body = init?.body as Uint8Array
+                    const prev = uploadedSizes.get(id) ?? 0
+                    const next = prev + body.byteLength
+                    uploadedSizes.set(id, next)
+                    const total = Number((init?.headers as Record<string, string>)['x-blob-size'])
+                    return new Response(JSON.stringify({
+                        success: true,
+                        state: next >= total ? 'ready' : 'uploading',
+                        received: next,
+                        size: total
+                    }), { status: 200, headers: { 'content-type': 'application/json' } })
+                }
+            })
+        })
+
+        const largePromise = scheduleGeneratedBlobUpload('file', 'large')
+        await largePausedAtSecondChunk.promise
+        const smallPromise = scheduleGeneratedBlobUpload('file', 'small')
+
+        expect(await smallPromise).toBe('ready')
+        expect(finishedOrder).toEqual(['small'])
+
+        largeSecondChunkGate.resolve()
+        expect(await largePromise).toBe('ready')
+        expect(finishedOrder).toEqual(['small', 'large'])
+    })
 })

@@ -918,6 +918,9 @@ function SessionItem(props: {
     const [forkError, setForkError] = useState<string | null>(null)
 
     const handleReopen = async () => {
+        // Server serializes/dedupes per-session lifecycle ops, but don't even
+        // fire a second request while one is in flight.
+        if (isPending) return
         setReopenError(null)
         try {
             const result = await reopenSession()
@@ -929,6 +932,10 @@ function SessionItem(props: {
                     result.sessionId,
                     () => onSelect(result.sessionId),
                 )
+            } else {
+                // Native OMP resumes keep the HAPI ID. Open it only after
+                // the server's native-readiness barrier has succeeded.
+                onSelect(s.id)
             }
         } catch (error) {
             setReopenError(formatReopenError(error))

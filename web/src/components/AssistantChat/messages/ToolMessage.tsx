@@ -22,6 +22,13 @@ import { UserBubbleContent, getUserBubbleClassName, shouldShowMessageStatus } fr
 import { ImagePreview } from '@/components/ImagePreview'
 import { generatedInlineMediaLabel, isInlineVideoMimeType } from '@/lib/generatedInlineMedia'
 
+import {
+    acquireSaveTargetInUserGesture,
+    formatP2pRouteLabel,
+    runP2pDirectFileDownload,
+    type AcquiredSaveTarget,
+    type P2pDownloadStatus
+} from '@/lib/p2pFileDownload'
 function isToolCallBlock(value: unknown): value is ToolCallBlock {
     if (!isObject(value)) return false
     if (value.kind !== 'tool-call') return false
@@ -217,36 +224,264 @@ function downloadGeneratedFile(fileName: string, blob: Blob): void {
     window.setTimeout(() => URL.revokeObjectURL(url), 60_000)
 }
 
+function triggerNativeFileDownload(url: string, fileName: string): void {
+    const anchor = document.createElement('a')
+    anchor.href = url
+    anchor.download = fileName
+    anchor.rel = 'noopener'
+    document.body.appendChild(anchor)
+    anchor.click()
+    anchor.remove()
+}
+
+function formatP2pStatusLine(status: P2pDownloadStatus): string {
+    const speed = status.speedBytesPerSec > 0
+        ? ` · ${formatFileSize(status.speedBytesPerSec)}/s`
+        : ''
+    const progressBytes = status.totalBytes !== null && status.totalBytes > 0
+        ? ` (${formatFileSize(status.receivedBytes)} / ${formatFileSize(status.totalBytes)})`
+        : status.receivedBytes > 0
+            ? ` (${formatFileSize(status.receivedBytes)})`
+            : ''
+    switch (status.state) {
+        case 'preparing':
+            return 'Preparing direct transfer…'
+        case 'negotiating':
+            return 'Negotiating P2P DataChannel…'
+        case 'transferring-direct':
+            return `Direct P2P transfer${progressBytes}${speed}`
+        case 'verifying':
+            return 'Verifying SHA-256 checksum…'
+        case 'switching-to-hub':
+            return 'Switching to Hub cache…'
+        case 'transferring-hub':
+            return `Downloading from Hub${progressBytes}${speed}`
+        case 'completed': {
+            const route = formatP2pRouteLabel(status.routeCategory)
+            const timing = status.negotiateMs !== null ? ` · handshake ${status.negotiateMs}ms` : ''
+            return `Completed${route ? ` · ${route}` : ''}${timing}${speed}`
+        }
+        case 'cancelled':
+            return 'Download cancelled'
+        case 'failed':
+            return 'Download failed'
+    }
+}
+
 export function GeneratedFileCard(props: { block: GeneratedFileBlock }) {
     const ctx = useHappyChatContext()
     const [busy, setBusy] = useState(false)
     const [error, setError] = useState<string | null>(null)
     const [progress, setProgress] = useState<GeneratedBlobProgress | null>(null)
+    const [p2pStatus, setP2pStatus] = useState<P2pDownloadStatus | null>(null)
+    const abortRef = useRef<AbortController | null>(null)
     const mimeType = props.block.mimeType ?? 'application/octet-stream'
 
-    const fetchBlob = async (): Promise<Blob> => {
-        setBusy(true)
-        setError(null)
-        setProgress(null)
-        try {
-            return await ctx.api.getGeneratedFileBlob(ctx.sessionId, props.block.fileId, {
-                onProgress: setProgress
-            })
-        } finally {
-            setBusy(false)
-            setProgress(null)
+    useEffect(() => {
+        return () => {
+            abortRef.current?.abort()
         }
+    }, [])
+
+    const fetchBlob = async (signal?: AbortSignal): Promise<Blob> => {
+        return await ctx.api.getGeneratedFileBlob(ctx.sessionId, props.block.fileId, {
+            onProgress: setProgress,
+            signal
+        })
+    }
+
+    const downloadViaHub = async (
+        saveTarget: AcquiredSaveTarget,
+        signal: AbortSignal,
+        fallbackReason: string | null
+    ): Promise<void> => {
+        setP2pStatus((prev) => ({
+            state: 'transferring-hub',
+            receivedBytes: 0,
+            totalBytes: props.block.size,
+            speedBytesPerSec: 0,
+            routeCategory: 'hub-cache',
+            negotiateMs: prev?.negotiateMs ?? null,
+            fallbackReason,
+            candidateTypes: prev?.candidateTypes ?? [],
+            error: null
+        }))
+        if (saveTarget.kind === 'file-handle') {
+            const blob = await fetchBlob(signal)
+            const bytes = new Uint8Array(await blob.arrayBuffer())
+            const writable = await saveTarget.handle.createWritable()
+            try {
+                await writable.write(bytes)
+                await writable.close()
+            } catch (writeErr) {
+                await writable.abort().catch(() => {})
+                throw writeErr
+            }
+        } else {
+            if (typeof ctx.api.acquireGeneratedFileDownloadTicket === 'function') {
+                const ticket = await ctx.api.acquireGeneratedFileDownloadTicket(
+                    ctx.sessionId,
+                    props.block.fileId,
+                    { onProgress: setProgress, signal }
+                )
+                if (ticket) {
+                    triggerNativeFileDownload(ticket.url, ticket.fileName || props.block.fileName)
+                    setP2pStatus((prev) => ({
+                        state: 'completed',
+                        receivedBytes: ticket.size,
+                        totalBytes: ticket.size,
+                        speedBytesPerSec: 0,
+                        routeCategory: 'hub-cache',
+                        negotiateMs: prev?.negotiateMs ?? null,
+                        fallbackReason,
+                        candidateTypes: prev?.candidateTypes ?? [],
+                        error: null
+                    }))
+                    return
+                }
+            }
+            const blob = await fetchBlob(signal)
+            downloadGeneratedFile(props.block.fileName, blob)
+        }
+        setP2pStatus((prev) => ({
+            state: 'completed',
+            receivedBytes: props.block.size ?? prev?.receivedBytes ?? 0,
+            totalBytes: props.block.size,
+            speedBytesPerSec: 0,
+            routeCategory: 'hub-cache',
+            negotiateMs: prev?.negotiateMs ?? null,
+            fallbackReason,
+            candidateTypes: prev?.candidateTypes ?? [],
+            error: null
+        }))
     }
 
     const handleDownload = () => {
-        void fetchBlob()
-            .then((blob) => downloadGeneratedFile(props.block.fileName, blob))
-            .catch((err: unknown) => {
-                setError(err instanceof Error ? err.message : 'Failed to download file')
-            })
+        if (busy) return
+        setBusy(true)
+        setError(null)
+        setProgress(null)
+        setP2pStatus(null)
+        const controller = new AbortController()
+        abortRef.current = controller
+
+        void (async () => {
+            try {
+                const saveTarget = await acquireSaveTargetInUserGesture(props.block.fileName)
+                if (saveTarget.kind === 'aborted') {
+                    setP2pStatus({
+                        state: 'cancelled',
+                        receivedBytes: 0,
+                        totalBytes: props.block.size,
+                        speedBytesPerSec: 0,
+                        routeCategory: null,
+                        negotiateMs: null,
+                        fallbackReason: null,
+                        candidateTypes: [],
+                        error: null
+                    })
+                    return
+                }
+
+                if (
+                    typeof ctx.api.createP2pFileTransfer === 'function'
+                    && typeof ctx.api.signalP2pFileTransfer === 'function'
+                ) {
+                    const p2pResult = await runP2pDirectFileDownload({
+                        api: ctx.api,
+                        sessionId: ctx.sessionId,
+                        fileId: props.block.fileId,
+                        fileName: props.block.fileName,
+                        mimeType,
+                        saveTarget,
+                        signal: controller.signal,
+                        onStatus: setP2pStatus
+                    })
+                    if (p2pResult.outcome === 'cancelled' || controller.signal.aborted) {
+                        setP2pStatus((prev) => prev ? { ...prev, state: 'cancelled' } : null)
+                        return
+                    }
+                    if (p2pResult.outcome === 'completed') {
+                        if (p2pResult.blob) {
+                            downloadGeneratedFile(props.block.fileName, p2pResult.blob)
+                        }
+                        setP2pStatus((prev) => ({
+                            state: 'completed',
+                            receivedBytes: p2pResult.bytes,
+                            totalBytes: p2pResult.bytes,
+                            speedBytesPerSec: prev?.speedBytesPerSec ?? 0,
+                            routeCategory: p2pResult.routeCategory,
+                            negotiateMs: p2pResult.negotiateMs,
+                            fallbackReason: null,
+                            candidateTypes: prev?.candidateTypes ?? [],
+                            error: null
+                        }))
+                        return
+                    }
+                    // Automatic fallback to Hub
+                    setP2pStatus((prev) => prev ? {
+                        ...prev,
+                        state: 'switching-to-hub',
+                        fallbackReason: p2pResult.reason
+                    } : null)
+                    await downloadViaHub(saveTarget, controller.signal, p2pResult.reason)
+                    return
+                }
+
+                await downloadViaHub(saveTarget, controller.signal, null)
+            } catch (err: unknown) {
+                if (controller.signal.aborted || (err instanceof DOMException && err.name === 'AbortError')) {
+                    setP2pStatus((prev) => prev ? { ...prev, state: 'cancelled' } : null)
+                    return
+                }
+                const msg = err instanceof Error ? err.message : 'Failed to download file'
+                setError(msg)
+                setP2pStatus((prev) => prev ? { ...prev, state: 'failed', error: msg } : null)
+            } finally {
+                if (abortRef.current === controller) {
+                    abortRef.current = null
+                }
+                setBusy(false)
+                setProgress(null)
+            }
+        })()
+    }
+
+    const handleHubOnlyDownload = () => {
+        if (busy) return
+        setBusy(true)
+        setError(null)
+        setProgress(null)
+        const controller = new AbortController()
+        abortRef.current = controller
+
+        void (async () => {
+            try {
+                await downloadViaHub({ kind: 'browser-default' }, controller.signal, null)
+            } catch (err: unknown) {
+                if (controller.signal.aborted || (err instanceof DOMException && err.name === 'AbortError')) {
+                    return
+                }
+                setError(err instanceof Error ? err.message : 'Failed to download file from Hub')
+            } finally {
+                if (abortRef.current === controller) {
+                    abortRef.current = null
+                }
+                setBusy(false)
+                setProgress(null)
+            }
+        })()
+    }
+
+    const handleCancel = () => {
+        abortRef.current?.abort()
     }
 
     const handleOpen = () => {
+        if (busy) return
+        setBusy(true)
+        setError(null)
+        setProgress(null)
         void fetchBlob()
             .then((blob) => {
                 const typed = blob.type ? blob : new Blob([blob], { type: mimeType })
@@ -257,7 +492,15 @@ export function GeneratedFileCard(props: { block: GeneratedFileBlock }) {
             .catch((err: unknown) => {
                 setError(err instanceof Error ? err.message : 'Failed to open file')
             })
+            .finally(() => {
+                setBusy(false)
+                setProgress(null)
+            })
     }
+
+    const statusSummary = busy
+        ? (progress ? formatGeneratedBlobProgress(progress) : p2pStatus ? formatP2pStatusLine(p2pStatus) : 'Downloading…')
+        : (p2pStatus && (p2pStatus.state === 'completed' || p2pStatus.state === 'cancelled') ? formatP2pStatusLine(p2pStatus) : '')
 
     return (
         <div className="max-w-[92%] rounded-2xl border border-[var(--app-border)] bg-[var(--app-tool-card-bg)] p-3">
@@ -275,11 +518,11 @@ export function GeneratedFileCard(props: { block: GeneratedFileBlock }) {
                     </div>
                     <div className="text-xs text-[var(--app-hint)]">
                         {props.block.size !== null ? formatFileSize(props.block.size) : 'File'}
-                        {busy ? ` · ${progress ? formatGeneratedBlobProgress(progress) : 'Downloading…'}` : ''}
+                        {statusSummary ? ` · ${statusSummary}` : ''}
                     </div>
                 </div>
             </button>
-            <div className="mt-2 flex items-center gap-3 text-xs">
+            <div className="mt-2 flex flex-wrap items-center gap-3 text-xs">
                 <button
                     type="button"
                     onClick={handleDownload}
@@ -288,6 +531,23 @@ export function GeneratedFileCard(props: { block: GeneratedFileBlock }) {
                 >
                     Download
                 </button>
+                <button
+                    type="button"
+                    onClick={handleHubOnlyDownload}
+                    disabled={busy}
+                    className="font-medium text-[var(--app-hint)] hover:text-[var(--app-fg)] hover:underline disabled:opacity-60"
+                >
+                    Download from Hub
+                </button>
+                {busy ? (
+                    <button
+                        type="button"
+                        onClick={handleCancel}
+                        className="font-medium text-amber-500 hover:underline"
+                    >
+                        Cancel
+                    </button>
+                ) : null}
                 {isPreviewableGeneratedFileMimeType(props.block.mimeType) ? (
                     <button
                         type="button"
@@ -299,6 +559,11 @@ export function GeneratedFileCard(props: { block: GeneratedFileBlock }) {
                     </button>
                 ) : null}
             </div>
+            {p2pStatus?.fallbackReason ? (
+                <div className="mt-1.5 text-[11px] text-[var(--app-hint)]">
+                    Direct P2P bypassed ({p2pStatus.fallbackReason}) → using Hub cache
+                </div>
+            ) : null}
             {error ? (
                 <div className="mt-2 text-xs text-red-500">
                     File is unavailable. {error}

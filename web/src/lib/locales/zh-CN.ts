@@ -795,6 +795,7 @@ export default {
   'reconnecting.reason.error': '流连接错误',
   'reconnecting.reason.closed': '流连接已关闭',
   'reconnecting.reason.heartbeatTimeout': '心跳超时',
+  'reconnecting.reason.connectTimeout': '连接超时',
   'reconnecting.reason.visibilityRecovery': '后台恢复中',
   'pwa.update.title': '新版本可用',
   'pwa.update.body': '重新加载以获取最新版 HAPI',

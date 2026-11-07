@@ -18,6 +18,7 @@ export const ompCommand: CommandDefinition = {
                 model?: string
                 effort?: string
                 resumeSessionId?: string
+                existingSessionId?: string
             } = {}
 
             let hasExplicitPermissionMode = false
@@ -48,6 +49,12 @@ export const ompCommand: CommandDefinition = {
                         throw new Error('Missing --resume value')
                     }
                     options.resumeSessionId = sessionId
+                } else if (arg === '--existing-session-id' || arg === '--hapi-session-id') {
+                    const sessionId = commandArgs[++i]
+                    if (!sessionId) {
+                        throw new Error(`Missing ${arg} value`)
+                    }
+                    options.existingSessionId = sessionId
                 } else if (arg === '--model') {
                     const model = commandArgs[++i]
                     if (!model) {

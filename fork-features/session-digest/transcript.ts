@@ -141,7 +141,7 @@ export function buildSessionPrompt(params: {
     const parts: string[] = []
     if (params.path) parts.push(`工作目录：${params.path}`)
     if (params.previous && params.rewrite) {
-        parts.push('此前的摘要（仅供参考，可能已过时；请以下面的对话为准重新总结，仍然成立的已完成事项保留）：')
+        parts.push('此前的摘要（仅供参考，可能已过时；请以下面的对话为准重新总结，生成能准确概括当前最新会话主题的新 title，仍然成立的已完成事项保留）：')
         parts.push(JSON.stringify(params.previous))
         parts.push('对话转录（开头与最近部分）：')
     } else if (params.previous) {

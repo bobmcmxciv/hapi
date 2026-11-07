@@ -54,6 +54,7 @@ export type CodexMessage =
     | {
         type: 'tool-call-result';
         callId: string;
+        name?: string;
         output: unknown;
         is_error?: boolean;
     }
@@ -128,6 +129,7 @@ export function convertAgentMessage(message: AgentMessage, model?: string | null
             return {
                 type: 'tool-call-result',
                 callId: message.id,
+                ...(message.name !== undefined ? { name: message.name } : {}),
                 output: message.output,
                 is_error: message.status === 'failed'
             };

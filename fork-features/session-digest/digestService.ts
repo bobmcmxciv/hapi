@@ -113,6 +113,7 @@ export class DigestService {
     private readonly deps: DigestDeps
     private readonly now: () => number
     private timer: ReturnType<typeof setInterval> | null = null
+    private kickTimer: ReturnType<typeof setTimeout> | null = null
     private running: string | null = null
     private lastRunAt: number | null = null
     private lastError: string | null = null
@@ -146,12 +147,19 @@ export class DigestService {
     }
 
     stop(): void {
-        if (this.timer) clearInterval(this.timer)
-        this.timer = null
+        if (this.timer) {
+            clearInterval(this.timer)
+            this.timer = null
+        }
+        if (this.kickTimer) {
+            clearTimeout(this.kickTimer)
+            this.kickTimer = null
+        }
     }
 
-    /** 手动"重新总结"：跳过空闲/限速判定，下一拍优先处理。 */
+    /** 手动"重新总结"：跳过空闲/限速判定，下一拍优先处理；若同一会话已在运行则直接复用本次运行。 */
     requestSession(sessionId: string): void {
+        if (this.running === `session:${sessionId}`) return
         this.forcedSessions.add(sessionId)
         this.kick()
     }
@@ -198,7 +206,11 @@ export class DigestService {
     }
 
     private kick(): void {
-        setTimeout(() => { void this.tick() }, 0)
+        if (this.kickTimer) return
+        this.kickTimer = setTimeout(() => {
+            this.kickTimer = null
+            void this.tick()
+        }, 0)
     }
 
     status(): DigestStatus {
@@ -224,6 +236,10 @@ export class DigestService {
 
     /** 跑一步：至多处理一个会话或一个项目。返回处理了什么，便于测试。 */
     async tick(): Promise<string | null> {
+        if (this.kickTimer) {
+            clearTimeout(this.kickTimer)
+            this.kickTimer = null
+        }
         if (this.running || !this.deps.llm) return null
         const settings = this.settings()
         const forced = this.takeForced()
@@ -357,14 +373,17 @@ export class DigestService {
             previous,
             rewrite
         })
+        const sessionAtStart = this.deps.getSession(session.id) ?? session
+        const nameAtStart = sessionAtStart.metadata?.name?.trim() || null
         try {
             const text = await this.deps.llm!({ model: settings.model, system: SESSION_SYSTEM_PROMPT, prompt, maxTokens: 1500 })
             const parsed = parseSessionDigest(text)
             if (!parsed) throw new Error(`unparseable digest: ${text.slice(0, 120)}`)
+            const generatedTitle = parsed.title.trim()
             const next: SessionDigest = {
                 ...existing,
                 ...parsed,
-                title: parsed.title || existing.title,
+                title: generatedTitle || existing.title,
                 artifacts,
                 sourceSeq: Math.max(newest, lines[lines.length - 1]!.seq),
                 sourceUpdatedAt: session.updatedAt,
@@ -374,14 +393,21 @@ export class DigestService {
                 errorCount: 0,
                 lastAttemptAt: now
             }
-            if (settings.autoRename && next.title) {
-                // 用户手动起过名（name 存在且不是我们上次写的）就不碰。
-                const current = session.metadata?.name?.trim() || null
-                if (current === null || current === existing.autoName) {
-                    if (current !== next.title) {
-                        await this.deps.renameSession(session.id, next.title)
+            if (generatedTitle) {
+                const latestSession = this.deps.getSession(session.id) ?? session
+                const currentName = latestSession.metadata?.name?.trim() || null
+                const renamedDuringRun = currentName !== nameAtStart
+                // 手动「重新总结」(rewrite=true) 同步更新会话标题（除非生成期间用户刚手动改过名）；
+                // 后台自动总结 (rewrite=false) 仅在开启 autoRename 且用户未手动改名时更新。
+                const shouldUpdateTitle = !renamedDuringRun && (
+                    rewrite
+                    || (settings.autoRename && (currentName === null || currentName === existing.autoName))
+                )
+                if (shouldUpdateTitle) {
+                    if (currentName !== generatedTitle) {
+                        await this.deps.renameSession(session.id, generatedTitle)
                     }
-                    next.autoName = next.title
+                    next.autoName = generatedTitle
                 }
             }
             this.deps.store.saveSession(next)

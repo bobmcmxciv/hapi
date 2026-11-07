@@ -16,6 +16,7 @@ import { GENERATED_BLOB_UPLOAD_CHUNK_BYTES, MAX_GENERATED_BLOB_BYTES } from '@ha
 import {
     BlobChecksumMismatchError,
     BlobOffsetMismatchError,
+    BlobSessionMismatchError,
     BlobSizeMismatchError,
     BlobStorageFullError,
     BlobTooLargeError,
@@ -149,6 +150,9 @@ export function createCliRoutes(
         if (!record) {
             return c.json({ success: true, state: 'missing', received: 0, size: null })
         }
+        if (record.sessionId !== null && record.sessionId !== access.sessionId) {
+            return c.json({ success: false, error: 'Blob belongs to another session', reason: 'access-denied' }, 403)
+        }
         return c.json({ success: true, state: record.state, received: record.received, size: record.size })
     })
 
@@ -213,6 +217,9 @@ export function createCliRoutes(
             if (error instanceof BlobOffsetMismatchError) {
                 const body: GeneratedBlobUploadResponse = { success: false, error: error.message, reason: 'offset-mismatch', received: error.received }
                 return c.json(body, 409)
+            }
+            if (error instanceof BlobSessionMismatchError) {
+                return c.json({ success: false, error: error.message, reason: 'access-denied' }, 403)
             }
             if (error instanceof BlobSizeMismatchError) {
                 const body: GeneratedBlobUploadResponse = { success: false, error: error.message, reason: 'size-mismatch', received: error.received, size: error.expected }

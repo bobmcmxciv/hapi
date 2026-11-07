@@ -7,7 +7,7 @@ import {
     type RemoteLauncherExitReason
 } from '@/modules/common/remote/RemoteLauncherBase';
 import { OmpDisplay } from '@/ui/ink/OmpDisplay';
-import type { OmpSession } from './session';
+import type { OmpSession, OmpShutdownReceipt } from './session';
 import type { OmpRuntimeConfigApplied, OmpRuntimeConfigRequest } from './session';
 import type { PermissionMode } from './types';
 import { RPC_METHODS } from '@hapi/protocol/rpcMethods';
@@ -18,6 +18,7 @@ import { loadOmpEventAllowlist } from './rpc/eventAllowlist';
 import type {
     OmpContextUsage,
     OmpInboundEvent,
+    OmpKnownEventType,
     OmpModel,
     OmpRpcSpawnConfig,
     OmpSubagentSnapshot,
@@ -46,7 +47,7 @@ import {
 } from './rpc/sessionLifecycle';
 import { resolveOmpSessionPath } from './utils/ompSessionScanner';
 import type { OmpQueuedInput } from './OmpInputQueue';
-import { describeIgnoredOmpAttachments, prepareOmpInput } from './ompInputContent';
+import { describeIgnoredOmpAttachments, prepareOmpInput, type PreparedOmpInput } from './ompInputContent';
 import { OmpHostIntegration } from '../../../fork-features/omp-host-integration/cli';
 import { startOmpSessionRelay, type OmpSessionRelay } from '../../../fork-features/session-relay/omp';
 
@@ -56,6 +57,17 @@ type PromptLifecycle = {
     ignoreAgentEnds: number;
 };
 
+const DEFAULT_OMP_IDLE_HIBERNATE_MS = 15 * 60 * 1_000;
+
+function resolveOmpIdleHibernateMs(): number {
+    const raw = process.env.HAPI_OMP_IDLE_HIBERNATE_MS;
+    if (raw !== undefined) {
+        const parsed = Number(raw);
+        if (Number.isFinite(parsed) && parsed >= 0) return Math.floor(parsed);
+    }
+    if (process.env.VITEST || process.env.NODE_ENV === 'test') return 0;
+    return DEFAULT_OMP_IDLE_HIBERNATE_MS;
+}
 class OmpRemoteLauncher extends RemoteLauncherBase {
     private readonly session: OmpSession;
     private client: OmpRpcClient | null = null;
@@ -79,6 +91,15 @@ class OmpRemoteLauncher extends RemoteLauncherBase {
     };
     private confirmedConfiguredThinking: OmpConfiguredThinkingLevel | null = null;
     private lastPersistedThinkingKey: string | null = null;
+    private pendingModel: { hasValue: boolean; value: string | null | undefined } = {
+        hasValue: false,
+        value: undefined
+    };
+    private pendingThinking: OmpConfiguredThinkingLevel | undefined = undefined;
+    private readyInFlight: Promise<void> | null = null;
+    private readyEmittedForIdleCycle = false;
+    private readyCheckedForIdleCycle = false;
+    private readonly bufferedInputIds = new Set<number>();
     private readonly eventTasks = new Set<Promise<void>>();
     private hostIntegration: OmpHostIntegration | null = null;
     private registeredHostToolNames: string[] = [];
@@ -91,10 +112,25 @@ class OmpRemoteLauncher extends RemoteLauncherBase {
     private changeWaiter: (() => void) | null = null;
     // fork(session-relay)
     private sessionRelay: OmpSessionRelay | null = null;
-
+    private readonly nativeExit = Promise.withResolvers<OmpShutdownReceipt>();
+    private unregisterShutdown: (() => void) | null = null;
+    private attemptedNativeLaunch = false;
+    private hibernating = false;
+    private wakePromise: Promise<OmpRpcClient> | null = null;
+    private eventAllowlist: ReadonlySet<OmpKnownEventType> | null = null;
     constructor(session: OmpSession) {
         super(process.env.DEBUG ? session.logPath : undefined);
         this.session = session;
+        this.unregisterShutdown = session.registerShutdownHandle({
+            requestExit: () => this.handleExitFromUi(),
+            waitForExit: async () => {
+                const receipt = await this.nativeExit.promise;
+                if (receipt.status !== 'unverified' || !this.client) return receipt;
+                await this.client.close();
+                const exit = this.client.exitInfo;
+                return { kind: 'omp-rpc', status: 'disposed', pid: exit?.pid, exitCode: exit?.code, signal: exit?.signal };
+            }
+        });
     }
 
     public async launch(): Promise<RemoteLauncherExitReason> {
@@ -108,10 +144,17 @@ class OmpRemoteLauncher extends RemoteLauncherBase {
         return React.createElement(OmpDisplay, context);
     }
 
-    protected async runMainLoop(): Promise<void> {
-        const eventAllowlist = await loadOmpEventAllowlist();
+    protected onLeavingRemote(): void {
+        this.session.client.clearSessionReady();
+    }
+
+    private async connectNativeClient(): Promise<OmpRpcClient> {
+        const eventAllowlist = this.eventAllowlist ?? (await loadOmpEventAllowlist());
+        this.eventAllowlist = eventAllowlist;
         const session = this.session;
-        const requestedSpawnModel = session.getModel();
+        const requestedSpawnModel = this.currentModel
+            ? `${this.currentModel.provider}/${this.currentModel.id}`
+            : session.getModel();
         const spawnBase = {
             cwd: session.path,
             env: {
@@ -123,11 +166,14 @@ class OmpRemoteLauncher extends RemoteLauncherBase {
         const spawnConfig: OmpRpcSpawnConfig = session.sessionId
             ? { ...spawnBase, resumeSessionId: session.sessionId }
             : spawnBase;
+        this.attemptedNativeLaunch = true;
         const client = await OmpRpcClient.connect(spawnConfig);
         this.client = client;
         this.availableModels = client.discovery.models;
         this.currentModel = client.discovery.state.model ?? null;
-        this.defaultModel = this.currentModel;
+        if (!this.defaultModel) {
+            this.defaultModel = this.currentModel;
+        }
         this.isStreaming = client.discovery.state.isStreaming;
         this.contextUsage = client.discovery.state.contextUsage ?? null;
         const persistedConfigured = this.asConfiguredThinking(session.getEffort());
@@ -194,6 +240,8 @@ class OmpRemoteLauncher extends RemoteLauncherBase {
             onTurnStarted: () => {
                 this.nativeTurnGeneration += 1;
                 this.isStreaming = true;
+                this.readyEmittedForIdleCycle = false;
+                this.readyCheckedForIdleCycle = false;
                 if (this.currentPrompt) {
                     this.currentPrompt.phase = 'streaming';
                 }
@@ -202,6 +250,7 @@ class OmpRemoteLauncher extends RemoteLauncherBase {
             },
             onTurnFinished: () => {
                 this.isStreaming = false;
+                this.readyCheckedForIdleCycle = false;
                 if (this.currentPrompt?.ignoreAgentEnds) {
                     this.currentPrompt.ignoreAgentEnds -= 1;
                 } else {
@@ -216,12 +265,11 @@ class OmpRemoteLauncher extends RemoteLauncherBase {
             },
             onPromptResult: (agentInvoked, failure) => {
                 if (failure) {
-                    // OMP acknowledged the prompt, then failed it before any run: without this the
-                    // message silently disappears and the session just goes idle.
                     logger.warn(`[omp-remote] OMP prompt failed before reaching the agent: ${failure}`);
                     this.reportInputFailure(failure);
                 }
                 if (!agentInvoked) {
+                    this.readyCheckedForIdleCycle = false;
                     this.clearCurrentPrompt();
                     this.signalChange();
                     void sessionReconciler.reconcile().catch((error) => {
@@ -256,12 +304,11 @@ class OmpRemoteLauncher extends RemoteLauncherBase {
         });
         client.onDiagnostic((message) => logger.warn(`[omp-remote] ${message}`));
         client.onClosed((reason) => {
-            if (this.shouldExit) {
+            if (this.shouldExit || this.hibernating || this.client !== client) {
                 return;
             }
             this.handleTransportFailure(reason);
         });
-        this.removeQueueChangeListener = session.queue.onChange(() => this.signalChange());
 
         const { hostToolNames } = await hostIntegration.initialize();
         this.registeredHostToolNames = hostToolNames;
@@ -282,7 +329,57 @@ class OmpRemoteLauncher extends RemoteLauncherBase {
         await Promise.all(subagents.map(async (snapshot) => {
             await this.syncSubagentTranscript(client, eventAdapter, snapshot);
         }));
+        return client;
+    }
 
+    private async ensureClient(): Promise<OmpRpcClient> {
+        if (this.client) return this.client;
+        if (this.wakePromise) return await this.wakePromise;
+        const promise = this.connectNativeClient().finally(() => {
+            if (this.wakePromise === promise) this.wakePromise = null;
+        });
+        this.wakePromise = promise;
+        return await promise;
+    }
+
+    private async tryHibernateIdleClient(): Promise<void> {
+        const client = this.client;
+        if (!client || client.state !== 'ready' || this.shouldExit || this.hasUnfinishedNativeInput() || this.hasLocalPendingInput()) {
+            return;
+        }
+        try {
+            const state = await client.request({ type: 'get_state' });
+            this.persistRuntimeState(state);
+            if (state.isStreaming || state.queuedMessageCount > 0) return;
+            const { subagents } = await client.request({ type: 'get_subagents' });
+            if (subagents.some((s) => s.status === 'running')) return;
+            if (this.shouldExit || this.client !== client || this.hasUnfinishedNativeInput() || this.hasLocalPendingInput()) {
+                return;
+            }
+            this.hibernating = true;
+            this.client = null;
+            await this.sessionReconciler?.drain();
+            this.sessionReconciler = null;
+            const hostIntegration = this.hostIntegration;
+            this.hostIntegration = null;
+            if (hostIntegration) {
+                await hostIntegration.close('OMP remote session hibernated while idle');
+            }
+            await client.close().catch(() => { });
+            logger.debug('[omp-remote] Hibernated idle OMP RPC subprocess to reclaim memory');
+        } catch (error) {
+            logger.debug('[omp-remote] Idle hibernate check skipped', error);
+        } finally {
+            this.hibernating = false;
+        }
+    }
+
+    protected async runMainLoop(): Promise<void> {
+        this.session.client.clearSessionReady();
+        if (this.session.isShutdownRequested()) return;
+        const session = this.session;
+        await this.ensureClient();
+        this.removeQueueChangeListener = session.queue.onChange(() => this.signalChange());
         session.client.rpcHandlerManager.registerHandler<Record<string, never>, ListOmpModelsResponse>(
             RPC_METHODS.ListOmpModels,
             async () => await this.listModels()
@@ -311,6 +408,8 @@ class OmpRemoteLauncher extends RemoteLauncherBase {
             session.getPermissionMode() as PermissionMode | undefined,
             this.currentModel?.id
         );
+        // Native startup readiness is a socket barrier, distinct from the idle chat event.
+        session.client.emitSessionReady({ replayOnReconnect: true });
         await this.sendReadyIfIdle();
         this.sessionRelay = await startOmpSessionRelay({
             cwd: session.path,
@@ -324,7 +423,12 @@ class OmpRemoteLauncher extends RemoteLauncherBase {
                 return { machineId, model, effort, permissionMode };
             },
             readContextUsage: async () => {
-                const state = await client.request({ type: 'get_state' });
+                if (!this.client) {
+                    return this.contextUsage
+                        ? { tokens: this.contextUsage.tokens, contextWindow: this.contextUsage.contextWindow }
+                        : null;
+                }
+                const state = await this.client.request({ type: 'get_state' });
                 const usage = state.contextUsage;
                 return usage ? { tokens: usage.tokens, contextWindow: usage.contextWindow } : null;
             },
@@ -354,8 +458,9 @@ class OmpRemoteLauncher extends RemoteLauncherBase {
 
             if (this.heldInput && this.canDispatch(this.heldInput)) {
                 const input = this.heldInput;
-                await this.dispatchInput(input, client);
-                if (this.heldInput?.id === input.id) {
+                const activeClient = await this.ensureClient();
+                await this.dispatchInput(input, activeClient);
+                if (this.heldInput?.id === input.id && !session.queue.isHeld(input)) {
                     this.heldInput = null;
                 }
                 continue;
@@ -371,37 +476,77 @@ class OmpRemoteLauncher extends RemoteLauncherBase {
             }
 
             const observedVersion = this.changeVersion;
-            await this.waitForChange(observedVersion);
+            const hibernateMs = this.client && !this.hasUnfinishedNativeInput() && !this.hasLocalPendingInput()
+                ? resolveOmpIdleHibernateMs()
+                : 0;
+            if (hibernateMs > 0) {
+                const { promise: timeoutPromise, resolve: resolveTimeout } = Promise.withResolvers<boolean>();
+                const timer = setTimeout(() => resolveTimeout(true), hibernateMs);
+                timer.unref?.();
+                const timedOut = await Promise.race([
+                    this.waitForChange(observedVersion).then(() => false),
+                    timeoutPromise
+                ]).finally(() => {
+                    clearTimeout(timer);
+                });
+                if (timedOut && this.changeVersion === observedVersion) {
+                    await this.tryHibernateIdleClient();
+                }
+            } else {
+                await this.waitForChange(observedVersion);
+            }
         }
     }
 
     protected async cleanup(): Promise<void> {
-        this.sessionRelay?.stop();
-        this.sessionRelay = null;
-        this.clearAbortHandlers(this.session.client.rpcHandlerManager);
-        this.session.setRuntimeConfigApplier(null);
-        this.removeQueueChangeListener?.();
-        this.removeQueueChangeListener = null;
-        this.session.queue.requeueHeld();
-        this.heldInput = null;
-        this.clearCurrentPrompt();
-        this.signalChange();
-        await this.sessionReconciler?.drain();
-        this.sessionReconciler = null;
-        this.subagentTranscriptCursors.clear();
-        this.registeredHostToolNames = [];
-        this.lastPersistedToolsKey = null;
-        this.lastPersistedCommandsKey = null;
-        const hostIntegration = this.hostIntegration;
-        this.hostIntegration = null;
-        if (hostIntegration) {
-            await hostIntegration.close('OMP remote launcher stopped');
-        }
-        await Promise.allSettled(this.eventTasks);
-        const client = this.client;
-        this.client = null;
-        if (client) {
-            await client.close();
+        this.session.client.clearSessionReady();
+        try {
+            this.sessionRelay?.stop();
+            this.sessionRelay = null;
+            this.clearAbortHandlers(this.session.client.rpcHandlerManager);
+            this.session.setRuntimeConfigApplier(null);
+            this.removeQueueChangeListener?.();
+            this.removeQueueChangeListener = null;
+            this.session.queue.requeueHeld();
+            this.heldInput = null;
+            this.clearCurrentPrompt();
+            this.signalChange();
+            await this.sessionReconciler?.drain();
+            this.sessionReconciler = null;
+            this.subagentTranscriptCursors.clear();
+            this.registeredHostToolNames = [];
+            this.lastPersistedToolsKey = null;
+            this.lastPersistedCommandsKey = null;
+            const hostIntegration = this.hostIntegration;
+            this.hostIntegration = null;
+            if (hostIntegration) {
+                await hostIntegration.close('OMP remote launcher stopped');
+            }
+            await Promise.allSettled(this.eventTasks);
+            const client = this.client;
+            if (client) {
+                // Keep the client available for shutdown retries after a timeout.
+                try {
+                    await client.close();
+                } catch (error) {
+                    const receipt: OmpShutdownReceipt = { kind: 'omp-rpc', status: 'unverified' };
+                    this.session.recordShutdownReceipt(receipt);
+                    this.nativeExit.resolve(receipt);
+                    throw error;
+                }
+            }
+            const exit = client?.exitInfo;
+            const receipt: OmpShutdownReceipt = client
+                ? { kind: 'omp-rpc', status: 'disposed', pid: exit?.pid, exitCode: exit?.code, signal: exit?.signal }
+                : { kind: 'omp-rpc', status: this.attemptedNativeLaunch ? 'unverified' : 'not-started' };
+            this.session.recordShutdownReceipt(receipt);
+            this.nativeExit.resolve(receipt);
+            this.unregisterShutdown?.();
+            this.unregisterShutdown = null;
+            this.client = null;
+        } finally {
+            // An earlier host/reconciler cleanup failure must not strand KillSession.
+            this.nativeExit.resolve({ kind: 'omp-rpc', status: 'unverified' });
         }
     }
 
@@ -416,9 +561,6 @@ class OmpRemoteLauncher extends RemoteLauncherBase {
         const nativeBusy = this.currentPrompt !== null || this.isStreaming;
         if (!nativeBusy) {
             return true;
-        }
-        if (this.currentPrompt && this.currentPrompt.modeHash !== input.modeHash) {
-            return false;
         }
 
         switch (input.inputMode) {
@@ -452,7 +594,7 @@ class OmpRemoteLauncher extends RemoteLauncherBase {
             return;
         }
 
-        let prepared: Awaited<ReturnType<typeof prepareOmpInput>>;
+        let prepared: PreparedOmpInput;
         try {
             prepared = await prepareOmpInput(input.text, input.attachments);
         } catch (error) {
@@ -488,16 +630,27 @@ class OmpRemoteLauncher extends RemoteLauncherBase {
         }
 
         this.dispatching = true;
+        this.readyEmittedForIdleCycle = false;
         const wasBusy = this.currentPrompt !== null || this.isStreaming;
         let startedPrompt = false;
         let queuedFollowUp = false;
         try {
             if (!wasBusy) {
-                await this.applyRequestedModel(input.mode.model);
-                await this.applyRequestedThinking(input.mode.effort);
+                const requestedModel = input.mode.model !== undefined
+                    ? input.mode.model
+                    : this.pendingModel.hasValue ? this.pendingModel.value : undefined;
+                const requestedThinking = input.mode.effort !== undefined
+                    ? input.mode.effort
+                    : this.pendingThinking;
+                await this.applyRequestedModel(requestedModel);
+                this.pendingModel = { hasValue: false, value: undefined };
+                await this.applyRequestedThinking(requestedThinking);
+                this.pendingThinking = undefined;
+            } else {
+                this.stagePendingRuntimeConfig(input.mode);
             }
             this.applyDisplayMode(input.mode.permissionMode, this.currentModel?.id);
-            this.messageBuffer.addMessage(input.text, 'user');
+            this.recordUserMessageOnce(input);
             const message = prepared.message;
 
             switch (input.inputMode) {
@@ -556,8 +709,13 @@ class OmpRemoteLauncher extends RemoteLauncherBase {
                     return exhaustive;
                 }
             }
+            this.bufferedInputIds.delete(input.id);
             this.session.queue.completeInvocation(input);
         } catch (error) {
+            if (this.isAlreadyProcessingError(error)) {
+                await this.recoverFromBusyDispatchRace(input, prepared, client, startedPrompt, queuedFollowUp);
+                return;
+            }
             if (startedPrompt) {
                 this.clearCurrentPrompt();
             }
@@ -567,6 +725,7 @@ class OmpRemoteLauncher extends RemoteLauncherBase {
             const detail = error instanceof Error ? error.message : String(error);
             logger.warn(`[omp-remote] RPC ${input.inputMode} failed`, error);
             this.reportInputFailure(detail);
+            this.bufferedInputIds.delete(input.id);
             this.session.queue.completeInvocation(input);
         } finally {
             this.dispatching = false;
@@ -584,6 +743,7 @@ class OmpRemoteLauncher extends RemoteLauncherBase {
             return;
         }
         this.dispatching = true;
+        this.readyEmittedForIdleCycle = false;
         this.session.onThinkingChange(true);
         this.messageBuffer.addMessage(input.text, 'user');
         if (input.attachments.length > 0) {
@@ -629,9 +789,9 @@ class OmpRemoteLauncher extends RemoteLauncherBase {
         }
     }
 
-    private async applyRequestedModel(requested: string | null | undefined): Promise<void> {
+    private resolveTargetModel(requested: string | null | undefined): OmpModel | null {
         if (requested === undefined) {
-            return;
+            return this.currentModel;
         }
         const target = requested === null
             ? this.defaultModel
@@ -641,11 +801,22 @@ class OmpRemoteLauncher extends RemoteLauncherBase {
         if (!target) {
             throw new Error(`OMP model is not available: ${requested ?? 'default'}`);
         }
+        return target;
+    }
+
+    private async applyRequestedModel(requested: string | null | undefined): Promise<void> {
+        if (requested === undefined) {
+            return;
+        }
+        const target = this.resolveTargetModel(requested);
+        if (!target) {
+            return;
+        }
         if (target.provider === this.currentModel?.provider && target.id === this.currentModel.id) {
             return;
         }
 
-        const client = this.requireClient();
+        const client = await this.ensureClient();
         await client.request({
             type: 'set_model',
             provider: target.provider,
@@ -764,7 +935,7 @@ class OmpRemoteLauncher extends RemoteLauncherBase {
         }
 
         this.trackEventTask((async () => {
-            const state = await this.requireClient().request({ type: 'get_state' });
+            const state = await (await this.ensureClient()).request({ type: 'get_state' });
             this.persistRuntimeState(state);
             const resolvedModel = state.model ?? this.currentModel;
             const modelId = resolvedModel ? `${resolvedModel.provider}/${resolvedModel.id}` : null;
@@ -780,7 +951,7 @@ class OmpRemoteLauncher extends RemoteLauncherBase {
     }
 
     private async refreshRuntimeState(): Promise<void> {
-        const state = await this.requireClient().request({ type: 'get_state' });
+        const state = await (await this.ensureClient()).request({ type: 'get_state' });
         this.persistRuntimeState(state);
     }
 
@@ -807,7 +978,7 @@ class OmpRemoteLauncher extends RemoteLauncherBase {
 
     private async listModels(): Promise<ListOmpModelsResponse> {
         try {
-            const client = this.requireClient();
+            const client = await this.ensureClient();
             const catalog = await client.request({ type: 'get_available_models' });
             this.availableModels = catalog.models;
             const state = await client.request({ type: 'get_state' });
@@ -837,7 +1008,7 @@ class OmpRemoteLauncher extends RemoteLauncherBase {
 
     private async listThinkingOptions(): Promise<ListOmpThinkingOptionsResponse> {
         try {
-            const state = await this.requireClient().request({ type: 'get_state' });
+            const state = await (await this.ensureClient()).request({ type: 'get_state' });
             this.persistRuntimeState(state);
             const values: OmpConfiguredThinkingLevel[] = state.model?.reasoning
                 ? ['auto', 'off', ...(state.model.thinking?.efforts ?? [])]
@@ -860,7 +1031,7 @@ class OmpRemoteLauncher extends RemoteLauncherBase {
             return { success: false, error: 'OMP model can only be cycled while the session is idle' };
         }
         try {
-            const client = this.requireClient();
+            const client = await this.ensureClient();
             const cycled = await client.request({ type: 'cycle_model' });
             if (!cycled) {
                 return { success: false, error: 'OMP has no other available model' };
@@ -892,7 +1063,7 @@ class OmpRemoteLauncher extends RemoteLauncherBase {
             return;
         }
 
-        const client = this.requireClient();
+        const client = await this.ensureClient();
         if (requested === 'auto') {
             let selectedAuto = false;
             for (let attempt = 0; attempt < OMP_THINKING_LEVELS.length + 2; attempt += 1) {
@@ -929,12 +1100,26 @@ class OmpRemoteLauncher extends RemoteLauncherBase {
         config: OmpRuntimeConfigRequest
     ): Promise<OmpRuntimeConfigApplied> {
         if (this.hasUnfinishedNativeInput()) {
-            throw new Error('OMP model and thinking can only be changed while the session is idle');
+            const applied: OmpRuntimeConfigApplied = {};
+            if (config.model !== undefined) {
+                const target = this.resolveTargetModel(config.model);
+                if (!target) {
+                    throw new Error('OMP did not report an active model after configuration');
+                }
+                this.pendingModel = { hasValue: true, value: config.model };
+                applied.model = `${target.provider}/${target.id}`;
+            }
+            if (config.effort !== undefined) {
+                this.pendingThinking = config.effort;
+                applied.effort = config.effort;
+            }
+            return applied;
         }
 
         const applied: OmpRuntimeConfigApplied = {};
         if (config.model !== undefined) {
             await this.applyRequestedModel(config.model);
+            this.pendingModel = { hasValue: false, value: undefined };
             if (!this.currentModel) {
                 throw new Error('OMP did not report an active model after configuration');
             }
@@ -942,31 +1127,175 @@ class OmpRemoteLauncher extends RemoteLauncherBase {
         }
         if (config.effort !== undefined) {
             await this.applyRequestedThinking(config.effort);
+            this.pendingThinking = undefined;
             applied.effort = config.effort;
         }
         return applied;
     }
 
-    private async sendReadyIfIdle(): Promise<void> {
-        if (this.shouldExit || this.hasLocalPendingInput()) {
-            return;
-        }
-        const client = this.client;
-        if (!client || client.state !== 'ready') {
-            return;
-        }
-        try {
-            const state = await client.request({ type: 'get_state' });
-            this.persistRuntimeState(state);
-            if (
-                !state.isStreaming
-                && state.queuedMessageCount === 0
-                && !this.hasLocalPendingInput()
-            ) {
-                this.session.sendSessionEvent({ type: 'ready' });
+    private stagePendingRuntimeConfig(mode: OmpQueuedInput['mode']): void {
+        if (mode.model !== undefined) {
+            const target = this.resolveTargetModel(mode.model);
+            if (target && (target.provider !== this.currentModel?.provider || target.id !== this.currentModel?.id)) {
+                this.pendingModel = { hasValue: true, value: mode.model };
             }
-        } catch (error) {
-            logger.debug('[omp-remote] failed checking ready state', error);
+        }
+        if (mode.effort !== undefined && mode.effort !== this.confirmedConfiguredThinking) {
+            this.pendingThinking = mode.effort;
+        }
+    }
+
+    private async flushPendingRuntimeConfig(): Promise<void> {
+        if (this.pendingModel.hasValue) {
+            const requestedModel = this.pendingModel.value;
+            this.pendingModel = { hasValue: false, value: undefined };
+            await this.applyRequestedModel(requestedModel);
+        }
+        if (this.pendingThinking !== undefined) {
+            const requestedThinking = this.pendingThinking;
+            this.pendingThinking = undefined;
+            await this.applyRequestedThinking(requestedThinking);
+        }
+    }
+
+    private isAlreadyProcessingError(error: unknown): boolean {
+        const detail = error instanceof Error ? error.message : String(error);
+        return /agent is already processing/i.test(detail);
+    }
+
+    private recordUserMessageOnce(input: OmpQueuedInput): void {
+        if (this.bufferedInputIds.has(input.id)) {
+            return;
+        }
+        this.bufferedInputIds.add(input.id);
+        this.messageBuffer.addMessage(input.text, 'user');
+    }
+
+    private async recoverFromBusyDispatchRace(
+        input: OmpQueuedInput,
+        prepared: PreparedOmpInput,
+        client: OmpRpcClient,
+        startedPrompt: boolean,
+        queuedFollowUp: boolean
+    ): Promise<void> {
+        this.isStreaming = true;
+        if (!this.currentPrompt) {
+            this.beginPrompt(input.modeHash, 0);
+        }
+        if (this.currentPrompt) {
+            this.currentPrompt.phase = 'streaming';
+        }
+        this.session.onThinkingChange(true);
+        this.stagePendingRuntimeConfig(input.mode);
+        this.applyDisplayMode(input.mode.permissionMode, this.currentModel?.id);
+        this.recordUserMessageOnce(input);
+
+        if (queuedFollowUp) {
+            this.nativeFollowUpOutstanding = false;
+        }
+
+        try {
+            if ((input.inputMode === 'prompt' || input.inputMode === 'follow_up') && !this.nativeFollowUpOutstanding) {
+                this.nativeFollowUpOutstanding = true;
+                if (input.inputMode === 'prompt') {
+                    const response = await client.request({
+                        type: 'prompt',
+                        message: prepared.message,
+                        images: prepared.images,
+                        streamingBehavior: 'followUp'
+                    });
+                    if (response?.agentInvoked === false) {
+                        this.nativeFollowUpOutstanding = false;
+                    }
+                } else {
+                    await client.request({
+                        type: 'follow_up',
+                        message: prepared.message,
+                        images: prepared.images
+                    });
+                }
+                this.bufferedInputIds.delete(input.id);
+                this.session.queue.completeInvocation(input);
+                return;
+            }
+            if (input.inputMode === 'steer') {
+                await client.request({
+                    type: 'steer',
+                    message: prepared.message,
+                    images: prepared.images
+                });
+                this.bufferedInputIds.delete(input.id);
+                this.session.queue.completeInvocation(input);
+                return;
+            }
+        } catch (fallbackError) {
+            this.nativeFollowUpOutstanding = false;
+            if (!this.isAlreadyProcessingError(fallbackError)) {
+                if (startedPrompt) {
+                    this.clearCurrentPrompt();
+                }
+                const detail = fallbackError instanceof Error ? fallbackError.message : String(fallbackError);
+                logger.warn(`[omp-remote] RPC ${input.inputMode} busy-fallback failed`, fallbackError);
+                this.reportInputFailure(detail);
+                this.bufferedInputIds.delete(input.id);
+                this.session.queue.completeInvocation(input);
+                return;
+            }
+        }
+
+        logger.debug(`[omp-remote] Requeueing held input ${input.id} (${input.inputMode}) while native agent is processing`);
+        this.session.queue.requeueInvocation(input);
+    }
+
+    private async sendReadyIfIdle(): Promise<void> {
+        while (!this.shouldExit && !this.hasLocalPendingInput() && !this.readyEmittedForIdleCycle) {
+            if (this.readyInFlight) {
+                await this.readyInFlight;
+                if (this.readyCheckedForIdleCycle) {
+                    return;
+                }
+                continue;
+            }
+            const client = this.client;
+            if (!client || client.state !== 'ready') {
+                return;
+            }
+            this.readyCheckedForIdleCycle = true;
+            let task: Promise<void>;
+            task = (async () => {
+                try {
+                    const state = await client.request({ type: 'get_state' });
+                    this.persistRuntimeState(state);
+                    if (
+                        !state.isStreaming
+                        && state.queuedMessageCount === 0
+                        && !this.hasLocalPendingInput()
+                        && !this.shouldExit
+                    ) {
+                        await this.flushPendingRuntimeConfig();
+                        if (
+                            !this.isStreaming
+                            && !this.hasLocalPendingInput()
+                            && !this.readyEmittedForIdleCycle
+                            && !this.shouldExit
+                        ) {
+                            this.readyEmittedForIdleCycle = true;
+                            this.session.sendSessionEvent({ type: 'ready' });
+                        }
+                    }
+                } catch (error) {
+                    logger.debug('[omp-remote] failed checking ready state', error);
+                }
+            })().finally(() => {
+                if (this.readyInFlight === task) {
+                    this.readyInFlight = null;
+                }
+            });
+            this.readyInFlight = task;
+            await task;
+            if (this.readyCheckedForIdleCycle) {
+                return;
+            }
         }
     }
 
@@ -1001,6 +1330,7 @@ class OmpRemoteLauncher extends RemoteLauncherBase {
     }
 
     private beginPrompt(modeHash: string, ignoreAgentEnds: number): void {
+        this.readyEmittedForIdleCycle = false;
         this.currentPrompt = {
             phase: 'awaiting-agent',
             modeHash,
@@ -1027,6 +1357,7 @@ class OmpRemoteLauncher extends RemoteLauncherBase {
     }
 
     private handleTransportFailure(error: unknown): void {
+        this.session.client.clearSessionReady();
         const failure = error instanceof Error ? error : new Error(String(error));
         this.transportFailure = failure;
         this.clearCurrentPrompt();
@@ -1064,7 +1395,7 @@ class OmpRemoteLauncher extends RemoteLauncherBase {
         const abortedTurnGeneration = this.nativeTurnGeneration;
         const client = this.client;
         if (client?.state === 'ready') {
-            await client.request({ type: 'abort' });
+            await client.request({ type: 'abort' }, { timeoutMs: 5_000 });
         }
         const newerTurnIsActive = (
             this.nativeTurnGeneration !== abortedTurnGeneration
@@ -1081,8 +1412,14 @@ class OmpRemoteLauncher extends RemoteLauncherBase {
 
     private async handleExitFromUi(): Promise<void> {
         await this.requestExit('exit', async () => {
-            await this.handleAbort();
-            this.signalChange();
+            try {
+                await this.handleAbort();
+            } catch (error) {
+                // EOF below still asks OMP to dispose when abort could not reply.
+                logger.warn('[omp-remote] Abort before shutdown failed', error);
+            } finally {
+                this.signalChange();
+            }
         });
     }
 

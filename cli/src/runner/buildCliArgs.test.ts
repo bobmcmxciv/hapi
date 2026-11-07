@@ -138,6 +138,35 @@ describe('buildCliArgs', () => {
         ])
     })
 
+    it('passes existing Hapi session id separately from OMP native resume id', () => {
+        const args = buildCliArgs('omp', {
+            directory: '/tmp',
+            resumeSessionId: 'omp-native-1',
+            existingSessionId: 'hapi-session-1',
+        })
+        expect(args).toEqual([
+            'omp',
+            '--resume',
+            'omp-native-1',
+            '--hapi-starting-mode',
+            'remote',
+            '--started-by',
+            'runner',
+            '--existing-session-id',
+            'hapi-session-1',
+        ])
+    })
+
+    it('forwards the preallocated HAPI id to OMP without resuming its native session', () => {
+        const args = buildCliArgs('omp', {
+            directory: '/tmp',
+            existingSessionId: 'fresh-hapi-session',
+        })
+        expect(args).toContain('--existing-session-id')
+        expect(args).toContain('fresh-hapi-session')
+        expect(args).not.toContain('--resume')
+    })
+
 
 
     it('passes the preallocated HAPI id to OpenCode without resuming its native session', () => {

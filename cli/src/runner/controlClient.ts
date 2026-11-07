@@ -10,7 +10,7 @@ import packageJson from '../../package.json';
 import { existsSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { isBunCompiled, projectPath } from '@/projectPath';
-import { isProcessAlive, isHapiRunnerProcess, killProcess } from '@/utils/process';
+import { getProcessStartMarker, isProcessAlive, isHapiRunnerProcess, killProcess } from '@/utils/process';
 import { configuration } from '@/configuration';
 import { hashRunnerCliApiToken, hashRunnerExtraHeaders, isRunnerStateCompatibleWithIdentity } from './runnerIdentity';
 
@@ -89,6 +89,22 @@ export async function notifyRunnerSessionStarted(
     sessionId,
     metadata
   });
+}
+
+/** Sent only after the native session has acknowledged disposal of its resources. */
+export async function notifyRunnerSessionCleanupVerified(sessionId: string): Promise<void> {
+  const state = await readRunnerState();
+  if (!state || !isProcessAlive(state.pid)) return;
+  const processStartMarker = getProcessStartMarker(process.pid);
+  if (!processStartMarker) throw new Error('Cannot verify session process generation during cleanup');
+  const result = await runnerPost('/session-cleanup-verified', {
+    sessionId,
+    pid: process.pid,
+    processStartMarker
+  });
+  if (result.status !== 'ok') {
+    throw new Error(result.error ?? 'Runner did not acknowledge native session cleanup');
+  }
 }
 
 export async function listRunnerSessions(): Promise<any[]> {

@@ -144,6 +144,46 @@ describe('cli session handlers', () => {
         expect((sessionUpdated.data as { updatedAt?: number }).updatedAt).toBeGreaterThan(0)
     })
 
+    it('persists native OMP snapshots, ignores errors, and publishes an empty clear', () => {
+        const store = new Store(':memory:')
+        try {
+            const session = store.sessions.getOrCreateSession('omp-todos', { path: '/tmp', host: 'h', flavor: 'omp' }, null, 'default')
+            const socket = new FakeSocket()
+            const events: SyncEvent[] = []
+            registerSessionHandlers(socket as unknown as CliSocketWithData, {
+                store,
+                resolveSessionAccess: () => ({ ok: true, value: session as StoredSession }),
+                emitAccessError: () => { throw new Error('unexpected access error') },
+                onWebappEvent: (event) => { events.push(event) }
+            })
+            const send = (phases: unknown[], isError = false) => {
+                const output = { toolName: 'todo', content: [], details: { op: 'view', phases } }
+                socket.trigger('message', { sid: session.id, message: { role: 'agent', content: {
+                    type: 'output', data: { type: 'user', toolUseResult: output, message: { content: [
+                        { type: 'tool_result', content: output, is_error: isError }
+                    ] } }
+                } } })
+            }
+            send([{ name: 'Repair', tasks: [{ id: '1', content: 'Implement', status: 'blocked' }] }])
+            const expected = [{ id: '1', content: 'Implement', status: 'pending', priority: 'medium' }]
+            expect(store.sessions.getSession(session.id)?.todos).toEqual(expected)
+            expect(events).toContainEqual(expect.objectContaining({ type: 'session-updated', data: expect.objectContaining({
+                todos: expect.objectContaining({ value: expected })
+            }) }))
+            events.length = 0
+            send([], true)
+            expect(store.sessions.getSession(session.id)?.todos).toEqual(expected)
+            expect(events.some((event) => event.type === 'session-updated')).toBe(false)
+            send([])
+            expect(store.sessions.getSession(session.id)?.todos).toEqual([])
+            expect(events).toContainEqual(expect.objectContaining({ type: 'session-updated', data: expect.objectContaining({
+                todos: expect.objectContaining({ value: [] })
+            }) }))
+        } finally {
+            store.close()
+        }
+    })
+
     it('emits a structured metadata patch on update-metadata RPC (closes second half of #884)', () => {
         const store = new Store(':memory:')
         const session = store.sessions.getOrCreateSession(

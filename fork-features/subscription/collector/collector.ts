@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { homedir } from 'node:os'
 import type { SubscriptionSnapshot } from '../domain'
 import { collectAntigravity, findAntigravityBinary, type runAntigravityUsage } from './antigravity'
+import { collectDevin, readDevinToken } from './devin'
 import {
     collectAnthropic,
     collectDeepSeek,
@@ -60,6 +61,8 @@ export type CollectorConfig = {
         deepseekApiKey?: string | null
         kimiApiKey?: string | null
         glmApiKey?: string | null
+        /** Devin session token。留空则自动从 %APPDATA%/devin/credentials.toml 或 ~/.omp/agent/agent.db 读。 */
+        devinApiKey?: string | null
     }
     /** 测试注入点。 */
     now?: () => number
@@ -112,7 +115,8 @@ export function configFromEnv(env: Record<string, string | undefined> = process.
                 anthropicAccessToken: env.HAPI_SUB_ANTHROPIC_TOKEN?.trim() || null,
                 deepseekApiKey: env.HAPI_SUB_DEEPSEEK_KEY?.trim() || null,
                 kimiApiKey: env.HAPI_SUB_KIMI_KEY?.trim() || null,
-                glmApiKey: env.HAPI_SUB_GLM_KEY?.trim() || null
+                glmApiKey: env.HAPI_SUB_GLM_KEY?.trim() || null,
+                devinApiKey: env.HAPI_SUB_DEVIN_TOKEN?.trim() || null
             }
         }
     }
@@ -137,6 +141,8 @@ export async function collectAll(config: CollectorConfig): Promise<SubscriptionS
     const agyBinary = config.antigravityBinary === null ? null
         : config.antigravityBinary ?? findAntigravityBinary(config.homeDir)
     if (agyBinary) jobs.push(collectAntigravity(ctx, agyBinary, config.antigravityAccountKey, config.runAntigravityUsage))
+    const devinToken = config.credentials.devinApiKey ?? readDevinToken(config.homeDir)
+    if (devinToken) jobs.push(collectDevin(ctx, devinToken))
 
     // 适配器自己已保证不 throw,这里再兜一层:某个适配器万一漏了,也不能带崩整轮。
     const settled = await Promise.allSettled(jobs)

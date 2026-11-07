@@ -79,6 +79,30 @@ function createHarness(eventAllowlist?: ReadonlySet<OmpKnownEventType>) {
 }
 
 describe('OmpRpcEventAdapter', () => {
+    it.each(['open-elsewhere', 'replaced', 'contested'])('reconciles %s persistence relocation before the turn ends even when notices are hidden', (reason) => {
+        const harness = createHarness(new Set<OmpKnownEventType>());
+        harness.adapter.handle(rpcEvent({
+            type: 'notice', level: 'warning', message: 'Session moved',
+            source: 'session-persistence', reason, from: '/old.jsonl', to: '/new.jsonl'
+        }));
+        expect(harness.callbacks.onSessionInfoUpdate).toHaveBeenCalledOnce();
+        expect(harness.callbacks.onTurnFinished).not.toHaveBeenCalled();
+        expect(harness.structuredEvents).toEqual([]);
+    });
+
+    it('does not treat an unrelated or incomplete notice as a native relocation', () => {
+        const harness = createHarness();
+        for (const frame of [
+            { source: 'extension', reason: 'open-elsewhere', from: '/old', to: '/new' },
+            { source: 'session-persistence', reason: 'open-elsewhere', from: '/old' },
+            { source: 'session-persistence' }
+        ]) {
+            harness.adapter.handle(rpcEvent({ type: 'notice', level: 'warning', message: 'Notice', ...frame }));
+        }
+        expect(harness.callbacks.onSessionInfoUpdate).not.toHaveBeenCalled();
+        expect(harness.structuredEvents).toHaveLength(3);
+    });
+
     it('passes the failure text only for prompts that failed before reaching the agent', () => {
         const harness = createHarness();
         harness.adapter.handle(rpcEvent({
@@ -229,12 +253,11 @@ describe('OmpRpcEventAdapter', () => {
         }));
 
         const lifecycle = harness.agentMessages.filter((message) => message.type === 'tool_call');
-        // The update repeats nothing new for the card, so it is not re-emitted.
-        expect(lifecycle).toHaveLength(2);
-        expect(lifecycle.map((message) => message.id)).toEqual(['tool-1', 'tool-1']);
-        expect(lifecycle.map((message) => message.status)).toEqual(['in_progress', 'completed']);
+        // Neither update nor end repeats the card once in_progress has been emitted; completion comes from toolResult.
+        expect(lifecycle).toHaveLength(1);
+        expect(lifecycle.map((message) => message.id)).toEqual(['tool-1']);
+        expect(lifecycle.map((message) => message.status)).toEqual(['in_progress']);
         expect(lifecycle.map((message) => message.input)).toEqual([
-            { command: 'printf start' },
             { command: 'printf start' }
         ]);
         expect(harness.agentMessages.some((message) => message.type === 'tool_result')).toBe(false);
@@ -408,12 +431,10 @@ describe('OmpRpcEventAdapter', () => {
             .map((trace) => trace.message)
             .filter((message) => message.type === 'tool_call');
         expect(childLifecycle.map((message) => message.id)).toEqual([
-            'child-tool',
             'child-tool'
         ]);
-        expect(childLifecycle.map((message) => message.status)).toEqual(['in_progress', 'completed']);
+        expect(childLifecycle.map((message) => message.status)).toEqual(['in_progress']);
         expect(childLifecycle.map((message) => message.input)).toEqual([
-            { command: 'printf original' },
             { command: 'printf original' }
         ]);
         expect(harness.traces.map((trace) => trace.message)).toContainEqual({
@@ -669,7 +690,6 @@ describe('OmpRpcEventAdapter', () => {
 
         expect(harness.agentMessages.filter((message) => message.type === 'tool_call').map((message) => [message.id, message.status])).toEqual([
             ['wait-1', 'in_progress'],
-            ['wait-1', 'completed'],
             ['wait-2', 'in_progress']
         ]);
     });
@@ -783,8 +803,7 @@ describe('OmpRpcEventAdapter', () => {
         expect(visible.traces.map((trace) => trace.message)).toEqual([
             expect.objectContaining({ type: 'reasoning', text: 'reasoning:final' }),
             expect.objectContaining({ type: 'text', text: 'final' }),
-            { type: 'tool_call', id: 'read-child', name: 'read', input: { path: 'child.ts' }, status: 'in_progress' },
-            { type: 'tool_call', id: 'read-child', name: 'read', input: { path: 'child.ts' }, status: 'completed' }
+            { type: 'tool_call', id: 'read-child', name: 'read', input: { path: 'child.ts' }, status: 'in_progress' }
         ]);
         expect(hidden.traces).toEqual([]);
         expect(hidden.agentRunEvents).toEqual([]);
@@ -859,5 +878,79 @@ describe('OmpRpcEventAdapter', () => {
         harness.adapter.handle(rpcEvent({ type: 'tool_stream_update', toolCallId: 't1', toolName: 'edit', preview: { diff: '+a' } }));
         harness.adapter.handle(rpcEvent({ type: 'session_settled' }));
         expect(harness.structuredEvents).toEqual([]);
+    });
+
+    it('deduplicates high-frequency running subagent_progress events until activity or terminal state changes', () => {
+        const harness = createHarness();
+        harness.adapter.handle(rpcEvent({
+            type: 'subagent_lifecycle',
+            payload: {
+                id: 'worker-1',
+                agent: 'task',
+                agentSource: 'bundled',
+                description: 'high-freq worker',
+                status: 'started',
+                parentToolCallId: 'task-parent',
+                index: 0
+            }
+        }));
+
+        for (let tick = 0; tick < 200; tick += 1) {
+            harness.adapter.handle(rpcEvent({
+                type: 'subagent_progress',
+                payload: {
+                    index: 0,
+                    agent: 'task',
+                    agentSource: 'bundled',
+                    task: 'work',
+                    parentToolCallId: 'task-parent',
+                    progress: {
+                        id: 'worker-1',
+                        status: 'running',
+                        tokens: tick * 50,
+                        durationMs: tick * 100
+                    }
+                }
+            }));
+        }
+
+        for (let tick = 0; tick < 100; tick += 1) {
+            harness.adapter.handle(rpcEvent({
+                type: 'subagent_progress',
+                payload: {
+                    index: 0,
+                    agent: 'task',
+                    agentSource: 'bundled',
+                    task: 'work',
+                    parentToolCallId: 'task-parent',
+                    progress: {
+                        id: 'worker-1',
+                        status: 'running',
+                        currentTool: 'read',
+                        tokens: 10_000 + tick * 50
+                    }
+                }
+            }));
+        }
+
+        harness.adapter.handle(rpcEvent({
+            type: 'subagent_lifecycle',
+            payload: {
+                id: 'worker-1',
+                agent: 'task',
+                agentSource: 'bundled',
+                description: 'high-freq worker',
+                status: 'completed',
+                parentToolCallId: 'task-parent',
+                index: 0
+            }
+        }));
+
+        const updates = harness.agentRunEvents.filter((event) => event.type === 'agent-run-update');
+        expect(updates.map((event) => [event.status, event.activity])).toEqual([
+            ['running', 'Running'],
+            ['running', 'Using read'],
+            ['completed', 'Completed']
+        ]);
     });
 });

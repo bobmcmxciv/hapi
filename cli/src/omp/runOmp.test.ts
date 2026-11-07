@@ -18,6 +18,8 @@ const harness = vi.hoisted(() => ({
         applyRuntimeConfig: vi.fn(),
         pushKeepAlive: vi.fn(),
         stopKeepAlive: vi.fn(),
+        isShutdownRequested: vi.fn(() => false),
+        requestShutdown: vi.fn(async () => ({ kind: 'omp-rpc', status: 'not-started' })),
         localLaunchFailure: null
     }
 }));
@@ -67,6 +69,10 @@ vi.mock('@/ui/logger', () => ({
     logger: { debug: vi.fn(), warn: vi.fn(), info: vi.fn(), getLogPath: vi.fn(() => '/logs/omp.log') }
 }));
 vi.mock('@/utils/invokedCwd', () => ({ getInvokedCwd: vi.fn(() => '/work') }));
+vi.mock('./utils/ompUsageMonitor', () => ({
+    createOmpUsageMonitor: vi.fn(() => ({ start: vi.fn(async () => undefined), cleanup: vi.fn(async () => undefined) })),
+    ensureOmpUsageExtension: vi.fn(async () => undefined)
+}));
 
 import { runOmp } from './runOmp';
 import type { OmpInputQueue } from './OmpInputQueue';

@@ -16,13 +16,15 @@ export function startRunnerControlServer({
   stopSession,
   spawnSession,
   requestShutdown,
-  onHappySessionWebhook
+  onHappySessionWebhook,
+  onSessionCleanupVerified
 }: {
   getChildren: () => TrackedSession[];
   stopSession: (sessionId: string) => Promise<'stopped' | 'already_gone' | 'still_alive'>;
   spawnSession: (options: SpawnSessionOptions) => Promise<SpawnSessionResult>;
   requestShutdown: () => void;
   onHappySessionWebhook: (sessionId: string, metadata: Metadata) => void;
+  onSessionCleanupVerified: (sessionId: string, pid: number, processStartMarker: string) => boolean;
 }): Promise<{ port: number; stop: () => Promise<void> }> {
   return new Promise((resolve) => {
     const app = fastify({
@@ -53,6 +55,26 @@ export function startRunnerControlServer({
       logger.debug(`[CONTROL SERVER] Session started: ${sessionId}`);
       onHappySessionWebhook(sessionId, metadata);
 
+      return { status: 'ok' as const };
+    });
+
+    typed.post('/session-cleanup-verified', {
+      schema: {
+        body: z.object({
+          sessionId: z.string().min(1),
+          pid: z.number().int().positive(),
+          processStartMarker: z.string().min(1)
+        }),
+        response: {
+          200: z.object({ status: z.literal('ok') }),
+          409: z.object({ error: z.string() })
+        }
+      }
+    }, async (request, reply) => {
+      const { sessionId, pid, processStartMarker } = request.body;
+      if (!onSessionCleanupVerified(sessionId, pid, processStartMarker)) {
+        return reply.code(409).send({ error: 'Session ownership changed before cleanup acknowledgement' });
+      }
       return { status: 'ok' as const };
     });
 

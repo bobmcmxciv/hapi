@@ -11,7 +11,7 @@ import { DecryptedMessageSchema, ScratchlistEntrySchema, SessionSchema } from '.
  *     still exists on the hub.
  */
 export const HAPI_SESSION_EXPORT_SCHEMA_VERSION = 2
-export const SESSION_EXPORT_MESSAGE_LIMIT = 20_000
+export const SESSION_EXPORT_MESSAGE_LIMIT = 100_000
 
 export const HapiSessionExportSchema = z.object({
     schemaVersion: z.literal(HAPI_SESSION_EXPORT_SCHEMA_VERSION),

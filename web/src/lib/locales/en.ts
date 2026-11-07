@@ -792,6 +792,7 @@ export default {
   'reconnecting.reason.error': 'stream error',
   'reconnecting.reason.closed': 'stream closed',
   'reconnecting.reason.heartbeatTimeout': 'heartbeat timeout',
+  'reconnecting.reason.connectTimeout': 'connection timeout',
   'reconnecting.reason.visibilityRecovery': 'resuming after background',
   'pwa.update.title': 'New version available',
   'pwa.update.body': 'Reload to get the latest HAPI',

@@ -3,6 +3,7 @@ import type { Session } from '@hapi/protocol/types'
 import { Store } from '../store'
 import { RpcRegistry } from '../socket/rpcRegistry'
 import { SyncEngine } from './syncEngine'
+import type { RpcGateway } from './rpcGateway'
 
 /**
  * Reopening an archived PTY session must reuse the SAME hub session id.
@@ -99,6 +100,114 @@ describe('SyncEngine reopen/resume PTY session id preservation', () => {
         mintedNewId = undefined
         staleReadyPresentAtSpawn = false
         installFakeRunner()
+    })
+
+    it.each(['ready', 'ended'] as const)('waits for native OMP readiness before reporting reopen success (%s)', async (readyResult) => {
+        const sessionId = insertSession(
+            'omp-session-native-readiness',
+            baseMetadata({
+                flavor: 'omp', lifecycleState: 'archived', archivedBy: 'hub',
+                ompSession: { id: 'native-omp-id', file: '/tmp/native-omp-id.jsonl' }
+            }),
+            { startingMode: 'remote' }
+        ).id
+        let waited = false
+        engine.waitForSessionReady = async (id) => {
+            expect(id).toBe(sessionId)
+            waited = true
+            return readyResult
+        }
+        engine.handleSessionReady({ sid: sessionId, time: Date.now() })
+        const result = await engine.reopenSession(sessionId, NAMESPACE)
+        expect(waited).toBe(true)
+        expect(staleReadyPresentAtSpawn).toBe(false)
+        expect(capturedExistingSessionId).toBe(sessionId)
+        expect(result.type).toBe(readyResult === 'ready' ? 'success' : 'error')
+        expect(mintedNewId).toBeUndefined()
+    })
+
+    it('does not report an active OMP wrapper as native-ready', async () => {
+        const sessionId = insertSession('omp-active-not-ready', baseMetadata({
+            flavor: 'omp', ompSession: { id: 'native-id', file: '/tmp/native-id.jsonl' }
+        }), { startingMode: 'remote' }).id
+        engine.handleSessionAlive({ sid: sessionId, time: Date.now() })
+        engine.waitForSessionReady = async () => 'timeout'
+        const result = await engine.reopenSession(sessionId, NAMESPACE)
+        expect(result).toMatchObject({ type: 'error', code: 'resume_failed', rollbackSafe: false })
+        expect(capturedExistingSessionId).toBeUndefined()
+        expect(engine.getSession(sessionId)?.active).toBe(true)
+        engine.stop()
+    })
+
+    it('coalesces reopen clicks and serializes resume behind native readiness', async () => {
+        const sessionId = insertSession('omp-concurrent-reopen', baseMetadata({
+            flavor: 'omp', lifecycleState: 'archived',
+            ompSession: { id: 'native-id', file: '/tmp/native-id.jsonl' }
+        }), { startingMode: 'remote' }).id
+        const { promise: nativeReady, resolve: ready } = Promise.withResolvers<'ready'>()
+        const { promise: waiting, resolve: reachedReady } = Promise.withResolvers<void>()
+        engine.waitForSessionReady = async () => { reachedReady(); return nativeReady }
+        // Capture the real test RPC seam while retaining its typed signature.
+        const internals = engine as unknown as { rpcGateway: RpcGateway }
+        const spawn = internals.rpcGateway.spawnSession.bind(internals.rpcGateway)
+        let spawns = 0
+        internals.rpcGateway.spawnSession = async (...args) => { spawns += 1; return spawn(...args) }
+
+        const first = engine.reopenSession(sessionId, NAMESPACE)
+        const repeated = engine.reopenSession(sessionId, NAMESPACE)
+        const resume = engine.resumeSession(sessionId, NAMESPACE)
+        await waiting
+        expect(spawns).toBe(1)
+        ready('ready')
+        expect(await first).toMatchObject({ type: 'success', sessionId })
+        expect(await repeated).toMatchObject({ type: 'success', sessionId })
+        expect(await resume).toEqual({ type: 'success', sessionId })
+        expect(spawns).toBe(1)
+        expect(engine.getSession(sessionId)?.metadata?.ompSession?.id).toBe('native-id')
+        engine.stop()
+    })
+
+    it.each(['already_gone', 'still_alive'] as const)('dedupes OMP restart and requires cleanup before spawn (%s)', async (status) => {
+        const sessionId = insertSession('omp-restart-cleanup', baseMetadata({
+            flavor: 'omp', lifecycleState: 'archived',
+            ompSession: { id: 'native-id', file: '/tmp/native-id.jsonl' }
+        }), { startingMode: 'remote' }).id
+        const internals = engine as unknown as { rpcGateway: RpcGateway }
+        const spawn = internals.rpcGateway.spawnSession.bind(internals.rpcGateway)
+        const calls: string[] = []
+        internals.rpcGateway.killSession = async () => { calls.push('native-cleanup') }
+        internals.rpcGateway.stopRunnerSession = async () => { calls.push('runner-verify'); return status }
+        internals.rpcGateway.spawnSession = async (...args) => { calls.push('spawn'); return spawn(...args) }
+        const first = engine.restartSession(sessionId, NAMESPACE)
+        const repeated = engine.restartSession(sessionId, NAMESPACE)
+        expect(await first).toMatchObject({ type: status === 'still_alive' ? 'error' : 'success' })
+        expect(await repeated).toEqual(await first)
+        expect(calls).toEqual(status === 'still_alive'
+            ? ['native-cleanup', 'runner-verify']
+            : ['native-cleanup', 'runner-verify', 'spawn'])
+        engine.stop()
+    })
+
+    it.each(['already_gone', 'still_alive'] as const)('stops timed-out OMP resume before archive rollback (%s)', async (stopResult) => {
+        const sessionId = insertSession(
+            'omp-session-timeout-cleanup',
+            baseMetadata({ flavor: 'omp', lifecycleState: 'archived', ompSession: { id: 'native-id', file: '/tmp/native-id.jsonl' } }),
+            { startingMode: 'remote' }
+        ).id
+        engine.waitForSessionReady = async () => 'timeout'
+        // Internal RPC seam: the fake runner must report whether its timed-out child actually exited.
+        const internals = engine as unknown as { rpcGateway: { stopRunnerSession: (machineId: string, sid: string) => Promise<string> } }
+        let stoppedId: string | undefined
+        internals.rpcGateway.stopRunnerSession = async (_machineId, sid) => {
+            stoppedId = sid
+            return stopResult
+        }
+        const result = await engine.reopenSession(sessionId, NAMESPACE)
+        expect(stoppedId).toBe(sessionId)
+        expect(result.type).toBe('error')
+        if (stopResult === 'still_alive' && result.type === 'error') {
+            expect(result.rollbackSafe).toBe(false)
+        }
     })
 
     it('clears stale readiness before spawning the same-id PTY replacement', async () => {

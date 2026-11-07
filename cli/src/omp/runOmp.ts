@@ -14,6 +14,8 @@ import { getInvokedCwd } from '@/utils/invokedCwd';
 import { resolveOmpRuntimeConfig } from './utils/config';
 import { OmpInputQueue } from './OmpInputQueue';
 import { loadOmpEventAllowlist } from './rpc/eventAllowlist';
+import { createOmpUsageMonitor, ensureOmpUsageExtension } from './utils/ompUsageMonitor';
+import { notifyRunnerSessionCleanupVerified } from '@/runner/controlClient';
 import {
     OMP_THINKING_LEVELS,
     type OmpConfiguredThinkingLevel
@@ -102,11 +104,25 @@ export async function runOmp(opts: {
     let currentPermissionMode: PermissionMode = opts.permissionMode ?? 'default';
     let sessionModel: string | null = persistedModel ?? null;
     let resolvedModel = sessionModel ?? machineDefault;
+    const usageMonitor = createOmpUsageMonitor({
+        sessionId: session.sessionId,
+        getPrimarySessionFile: () => sessionWrapperRef.current?.getNativeSession()?.file
+            ?? session.getMetadata()?.ompSession?.file ?? null,
+        onUsage: (event) => session.sendClaudeSessionMessage(event)
+    });
 
     const lifecycle = createRunnerLifecycle({
         session,
         logTag: 'omp',
-        stopKeepAlive: () => sessionWrapperRef.current?.stopKeepAlive()
+        stopKeepAlive: () => sessionWrapperRef.current?.stopKeepAlive(),
+        onShutdownRequest: async () => {
+            const receipt = await sessionWrapperRef.current?.requestShutdown();
+            if (receipt?.status === 'unverified') {
+                throw new Error('OMP native cleanup was not confirmed; session resources may still be running');
+            }
+            await notifyRunnerSessionCleanupVerified(session.sessionId);
+        },
+        onBeforeClose: () => usageMonitor.cleanup()
     });
 
     lifecycle.registerProcessHandlers();
@@ -244,6 +260,8 @@ export async function runOmp(opts: {
     let crashed = false;
 
     try {
+        await ensureOmpUsageExtension();
+        await usageMonitor.start();
         await ompLoop({
             path: workingDirectory,
             startingMode,
@@ -276,8 +294,8 @@ export async function runOmp(opts: {
             lifecycle.setExitCode(1);
             lifecycle.setArchiveReason(`Local launch failed: ${localFailure.message.slice(0, 200)}`);
             lifecycle.setSessionEndReason('error');
-        } else if (!crashed) {
-            lifecycle.setSessionEndReason('completed');
+        } else if (!crashed && !lifecycle.hasExplicitSessionEndReason()) {
+            lifecycle.setSessionEndReason(sessionWrapperRef.current?.isShutdownRequested() ? 'terminated' : 'completed');
         }
         await lifecycle.cleanupAndExit();
     }

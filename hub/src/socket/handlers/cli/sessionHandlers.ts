@@ -145,7 +145,7 @@ export function registerSessionHandlers(socket: CliSocketWithData, deps: Session
         const parsedTodos = TodosSchema.safeParse(storedTodos)
         const nextTodos = applyTodoMessageContent(parsedTodos.success ? parsedTodos.data : null, content)
         if (nextTodos) {
-            const updated = store.sessions.setSessionTodos(sid, nextTodos, msg.createdAt, session.namespace)
+            const updated = store.sessions.setSessionTodos(sid, nextTodos, msg.createdAt, session.namespace, { replaceAtSameTimestamp: true })
             if (updated) {
                 const stored = store.sessions.getSession(sid)
                 onWebappEvent?.({

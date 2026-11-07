@@ -64,7 +64,7 @@ function createApp(session: Session, opts?: {
     listSlashCommands?: SyncEngine['listSlashCommands']
     getSessionExport?: (sessionId: string, session: Session) => unknown
     sessionExists?: boolean
-    archiveSession?: (sessionId: string) => Promise<void>
+    archiveSession?: SyncEngine['archiveSession']
     getCursorChatStoreStatus?: SyncEngine['getCursorChatStoreStatus']
     listCodexModelsForSession?: SyncEngine['listCodexModelsForSession']
     forkConversation?: SyncEngine['forkConversation']
@@ -146,7 +146,7 @@ function createApp(session: Session, opts?: {
         resumed: true
     }))
     const sessionExists = opts?.sessionExists !== false
-    const archiveSessionMock = opts?.archiveSession ?? (async () => {})
+    const archiveSessionMock: SyncEngine['archiveSession'] = opts?.archiveSession ?? (async () => ({ type: 'success' as const, alreadyArchived: false }))
     const engine = {
         resolveSessionAccess: () => sessionExists
             ? { ok: true, sessionId: session.id, session }
@@ -1437,7 +1437,7 @@ describe('sessions routes', () => {
             const calls: string[] = []
             const session = createSession({ active: true })
             const { app } = createApp(session, {
-                archiveSession: async (sessionId: string) => { calls.push(sessionId) }
+                archiveSession: async (sessionId) => { calls.push(sessionId); return { type: 'success' as const, alreadyArchived: false } }
             })
 
             const response = await app.request('/api/sessions/session-1/archive', { method: 'POST' })
@@ -1459,7 +1459,7 @@ describe('sessions routes', () => {
                 }
             })
             const { app } = createApp(session, {
-                archiveSession: async (sessionId: string) => { calls.push(sessionId) }
+                archiveSession: async (sessionId) => { calls.push(sessionId); return { type: 'success' as const, alreadyArchived: false } }
             })
 
             const response = await app.request('/api/sessions/session-1/archive', { method: 'POST' })
@@ -1469,7 +1469,7 @@ describe('sessions routes', () => {
             expect(await response.json()).toEqual({ ok: true })
         })
 
-        it('returns 2xx and skips archiveSession when the row is already archived (idempotent)', async () => {
+        it('rechecks cleanup for an already archived row (idempotent)', async () => {
             let called = false
             const session = createSession({
                 active: false,
@@ -1483,26 +1483,25 @@ describe('sessions routes', () => {
                 }
             })
             const { app } = createApp(session, {
-                archiveSession: async () => { called = true }
+                archiveSession: async () => { called = true; return { type: 'success' as const, alreadyArchived: true } }
             })
 
             const response = await app.request('/api/sessions/session-1/archive', { method: 'POST' })
 
             expect(response.status).toBe(200)
             expect(await response.json()).toEqual({ ok: true, alreadyArchived: true })
-            expect(called).toBe(false)
+            expect(called).toBe(true)
         })
 
-        it('returns 2xx when the active session\'s CLI is gone — engine.archiveSession swallows the missing-RPC error', async () => {
-            // Pre-fix this returned 500 because rpcGateway.killSession threw
-            // 'RPC handler not registered'. Post-fix the engine narrows on
-            // RpcTargetMissingError and still flips lifecycle to archived.
+        it('accepts runner-verified cleanup after the session CLI is gone', async () => {
+            // Missing session RPC alone does not prove cleanup. The engine
+            // reports success only after the runner verifies ownership cleanup.
             const session = createSession({ active: true })
             const { app } = createApp(session, {
                 archiveSession: async () => {
-                    // Simulates the post-fix behavior: engine catches the
-                    // RpcTargetMissingError, calls markSessionArchivedFromHub,
-                    // and returns normally.
+                    // Simulate authoritative runner verification after a
+                    // missing session target, not an unverified no-op.
+                    return { type: 'success' as const, alreadyArchived: false }
                 }
             })
 
@@ -1534,18 +1533,30 @@ describe('sessions routes', () => {
             expect(await response.json()).toEqual({ error: 'Session not found' })
         })
 
-        it('returns 409 for an inactive non-archived row whose lifecycle is not running', async () => {
+        it('establishes cleanup for an inactive non-archived row', async () => {
             let called = false
             const session = createSession({ active: false })
             const { app } = createApp(session, {
-                archiveSession: async () => { called = true }
+                archiveSession: async () => { called = true; return { type: 'success' as const, alreadyArchived: false } }
             })
 
             const response = await app.request('/api/sessions/session-1/archive', { method: 'POST' })
 
+            expect(response.status).toBe(200)
+            expect(await response.json()).toEqual({ ok: true })
+            expect(called).toBe(true)
+        })
+
+        it('surfaces runner cleanup refusal for already archived rows', async () => {
+            const session = createSession({ active: false, metadata: {
+                path: '/tmp/project', host: 'localhost', flavor: 'omp', lifecycleState: 'archived'
+            } })
+            const { app } = createApp(session, { archiveSession: async () => ({
+                type: 'error', message: 'Cleanup unverified', code: 'session_still_running'
+            }) })
+            const response = await app.request('/api/sessions/session-1/archive', { method: 'POST' })
             expect(response.status).toBe(409)
-            expect(await response.json()).toEqual({ error: 'Session is inactive' })
-            expect(called).toBe(false)
+            expect(await response.json()).toEqual({ error: 'Cleanup unverified', code: 'session_still_running' })
         })
 
         it('returns 2xx for an inactive split-brain row still marked lifecycleState=running', async () => {
@@ -1560,7 +1571,7 @@ describe('sessions routes', () => {
                 }
             })
             const { app } = createApp(session, {
-                archiveSession: async (sessionId: string) => { calls.push(sessionId) }
+                archiveSession: async (sessionId) => { calls.push(sessionId); return { type: 'success' as const, alreadyArchived: false } }
             })
 
             const response = await app.request('/api/sessions/session-1/archive', { method: 'POST' })

@@ -154,12 +154,32 @@ type UsageEvent =
         ts: string | null
         messageId: string
         model: string
+        /** Only these legacy rows are replaced by the OMP journal backfill. */
+        legacyOmp?: boolean
         /** Antigravity reports uncached input explicitly; no proxy heuristic. */
         inputIsUncached?: boolean
         inputTokens: number
         outputTokens: number
         cacheCreationInputTokens: number
         cacheReadInputTokens: number
+    }
+    | ({
+        kind: 'nativeUsage'
+        ts: string
+        sourceSessionId: string
+        entryId: string
+        agentId: string
+        purpose: string
+        model: string
+    } & UsageNums)
+    | { kind: 'nativeAuthority' }
+    | {
+        kind: 'trace'
+        ts: string
+        agentId: string
+        responseId: string | null
+        model: string
+        usage: UsageNums
     }
     | {
         kind: 'frame'
@@ -252,6 +272,8 @@ const readNums = (record: Record<string, unknown>): UsageNums => ({
     )
 })
 
+const nonemptyString = (value: unknown): string | null => typeof value === 'string' && value ? value : null
+
 /** 把一行 messages.content 解码成 0..n 条用量事件。
  *  过滤条件与聚合口径必须和原实现逐条一致。
  *
@@ -284,6 +306,30 @@ function extractUsageEvents(
     const data = outer.data as Record<string, unknown> | undefined
     if (!data) return []
     const ts = typeof data.timestamp === 'string' ? data.timestamp : null
+    // Native accounting is independent of the parent flavor (OMP can run inside AGY).
+    if (outer.type === 'output' && data.source === 'omp') {
+        if (data.type === 'native-usage-authority') return [{ kind: 'nativeAuthority' }]
+        if (data.type === 'native-model-usage') {
+            const usage = asRecord(data.usage)
+            if (!usage || typeof data.sourceSessionId !== 'string' || !data.sourceSessionId
+                || typeof data.entryId !== 'string' || !data.entryId
+                || typeof data.model !== 'string' || !data.model.trim()
+                || data.model === '<synthetic>') return []
+            const nums = readNums(usage)
+            if (usageTotal(nums) <= 0) return []
+            const timestamp = ts ? Date.parse(ts) : NaN
+            return [{
+                kind: 'nativeUsage',
+                ts: new Date(Number.isFinite(timestamp) ? timestamp : createdAt).toISOString(),
+                sourceSessionId: data.sourceSessionId,
+                entryId: data.entryId,
+                model: data.model.trim(),
+                agentId: typeof data.agentId === 'string' ? data.agentId : 'main',
+                purpose: typeof data.purpose === 'string' ? data.purpose : 'assistant',
+                ...nums
+            }]
+        }
+    }
 
     if (outer.type === 'output' && data.type === 'agy_message') {
         const usage = asRecord(data.usage)
@@ -312,7 +358,7 @@ function extractUsageEvents(
         return [{
             kind: 'assistant',
             ts: ts ?? new Date(createdAt).toISOString(),
-            ...(agent === 'omp' ? { inputIsUncached: true } : {}),
+            ...(agent === 'omp' || data.source === 'omp' ? { inputIsUncached: true, legacyOmp: true } : {}),
             messageId,
             model,
             inputTokens: Number(usage.input_tokens) || 0,
@@ -339,6 +385,29 @@ function extractUsageEvents(
             })
         }
         return events
+    }
+
+    // Legacy traces are exact only when an explicit response identity survived.
+    // message.id is commonly a tool-call id, NOT a stable response identity.
+    if (data.type === 'agent-run-trace') {
+        if (data.hapiUsageScope === 'imported-history') return []
+        const traceMsg = asRecord(data.message)
+        if (!traceMsg || traceMsg.streamSnapshot === true) return []
+        const usageInfo = asRecord(traceMsg.usage)
+        const total = asRecord(usageInfo?.total) ?? usageInfo
+        const nums = total ? readNums(total) : null
+        if (!nums || usageTotal(nums) <= 0 || typeof traceMsg.model !== 'string'
+            || !traceMsg.model.trim() || traceMsg.model === '<synthetic>') return []
+        const responseId = nonemptyString(traceMsg.responseId) ?? nonemptyString(traceMsg.providerMessageId)
+            ?? nonemptyString(data.responseId) ?? nonemptyString(data.providerMessageId)
+        return [{
+            kind: 'trace',
+            ts: ts ?? new Date(createdAt).toISOString(),
+            agentId: typeof data.agentId === 'string' ? data.agentId : '',
+            responseId,
+            model: traceMsg.model.trim(),
+            usage: nums
+        }]
     }
 
     // —— Codex / Kimi / ACP 后端唯一的用量来源。口径搬自上游
@@ -503,6 +572,9 @@ export type UsageWindow = { sinceIso?: string | null; untilIso?: string | null }
  *  结果与单独调用一次逐位相同。 */
 class UsageViewAccumulator {
     private readonly seenTurn = new Set<string>()
+    private readonly seenNativeEntry = new Set<string>()
+    /** Journal models/counts bypass legacy proxy alias reconciliation entirely. */
+    private readonly nativeBySession = new Map<string, Map<string, UsageAggregateRow>>()
     private readonly assistantBySession = new Map<string, Map<string, UsageAggregateRow>>()
     private readonly frameBySession = new Map<string, Map<string, UsageNums>>()
     /** Known uncached input: normalized agentUsage or native Antigravity counts. */
@@ -514,8 +586,8 @@ class UsageViewAccumulator {
         return inner
     }
 
-    private addRow(sessionId: string, model: string, nums: UsageNums): void {
-        const perSession = this.bucket(this.assistantBySession, sessionId)
+    private addRow(sessionId: string, model: string, nums: UsageNums, store = this.assistantBySession): void {
+        const perSession = this.bucket(store, sessionId)
         const agg = perSession.get(model) ?? {
             model, requestCount: 0, inputTokens: 0, outputTokens: 0,
             cacheCreationInputTokens: 0, cacheReadInputTokens: 0
@@ -538,6 +610,14 @@ class UsageViewAccumulator {
         this.addRow(sessionId, event.model, event)
         if (event.inputIsUncached) this.uncachedInputBuckets.add(`${sessionId}::${event.model}`)
     }
+    addNativeUsage(sessionId: string, event: Extract<UsageEvent, { kind: 'nativeUsage' }>): void {
+        // Identity never includes model, purpose or the HAPI parent: replays are the same entry.
+        const key = JSON.stringify([event.sourceSessionId, event.entryId])
+        if (this.seenNativeEntry.has(key)) return
+        this.seenNativeEntry.add(key)
+        this.addRow(sessionId, event.model, event, this.nativeBySession)
+    }
+
 
     /** token_count 的一帧（已取差值、已扣缓存读）。 */
     addAgentUsage(sessionId: string, model: string, nums: UsageNums): void {
@@ -578,6 +658,7 @@ class UsageViewAccumulator {
                 this.frameBySession.get(sessionId) ?? new Map()
             ))
         }
+        for (const rows of this.nativeBySession.values()) settled.push([...rows.values()])
         return combineSessionUsage(settled)
     }
 }
@@ -607,8 +688,32 @@ function runUsageScan(db: Database, sessionIds: string[], route: SessionRouter):
         if (!viewsAt) continue
         const targets = (ts: string | null): readonly UsageViewAccumulator[] =>
             typeof ts === 'string' && ts ? viewsAt(ts) : NO_VIEWS
-        for (const event of eventsBySession.get(sessionId)!) {
+        const events = eventsBySession.get(sessionId)!
+        // Collect before routing by time. A later backfill marker replaces old rows
+        // even in historical windows that don't contain the marker itself.
+        const nativeAuthority = events.some(event => event.kind === 'nativeAuthority')
+        const seenTraceResponses = new Set<string>()
+        for (const event of events) {
+            if (event.kind === 'nativeAuthority') continue
+            if (event.kind === 'nativeUsage') {
+                for (const view of targets(event.ts)) view.addNativeUsage(sessionId, event)
+                continue
+            }
+            if (event.kind === 'trace') {
+                if (nativeAuthority) continue
+                // Without an explicit response id, identical usage on adjacent blocks
+                // can also be distinct equal-sized requests. Never merge by token equality;
+                // journal backfill + authority replaces these ambiguous historical frames.
+                if (event.responseId) {
+                    const key = JSON.stringify([event.agentId, event.responseId])
+                    if (seenTraceResponses.has(key)) continue
+                    seenTraceResponses.add(key)
+                }
+                for (const view of targets(event.ts)) view.addAgentUsage(sessionId, event.model, event.usage)
+                continue
+            }
             if (event.kind === 'assistant') {
+                if (nativeAuthority && event.legacyOmp) continue
                 // 窗口过滤在去重之前：窗外的行不该占用 turnKey，否则窗内同轮的行会被吞。
                 for (const view of targets(event.ts)) view.addAssistant(sessionId, event)
                 continue

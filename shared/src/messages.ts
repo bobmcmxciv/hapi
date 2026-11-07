@@ -40,7 +40,9 @@ const NON_CHAT_CLAUDE_MESSAGE_TYPES = new Set([
     // 不登记在这里的新类型默认可见，会被渲染成一坨原始 JSON。
     // 只挡「导出/渲染」，不挡「入库」——hub 侧过滤发生在 isExportVisibleStoredMessage，
     // 落库路径不看这个集合，所以统计仍读得到。
-    'usage_report'
+    'usage_report',
+    'native-model-usage',
+    'native-usage-authority'
 ])
 
 export function isNonChatClaudeMessageType(type: unknown): boolean {

@@ -29,6 +29,41 @@ hapi omp --model <provider/model> --effort high
 
 Sessions created from a HAPI runner start in remote mode automatically. Terminal-created sessions start locally and can switch between local terminal control and remote Web control without creating a new HAPI session.
 
+On Windows, HAPI launches the OMP package entry with a native `bun.exe`, not
+through npm's `omp.cmd` or `bun.cmd` shims. It resolves Bun's executable from
+PATH or the npm package layout; unsupported installations fail explicitly.
+
+Reopening an archived OMP session preserves its HAPI row and resumes the native
+session recorded in `metadata.ompSession`. Reopen succeeds only after OMP reports
+ready. A readiness failure is surfaced; archive metadata is restored only after
+cleanup is verified and the runtime is inactive. If another native process owns the journal, OMP safely
+continues the history in a new sibling journal; HAPI immediately updates the
+native ID/file from OMP's authoritative RPC state. It does not take over the
+other process's lease or modify its session header.
+
+Archiving a session is a verified exit: the hub awaits session-owned cleanup,
+then asks the runner to verify session-owned resource cleanup before marking the
+row inactive and archived. The detached shared OMP broker is not session-owned
+and is never killed by this path. Unverified cleanup (including an offline
+runner) is a visible error, never silent success. Repeated or concurrent
+archive/reopen/restart clicks are serialized per session server-side.
+
+With native OMP 18.16.0, remote exit aborts the active turn and closes RPC input;
+OMP disposes its session-owned resources and flushes its journal before HAPI
+accepts an observed native exit code of zero. Local terminal shutdown uses a
+per-launch private, nonce-bound request consumed by HAPI's managed OMP extension;
+the extension invokes native abort/shutdown, rather than injecting keystrokes or
+terminating a Windows process tree. Both paths wait up to 30 seconds for native
+exit. Missing extension control, timeouts, nonzero exits, and unconfirmed metadata
+flushes are visible failures; they never authorize a blanket broker/subtree kill.
+The kill RPC acknowledges only after native disposal and hub metadata flushing,
+then schedules wrapper/socket exit so the acknowledgment can reach its caller.
+
+Closing a session tab, backgrounding the browser, or temporary network/SSE
+disconnection only changes navigation/connectivity; none exits the native runtime.
+The composer's Stop button aborts the current turn, not the session. Use Archive
+for an explicit exit; use Reopen in the session list to resume its history.
+
 ## Native remote protocol
 
 Remote control starts OMP in native headless RPC mode (`omp --mode rpc`). The process exchanges typed JSONL commands, responses, and events with HAPI; OMP is not routed through ACP.
@@ -41,6 +76,49 @@ The native RPC path provides:
 - tool, thinking, usage, retry, subagent, media, file, and extension UI events;
 - host tools for `display_image`, `display_video`, and `send_file`;
 - runner-scoped provider sign-in under **Settings → HAPI Extensions → Oh My Pi providers**, without copying credentials into chat.
+
+## Message formatting
+
+OMP chat messages render `$...$`, `$$...$$`, `\(...\)`, and `\[...\]` formulas
+with KaTeX, including color, bold text, and subscripts. Single-dollar delimiters
+must touch the formula and must not be followed by a digit at the closing end;
+ordinary dollar amounts remain prose. Bare `<br>`, `<br/>`, and `<br />` tags
+produce line breaks, including inside tables. Other raw HTML stays inert, and
+code spans and fenced code blocks keep their literal contents.
+
+## Model usage accounting
+
+HAPI reads OMP's persisted native journals for the main session and recursively
+owned subagents. Each assistant response and auxiliary `model_usage` entry is
+counted once by its native session ID and entry ID, independently of RPC timeline
+selection. Reported token usage from failed or aborted requests is included.
+Provider-qualified actual model names are retained, including Devin models;
+`upstreamModel` takes precedence when the native entry supplies it. Cache-read,
+cache-write, input, and output counts remain separate.
+
+After the complete initial primary subtree has been read, its native accounting
+replaces legacy OMP chat/trace accounting for that HAPI session. Replay and cache
+rebuilds do not duplicate requests. Older trace records without a response identity
+cannot be deduplicated exactly; identical token counts are not evidence that two
+requests are the same.
+
+For OMP invoked inside Antigravity, HAPI installs a managed `hapi-usage.ts` global
+OMP extension. It records the native journal path and inherited `HAPI_SESSION_ID`
+in OMP's `hapi-usage-bindings` directory. Only exact bindings are followed; matching
+a workspace, model, or time window is not sufficient. Antigravity's own generation
+usage remains separate and is also read for native child conversations. The usage
+page groups by model; native OMP accounting events retain agent and purpose metadata
+but do not add a per-agent usage UI.
+
+Accounting requires persisted usage and model metadata. Calls not written by the
+native agent cannot be reconstructed. External OMP processes started with extension
+discovery disabled, without `HAPI_SESSION_ID`, or before the managed extension was
+installed have no automatic binding. Existing HAPI session processes keep their
+old accounting code until resumed with the upgraded CLI. OMP journal timestamps
+are preserved; Antigravity generation-only records without a transcript timestamp
+use their discovery time. New sessions and resumes use the new accounting path.
+
+The global extension lifecycle was verified with OMP **18.16.0**.
 
 ## RPC event timeline allowlist
 

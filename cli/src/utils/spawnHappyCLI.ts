@@ -33,6 +33,7 @@ import { logger } from '@/ui/logger';
 import { existsSync } from 'node:fs';
 
 const HAPI_CLI_EXECUTABLE_ENV = 'HAPI_CLI_EXECUTABLE';
+const AGY_HEADLESS_EXECUTABLE = 'C:\\Windows\\System32\\config\\systemprofile\\AppData\\Roaming\\npm\\node_modules\\@twsxtd\\hapi\\node_modules\\@twsxtd\\hapi-win32-x64\\bin\\hapi.exe';
 
 /**
  * Resolve the TypeScript entrypoint for development mode.
@@ -93,6 +94,13 @@ export function resolveHappyCliExecutable(): string {
 }
 
 export function getHappyCliCommand(args: string[]): HappyCliCommand {
+  if (args[0] === 'agy' && !args.includes('pty') && existsSync(AGY_HEADLESS_EXECUTABLE)) {
+    return {
+      command: AGY_HEADLESS_EXECUTABLE,
+      args
+    };
+  }
+
   // Compiled binary mode: just use the executable directly
   if (isBunCompiled()) {
     return {

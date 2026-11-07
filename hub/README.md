@@ -88,16 +88,38 @@ See `src/web/routes/` for all endpoints.
 - `POST /api/sessions/:id/abort` - Abort session.
 - `POST /api/sessions/:id/switch` - Switch session to remote mode.
 - `POST /api/sessions/:id/resume` - Resume inactive session.
+- `POST /api/sessions/:id/reopen` - Resume an archived or ended session; clear the archive marker after native readiness.
+- `POST /api/sessions/:id/restart` - Stop the session process on its machine, then resume it.
 - `POST /api/sessions/:id/upload` - Upload file (base64, max 50MB).
 - `POST /api/sessions/:id/upload/delete` - Delete uploaded file.
-- `POST /api/sessions/:id/archive` - Archive active session.
+- `POST /api/sessions/:id/archive` - Exit/archive a session; repeated and inactive calls still verify cleanup.
 - `PATCH /api/sessions/:id` - Rename session.
 - `DELETE /api/sessions/:id` - Delete inactive session.
+
 - `GET /api/sessions/:id/slash-commands` - List slash commands.
 - `GET /api/sessions/:id/skills` - List skills.
 - `POST /api/sessions/:id/permission-mode` - Set permission mode.
 - `POST /api/sessions/:id/model` - Set model preference.
 - `POST /api/sessions/:id/effort` - Set Claude effort preference.
+
+Session lifecycle ops are serialized per session on a FIFO tail in
+`SyncEngine.enqueueSessionLifecycleOp`: identical queued ops dedupe (a rapid
+double-click triggers one runtime action), different kinds run in arrival
+order so a stop can never interleave with a spawn. `archive` awaits the
+session-owned cleanup (kill RPC), then verifies runner-side process
+termination via `stop-session`; `still_alive` or an RPC failure refuses the
+archive (409/5xx) without marking the row inactive or archived. Retrying an
+already-archived session re-runs cleanup verification. `restart` refuses
+when the runner reports `still_alive` or the stop RPC fails — it never
+spawns a second instance over an unverified runtime. Closing a web tab or
+losing SSE connectivity is navigation-only and never stops a session.
+
+PTY resume/reopen retains its fail-fast owner-marker contract: another pending
+PTY resume is rejected immediately instead of waiting on or reconciling the
+owner's durable marker. Its archive snapshot remains persisted until the CLI
+bootstraps the row as running. A CLI lifecycle-state archive announcement alone
+does not suppress live heartbeats: only the hub's verified `archivedAt` commit
+blocks revival, so a still-live OpenCode `/clear` source cannot be replaced.
 
 ### Messages (`src/web/routes/messages.ts`)
 
@@ -126,6 +148,8 @@ See `src/web/routes/` for all endpoints.
 - `GET /api/sessions/:id/git-diff-file` - File-specific diff.
 - `GET /api/sessions/:id/file` - Read file content.
 - `GET /api/sessions/:id/files` - File search with ripgrep.
+  Windows-session searches accept either path separator in queries and normalize
+  result paths before metadata lookup; POSIX-session backslashes stay literal.
 
 ### Events (`src/web/routes/events.ts`)
 
@@ -212,6 +236,11 @@ See `src/sync/syncEngine.ts` for the main session/message manager:
 - Event publishing to SSE and Telegram.
 - Git operations and file search.
 - Activity tracking and timeouts.
+- Cursor legacy migration removes source files only after the verified ACP
+  target and session metadata are intact. Windows `EBUSY`/`EPERM` cleanup uses
+  bounded retries with SQLite-handle collection; an exhausted/other removal
+  failure preserves the successful migration and reports `sourceRemoved: false`.
+  Unknown files in the legacy directory are never recursively deleted.
 
 ## Storage
 
@@ -220,7 +249,12 @@ See `src/store/index.ts` for SQLite persistence:
 - Sessions with metadata and agent state.
 - Messages with pagination support.
 - Machines with runner state.
-- Todo extraction from messages.
+- Todo extraction from messages, including successful native OMP `todo` result
+  snapshots (`details.op` and `details.phases`). Incremental inputs, errors,
+  unlabelled/non-todo results, and malformed snapshots leave tasks unchanged;
+  an explicit empty snapshot clears the existing Tasks UI. Blocked tasks remain
+  pending; abandoned tasks count as completed. Snapshots persist in session
+  storage and structured SSE publishes the accepted cached task state.
 - Users table for Telegram bindings (includes namespace).
 
 Message content is stored via `src/store/contentCodec.ts`: oversized strings

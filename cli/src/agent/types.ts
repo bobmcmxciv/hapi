@@ -55,7 +55,7 @@ export type AgentMessage =
         usage?: AgentUsage;
         progress?: unknown;
     }
-    | { type: 'tool_result'; id: string; output: unknown; status: 'completed' | 'failed' }
+    | { type: 'tool_result'; id: string; name?: string; output: unknown; status: 'completed' | 'failed' }
     | ({ type: 'usage' } & AgentUsage)
     | { type: 'plan'; items: PlanItem[] }
     | { type: 'generated_image'; imageId: string; fileName: string; mimeType: string }

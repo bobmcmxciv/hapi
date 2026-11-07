@@ -741,6 +741,18 @@ export type GeneratedBlobPendingResponse = {
     retryAfterMs: number
 }
 
+/** Answer to `POST /api/sessions/:id/generated-(files|images)/:blobId/download-ticket`. */
+export type GeneratedBlobDownloadTicketResponse = {
+    success: true
+    state: 'ready'
+    ticket: string
+    downloadPath: string
+    expiresAt: number
+    fileName: string
+    mimeType: string
+    size: number
+}
+
 /** Answer to a CLI upload slice (`PUT /cli/sessions/:id/blobs/:kind/:blobId`). */
 export type GeneratedBlobUploadResponse = {
     success: boolean
@@ -751,6 +763,95 @@ export type GeneratedBlobUploadResponse = {
     error?: string
     reason?: 'offset-mismatch' | 'size-mismatch' | 'checksum-mismatch' | 'too-large' | 'insufficient-storage' | 'busy'
 }
+
+export type P2pIceCandidateInit = {
+    candidate: string
+    sdpMid?: string | null
+    sdpMLineIndex?: number | null
+}
+
+export type P2pSessionDescriptionInit = {
+    type: 'offer' | 'answer'
+    sdp: string
+}
+
+export type P2pRouteCategory =
+    | 'lan-direct'
+    | 'wan-direct'
+    | 'p2p-unverified-route'
+    | 'hub-cache'
+
+export type P2pTransferManifest = {
+    transferId: string
+    kind: GeneratedBlobKind
+    blobId: string
+    fileName: string
+    mimeType: string
+    size: number
+    sha256: string
+    chunkBytes: number
+}
+
+export type PrepareP2pFileTransferRpcRequest = {
+    transferId: string
+    authToken: string
+    kind: GeneratedBlobKind
+    id: string
+    expiresAt: number
+    iceServers?: Array<{ urls: string | string[]; username?: string; credential?: string }>
+}
+
+export type PrepareP2pFileTransferRpcResponse =
+    | {
+        success: true
+        offer: P2pSessionDescriptionInit
+        candidates: P2pIceCandidateInit[]
+        manifest: P2pTransferManifest
+        candidateTypes: string[]
+    }
+    | {
+        success: false
+        reason: 'snapshot-missing' | 'busy' | 'unsupported' | 'failed'
+        error: string
+    }
+
+export type SignalP2pFileTransferRpcRequest = {
+    transferId: string
+    action: 'signal' | 'cancel' | 'complete' | 'renew'
+    answer?: P2pSessionDescriptionInit
+    candidates?: P2pIceCandidateInit[]
+    expiresAt?: number
+    reason?: string
+}
+
+export type SignalP2pFileTransferRpcResponse = {
+    success: boolean
+    candidates?: P2pIceCandidateInit[]
+    selectedRoute?: P2pRouteCategory
+    error?: string
+}
+
+export type CreateP2pFileTransferResponse =
+    | {
+        success: true
+        p2pAvailable: true
+        transferId: string
+        authToken: string
+        expiresAt: number
+        hubReady: boolean
+        offer: P2pSessionDescriptionInit
+        candidates: P2pIceCandidateInit[]
+        manifest: P2pTransferManifest
+        iceServers: Array<{ urls: string | string[] }>
+        candidateTypes: string[]
+    }
+    | {
+        success: false
+        p2pAvailable: false
+        reason: 'session-offline' | 'snapshot-missing' | 'busy' | 'unsupported' | 'failed'
+        error: string
+        hubReady: boolean
+    }
 
 export type UploadFileResponse = {
     success: boolean

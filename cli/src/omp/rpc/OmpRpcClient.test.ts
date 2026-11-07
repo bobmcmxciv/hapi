@@ -217,7 +217,7 @@ describe('OmpRpcClient discovery', () => {
         )).rejects.toThrow('models unavailable');
 
         expect(fake.dependencies.spawnProcess).toHaveBeenCalledOnce();
-        expect(fake.killProcess).toHaveBeenCalledOnce();
+        expect(fake.killProcess).not.toHaveBeenCalled();
     });
 
     it('closes and fails on a discovery schema violation', async () => {

@@ -22,6 +22,8 @@ export const RPC_METHODS = {
     // Ranged counterpart of the two above. Hub prefers it and falls back to the
     // whole-blob methods when a CLI predating it has not registered a handler.
     ReadGeneratedBlobChunk: 'readGeneratedBlobChunk',
+    PrepareP2pFileTransfer: 'prepareP2pFileTransfer',
+    SignalP2pFileTransfer: 'signalP2pFileTransfer',
     WriteFile: 'writeFile',
     ListDirectory: 'listDirectory',
     StatFiles: 'statFiles',

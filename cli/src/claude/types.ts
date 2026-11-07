@@ -113,6 +113,22 @@ export const RawJSONLinesSchema = z.discriminatedUnion("type", [
     }).passthrough()),
   }),
 
+  // Persisted OMP journal entries, independent of chat/RPC presentation blocks.
+  RawJSONLinesBaseSchema.extend({
+    type: z.literal("native-model-usage"),
+    source: z.literal("omp"),
+    sourceSessionId: z.string().min(1),
+    entryId: z.string().min(1),
+    model: z.string().min(1),
+    agentId: z.string().min(1),
+    purpose: z.string().min(1),
+    usage: UsageSchema,
+  }),
+  RawJSONLinesBaseSchema.extend({
+    type: z.literal("native-usage-authority"),
+    source: z.literal("omp"),
+  }),
+
   // System message - validates uuid and subtype data used by the UI.
   // `passthrough` preserves fields like `messageId` on `turn_duration` and any
   // future system subtype data the hub forwards to the web reducer.

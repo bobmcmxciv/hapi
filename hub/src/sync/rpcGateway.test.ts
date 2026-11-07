@@ -3,7 +3,7 @@ import type { Server } from 'socket.io'
 import type { RpcRegistry } from '../socket/rpcRegistry'
 import { RpcGateway, RpcTargetMissingError } from './rpcGateway'
 
-function createGateway() {
+function createGateway(options?: { reply: unknown }) {
     const timeouts: number[] = []
     const calls: Array<{ method: string; params: string }> = []
     const socket = {
@@ -12,6 +12,7 @@ function createGateway() {
             return {
                 async emitWithAck(_event: string, payload: { method: string; params: string }) {
                     calls.push(payload)
+                    if (options) return options.reply
                     if (payload.method.endsWith(':cursor-chat-store-status')) {
                         return JSON.stringify({ onDisk: false, store: null })
                     }
@@ -111,6 +112,18 @@ describe('RpcGateway RPC timeouts', () => {
                 homeDir: '/home/recorded-owner'
             })
         }])
+    })
+    it('requires an explicit successful kill acknowledgement', async () => {
+        for (const reply of [undefined, null, {}, { success: false, error: 'Native cleanup failed' }]) {
+            const { gateway } = createGateway({ reply })
+            await expect(gateway.killSession('session-1')).rejects.toThrow()
+        }
+        await expect(createGateway().gateway.killSession('session-1')).resolves.toBeUndefined()
+    })
+
+    it('preserves native cleanup errors returned by the wrapper', async () => {
+        const { gateway } = createGateway({ reply: { success: false, message: 'Native dispose unverified' } })
+        await expect(gateway.killSession('session-1')).rejects.toThrow('Native dispose unverified')
     })
 })
 

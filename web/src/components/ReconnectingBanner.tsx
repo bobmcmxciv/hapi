@@ -1,6 +1,10 @@
 import { useTranslation } from '@/lib/use-translation'
+import { useOnlineStatus } from '@/hooks/useOnlineStatus'
 
 function getReasonLabel(reason: string, t: (key: string) => string): string {
+    if (reason === 'connect-timeout') {
+        return t('reconnecting.reason.connectTimeout')
+    }
     if (reason === 'heartbeat-timeout') {
         return t('reconnecting.reason.heartbeatTimeout')
     }
@@ -24,9 +28,10 @@ export function ReconnectingBanner({
     reason?: string | null
 }) {
     const { t } = useTranslation()
+    const isOnline = useOnlineStatus()
     const reasonLabel = reason ? getReasonLabel(reason, t) : null
 
-    if (!isReconnecting) {
+    if (!isReconnecting || !isOnline) {
         return null
     }
 

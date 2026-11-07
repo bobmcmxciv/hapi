@@ -100,10 +100,11 @@ function normalizeWorkspaceRoots(paths?: string[]): string[] | undefined {
     }
 
     const normalized = Array.from(new Set(paths.map((path) => {
+        const rootPath = normalizeWindowsDriveRoot(path)
         try {
-            return canonicalRealpathSync(path)
+            return canonicalRealpathSync(rootPath)
         } catch {
-            return normalizeWindowsDriveRoot(resolvePath(path))
+            return normalizeWindowsDriveRoot(resolvePath(rootPath))
         }
     })))
 
@@ -452,7 +453,7 @@ export class ApiMachineClient {
      * intermediate symlink in the parent chain has been resolved.
      */
     private async resolveForWorkspaceCheck(path: string): Promise<string> {
-        const absolute = resolvePath(path)
+        const absolute = resolvePath(normalizeWindowsDriveRoot(path))
         try {
             return normalizeWindowsDriveRoot(await realpath(absolute))
         } catch {

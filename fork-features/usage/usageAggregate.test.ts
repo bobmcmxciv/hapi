@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test'
 import { Store } from '../../hub/src/store'
-import { buildUsageSummaryResponse, parseIsoParam, summarizeUsageHosts } from './usageAggregate'
+import { __resetUsageEventCacheForTests, buildUsageSummaryResponse, parseIsoParam, summarizeUsageHosts } from './usageAggregate'
 
 function makeStore(): Store {
     return new Store(':memory:')
@@ -726,5 +726,273 @@ describe('summarizeUsageHosts', () => {
         ], groups => groups.map(ids => ids.map(() => row('m', 1, 10))))
 
         expect(hosts.map(h => h.host)).toEqual(['alpha', 'zeta'])
+    })
+
+    it('OMP 子代理通过 agent-run-trace 上报的 devin/swe-2 用量被计入对应模型', () => {
+        const store = makeStore()
+        const session = store.sessions.getOrCreateSession('omp-subagent', { path: '/tmp/omp', flavor: 'omp' }, null, 'default')
+        store.messages.addMessage(session.id, {
+            role: 'agent',
+            content: {
+                type: 'codex',
+                data: {
+                    type: 'agent-run-trace',
+                    agentId: 'explore-1',
+                    cardId: 'omp-subagent:explore-1',
+                    message: {
+                        type: 'tool-call',
+                        callId: 'call_1',
+                        name: 'grep',
+                        input: { pattern: 'foo' },
+                        model: 'devin/swe-2',
+                        usage: {
+                            total: {
+                                inputTokens: 1200,
+                                outputTokens: 80,
+                                cachedInputTokens: 3000,
+                                cacheWriteInputTokens: 500
+                            }
+                        }
+                    }
+                }
+            }
+        })
+
+        const rows = store.messages.aggregateUsageForSessions([session.id])
+        expect(rows).toEqual([
+            {
+                model: 'devin/swe-2',
+                requestCount: 1,
+                inputTokens: 1200,
+                outputTokens: 80,
+                cacheCreationInputTokens: 500,
+                cacheReadInputTokens: 3000
+            }
+        ])
+    })
+})
+
+function nativeOutput(data: Record<string, unknown>) {
+    return { role: 'agent', content: { type: 'output', data } }
+}
+
+function nativeUsageEnvelope(input: {
+    sourceSessionId?: string
+    entryId: string
+    model?: string
+    timestamp?: string
+    agentId?: string
+    purpose?: string
+    input?: number
+    output?: number
+    cacheRead?: number
+    cacheWrite?: number
+}) {
+    return nativeOutput({
+        type: 'native-model-usage', source: 'omp',
+        sourceSessionId: input.sourceSessionId ?? 'native-root',
+        entryId: input.entryId,
+        timestamp: input.timestamp ?? '2026-11-01T10:00:00.000Z',
+        model: input.model ?? 'devin/swe-2',
+        agentId: input.agentId ?? 'main',
+        purpose: input.purpose ?? 'assistant',
+        usage: {
+            input_tokens: input.input ?? 100,
+            output_tokens: input.output ?? 10,
+            cache_creation_input_tokens: input.cacheWrite ?? 0,
+            cache_read_input_tokens: input.cacheRead ?? 0
+        }
+    })
+}
+
+function traceEnvelope(input: {
+    type: string
+    agentId?: string
+    responseId?: string
+    id?: string
+    timestamp?: string
+    usage?: boolean
+    model?: string
+}) {
+    return nativeOutput({
+        type: 'agent-run-trace', agentId: input.agentId ?? 'child-1',
+        timestamp: input.timestamp ?? '2026-11-01T10:00:00.000Z',
+        message: {
+            type: input.type, id: input.id, responseId: input.responseId,
+            model: input.model ?? 'devin/swe-2',
+            ...(input.usage === false ? {} : { usage: { inputTokens: 100, outputTokens: 10 } })
+        }
+    })
+}
+
+describe('OMP native journal accounting', () => {
+    it('deduplicates canonical replay across incremental loads and cold cache rebuilds by entry identity only', () => {
+        const store = makeStore()
+        const session = makeSession(store, 'native-replay')
+        const first = nativeUsageEnvelope({ entryId: 'entry-1', cacheRead: 40 })
+        store.messages.addMessage(session.id, first)
+        const expected = [{
+            model: 'devin/swe-2', requestCount: 1, inputTokens: 100, outputTokens: 10,
+            cacheCreationInputTokens: 0, cacheReadInputTokens: 40
+        }]
+        expect(store.messages.aggregateUsageForSessions([session.id])).toEqual(expected)
+        store.messages.addMessage(session.id, first)
+        // The identity is not model/purpose/agentId: changed incidental fields are still one entry.
+        store.messages.addMessage(session.id, nativeUsageEnvelope({ entryId: 'entry-1', model: 'wrong/replay', purpose: 'title' }))
+        expect(store.messages.aggregateUsageForSessions([session.id])).toEqual(expected)
+        __resetUsageEventCacheForTests()
+        expect(store.messages.aggregateUsageForSessions([session.id])).toEqual(expected)
+        store.close()
+    })
+
+    it('keeps assistant, auxiliary and descendant actual models and counts error/aborted usage', () => {
+        const store = makeStore()
+        const session = store.sessions.getOrCreateSession('native-models', { path: '/tmp/omp', flavor: 'omp' }, null, 'default', 'configured/wrong-model')
+        store.messages.addMessage(session.id, nativeUsageEnvelope({ entryId: 'same-id', model: 'openai/main', input: 20, cacheRead: 10 }))
+        store.messages.addMessage(session.id, nativeUsageEnvelope({ entryId: 'aux-1', model: 'google/title', purpose: 'title', input: 3, output: 2 }))
+        store.messages.addMessage(session.id, nativeUsageEnvelope({ entryId: 'aux-2', model: 'openai/compactor', purpose: 'compaction', input: 4, output: 3 }))
+        store.messages.addMessage(session.id, nativeUsageEnvelope({ sourceSessionId: 'native-child', entryId: 'same-id', agentId: 'explore-1', input: 7, cacheWrite: 5 }))
+        store.messages.addMessage(session.id, nativeOutput({
+            ...nativeUsageEnvelope({ sourceSessionId: 'native-child', entryId: 'error', input: 8 }).content.data,
+            stopReason: 'error'
+        }))
+        store.messages.addMessage(session.id, nativeOutput({
+            ...nativeUsageEnvelope({ sourceSessionId: 'native-grandchild', entryId: 'aborted', agentId: 'nested', input: 9 }).content.data,
+            stopReason: 'aborted'
+        }))
+        const rows = store.messages.aggregateUsageForSessions([session.id])
+        expect(rows).toHaveLength(4)
+        expect(rows.find(row => row.model === 'openai/main')).toMatchObject({ requestCount: 1, inputTokens: 20, cacheReadInputTokens: 10 })
+        expect(rows.find(row => row.model === 'google/title')).toMatchObject({ requestCount: 1, inputTokens: 3, outputTokens: 2 })
+        expect(rows.find(row => row.model === 'openai/compactor')).toMatchObject({ requestCount: 1, inputTokens: 4, outputTokens: 3 })
+        expect(rows.find(row => row.model === 'devin/swe-2')).toMatchObject({ requestCount: 3, inputTokens: 24, cacheCreationInputTokens: 5 })
+        store.close()
+    })
+
+    it('collects late authority before time filtering, replaces cached OMP legacy rows, and retains native AGY', () => {
+        const store = makeStore()
+        const session = store.sessions.getOrCreateSession('native-authority', { path: '/tmp/omp', flavor: 'omp' }, null, 'default')
+        store.messages.addMessage(session.id, assistantEnvelope({
+            messageId: 'old-parent', model: 'old/model', timestamp: '2026-11-01T10:00:00.000Z', usage: { input: 900 }
+        }))
+        store.messages.addMessage(session.id, traceEnvelope({ type: 'tool_call', id: 'tool-1' }))
+        expect(store.messages.aggregateUsageForSessions([session.id])).toHaveLength(2)
+        store.messages.addMessage(session.id, nativeUsageEnvelope({ entryId: 'real-1' }))
+        store.messages.addMessage(session.id, nativeOutput({
+            type: 'agy_message', messageId: 'agy-1', model: 'devin/swe-2',
+            timestamp: '2026-11-01T10:30:00.000Z', usage: { input_tokens: 25, output_tokens: 5 }
+        }))
+        store.messages.addMessage(session.id, nativeOutput({
+            type: 'native-usage-authority', source: 'omp', timestamp: '2026-11-05T10:00:00.000Z'
+        }))
+        expect(store.messages.aggregateUsageForSessions([session.id], {
+            sinceIso: '2026-11-01T00:00:00.000Z', untilIso: '2026-11-02T00:00:00.000Z'
+        })).toEqual([{
+            model: 'devin/swe-2', requestCount: 2, inputTokens: 125, outputTokens: 15,
+            cacheCreationInputTokens: 0, cacheReadInputTokens: 0
+        }])
+        expect(store.messages.aggregateUsageForSessions([session.id], {
+            sinceIso: '2026-11-01T10:15:00.000Z', untilIso: '2026-11-02T00:00:00.000Z'
+        })).toMatchObject([{ model: 'devin/swe-2', requestCount: 1, inputTokens: 25 }])
+        store.close()
+    })
+
+    it('accepts OMP journal accounting inside an AGY parent and never suppresses agy_message', () => {
+        const store = makeStore()
+        const session = store.sessions.getOrCreateSession('agy-with-omp', { path: '/tmp/agy', flavor: 'antigravity' }, null, 'default')
+        store.messages.addMessage(session.id, nativeUsageEnvelope({ entryId: 'external-omp' }))
+        store.messages.addMessage(session.id, nativeOutput({
+            ...assistantEnvelope({ messageId: 'external-legacy', model: 'old/omp', timestamp: '2026-11-01T10:00:00.000Z', usage: { input: 999 } }).content.data,
+            source: 'omp'
+        }))
+        store.messages.addMessage(session.id, traceEnvelope({ type: 'text' }))
+        store.messages.addMessage(session.id, nativeOutput({
+            type: 'agy_message', messageId: 'agy-main', model: 'google/agy',
+            timestamp: '2026-11-01T10:00:00.000Z', usage: { input_tokens: 9, output_tokens: 3 }
+        }))
+        store.messages.addMessage(session.id, nativeOutput({ type: 'native-usage-authority', source: 'omp' }))
+        expect(store.messages.aggregateUsageForSessions([session.id])).toHaveLength(2)
+        expect(store.messages.aggregateUsageForSessions([session.id])).toEqual(expect.arrayContaining([
+            expect.objectContaining({ model: 'devin/swe-2', requestCount: 1, inputTokens: 100 }),
+            expect.objectContaining({ model: 'google/agy', requestCount: 1, inputTokens: 9 })
+        ]))
+        store.close()
+    })
+
+    it('deduplicates replay shared across HAPI sessions but not distinct native sessions with the same entry id', () => {
+        const store = makeStore()
+        const a = makeSession(store, 'native-shared-a')
+        const b = makeSession(store, 'native-shared-b')
+        for (const session of [a, b]) store.messages.addMessage(session.id, nativeUsageEnvelope({ entryId: 'shared' }))
+        store.messages.addMessage(b.id, nativeUsageEnvelope({ entryId: 'shared', sourceSessionId: 'different-root' }))
+        expect(store.messages.aggregateUsageForSessions([a.id, b.id])).toMatchObject([{ requestCount: 2, inputTokens: 200 }])
+        expect(store.messages.aggregateUsageForSessions([a.id])).toMatchObject([{ requestCount: 1, inputTokens: 100 }])
+        expect(store.messages.aggregateUsageForSessions([b.id])).toMatchObject([{ requestCount: 2, inputTokens: 200 }])
+        store.close()
+    })
+
+    it('counts distinct same-sized assistant and auxiliary entries without changing their actual model name', () => {
+        const store = makeStore()
+        const session = makeSession(store, 'native-equal-sized')
+        for (const [entryId, purpose] of [['reply-1', 'assistant'], ['reply-2', 'assistant'], ['aux-1', 'title']]) {
+            store.messages.addMessage(session.id, nativeUsageEnvelope({ entryId: entryId!, purpose, model: 'provider/actual-model[1m]' }))
+        }
+        expect(store.messages.aggregateUsageForSessions([session.id])).toEqual([{
+            model: 'provider/actual-model[1m]', requestCount: 3, inputTokens: 300, outputTokens: 30,
+            cacheCreationInputTokens: 0, cacheReadInputTokens: 0
+        }])
+        store.close()
+    })
+})
+
+describe('OMP historical trace reply blocks', () => {
+    it('counts tool_call/reasoning/text usage once when response ids identify replies across tool-result boundaries', () => {
+        const store = makeStore()
+        const session = makeSession(store, 'trace-runs')
+        for (const id of ['call-1', 'call-2']) {
+            store.messages.addMessage(session.id, traceEnvelope({ type: 'tool_call', id, responseId: `response-${id}` }))
+            store.messages.addMessage(session.id, traceEnvelope({ type: 'reasoning', responseId: `response-${id}` }))
+            store.messages.addMessage(session.id, traceEnvelope({ type: 'text', responseId: `response-${id}` }))
+            store.messages.addMessage(session.id, traceEnvelope({ type: 'tool_result', id, usage: false }))
+        }
+        expect(store.messages.aggregateUsageForSessions([session.id])).toMatchObject([{ requestCount: 2, inputTokens: 200, outputTokens: 20 }])
+        store.close()
+    })
+
+    it('never merges ambiguous equal-sized requests by usage equality, even on adjacent different block types', () => {
+        const store = makeStore()
+        const session = makeSession(store, 'trace-same-sized')
+        for (let reply = 0; reply < 2; reply += 1) {
+            for (const agentId of ['a', 'b']) store.messages.addMessage(session.id, traceEnvelope({ type: 'reasoning', agentId }))
+            for (const agentId of ['a', 'b']) store.messages.addMessage(session.id, traceEnvelope({ type: 'text', agentId }))
+        }
+        expect(store.messages.aggregateUsageForSessions([session.id])).toMatchObject([{ requestCount: 8, inputTokens: 800 }])
+        store.close()
+    })
+
+    it('uses explicit response identity rather than tool-call ids and keeps distinct same-sized response ids', () => {
+        const store = makeStore()
+        const session = makeSession(store, 'trace-response-ids')
+        for (const responseId of ['response-1', 'response-2', 'response-1']) {
+            store.messages.addMessage(session.id, traceEnvelope({ type: 'tool_call', id: `${responseId}-tool-a`, responseId }))
+            store.messages.addMessage(session.id, traceEnvelope({ type: 'tool_call', id: `${responseId}-tool-b`, responseId }))
+            store.messages.addMessage(session.id, traceEnvelope({ type: 'tool_result', usage: false }))
+        }
+        expect(store.messages.aggregateUsageForSessions([session.id])).toMatchObject([{ requestCount: 2, inputTokens: 200 }])
+        store.close()
+    })
+
+    it('deduplicates explicit response replay across incremental cache reads before applying time windows', () => {
+        const store = makeStore()
+        const session = makeSession(store, 'trace-window')
+        store.messages.addMessage(session.id, traceEnvelope({ type: 'reasoning', responseId: 'before-window', timestamp: '2026-11-01T09:59:00.000Z' }))
+        expect(store.messages.aggregateUsageForSessions([session.id])).toMatchObject([{ requestCount: 1 }])
+        store.messages.addMessage(session.id, traceEnvelope({ type: 'text', responseId: 'before-window' }))
+        store.messages.addMessage(session.id, traceEnvelope({ type: 'tool_result', usage: false }))
+        store.messages.addMessage(session.id, traceEnvelope({ type: 'reasoning', responseId: 'inside-window', timestamp: '2026-11-01T10:01:00.000Z' }))
+        store.messages.addMessage(session.id, traceEnvelope({ type: 'text', responseId: 'inside-window', timestamp: '2026-11-01T10:01:00.000Z' }))
+        expect(store.messages.aggregateUsageForSessions([session.id], { sinceIso: '2026-11-01T10:00:00.000Z' }))
+            .toMatchObject([{ requestCount: 1, inputTokens: 100 }])
+        store.close()
     })
 })

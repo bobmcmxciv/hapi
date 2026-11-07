@@ -85,6 +85,79 @@ function extractTodosFromAcpMessage(content: Record<string, unknown>): TodoItem[
     return parsed.success ? parsed.data : null
 }
 
+function extractOmpTodoSnapshot(result: unknown): TodoItem[] | null {
+    let output = result
+    if (typeof output === 'string') {
+        try {
+            output = JSON.parse(output)
+        } catch {
+            return null
+        }
+    }
+    if (!isObject(output) || output.isError === true || !isObject(output.details)) return null
+    const snapshot = output.details
+    if (typeof snapshot.op !== 'string'
+        || !['init', 'start', 'done', 'rm', 'drop', 'block', 'unblock', 'append', 'view'].includes(snapshot.op)
+        || !Array.isArray(snapshot.phases)) return null
+
+    const todos: TodoItem[] = []
+    for (const phase of snapshot.phases) {
+        if (!isObject(phase) || typeof phase.name !== 'string' || !Array.isArray(phase.tasks)) return null
+        for (const task of phase.tasks) {
+            if (!isObject(task) || typeof task.content !== 'string' || !task.content.trim()) return null
+            let status: TodoItem['status']
+            switch (task.status) {
+                case 'pending':
+                case 'blocked':
+                    status = 'pending'
+                    break
+                case 'in_progress':
+                    status = 'in_progress'
+                    break
+                case 'completed':
+                case 'abandoned':
+                    status = 'completed'
+                    break
+                default:
+                    return null
+            }
+            todos.push({
+                content: task.content,
+                status,
+                priority: 'medium',
+                id: typeof task.id === 'string' ? task.id : `plan-${todos.length + 1}`
+            })
+        }
+    }
+    // An explicitly empty snapshot clears tasks; malformed snapshots above do not.
+    return todos
+}
+
+function extractTodosFromOmpResult(content: Record<string, unknown>): TodoItem[] | null {
+    const data = isObject(content.data) ? content.data : null
+    if (!data || data.is_error === true) return null
+
+    // ACP/codex results name the tool on the result envelope.
+    if (content.type === 'codex') {
+        if (data.type !== 'tool-call-result' || data.name !== 'todo') return null
+        return extractOmpTodoSnapshot(data.output)
+    }
+
+    // Native OMP uses canonical Claude user tool_result blocks. Inputs are
+    // incremental operations; only a successful, explicitly labelled result
+    // with structured details can replace the complete task list.
+    if (content.type !== 'output' || data.type !== 'user') return null
+    const message = isObject(data.message) ? data.message : null
+    if (!message || !Array.isArray(message.content)) return null
+    let todos: TodoItem[] | null = null
+    for (const block of message.content) {
+        if (!isObject(block) || block.type !== 'tool_result' || block.is_error === true) continue
+        if (!isObject(block.content) || block.content.toolName !== 'todo') continue
+        todos = extractOmpTodoSnapshot(block.content) ?? todos
+    }
+    return todos
+}
+
 export function extractTodoWriteTodosFromMessageContent(messageContent: unknown): TodoItem[] | null {
     const record = unwrapRoleWrappedRecordEnvelope(messageContent)
     if (!record) return null
@@ -96,4 +169,5 @@ export function extractTodoWriteTodosFromMessageContent(messageContent: unknown)
     return extractTodosFromClaudeOutput(record.content)
         ?? extractTodosFromCodexMessage(record.content)
         ?? extractTodosFromAcpMessage(record.content)
+        ?? extractTodosFromOmpResult(record.content)
 }

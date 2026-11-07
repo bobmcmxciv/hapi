@@ -25,12 +25,62 @@ type OmpRuntimeConfigApplier = (
     config: OmpRuntimeConfigRequest
 ) => Promise<OmpRuntimeConfigApplied>;
 
+export type OmpShutdownReceipt = {
+    kind: 'omp-rpc' | 'omp-local';
+    status: 'disposed' | 'not-started' | 'unverified';
+    pid?: number;
+    exitCode?: number | null;
+    signal?: string | null;
+};
+
+type OmpShutdownHandle = {
+    requestExit: () => void | Promise<void>;
+    waitForExit: () => Promise<OmpShutdownReceipt>;
+};
+
 export class OmpSession extends AgentSessionBase<OmpMode, OmpInputQueue> {
     readonly startedBy: 'runner' | 'terminal';
     readonly startingMode: 'local' | 'remote';
     localLaunchFailure: LocalLaunchFailure | null = null;
     private nativeSession: OmpNativeSession | null;
     private runtimeConfigApplier: OmpRuntimeConfigApplier | null = null;
+    private shutdownHandle: OmpShutdownHandle | null = null;
+    private shutdownPromise: Promise<OmpShutdownReceipt> | null = null;
+    private shutdownRequested = false;
+    private lastShutdownReceipt: OmpShutdownReceipt = { kind: 'omp-rpc', status: 'not-started' };
+
+    isShutdownRequested = (): boolean => this.shutdownRequested;
+
+    registerShutdownHandle = (handle: OmpShutdownHandle): (() => void) => {
+        this.shutdownHandle = handle;
+        return () => {
+            if (this.shutdownHandle === handle) this.shutdownHandle = null;
+        };
+    };
+
+    recordShutdownReceipt = (receipt: OmpShutdownReceipt): void => {
+        this.lastShutdownReceipt = receipt;
+    };
+
+    requestShutdown = (): Promise<OmpShutdownReceipt> => {
+        this.shutdownRequested = true;
+        if (!this.shutdownPromise) {
+            const handle = this.shutdownHandle;
+            if (!handle) return Promise.resolve(this.lastShutdownReceipt);
+            this.shutdownPromise = (async () => {
+                try {
+                    await handle.requestExit();
+                    const receipt = await handle.waitForExit();
+                    if (receipt.status === 'unverified') this.shutdownPromise = null;
+                    return receipt;
+                } catch (error) {
+                    this.shutdownPromise = null;
+                    throw error;
+                }
+            })();
+        }
+        return this.shutdownPromise;
+    };
 
     constructor(opts: {
         api: ApiClient;
@@ -64,13 +114,16 @@ export class OmpSession extends AgentSessionBase<OmpMode, OmpInputQueue> {
                 if (!nativeSession || nativeSession.id !== sessionId) {
                     throw new Error('OMP native session snapshot must accompany its session ID');
                 }
+                const previousNative = metadata.ompSession;
+                const sameNativeSession = previousNative?.id === nativeSession.id;
+                const nativeNameChanged = !sameNativeSession || previousNative?.name !== nativeSession.name;
                 const next = {
                     ...metadata,
                     ompSession: nativeSession
                 };
-                if (nativeSession.name) {
+                if (nativeSession.name && (nativeNameChanged || !metadata.name)) {
                     next.name = nativeSession.name;
-                } else {
+                } else if (!sameNativeSession && !nativeSession.name) {
                     delete next.name;
                 }
                 return next;

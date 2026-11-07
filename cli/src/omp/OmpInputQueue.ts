@@ -83,6 +83,16 @@ export class OmpInputQueue {
         return true;
     }
 
+    requeueInvocation(input: OmpQueuedInput): boolean {
+        const held = this.held.get(input.id);
+        if (!held) {
+            return false;
+        }
+        held.state = 'held';
+        this.emitChange();
+        return true;
+    }
+
     completeInvocation(input: OmpQueuedInput): void {
         if (!this.held.delete(input.id)) {
             return;

@@ -8,7 +8,11 @@ import type {
     GeneratedBlobChunkRequest,
     GeneratedBlobChunkResponse,
     GeneratedFileResponse,
-    GeneratedImageResponse
+    GeneratedImageResponse,
+    PrepareP2pFileTransferRpcRequest,
+    PrepareP2pFileTransferRpcResponse,
+    SignalP2pFileTransferRpcRequest,
+    SignalP2pFileTransferRpcResponse
 } from '@hapi/protocol/apiTypes'
 import { RPC_METHODS } from '@hapi/protocol/rpcMethods'
 import { GENERATED_BLOB_CHUNK_BYTES } from '@hapi/protocol/socketLimits'
@@ -16,6 +20,7 @@ import type { RpcHandlerManager } from '@/api/rpc/RpcHandlerManager'
 import { validatePath } from '../pathSecurity'
 import { getGeneratedImage } from '../generatedImages'
 import { loadGeneratedFile, readGeneratedFileChunk } from '../generatedFiles'
+import { handlePrepareP2pFileTransfer, handleSignalP2pFileTransfer } from '../p2pFileSender'
 import { getErrorMessage, rpcError } from '../rpcResponses'
 
 interface ReadFileRequest {
@@ -155,6 +160,16 @@ export function registerFileHandlers(rpcHandlerManager: RpcHandlerManager, worki
                 return rpcError(getErrorMessage(error, 'Failed to read generated blob'))
             }
         }
+    )
+
+    rpcHandlerManager.registerHandler<PrepareP2pFileTransferRpcRequest, PrepareP2pFileTransferRpcResponse>(
+        RPC_METHODS.PrepareP2pFileTransfer,
+        async (data) => await handlePrepareP2pFileTransfer(data)
+    )
+
+    rpcHandlerManager.registerHandler<SignalP2pFileTransferRpcRequest, SignalP2pFileTransferRpcResponse>(
+        RPC_METHODS.SignalP2pFileTransfer,
+        async (data) => await handleSignalP2pFileTransfer(data)
     )
 
     rpcHandlerManager.registerHandler<WriteFileRequest, FileWriteResponse>(RPC_METHODS.WriteFile, async (data) => {

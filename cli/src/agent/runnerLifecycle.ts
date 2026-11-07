@@ -8,6 +8,7 @@ type RunnerLifecycleOptions = {
     session: ApiSessionClient
     logTag: string
     stopKeepAlive?: () => void
+    onShutdownRequest?: () => Promise<void>
     onBeforeClose?: () => Promise<void> | void
     onAfterClose?: () => Promise<void> | void
 }
@@ -20,6 +21,8 @@ export type RunnerLifecycle = {
     markCrash: (error: unknown) => void
     cleanup: () => Promise<void>
     cleanupConfirmed: (options?: { timeoutMs?: number }) => Promise<void>
+    prepareShutdown: () => Promise<void>
+    releaseShutdownAck: () => void
     cleanupAndExit: (codeOverride?: number) => Promise<void>
     registerProcessHandlers: () => void
 }
@@ -53,10 +56,46 @@ export function createRunnerLifecycle(options: RunnerLifecycleOptions): RunnerLi
     let cleanupPromise: Promise<void> | null = null
     let confirmedCleanupPrepared = false
     let confirmedCleanupComplete = false
+    let shutdownAck: { promise: Promise<void>; resolve: () => void } | null = null
+    let preparation: Promise<void> | null = null
+
+    const prepareShutdown = async () => {
+        shutdownAck ??= Promise.withResolvers<void>()
+        if (!preparation) {
+            preparation = (async () => {
+                restoreTerminalState()
+                await options.onShutdownRequest?.()
+                options.stopKeepAlive?.()
+                await options.onBeforeClose?.()
+                options.session.updateMetadata((metadata) => ({
+                    ...metadata,
+                    lifecycleState: 'archived',
+                    lifecycleStateSince: Date.now(),
+                    archivedBy: 'cli',
+                    archiveReason
+                }))
+                options.session.sendSessionDeath(sessionEndReason)
+                if (!await options.session.flush({ timeoutMs: 5_000 })) {
+                    throw new Error(`${logPrefix} Timed out confirming session shutdown metadata`)
+                }
+                confirmedCleanupPrepared = true
+            })()
+            preparation.catch(() => { preparation = null })
+        }
+        await preparation
+    }
+
+    const releaseShutdownAck = () => shutdownAck?.resolve()
 
     const logPrefix = `[${options.logTag}]`
 
     const archiveAndClose = async () => {
+        if (preparation) {
+            await preparation
+            await shutdownAck?.promise
+            await options.session.close()
+            return
+        }
         options.session.updateMetadata((currentMetadata) => ({
             ...currentMetadata,
             lifecycleState: 'archived',
@@ -66,7 +105,10 @@ export function createRunnerLifecycle(options: RunnerLifecycleOptions): RunnerLi
         }))
 
         options.session.sendSessionDeath(sessionEndReason)
-        await options.session.flush({ timeoutMs: 1_000 })
+        const flushed = await options.session.flush({ timeoutMs: options.onShutdownRequest ? 5_000 : 1_000 })
+        if (options.onShutdownRequest && !flushed) {
+            throw new Error(`${logPrefix} Timed out confirming session shutdown metadata`)
+        }
         await options.session.close()
     }
 
@@ -81,8 +123,11 @@ export function createRunnerLifecycle(options: RunnerLifecycleOptions): RunnerLi
             restoreTerminalState()
 
             try {
-                options.stopKeepAlive?.()
-                await options.onBeforeClose?.()
+                if (!preparation) {
+                    await options.onShutdownRequest?.()
+                    options.stopKeepAlive?.()
+                    await options.onBeforeClose?.()
+                }
                 await archiveAndClose()
                 logger.debug(`${logPrefix} Cleanup complete`)
             } finally {
@@ -106,6 +151,7 @@ export function createRunnerLifecycle(options: RunnerLifecycleOptions): RunnerLi
             logger.debug(`${logPrefix} Confirmed cleanup start`)
             restoreTerminalState()
             options.stopKeepAlive?.()
+            await options.onShutdownRequest?.()
             await options.onBeforeClose?.()
             options.session.updateMetadata((currentMetadata) => ({
                 ...currentMetadata,
@@ -143,6 +189,10 @@ export function createRunnerLifecycle(options: RunnerLifecycleOptions): RunnerLi
             process.exit(exitCode)
         } catch (error) {
             logger.debug(`${logPrefix} Error during cleanup:`, error)
+            if (shutdownAck) {
+                cleanupPromise = null
+                return
+            }
             process.exit(1)
         }
     }
@@ -225,6 +275,8 @@ export function createRunnerLifecycle(options: RunnerLifecycleOptions): RunnerLi
         markCrash,
         cleanup,
         cleanupConfirmed,
+        prepareShutdown,
+        releaseShutdownAck,
         cleanupAndExit,
         registerProcessHandlers
     }

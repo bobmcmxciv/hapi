@@ -1,9 +1,26 @@
 import { Hono } from 'hono'
 import type { Context } from 'hono'
+import { randomBytes, randomUUID } from 'node:crypto'
 import { z } from 'zod'
-import type { GeneratedBlobChunkResponse, GeneratedBlobKind, GeneratedBlobPendingResponse } from '@hapi/protocol/apiTypes'
-import { GENERATED_BLOB_PULL_CHUNK_BYTES } from '@hapi/protocol/socketLimits'
-import type { BlobRecord, BlobStore, GeneratedBlobServices } from '../../blobs'
+import type {
+    CreateP2pFileTransferResponse,
+    GeneratedBlobChunkResponse,
+    GeneratedBlobDownloadTicketResponse,
+    GeneratedBlobKind,
+    GeneratedBlobPendingResponse
+} from '@hapi/protocol/apiTypes'
+import {
+    GENERATED_BLOB_PULL_CHUNK_BYTES,
+    P2P_TRANSFER_TTL_MS
+} from '@hapi/protocol/socketLimits'
+import {
+    isSafeBlobId,
+    issueBlobDownloadTicket,
+    verifyBlobDownloadTicket,
+    type BlobRecord,
+    type BlobStore,
+    type GeneratedBlobServices
+} from '../../blobs'
 import type { SyncEngine } from '../../sync/syncEngine'
 import { RpcTargetMissingError } from '../../sync/rpcGateway'
 import type { WebAppEnv } from '../middleware/auth'
@@ -32,12 +49,16 @@ const generatedImageSchema = z.object({
     imageId: z.string().min(1)
 })
 
+function normalizeFileSearchQuery(query: string, sessionPath: string): string {
+    return isWindowsSessionPath(sessionPath) ? query.replaceAll('\\', '/') : query
+}
+
 function normalizeFileSearchPath(path: string): string {
     return path.replaceAll('\\', '/')
 }
 
 function isWindowsSessionPath(path: string): boolean {
-    return /^[A-Za-z]:[\\/]/.test(path) || path.startsWith('\\\\')
+    return /^[A-Za-z]:[\\/]/.test(path) || /^(?:\\\\|\/\/)[^\\/]+[\\/][^\\/]+/.test(path)
 }
 const generatedFileSchema = z.object({
     fileId: z.string().min(1)
@@ -79,10 +100,11 @@ const BLOB_CHUNK_RETRIES = 3
 const BLOB_CHUNK_RETRY_DELAY_MS = 750
 /** How long a download request waits for a running pull before answering 202. */
 const BLOB_PENDING_WAIT_MS = 12_000
+/** Bounded wait for an active push to land before returning 202 (avoids a full 1.5 s poll pause on small files). */
+const BLOB_PUSH_READY_WAIT_MS = 1_500
 /** A push with no bytes for this long is treated as abandoned and pulled instead. */
 const BLOB_PUSH_STALL_MS = 60_000
 const BLOB_PENDING_RETRY_AFTER_MS = 1_500
-
 type BlobFailure =
     | { kind: 'offline'; message: string }
     | { kind: 'timeout'; message: string }
@@ -225,26 +247,112 @@ function blobHeaders(options: GeneratedBlobServeOptions, mimeType: string, fileN
 }
 
 /** Serve a finished blob straight from the hub's disk, honouring Range. */
-function serveStoredBlob(c: Context<WebAppEnv>, store: BlobStore, record: BlobRecord, options: GeneratedBlobServeOptions): Response {
+function serveStoredBlob(
+    c: Context<WebAppEnv>,
+    store: BlobStore,
+    record: BlobRecord,
+    options: GeneratedBlobServeOptions
+): Response {
     store.touch(record.kind, record.id)
     const baseHeaders = blobHeaders(options, record.mimeType, record.fileName || options.fallbackFileName)
+    const headOnly = c.req.method === 'HEAD'
     const size = record.size
     const range = parseSingleByteRange(c.req.header('range'), size)
     if (range === 'unsatisfiable') {
         return c.body(null, 416, { ...baseHeaders, 'Content-Range': `bytes */${size}` })
     }
     if (size === 0) {
-        return c.body(new Uint8Array(0), 200, { ...baseHeaders, 'Content-Length': '0' })
+        return new Response(headOnly ? null : new Uint8Array(0), {
+            status: 200,
+            headers: { ...baseHeaders, 'Content-Length': '0' }
+        })
     }
     const start = range ? range.start : 0
     const end = range ? range.end : size - 1
     const length = end - start + 1
-    const file = Bun.file(store.finalPath(record.kind, record.id))
-    const body = range ? file.slice(start, end + 1) : file
     const headers = range
         ? { ...baseHeaders, 'Content-Range': `bytes ${start}-${end}/${size}`, 'Content-Length': String(length) }
         : { ...baseHeaders, 'Content-Length': String(length) }
+    if (headOnly) {
+        return new Response(null, { status: range ? 206 : 200, headers })
+    }
+    const file = Bun.file(store.finalPath(record.kind, record.id))
+    const body = range ? file.slice(start, end + 1) : file
     return new Response(body, { status: range ? 206 : 200, headers })
+}
+
+async function resolveStoredOrFetchedBlob(
+    c: Context<WebAppEnv>,
+    engine: SyncEngine,
+    blobs: GeneratedBlobServices,
+    options: Pick<GeneratedBlobServeOptions, 'sessionId' | 'kind' | 'id'>
+): Promise<{ ok: true; record: BlobRecord } | { ok: false; response: Response }> {
+    const { store, fetcher } = blobs
+    const { sessionId, kind, id } = options
+    let record = store.stat(kind, id)
+    if (record && record.sessionId !== null && record.sessionId !== sessionId) {
+        return {
+            ok: false,
+            response: c.json({
+                success: false,
+                error: 'Blob belongs to another session',
+                reason: 'access-denied',
+                retryable: false
+            }, 403)
+        }
+    }
+    if (record?.state === 'ready') {
+        return { ok: true, record }
+    }
+    if (record?.state === 'uploading' && record.origin === 'push' && store.now() - record.lastActivityAt < BLOB_PUSH_STALL_MS) {
+        const waitMs = blobs.pushReadyWaitMs ?? blobs.pendingWaitMs ?? BLOB_PUSH_READY_WAIT_MS
+        if (waitMs > 0) {
+            record = await store.waitForReady(kind, id, waitMs)
+            if (record && record.sessionId !== null && record.sessionId !== sessionId) {
+                return {
+                    ok: false,
+                    response: c.json({
+                        success: false,
+                        error: 'Blob belongs to another session',
+                        reason: 'access-denied',
+                        retryable: false
+                    }, 403)
+                }
+            }
+            if (record?.state === 'ready') {
+                return { ok: true, record }
+            }
+        }
+        // The sending CLI is still pushing; pulling concurrently would only
+        // compete with it for the same uplink.
+        return {
+            ok: false,
+            response: blobPendingResponse(c, 'uploading', {
+                received: record?.received ?? 0,
+                size: record?.size ?? null
+            })
+        }
+    }
+    const job = fetcher.ensure(engine, sessionId, kind, id)
+    const outcome = await job.waitFor(blobs.pendingWaitMs ?? BLOB_PENDING_WAIT_MS)
+    if (outcome === 'pending') {
+        return { ok: false, response: blobPendingResponse(c, 'fetching', job.status()) }
+    }
+    if (!outcome.ok) {
+        return { ok: false, response: blobFailureResponse(c, outcome.failure) }
+    }
+    if (outcome.record.sessionId !== null && outcome.record.sessionId !== sessionId) {
+        return {
+            ok: false,
+            response: c.json({
+                success: false,
+                error: 'Blob belongs to another session',
+                reason: 'access-denied',
+                retryable: false
+            }, 403)
+        }
+    }
+    return { ok: true, record: outcome.record }
 }
 
 /**
@@ -258,26 +366,11 @@ async function serveGeneratedBlob(
     blobs: GeneratedBlobServices,
     options: GeneratedBlobServeOptions
 ): Promise<Response> {
-    const { store, fetcher } = blobs
-    const { sessionId, kind, id } = options
-    const record = store.stat(kind, id)
-    if (record?.state === 'ready') {
-        return serveStoredBlob(c, store, record, options)
+    const resolved = await resolveStoredOrFetchedBlob(c, engine, blobs, options)
+    if (!resolved.ok) {
+        return resolved.response
     }
-    if (record?.state === 'uploading' && record.origin === 'push' && store.now() - record.lastActivityAt < BLOB_PUSH_STALL_MS) {
-        // The sending CLI is still pushing; pulling concurrently would only
-        // compete with it for the same uplink.
-        return blobPendingResponse(c, 'uploading', { received: record.received, size: record.size })
-    }
-    const job = fetcher.ensure(engine, sessionId, kind, id)
-    const outcome = await job.waitFor(blobs.pendingWaitMs ?? BLOB_PENDING_WAIT_MS)
-    if (outcome === 'pending') {
-        return blobPendingResponse(c, 'fetching', job.status())
-    }
-    if (!outcome.ok) {
-        return blobFailureResponse(c, outcome.failure)
-    }
-    return serveStoredBlob(c, store, outcome.record, options)
+    return serveStoredBlob(c, blobs.store, resolved.record, options)
 }
 
 /**
@@ -405,11 +498,11 @@ function ifNoneMatchMatches(header: string | undefined, etag: string): boolean {
 
 export function createGitRoutes(
     getSyncEngine: () => SyncEngine | null,
-    deps: { blobs?: GeneratedBlobServices } = {}
+    deps: { blobs?: GeneratedBlobServices; jwtSecret?: Uint8Array } = {}
 ): Hono<WebAppEnv> {
     const app = new Hono<WebAppEnv>()
     const blobs = deps.blobs ?? null
-
+    const ticketSecret = deps.blobs?.ticketSecret ?? deps.jwtSecret
     app.get('/sessions/:id/git-status', async (c) => {
         const engine = requireSyncEngine(c, getSyncEngine)
         if (engine instanceof Response) {
@@ -527,15 +620,31 @@ export function createGitRoutes(
         return c.json(result)
     })
 
-    app.get('/sessions/:id/generated-images/:imageId', async (c) => {
+    const verifyOptionalQueryTicket = (
+        c: Context<WebAppEnv>,
+        sessionId: string,
+        kind: GeneratedBlobKind,
+        blobId: string
+    ): Response | null => {
+        const ticket = c.req.query('ticket')
+        if (!ticket) return null
+        const verified = verifyBlobDownloadTicket(ticket, { sessionId, kind, blobId, now: blobs?.store.now() }, ticketSecret)
+        if (!verified.ok) {
+            return c.json({
+                error: verified.reason === 'expired' ? 'Download ticket expired' : 'Invalid download ticket',
+                reason: verified.reason === 'expired' ? 'ticket-expired' : 'invalid-ticket'
+            }, 401)
+        }
+        if (verified.claims.ns !== c.get('namespace')) {
+            return c.json({ error: 'Session access denied', reason: 'access-denied' }, 403)
+        }
+        return null
+    }
+
+    const handleGeneratedImage = async (c: Context<WebAppEnv>): Promise<Response> => {
         const engine = requireSyncEngine(c, getSyncEngine)
         if (engine instanceof Response) {
             return engine
-        }
-
-        const sessionResult = requireSessionFromParam(c, engine)
-        if (sessionResult instanceof Response) {
-            return sessionResult
         }
 
         const parsed = generatedImageSchema.safeParse(c.req.param())
@@ -543,11 +652,32 @@ export function createGitRoutes(
             return c.json({ error: 'Invalid generated image id' }, 400)
         }
 
+        const ticketError = verifyOptionalQueryTicket(c, c.req.param('id') ?? '', 'image', parsed.data.imageId)
+        if (ticketError) {
+            return ticketError
+        }
+
+        const sessionResult = requireSessionFromParam(c, engine)
+        if (sessionResult instanceof Response) {
+            return sessionResult
+        }
+
         // The id is an immutable content fingerprint, so it doubles as the ETag. If the client
         // already holds it, answer 304 *before* the RPC so revalidation skips the CLI round-trip
         // entirely (and still works even if the image was evicted from CLI memory). Issue #927.
         const etag = `"${parsed.data.imageId}"`
         if (ifNoneMatchMatches(c.req.header('if-none-match'), etag)) {
+            if (blobs) {
+                const existing = blobs.store.stat('image', parsed.data.imageId)
+                if (existing && existing.sessionId !== null && existing.sessionId !== sessionResult.sessionId) {
+                    return c.json({
+                        success: false,
+                        error: 'Blob belongs to another session',
+                        reason: 'access-denied',
+                        retryable: false
+                    }, 403)
+                }
+            }
             return c.body(null, 304, {
                 'Cache-Control': GENERATED_IMAGE_CACHE_CONTROL,
                 ETag: etag
@@ -570,17 +700,15 @@ export function createGitRoutes(
         return blobs
             ? await serveGeneratedBlob(c, engine, blobs, serve)
             : await serveGeneratedBlobDirect(c, engine, serve)
-    })
+    }
 
-    app.get('/sessions/:id/generated-files/:fileId', async (c) => {
+    app.get('/sessions/:id/generated-images/:imageId', handleGeneratedImage)
+    app.on('HEAD', '/sessions/:id/generated-images/:imageId', handleGeneratedImage)
+
+    const handleGeneratedFile = async (c: Context<WebAppEnv>): Promise<Response> => {
         const engine = requireSyncEngine(c, getSyncEngine)
         if (engine instanceof Response) {
             return engine
-        }
-
-        const sessionResult = requireSessionFromParam(c, engine)
-        if (sessionResult instanceof Response) {
-            return sessionResult
         }
 
         const parsed = generatedFileSchema.safeParse(c.req.param())
@@ -588,10 +716,31 @@ export function createGitRoutes(
             return c.json({ error: 'Invalid generated file id' }, 400)
         }
 
+        const ticketError = verifyOptionalQueryTicket(c, c.req.param('id') ?? '', 'file', parsed.data.fileId)
+        if (ticketError) {
+            return ticketError
+        }
+
+        const sessionResult = requireSessionFromParam(c, engine)
+        if (sessionResult instanceof Response) {
+            return sessionResult
+        }
+
         // Sent files are disk snapshots keyed by an immutable random id, so the same
         // caching strategy as generated images applies (see the route above).
         const etag = `"${parsed.data.fileId}"`
         if (ifNoneMatchMatches(c.req.header('if-none-match'), etag)) {
+            if (blobs) {
+                const existing = blobs.store.stat('file', parsed.data.fileId)
+                if (existing && existing.sessionId !== null && existing.sessionId !== sessionResult.sessionId) {
+                    return c.json({
+                        success: false,
+                        error: 'Blob belongs to another session',
+                        reason: 'access-denied',
+                        retryable: false
+                    }, 403)
+                }
+            }
             return c.body(null, 304, {
                 'Cache-Control': GENERATED_IMAGE_CACHE_CONTROL,
                 ETag: etag
@@ -611,6 +760,308 @@ export function createGitRoutes(
         return blobs
             ? await serveGeneratedBlob(c, engine, blobs, serve)
             : await serveGeneratedBlobDirect(c, engine, serve)
+    }
+
+    app.get('/sessions/:id/generated-files/:fileId', handleGeneratedFile)
+    app.on('HEAD', '/sessions/:id/generated-files/:fileId', handleGeneratedFile)
+
+    const handleDownloadTicket = async (c: Context<WebAppEnv>, kind: GeneratedBlobKind, blobId: string): Promise<Response> => {
+        if (!blobs) {
+            return c.json({ success: false, error: 'Blob storage is not enabled on this hub', reason: 'unsupported' }, 501)
+        }
+        const engine = requireSyncEngine(c, getSyncEngine)
+        if (engine instanceof Response) {
+            return engine
+        }
+        const sessionResult = requireSessionFromParam(c, engine)
+        if (sessionResult instanceof Response) {
+            return sessionResult
+        }
+        const resolved = await resolveStoredOrFetchedBlob(c, engine, blobs, {
+            sessionId: sessionResult.sessionId,
+            kind,
+            id: blobId
+        })
+        if (!resolved.ok) {
+            return resolved.response
+        }
+        const deliveryMeta = c.get('deliveryMetadata')
+        const gatewayAccountId = deliveryMeta && typeof deliveryMeta.gatewayAccountId === 'number'
+            ? deliveryMeta.gatewayAccountId
+            : undefined
+        const issued = issueBlobDownloadTicket({
+            sessionId: sessionResult.sessionId,
+            kind,
+            blobId,
+            namespace: c.get('namespace') ?? 'default',
+            userId: c.get('userId') ?? 0,
+            ...(gatewayAccountId !== undefined ? { gatewayAccountId } : {}),
+            ttlMs: blobs.ticketTtlMs,
+            now: blobs.store.now()
+        }, ticketSecret)
+        const routeSegment = kind === 'file' ? 'generated-files' : 'generated-images'
+        const downloadPath = `/api/sessions/${encodeURIComponent(sessionResult.sessionId)}/${routeSegment}/${encodeURIComponent(blobId)}?ticket=${encodeURIComponent(issued.ticket)}`
+        const body: GeneratedBlobDownloadTicketResponse = {
+            success: true,
+            state: 'ready',
+            ticket: issued.ticket,
+            downloadPath,
+            expiresAt: issued.expiresAt,
+            fileName: resolved.record.fileName || (kind === 'file' ? 'file' : 'generated-image'),
+            mimeType: resolved.record.mimeType,
+            size: resolved.record.size
+        }
+        return c.json(body, 200, { 'Cache-Control': 'no-store' })
+    }
+
+    app.post('/sessions/:id/generated-files/:fileId/download-ticket', async (c) => {
+        const parsed = generatedFileSchema.safeParse(c.req.param())
+        if (!parsed.success) {
+            return c.json({ error: 'Invalid generated file id' }, 400)
+        }
+        return await handleDownloadTicket(c, 'file', parsed.data.fileId)
+    })
+
+    app.post('/sessions/:id/generated-images/:imageId/download-ticket', async (c) => {
+        const parsed = generatedImageSchema.safeParse(c.req.param())
+        if (!parsed.success) {
+            return c.json({ error: 'Invalid generated image id' }, 400)
+        }
+        return await handleDownloadTicket(c, 'image', parsed.data.imageId)
+    })
+
+    type HubP2pTransferRecord = {
+        transferId: string
+        sessionId: string
+        kind: GeneratedBlobKind
+        blobId: string
+        namespace: string
+        userId: number
+        gatewayAccountId?: number
+        authToken: string
+        expiresAt: number
+    }
+
+    const hubP2pTransfers = new Map<string, HubP2pTransferRecord>()
+
+    const p2pSignalBodySchema = z.object({
+        action: z.enum(['signal', 'cancel', 'complete', 'renew']).default('signal'),
+        answer: z.object({
+            type: z.literal('answer'),
+            sdp: z.string().min(1).max(65_536)
+        }).optional(),
+        candidates: z.array(z.object({
+            candidate: z.string().min(1).max(1024),
+            sdpMid: z.string().max(64).nullish(),
+            sdpMLineIndex: z.number().int().min(0).max(32).nullish()
+        })).max(32).optional(),
+        reason: z.string().max(256).optional()
+    })
+
+    function resolveConfiguredStunServers(): Array<{ urls: string | string[] }> {
+        const raw = process.env.HAPI_P2P_STUN_URLS?.trim()
+        if (!raw) return []
+        const urls = raw
+            .split(',')
+            .map((entry) => entry.trim())
+            .filter((entry) => entry.startsWith('stun:'))
+        return urls.length > 0 ? [{ urls }] : []
+    }
+
+    app.post('/sessions/:id/generated-files/:fileId/p2p', async (c) => {
+        const engine = requireSyncEngine(c, getSyncEngine)
+        if (engine instanceof Response) {
+            return engine
+        }
+        const sessionResult = requireSessionFromParam(c, engine)
+        if (sessionResult instanceof Response) {
+            return sessionResult
+        }
+        const parsed = generatedFileSchema.safeParse(c.req.param())
+        if (!parsed.success || !isSafeBlobId(parsed.data.fileId)) {
+            return c.json({ error: 'Invalid generated file id' }, 400)
+        }
+        const fileId = parsed.data.fileId
+        const existingRecord = blobs?.store.stat('file', fileId) ?? null
+        if (existingRecord && existingRecord.sessionId !== null && existingRecord.sessionId !== sessionResult.sessionId) {
+            return c.json({
+                success: false,
+                error: 'Blob belongs to another session',
+                reason: 'access-denied',
+                retryable: false
+            }, 403)
+        }
+        const hubReady = existingRecord?.state === 'ready'
+        const now = blobs?.store.now() ?? Date.now()
+        for (const [id, record] of hubP2pTransfers) {
+            if (now >= record.expiresAt) {
+                hubP2pTransfers.delete(id)
+            }
+        }
+
+        if (typeof engine.prepareP2pFileTransfer !== 'function') {
+            const unavailable: CreateP2pFileTransferResponse = {
+                success: false,
+                p2pAvailable: false,
+                reason: 'unsupported',
+                error: 'P2P transfer is not available on this hub',
+                hubReady
+            }
+            return c.json(unavailable, 200, { 'Cache-Control': 'no-store' })
+        }
+
+        const transferId = randomUUID()
+        const authToken = randomBytes(24).toString('base64url')
+        const expiresAt = now + P2P_TRANSFER_TTL_MS
+        const iceServers = resolveConfiguredStunServers()
+
+        try {
+            const prepared = await engine.prepareP2pFileTransfer(sessionResult.sessionId, {
+                transferId,
+                authToken,
+                kind: 'file',
+                id: fileId,
+                expiresAt,
+                iceServers
+            })
+            if (!prepared.success) {
+                const unavailable: CreateP2pFileTransferResponse = {
+                    success: false,
+                    p2pAvailable: false,
+                    reason: prepared.reason,
+                    error: prepared.error,
+                    hubReady
+                }
+                return c.json(unavailable, 200, { 'Cache-Control': 'no-store' })
+            }
+
+            const deliveryMeta = c.get('deliveryMetadata')
+            const gatewayAccountId = deliveryMeta && typeof deliveryMeta.gatewayAccountId === 'number'
+                ? deliveryMeta.gatewayAccountId
+                : undefined
+            hubP2pTransfers.set(transferId, {
+                transferId,
+                sessionId: sessionResult.sessionId,
+                kind: 'file',
+                blobId: fileId,
+                namespace: c.get('namespace') ?? 'default',
+                userId: c.get('userId') ?? 0,
+                ...(gatewayAccountId !== undefined ? { gatewayAccountId } : {}),
+                authToken,
+                expiresAt
+            })
+
+            const response: CreateP2pFileTransferResponse = {
+                success: true,
+                p2pAvailable: true,
+                transferId,
+                authToken,
+                expiresAt,
+                hubReady,
+                offer: prepared.offer,
+                candidates: prepared.candidates,
+                manifest: prepared.manifest,
+                iceServers,
+                candidateTypes: prepared.candidateTypes
+            }
+            return c.json(response, 200, { 'Cache-Control': 'no-store' })
+        } catch (error) {
+            const failure = classifyBlobError(error)
+            const unavailable: CreateP2pFileTransferResponse = {
+                success: false,
+                p2pAvailable: false,
+                reason: failure.kind === 'offline' ? 'session-offline' : 'failed',
+                error: failure.message,
+                hubReady
+            }
+            return c.json(unavailable, 200, { 'Cache-Control': 'no-store' })
+        }
+    })
+
+    app.post('/sessions/:id/generated-files/:fileId/p2p/:transferId/signal', async (c) => {
+        const engine = requireSyncEngine(c, getSyncEngine)
+        if (engine instanceof Response) {
+            return engine
+        }
+        const sessionResult = requireSessionFromParam(c, engine)
+        if (sessionResult instanceof Response) {
+            return sessionResult
+        }
+        const fileId = c.req.param('fileId')
+        const transferId = c.req.param('transferId')
+        if (!fileId || !isSafeBlobId(fileId) || !transferId) {
+            return c.json({ error: 'Invalid transfer reference' }, 400)
+        }
+        const record = hubP2pTransfers.get(transferId)
+        const now = blobs?.store.now() ?? Date.now()
+        if (!record || now >= record.expiresAt) {
+            hubP2pTransfers.delete(transferId)
+            return c.json({ success: false, error: 'P2P transfer session expired or not found', reason: 'expired' }, 410)
+        }
+        const deliveryMeta = c.get('deliveryMetadata')
+        const gatewayAccountId = deliveryMeta && typeof deliveryMeta.gatewayAccountId === 'number'
+            ? deliveryMeta.gatewayAccountId
+            : undefined
+        if (
+            record.sessionId !== sessionResult.sessionId
+            || record.blobId !== fileId
+            || record.namespace !== (c.get('namespace') ?? 'default')
+            || record.userId !== (c.get('userId') ?? 0)
+            || (record.gatewayAccountId !== undefined && record.gatewayAccountId !== gatewayAccountId)
+        ) {
+            return c.json({ success: false, error: 'Transfer access denied', reason: 'access-denied' }, 403)
+        }
+
+        const rawBody = await c.req.json().catch(() => ({}))
+        const parsedBody = p2pSignalBodySchema.safeParse(rawBody)
+        if (!parsedBody.success) {
+            return c.json({ success: false, error: 'Invalid P2P signal payload' }, 400)
+        }
+        const { action, answer, candidates, reason } = parsedBody.data
+
+        if (action === 'cancel' || action === 'complete') {
+            hubP2pTransfers.delete(transferId)
+            if (typeof engine.signalP2pFileTransfer === 'function') {
+                await engine.signalP2pFileTransfer(sessionResult.sessionId, {
+                    transferId,
+                    action,
+                    reason
+                }).catch(() => {})
+            }
+            return c.json({ success: true })
+        }
+
+        if (action === 'renew') {
+            record.expiresAt = now + P2P_TRANSFER_TTL_MS
+            if (typeof engine.signalP2pFileTransfer === 'function') {
+                await engine.signalP2pFileTransfer(sessionResult.sessionId, {
+                    transferId,
+                    action: 'renew',
+                    expiresAt: record.expiresAt
+                }).catch(() => {})
+            }
+            return c.json({ success: true, expiresAt: record.expiresAt })
+        }
+
+        if (typeof engine.signalP2pFileTransfer !== 'function') {
+            return c.json({ success: false, error: 'P2P signaling not supported' }, 501)
+        }
+
+        try {
+            const result = await engine.signalP2pFileTransfer(sessionResult.sessionId, {
+                transferId,
+                action: 'signal',
+                answer,
+                candidates
+            })
+            if (!result.success) {
+                return c.json(result, 400)
+            }
+            return c.json(result, 200, { 'Cache-Control': 'no-store' })
+        } catch (error) {
+            const failure = classifyBlobError(error)
+            return blobFailureResponse(c, failure)
+        }
     })
 
     app.get('/sessions/:id/files', async (c) => {
@@ -634,7 +1085,7 @@ export function createGitRoutes(
             return c.json({ error: 'Invalid query' }, 400)
         }
 
-        const query = parsed.data.query?.trim() ?? ''
+        const query = normalizeFileSearchQuery(parsed.data.query?.trim() ?? '', sessionPath)
         const limit = parsed.data.limit ?? 200
         const args = ['--files']
         if (query) {

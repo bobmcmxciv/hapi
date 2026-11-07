@@ -27,6 +27,26 @@ describe('gateway account memory delivery', () => {
         const content = { role: 'user', content: { type: 'text', text: 'hello' }, meta: { gatewayAccountId: alice.id } }
         expect(delivery.decorateForCli(content)).toBe(content)
     })
+
+    it('distinguishes the active runner host from user-declared machines in <hapi_user_context>', () => {
+        const store = new MultiUserGatewayStore(':memory:'); stores.push(store)
+        const admin = store.createAccount('admin', 'admin', 'default')
+        store.updateAccount(admin.id, { memory: '我的电脑是 WIN-GVHSJ7B378A 和 DESKTOP-4SQALMG。' })
+        const delivery = createGatewayMemoryDelivery(store)
+        const original = {
+            role: 'user',
+            content: { type: 'text', text: 'deploy now' },
+            meta: { gatewayAccountId: admin.id }
+        }
+        const decorated = delivery.decorateForCli(original, {
+            host: 'DESKTOP-26GU3SD',
+            path: 'C:/vircs-projects/hapi-mouriya'
+        }) as typeof original
+        expect(decorated.content.text).toContain('runner_host="DESKTOP-26GU3SD"')
+        expect(decorated.content.text).toContain('Current HAPI Runner execution host (local machine running this session): DESKTOP-26GU3SD (cwd: C:/vircs-projects/hapi-mouriya)')
+        expect(decorated.content.text).toContain('DESKTOP-4SQALMG')
+        expect(stripGatewayMemoryContext(decorated.content.text)).toBe('deploy now')
+    })
 })
 
 describe('gateway memory context stripping', () => {

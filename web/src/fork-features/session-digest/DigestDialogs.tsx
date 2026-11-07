@@ -1,8 +1,10 @@
 import { useEffect, useState, type Dispatch, type SetStateAction } from 'react'
+import { useQueryClient } from '@tanstack/react-query'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Button } from '@/components/ui/button'
+import { queryKeys } from '@/lib/query-keys'
 import { useTranslation } from '@/lib/use-translation'
-import { useDigestActions, useProjectDigests, useSessionDigest, type DigestJobState, type RefreshAccepted } from './digestApi'
+import { digestQueryKeys, useDigestActions, useProjectDigests, useSessionDigest, type DigestJobState, type RefreshAccepted } from './digestApi'
 import { refreshPhase, type RefreshBaseline } from './refreshProgress'
 
 function formatTime(ms: number | null): string {
@@ -117,18 +119,29 @@ export function CompletedMark(props: { className?: string; title?: string }) {
 
 export function SessionDigestDialog(props: { sessionId: string; onClose: () => void }) {
     const { t } = useTranslation()
+    const queryClient = useQueryClient()
+    const targetSessionId = props.sessionId
     const [baseline, setBaseline] = useState<RefreshBaseline | null>(null)
-    const query = useSessionDigest(props.sessionId, true, baseline !== null)
+    const query = useSessionDigest(targetSessionId, true, baseline !== null)
     const { refreshSession, setCompleted } = useDigestActions()
     const digest = query.data?.digest ?? null
     const serverState: DigestJobState = query.data?.state ?? (query.data?.running ? 'running' : null)
     const progress = useRefreshProgress(baseline, setBaseline, digest?.lastAttemptAt ?? null, serverState)
     const running = progress.busy || refreshSession.isPending
-    const refresh = () => {
-        progress.start()
-        refreshSession.mutate(props.sessionId, { onSuccess: progress.accepted, onError: () => setBaseline(null) })
-    }
 
+    useEffect(() => {
+        if (progress.outcome !== 'updated') return
+        void queryClient.invalidateQueries({ queryKey: digestQueryKeys.session(targetSessionId) })
+        void queryClient.invalidateQueries({ queryKey: digestQueryKeys.index })
+        void queryClient.invalidateQueries({ queryKey: queryKeys.session(targetSessionId) })
+        void queryClient.invalidateQueries({ queryKey: queryKeys.sessions })
+    }, [progress.outcome, queryClient, targetSessionId])
+
+    const refresh = () => {
+        if (running) return
+        progress.start()
+        refreshSession.mutate(targetSessionId, { onSuccess: progress.accepted, onError: () => setBaseline(null) })
+    }
     return (
         <Dialog open onOpenChange={(open) => { if (!open) props.onClose() }}>
             <DialogContent className="max-w-lg">
@@ -199,7 +212,7 @@ export function SessionDigestButton(props: { sessionId: string; className: strin
             >
                 <DigestIcon />
             </button>
-            {open ? <SessionDigestDialog sessionId={props.sessionId} onClose={() => setOpen(false)} /> : null}
+            {open ? <SessionDigestDialog key={props.sessionId} sessionId={props.sessionId} onClose={() => setOpen(false)} /> : null}
         </>
     )
 }

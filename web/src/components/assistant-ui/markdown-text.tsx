@@ -10,7 +10,7 @@ import {
 } from '@assistant-ui/react-markdown'
 import remarkGfm from 'remark-gfm'
 import remarkBreaks from 'remark-breaks'
-import remarkMath from 'remark-math'
+import remarkChatFormatting from '@/lib/remark-chat-formatting'
 import rehypeKatex from 'rehype-katex'
 import remarkDisableIndentedCode from '@/lib/remark-disable-indented-code'
 import remarkRepairTables from '@/lib/remark-repair-tables'
@@ -34,26 +34,22 @@ import { UriConfirmDialog } from '@/components/UriConfirmDialog'
 import type { MarkdownTextPrimitiveProps } from '@assistant-ui/react-markdown'
 
 // ── Plugin array ────────────────────────────────────────────────────────────
-// Order: remarkGfm → remarkRepairTables → remarkLatexBracketMath → remarkNonHttpsAutolink → remarkStripCjkAutolink → remarkMath → remarkDisableIndentedCode → remarkSessionPathLinks → remarkFilePathLinks
+// Order: remarkGfm → remarkRepairTables → remarkLatexBracketMath → URI transforms → remarkChatFormatting → remarkDisableIndentedCode → path links
 // remarkRepairTables must run immediately after remarkGfm — it reads file.value
 // (raw source) to pad short separator rows before remark-gfm parses the table.
 // remarkNonHttpsAutolink must run BEFORE remarkStripCjkAutolink so that the
 // CJK strip plugin sees the new link nodes and can trim trailing CJK punctuation
-// from them. Both must come before remarkMath (to avoid treating TeX as URI).
+// from them. Both run before math formatting.
 // remarkSessionPathLinks turns bare /sessions/<id> citations into links.
 // remarkFilePathLinks runs last to convert file paths → links after all other
 // transforms have settled.
 //
-// remarkMath is configured with `singleDollarTextMath: false` so that prose
-// containing currency amounts (e.g. "$200/mo ... $80 bill") is not garbled
-// into KaTeX output. Block math `$$...$$` (on its own line) still works.
-// This matches GitHub-flavored markdown behavior. The option lives on the
-// shared TAIL so both MARKDOWN_PLUGINS (default) and MARKDOWN_PLUGINS_WITH_BREAKS
-// (user-prompt rendering with hard breaks) inherit the fix.
+// Single-dollar math uses strict delimiter boundaries to preserve currency prose.
+// Chat formatting also converts bare <br> tags to breaks without enabling raw HTML.
 const MARKDOWN_PLUGIN_TAIL_HEAD = [
     remarkNonHttpsAutolink,
     remarkStripCjkAutolink,
-    [remarkMath, { singleDollarTextMath: false }],
+    remarkChatFormatting,
     remarkDisableIndentedCode,
 ] satisfies NonNullable<MarkdownTextPrimitiveProps['remarkPlugins']>
 

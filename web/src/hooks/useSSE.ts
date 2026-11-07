@@ -82,6 +82,8 @@ type VisibilityState = 'visible' | 'hidden'
 
 type ToastEvent = Extract<SyncEvent, { type: 'toast' }>
 
+const CONNECT_TIMEOUT_MS = 10_000
+const FOREGROUND_RESUME_STALE_MS = 45_000
 const HEARTBEAT_STALE_MS = 90_000
 const HEARTBEAT_WATCHDOG_INTERVAL_MS = 10_000
 const RECONNECT_BASE_DELAY_MS = 1_000
@@ -455,6 +457,14 @@ export function useSSE(options: {
         const eventSource = new EventSource(url)
         let disconnectNotified = false
         let reconnectRequested = false
+        let disposed = false
+        let connectTimeoutTimer: ReturnType<typeof setTimeout> | null = null
+        const clearConnectTimeout = () => {
+            if (connectTimeoutTimer !== null) {
+                clearTimeout(connectTimeoutTimer)
+                connectTimeoutTimer = null
+            }
+        }
         eventSourceRef.current = eventSource
         lastActivityAtRef.current = Date.now()
 
@@ -482,6 +492,7 @@ export function useSSE(options: {
                 clearTimeout(reconnectTimerRef.current)
             }
             reconnectTimerRef.current = setTimeout(() => {
+                if (disposed) return
                 reconnectTimerRef.current = null
                 setReconnectNonce((value) => value + 1)
             }, exponentialDelay + jitter)
@@ -496,10 +507,11 @@ export function useSSE(options: {
         }
 
         const requestReconnect = (reason: string) => {
-            if (reconnectRequested) {
+            if (disposed || reconnectRequested) {
                 return
             }
             reconnectRequested = true
+            clearConnectTimeout()
             notifyDisconnect(reason)
             eventSource.close()
             if (eventSourceRef.current === eventSource) {
@@ -508,6 +520,13 @@ export function useSSE(options: {
             setSubscriptionId(null)
             scheduleReconnect()
         }
+
+        connectTimeoutTimer = setTimeout(() => {
+            connectTimeoutTimer = null
+            if (eventSourceRef.current === eventSource && eventSource.readyState !== EventSource.OPEN) {
+                requestReconnect('connect-timeout')
+            }
+        }, CONNECT_TIMEOUT_MS)
 
         const flushInvalidations = () => {
             const pending = pendingInvalidationsRef.current
@@ -917,6 +936,8 @@ export function useSSE(options: {
 
         eventSource.onmessage = handleMessage
         eventSource.onopen = () => {
+            if (disposed || reconnectRequested) return
+            clearConnectTimeout()
             if (reconnectTimerRef.current) {
                 clearTimeout(reconnectTimerRef.current)
                 reconnectTimerRef.current = null
@@ -929,6 +950,7 @@ export function useSSE(options: {
             // connection-changed handshake, which carries the resume verdict.
         }
         eventSource.onerror = (error) => {
+            if (disposed || reconnectRequested) return
             onErrorRef.current?.(error)
             if (eventSource.readyState === EventSource.CLOSED) {
                 requestReconnect('closed')
@@ -970,13 +992,15 @@ export function useSSE(options: {
                 return
             }
             if (eventSourceRef.current !== eventSource) return
-            if (Date.now() - lastActivityAtRef.current >= HEARTBEAT_STALE_MS) {
+            if (Date.now() - lastActivityAtRef.current >= FOREGROUND_RESUME_STALE_MS) {
                 requestReconnect('visibility-recovery')
             }
         }
         document.addEventListener('visibilitychange', onVisibilityChange)
 
         return () => {
+            disposed = true
+            clearConnectTimeout()
             clearInterval(watchdogTimer)
             document.removeEventListener('visibilitychange', onVisibilityChange)
             if (invalidationTimerRef.current) {

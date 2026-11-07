@@ -1061,3 +1061,23 @@ describe('replaceSessionTodos: watermark ratchet (PR #897 rewind race)', () => {
         store.close()
     })
 })
+
+describe('setSessionTodos: ordered same-millisecond results', () => {
+    it('persists same-timestamp live snapshots only when opted in and still rejects older/wrong-namespace writes', () => {
+        const store = makeStore()
+        try {
+            const session = store.sessions.getOrCreateSession('omp-same-ms', { path: '/tmp' }, null, 'default')
+            const todos = [{ content: 'Task', status: 'pending', priority: 'medium', id: '1' }]
+            expect(store.sessions.setSessionTodos(session.id, todos, 100, 'default')).toBe(true)
+            expect(store.sessions.setSessionTodos(session.id, [], 100, 'default')).toBe(false)
+            expect(store.sessions.setSessionTodos(session.id, [], 100, 'other', { replaceAtSameTimestamp: true })).toBe(false)
+            expect(store.sessions.setSessionTodos(session.id, [], 99, 'default', { replaceAtSameTimestamp: true })).toBe(false)
+            expect(store.sessions.getSession(session.id)?.todos).toEqual(todos)
+            expect(store.sessions.setSessionTodos(session.id, [], 100, 'default', { replaceAtSameTimestamp: true })).toBe(true)
+            expect(store.sessions.getSession(session.id)?.todos).toEqual([])
+            expect(store.sessions.getSession(session.id)?.todosUpdatedAt).toBe(100)
+        } finally {
+            store.close()
+        }
+    })
+})

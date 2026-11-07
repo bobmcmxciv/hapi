@@ -13,7 +13,7 @@ import { GeneratedBlobFetcher } from '../../blobs/blobFetcher'
 import type { GeneratedBlobServices } from '../../blobs'
 import { createGitRoutes } from './git'
 import { createCliRoutes } from './cli'
-
+import { redactAccessLogLine } from '../accessLogRedaction'
 const session = { id: 'session-1', namespace: 'default', active: true } as unknown as Session
 
 let dir: string
@@ -200,6 +200,276 @@ describe('generated blob download backed by the hub store', () => {
         const response = await app.request('/api/sessions/session-1/generated-files/file-1', { headers: { 'if-none-match': '"file-1"' } })
         expect(response.status).toBe(304)
         expect(calls).toEqual([])
+    })
+
+    it('waits for an active push to finish within pushReadyWaitMs instead of immediately returning 202', async () => {
+        const bytes = payload(2000)
+        await store.append('file', 'fast-push', {
+            sessionId: 'session-1', fileName: 'quick.bin', mimeType: 'application/octet-stream', size: 2000, origin: 'push'
+        }, 0, bytes.subarray(0, 1000))
+
+        const app = webApp(engineFor(bytes), {
+            store,
+            fetcher: new GeneratedBlobFetcher(store),
+            pushReadyWaitMs: 1_000
+        })
+
+        const downloadPromise = app.request('/api/sessions/session-1/generated-files/fast-push')
+        await store.append('file', 'fast-push', {
+            sessionId: 'session-1', fileName: 'quick.bin', mimeType: 'application/octet-stream', size: 2000, origin: 'push'
+        }, 1000, bytes.subarray(1000))
+
+        const response = await downloadPromise
+        expect(response.status).toBe(200)
+        expect(Buffer.from(await response.arrayBuffer()).equals(bytes)).toBe(true)
+    })
+
+    it('issues a short-lived single-file download ticket that supports HEAD and multiple Range requests, and rejects expired or cross-file tickets', async () => {
+        let now = 10_000_000
+        const timedStore = await BlobStore.open(dir, { now: () => now })
+        const bytes = payload(8192)
+        await timedStore.append('file', 'file-ticket', {
+            sessionId: 'session-1', fileName: 'bundle.zip', mimeType: 'application/zip', size: bytes.byteLength, origin: 'push'
+        }, 0, bytes)
+
+        const app = webApp(engineFor(bytes), {
+            store: timedStore,
+            fetcher: new GeneratedBlobFetcher(timedStore),
+            ticketSecret: 'test-ticket-secret',
+            ticketTtlMs: 60_000
+        })
+
+        const ticketRes = await app.request('/api/sessions/session-1/generated-files/file-ticket/download-ticket', {
+            method: 'POST'
+        })
+        expect(ticketRes.status).toBe(200)
+        const issued = await ticketRes.json() as {
+            success: boolean
+            state: string
+            ticket: string
+            downloadPath: string
+            expiresAt: number
+            fileName: string
+            size: number
+        }
+        expect(issued).toMatchObject({
+            success: true,
+            state: 'ready',
+            fileName: 'bundle.zip',
+            size: 8192
+        })
+        expect(redactAccessLogLine(`GET ${issued.downloadPath} 200`)).not.toContain(issued.ticket)
+        expect(redactAccessLogLine(`GET ${issued.downloadPath} 200`)).toContain('ticket=[redacted]')
+
+        // HEAD request with ticket
+        const headRes = await app.request(issued.downloadPath, { method: 'HEAD' })
+        expect(headRes.status).toBe(200)
+        expect(headRes.headers.get('accept-ranges')).toBe('bytes')
+        expect(headRes.headers.get('content-length')).toBe('8192')
+        expect(await headRes.arrayBuffer()).toHaveLength(0)
+
+        // Multiple Range requests using the same ticket (resumed download)
+        const part1 = await app.request(issued.downloadPath, { headers: { range: 'bytes=0-4095' } })
+        expect(part1.status).toBe(206)
+        expect(part1.headers.get('content-range')).toBe('bytes 0-4095/8192')
+
+        const part2 = await app.request(issued.downloadPath, { headers: { range: 'bytes=4096-8191' } })
+        expect(part2.status).toBe(206)
+        expect(part2.headers.get('content-range')).toBe('bytes 4096-8191/8192')
+
+        const combined = Buffer.concat([
+            Buffer.from(await part1.arrayBuffer()),
+            Buffer.from(await part2.arrayBuffer())
+        ])
+        expect(combined.equals(bytes)).toBe(true)
+
+        // Out-of-bounds Range -> 416
+        const range416 = await app.request(issued.downloadPath, { headers: { range: 'bytes=9000-9999' } })
+        expect(range416.status).toBe(416)
+
+        // Ticket cannot be used for a different fileId or different sessionId
+        const wrongFile = await app.request(`/api/sessions/session-1/generated-files/other-file?ticket=${encodeURIComponent(issued.ticket)}`)
+        expect(wrongFile.status).toBe(401)
+        const wrongSession = await app.request(`/api/sessions/session-2/generated-files/file-ticket?ticket=${encodeURIComponent(issued.ticket)}`)
+        expect(wrongSession.status).toBe(401)
+
+        // Advance time past TTL -> 401 ticket-expired
+        now += 61_000
+        const expiredRes = await app.request(issued.downloadPath)
+        expect(expiredRes.status).toBe(401)
+        expect(await expiredRes.json()).toMatchObject({ reason: 'ticket-expired' })
+    })
+
+    it('enforces BlobRecord.sessionId ownership so session-2 cannot read or mint tickets for session-1 blobs', async () => {
+        const bytes = payload(1024)
+        await store.append('file', 'secret-file', {
+            sessionId: 'session-1', fileName: 'secret.txt', mimeType: 'text/plain', size: 1024, origin: 'push'
+        }, 0, bytes)
+
+        const multiSessionEngine = {
+            resolveSessionAccess: (sessionId: string) => ({
+                ok: true as const,
+                sessionId,
+                session: { id: sessionId, namespace: 'default', active: true } as unknown as Session
+            }),
+            readGeneratedBlobChunk: async () => ({ success: false, error: 'must not pull' })
+        } as unknown as Partial<SyncEngine>
+
+        const app = webApp(multiSessionEngine, {
+            store,
+            fetcher: new GeneratedBlobFetcher(store),
+            ticketSecret: 'test-secret'
+        })
+
+        const crossDownload = await app.request('/api/sessions/session-2/generated-files/secret-file')
+        expect(crossDownload.status).toBe(403)
+        expect(await crossDownload.json()).toMatchObject({ reason: 'access-denied' })
+
+        const crossTicket = await app.request('/api/sessions/session-2/generated-files/secret-file/download-ticket', {
+            method: 'POST'
+        })
+        expect(crossTicket.status).toBe(403)
+        expect(await crossTicket.json()).toMatchObject({ reason: 'access-denied' })
+
+        const cApp = cliApp(multiSessionEngine, store)
+        const crossCliGet = await cApp.request('/cli/sessions/session-2/blobs/file/secret-file', { headers: cliAuth })
+        expect(crossCliGet.status).toBe(403)
+        const crossCliPut = await cApp.request('/cli/sessions/session-2/blobs/file/secret-file?offset=0', {
+            method: 'PUT',
+            headers: { ...cliAuth, 'x-blob-size': '1024' },
+            body: bytes
+        })
+        expect(crossCliPut.status).toBe(403)
+    })
+
+    it('coordinates P2P transfer preparation, authenticated signaling, cross-session/cross-file rejection, and offline hubReady fallback', async () => {
+        let now = 20_000_000
+        const timedStore = await BlobStore.open(dir, { now: () => now })
+        const bytes = payload(2048)
+        await timedStore.append('file', 'file-p2p', {
+            sessionId: 'session-1', fileName: 'archive.tar', mimeType: 'application/x-tar', size: 2048, origin: 'push'
+        }, 0, bytes)
+
+        const signalCalls: unknown[] = []
+        let cliOnline = true
+        const p2pEngine = {
+            resolveSessionAccess: (sessionId: string) => ({
+                ok: true as const,
+                sessionId,
+                session: { id: sessionId, namespace: 'default', active: true } as unknown as Session
+            }),
+            prepareP2pFileTransfer: async (_sessionId: string, req: { transferId: string; id: string }) => {
+                if (!cliOnline) {
+                    throw new RpcTargetMissingError('prepareP2pFileTransfer', 'socket-disconnected')
+                }
+                return {
+                    success: true as const,
+                    offer: { type: 'offer' as const, sdp: 'v=0\r\no=- 1 1 IN IP4 192.168.0.127\r\n' },
+                    candidates: [{ candidate: 'candidate:1 1 udp 2116026367 192.168.0.127 60104 typ host', sdpMid: '0', sdpMLineIndex: 0 }],
+                    manifest: {
+                        transferId: req.transferId,
+                        kind: 'file' as const,
+                        blobId: req.id,
+                        fileName: 'archive.tar',
+                        mimeType: 'application/x-tar',
+                        size: 2048,
+                        sha256: createHash('sha256').update(bytes).digest('hex'),
+                        chunkBytes: 16384
+                    },
+                    candidateTypes: ['host']
+                }
+            },
+            signalP2pFileTransfer: async (_sessionId: string, req: unknown) => {
+                signalCalls.push(req)
+                return {
+                    success: true,
+                    candidates: [],
+                    selectedRoute: 'lan-direct' as const
+                }
+            }
+        } as unknown as Partial<SyncEngine>
+
+        const app = webApp(p2pEngine, {
+            store: timedStore,
+            fetcher: new GeneratedBlobFetcher(timedStore)
+        })
+
+        // Cross-session P2P request for session-1's blob must be rejected with 403
+        const crossSessionP2p = await app.request('/api/sessions/session-2/generated-files/file-p2p/p2p', {
+            method: 'POST'
+        })
+        expect(crossSessionP2p.status).toBe(403)
+
+        // Valid P2P preparation
+        const createRes = await app.request('/api/sessions/session-1/generated-files/file-p2p/p2p', {
+            method: 'POST'
+        })
+        expect(createRes.status).toBe(200)
+        const created = await createRes.json() as {
+            success: boolean
+            p2pAvailable: boolean
+            transferId: string
+            authToken: string
+            hubReady: boolean
+        }
+        expect(created).toMatchObject({
+            success: true,
+            p2pAvailable: true,
+            hubReady: true
+        })
+
+        // Signal answer + candidates
+        const signalRes = await app.request(
+            `/api/sessions/session-1/generated-files/file-p2p/p2p/${encodeURIComponent(created.transferId)}/signal`,
+            {
+                method: 'POST',
+                headers: { 'content-type': 'application/json' },
+                body: JSON.stringify({
+                    action: 'signal',
+                    answer: { type: 'answer', sdp: 'v=0\r\n' },
+                    candidates: [{ candidate: 'candidate:2 1 udp 2116026367 192.168.0.100 50000 typ host' }]
+                })
+            }
+        )
+        expect(signalRes.status).toBe(200)
+        expect(await signalRes.json()).toMatchObject({ success: true, selectedRoute: 'lan-direct' })
+        expect(signalCalls).toHaveLength(1)
+
+        // Replay of the same transferId under another fileId or sessionId must be rejected with 403
+        const replayOtherFile = await app.request(
+            `/api/sessions/session-1/generated-files/other-file/p2p/${encodeURIComponent(created.transferId)}/signal`,
+            {
+                method: 'POST',
+                headers: { 'content-type': 'application/json' },
+                body: JSON.stringify({ action: 'signal' })
+            }
+        )
+        expect(replayOtherFile.status).toBe(403)
+
+        // Expire the transfer session -> 410
+        now += 10 * 60_000
+        const expiredSignal = await app.request(
+            `/api/sessions/session-1/generated-files/file-p2p/p2p/${encodeURIComponent(created.transferId)}/signal`,
+            {
+                method: 'POST',
+                headers: { 'content-type': 'application/json' },
+                body: JSON.stringify({ action: 'signal' })
+            }
+        )
+        expect(expiredSignal.status).toBe(410)
+
+        // When CLI is offline, P2P preparation immediately returns p2pAvailable:false with hubReady:true
+        cliOnline = false
+        const offlineRes = await app.request('/api/sessions/session-1/generated-files/file-p2p/p2p', {
+            method: 'POST'
+        })
+        expect(offlineRes.status).toBe(200)
+        expect(await offlineRes.json()).toMatchObject({
+            success: false,
+            p2pAvailable: false,
+            reason: 'session-offline',
+            hubReady: true
+        })
     })
 })
 

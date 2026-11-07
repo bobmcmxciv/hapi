@@ -3,32 +3,10 @@ import { unified } from 'unified'
 import remarkParse from 'remark-parse'
 import remarkRehype from 'remark-rehype'
 import { toHtml } from 'hast-util-to-html'
-import remarkBreaks from 'remark-breaks'
-import remarkNonHttpsAutolink from '@/lib/remark-non-https-autolink'
-import remarkStripCjkAutolink from '@/lib/remark-strip-cjk-autolink'
 import {
     MARKDOWN_PLUGINS,
-    MARKDOWN_PLUGINS_WITH_BREAKS,
     MARKDOWN_REHYPE_PLUGINS,
 } from '@/components/assistant-ui/markdown-text'
-
-describe('MARKDOWN_PLUGINS integration', () => {
-    it('includes remarkNonHttpsAutolink', () => {
-        expect(MARKDOWN_PLUGINS).toContain(remarkNonHttpsAutolink)
-    })
-
-    it('places remarkNonHttpsAutolink BEFORE remarkStripCjkAutolink so CJK strip sees new links', () => {
-        const idxAutolink = MARKDOWN_PLUGINS.indexOf(remarkNonHttpsAutolink)
-        const idxCjk = MARKDOWN_PLUGINS.indexOf(remarkStripCjkAutolink)
-        expect(idxAutolink).toBeGreaterThan(0) // not first (remarkGfm is first)
-        expect(idxAutolink).toBeLessThan(idxCjk) // autolink before CJK strip
-    })
-
-    it('keeps hard-break parsing scoped to opt-in user prompt rendering', () => {
-        expect(MARKDOWN_PLUGINS).not.toContain(remarkBreaks)
-        expect(MARKDOWN_PLUGINS_WITH_BREAKS).toContain(remarkBreaks)
-    })
-})
 
 function render(markdown: string): string {
     const processor = unified()
@@ -41,10 +19,6 @@ function render(markdown: string): string {
 }
 
 describe('MARKDOWN_PLUGINS — currency prose vs KaTeX', () => {
-    // Regression: prose with multiple "$N" amounts must NOT be eaten by KaTeX.
-    // remarkMath is configured with `singleDollarTextMath: false` so single
-    // dollar signs are treated as literal text, matching GitHub markdown.
-
     it('does not render single-$ currency amounts as KaTeX math', () => {
         const md = "The plan is $200/mo and the bill is $80 — total $400 saved."
         const html = render(md)
@@ -71,5 +45,30 @@ describe('MARKDOWN_PLUGINS — currency prose vs KaTeX', () => {
         const md = "Before\n\n$$\nE = mc^2\n$$\n\nAfter"
         const html = render(md)
         expect(html).toContain('class="katex"')
+    })
+
+    it('renders styled single-dollar LaTeX alongside currency prose', () => {
+        const html = render(String.raw`Price $200/mo and $80; result $\textcolor{red}{\textbf{risk}}$ and $\mathbf{4\times}$; $x_i^2$.`)
+        expect(html.match(/class="katex"/g)).toHaveLength(3)
+        expect(html).toContain('color:red')
+        expect(html).not.toContain('katex-error')
+        expect(html).toContain('$200/mo and $80')
+    })
+
+    it('renders safe HTML line breaks in table cells', () => {
+        const html = render('| Item | Detail |\n| --- | --- |\n| A | first<br>second<br/>third<BR />last |')
+        const container = document.createElement('div')
+        container.innerHTML = html
+        const cell = container.querySelector('tbody tr')?.lastElementChild
+        expect(cell?.querySelectorAll('br')).toHaveLength(3)
+        expect(cell?.textContent?.replaceAll('\n', '')).toBe('firstsecondthirdlast')
+    })
+
+    it('keeps formatting examples literal and does not enable arbitrary HTML', () => {
+        const html = render('`$x_i$ <br>`\n\n```html\n<br>\n```\n\n<br onclick="alert(1)">\n\n<img src=x onerror="alert(1)">')
+        expect(html).toContain('$x_i$ &#x3C;br>')
+        expect(html).not.toContain('class="katex"')
+        expect(html).not.toContain('<img')
+        expect(html).not.toContain('<br onclick')
     })
 })

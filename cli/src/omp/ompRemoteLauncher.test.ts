@@ -71,7 +71,7 @@ const harness = vi.hoisted(() => ({
     controlFrames: [] as OmpOutboundControlFrame[],
     eventListeners: [] as EventListener[],
     closedListeners: [] as ClosedListener[],
-    close: vi.fn(async () => {}),
+    close: vi.fn(async () => { }),
     connectError: null as Error | null,
     requestError: null as null | ((command: OmpCommand) => Error | null),
     abortResponse: null as Promise<void> | null,
@@ -229,14 +229,14 @@ vi.mock('./rpc/OmpRpcClient', () => ({
                 }),
                 onEvent(listener: EventListener) {
                     harness.eventListeners.push(listener);
-                    return () => {};
+                    return () => { };
                 },
                 onDiagnostic() {
-                    return () => {};
+                    return () => { };
                 },
                 onClosed(listener: ClosedListener) {
                     harness.closedListeners.push(listener);
-                    return () => {};
+                    return () => { };
                 },
                 close: harness.close
             };
@@ -305,7 +305,7 @@ function createSessionStub(
         queue.close();
     }
 
-    const sessionEvents: Array<{ type: string; [key: string]: unknown }> = [];
+    const sessionEvents: Array<{ type: string;[key: string]: unknown }> = [];
     const snapshots: Array<{ id: string; file: string; name?: string }> = [];
     const consumedLocalIds: string[][] = [];
     const agentMessages: unknown[] = [];
@@ -316,6 +316,8 @@ function createSessionStub(
     const rpcHandlers = new Map<string, RpcHandler>();
     let runtimeConfigApplier: ((config: import('./session').OmpRuntimeConfigRequest) => Promise<import('./session').OmpRuntimeConfigApplied>) | null = null;
     const client = {
+        emitSessionReady: vi.fn(),
+        clearSessionReady: vi.fn(),
         rpcHandlerManager: {
             registerHandler(method: string, handler: RpcHandler) {
                 rpcHandlers.set(method, handler);
@@ -327,8 +329,8 @@ function createSessionStub(
         sendClaudeSessionMessage(message: RawJSONLines) {
             canonicalMessages.push(message);
         },
-        sendUserMessage(_text: string) {},
-        sendSessionEvent(event: { type: string; [key: string]: unknown }) {
+        sendUserMessage(_text: string) { },
+        sendSessionEvent(event: { type: string;[key: string]: unknown }) {
             sessionEvents.push(event);
         },
         updateAgentState(handler: (state: import('@/api/types').AgentState) => import('@/api/types').AgentState) {
@@ -337,6 +339,9 @@ function createSessionStub(
     };
 
     const session = {
+        registerShutdownHandle: vi.fn(() => () => { }),
+        recordShutdownReceipt: vi.fn(),
+        isShutdownRequested: vi.fn(() => false),
         path: '/tmp/hapi-omp-test',
         logPath: '/tmp/hapi-omp-test/test.log',
         client,
@@ -352,8 +357,8 @@ function createSessionStub(
         getPermissionMode() {
             return 'default' as const;
         },
-        setModel(_model: string | null) {},
-        setEffort(_effort: import('./rpc/types').OmpConfiguredThinkingLevel) {},
+        setModel(_model: string | null) { },
+        setEffort(_effort: import('./rpc/types').OmpConfiguredThinkingLevel) { },
         setRuntimeConfigApplier(applier: typeof runtimeConfigApplier) {
             runtimeConfigApplier = applier;
         },
@@ -377,10 +382,10 @@ function createSessionStub(
         sendAgentMessage(message: unknown) {
             agentMessages.push(message);
         },
-        sendSessionEvent(event: { type: string; [key: string]: unknown }) {
+        sendSessionEvent(event: { type: string;[key: string]: unknown }) {
             client.sendSessionEvent(event);
         },
-        sendUserMessage(_text: string) {}
+        sendUserMessage(_text: string) { }
     };
     queue.onBatchConsumed = (localIds) => consumedLocalIds.push(localIds);
 
@@ -476,6 +481,7 @@ describe('ompRemoteLauncher RPC lifecycle', () => {
             env: expect.objectContaining({ PI_RPC_EMIT_TITLE: '1' })
         })]);
         expect(session.sessionId).toBe('omp-session-1');
+        expect(session.client.emitSessionReady).toHaveBeenCalledOnce();
         expect(snapshots[0]).toEqual({
             id: 'omp-session-1',
             file: '/sessions/omp-session-1.jsonl',
@@ -752,7 +758,7 @@ describe('ompRemoteLauncher RPC lifecycle', () => {
         ]);
     });
 
-    it('holds a different config hash until the active native turn finishes', async () => {
+    it('dispatches follow-up input with a different modeHash immediately while deferring model switch until idle', async () => {
         harness.autoFinishPrompt = false;
         harness.currentModel = model('ollama', 'a', 'Model A');
         harness.availableModels[0] = harness.currentModel;
@@ -761,23 +767,29 @@ describe('ompRemoteLauncher RPC lifecycle', () => {
             { message: 'second', mode: createMode('mlx/qwen3:0.6b') }
         ], { closeQueue: false });
         const launch = ompRemoteLauncher(session as never);
-        await waitForRequest('prompt');
-        emitEvent('agent_start');
-        await vi.waitFor(() => expect(session.queue.heldSize()).toBe(1));
-
-        expect(harness.prompts).toEqual(['first']);
-        expect(harness.requests.some((request) => request.type === 'set_model')).toBe(false);
-        emitEvent('agent_end');
         await waitForRequestCount('prompt', 2);
-        session.queue.close();
+
+        const prompts = harness.requests.filter((request): request is Extract<OmpCommand, { type: 'prompt' }> => (
+            request.type === 'prompt'
+        ));
+        expect(prompts).toEqual([
+            expect.objectContaining({ type: 'prompt', message: 'first' }),
+            expect.objectContaining({ type: 'prompt', message: 'second', streamingBehavior: 'followUp' })
+        ]);
+        expect(harness.requests.some((request) => request.type === 'set_model')).toBe(false);
+
         emitEvent('agent_start');
+        emitEvent('message_end', {
+            message: { role: 'user', content: [{ type: 'text', text: 'second' }] }
+        });
+        session.queue.close();
         emitEvent('agent_end');
         await launch;
 
         expect(harness.events).toEqual([
             'prompt:first',
-            'set_model:mlx/qwen3:0.6b',
-            'prompt:second'
+            'prompt:second',
+            'set_model:mlx/qwen3:0.6b'
         ]);
     });
 
@@ -946,9 +958,8 @@ describe('ompRemoteLauncher RPC lifecycle', () => {
             }
         });
 
-        await vi.waitFor(() => expect(agentMessages).toContainEqual({
+        await vi.waitFor(() => expect(agentMessages).toContainEqual(expect.objectContaining({
             type: 'token_count',
-            model: null,
             info: {
                 total: {
                     inputTokens: 130,
@@ -962,7 +973,7 @@ describe('ompRemoteLauncher RPC lifecycle', () => {
                 modelContextWindow: 128_000,
                 costUsd: 0.031
             }
-        }));
+        })));
         expect(canonicalMessages).toContainEqual(expect.objectContaining({
             type: 'assistant',
             uuid: expect.any(String),
@@ -1395,5 +1406,157 @@ describe('ompRemoteLauncher RPC lifecycle', () => {
         ]);
 
         await expect(ompRemoteLauncher(session as never)).rejects.toThrow('OMP RPC close failed');
+    });
+
+    it('allows switching model while busy, delivers multiple follow-up messages, and recovers from busy race without losing messages', async () => {
+        harness.autoFinishPrompt = false;
+        harness.currentModel = model('ollama', 'a', 'Model A');
+        harness.availableModels[0] = harness.currentModel;
+        const { session, consumedLocalIds, sessionEvents, getRuntimeConfigApplier } = createSessionStub([
+            { message: 'turn-4', mode: createMode('ollama/a'), localId: 'local-4' }
+        ], { closeQueue: false });
+        const launch = ompRemoteLauncher(session as never);
+        await waitForRequest('prompt');
+        emitEvent('agent_start');
+
+        // User switches model in Web UI while turn-4 is running
+        const applier = getRuntimeConfigApplier();
+        expect(applier).not.toBeNull();
+        await expect(applier!({ model: 'mlx/qwen3:0.6b', effort: 'low' })).resolves.toEqual({
+            model: 'mlx/qwen3:0.6b',
+            effort: 'low'
+        });
+        expect(harness.requests.some((request) => request.type === 'set_model')).toBe(false);
+
+        // User appends turn-6 and turn-7 with the new model while turn-4 is still running
+        session.queue.push({
+            text: 'turn-6-js-bridge',
+            mode: { permissionMode: 'default', model: 'mlx/qwen3:0.6b', effort: 'low' },
+            inputMode: 'prompt',
+            localId: 'local-6'
+        });
+        session.queue.push({
+            text: 'turn-7-enterprise-news',
+            mode: { permissionMode: 'default', model: 'mlx/qwen3:0.6b', effort: 'low' },
+            inputMode: 'prompt',
+            localId: 'local-7'
+        });
+
+        // turn-6 is sent immediately as followUp; turn-7 stays held until turn-6 commits
+        await waitForRequestCount('prompt', 2);
+        expect(consumedLocalIds.flat()).toEqual(['local-4', 'local-6']);
+        expect(session.queue.heldSize()).toBe(1);
+
+        // Simulate turn-6 user message committed, followed by a busy race when turn-7 is dispatched:
+        // launcher briefly sees isStreaming=false after agent_end, so it tries plain prompt/set_model,
+        // which OMP rejects with "Agent is already processing..."
+        let rejectedBusyOnce = false;
+        harness.requestError = (command) => {
+            if (
+                !rejectedBusyOnce
+                && command.type === 'prompt'
+                && command.message === 'turn-7-enterprise-news'
+                && command.streamingBehavior === undefined
+            ) {
+                rejectedBusyOnce = true;
+                return new Error('Agent is already processing. Use steer() or followUp() to queue messages, or wait for completion.');
+            }
+            return null;
+        };
+
+        emitEvent('agent_end');
+        emitEvent('message_end', {
+            message: { role: 'user', content: [{ type: 'text', text: 'turn-6-js-bridge' }] }
+        });
+
+        // turn-7 hits the busy race on plain prompt and automatically falls back to followUp!
+        await vi.waitFor(() => {
+            expect(consumedLocalIds.flat()).toEqual(['local-4', 'local-6', 'local-7']);
+        });
+        const turn7FollowUp = harness.requests.find((request) => (
+            request.type === 'prompt'
+            && request.message === 'turn-7-enterprise-news'
+            && request.streamingBehavior === 'followUp'
+        ));
+        expect(turn7FollowUp).toBeDefined();
+        expect(sessionEvents.some((event) => (
+            event.type === 'message' && String(event.message).includes('Agent is already processing')
+        ))).toBe(false);
+
+        emitEvent('message_end', {
+            message: { role: 'user', content: [{ type: 'text', text: 'turn-7-enterprise-news' }] }
+        });
+        session.queue.close();
+        emitEvent('agent_end');
+        await launch;
+
+        const readyEvents = sessionEvents.filter((event) => event.type === 'ready');
+        expect(readyEvents).toHaveLength(1);
+    });
+
+    it('requeues a second message instead of dropping it when a busy race occurs while a followUp is already outstanding', async () => {
+        harness.autoFinishPrompt = false;
+        const { session, consumedLocalIds, sessionEvents } = createSessionStub([], { closeQueue: false });
+        const launch = ompRemoteLauncher(session as never);
+        await waitForRequest('get_subagents');
+        await vi.waitFor(() => expect(sessionEvents.some((event) => event.type === 'ready')).toBe(true));
+        sessionEvents.splice(0);
+        // Simulate OMP already processing natively when launcher thought it was idle:
+        // First prompt fails plain prompt -> falls back to followUp (setting nativeFollowUpOutstanding = true).
+        harness.requestError = (command) => {
+            if (command.type === 'prompt' && command.streamingBehavior === undefined) {
+                return new Error('Agent is already processing. Use steer() or followUp() to queue messages, or wait for completion.');
+            }
+            return null;
+        };
+
+        session.queue.push({ text: 'msg-1', mode: createMode(), inputMode: 'prompt', localId: 'l-1' });
+        session.queue.push({ text: 'msg-2', mode: createMode(), inputMode: 'prompt', localId: 'l-2' });
+
+        await vi.waitFor(() => {
+            expect(consumedLocalIds.flat()).toEqual(['l-1']);
+        });
+        // msg-2 must still be held, NOT consumed/dropped
+        expect(session.queue.heldSize()).toBe(1);
+
+        // Once msg-1 is committed by OMP, msg-2 can now be dispatched as followUp
+        emitEvent('message_end', {
+            message: { role: 'user', content: [{ type: 'text', text: 'msg-1' }] }
+        });
+        await vi.waitFor(() => {
+            expect(consumedLocalIds.flat()).toEqual(['l-1', 'l-2']);
+        });
+
+        emitEvent('message_end', {
+            message: { role: 'user', content: [{ type: 'text', text: 'msg-2' }] }
+        });
+        session.queue.close();
+        emitEvent('agent_end');
+        await launch;
+
+        expect(sessionEvents.filter((event) => event.type === 'ready')).toHaveLength(1);
+    });
+
+    it('hibernates the idle OMP RPC subprocess after HAPI_OMP_IDLE_HIBERNATE_MS and wakes it with --resume on the next prompt', async () => {
+        const prevEnv = process.env.HAPI_OMP_IDLE_HIBERNATE_MS;
+        process.env.HAPI_OMP_IDLE_HIBERNATE_MS = '30';
+        try {
+            const { session, sessionEvents } = createSessionStub([], { closeQueue: false });
+            const launch = ompRemoteLauncher(session as never);
+            await vi.waitFor(() => expect(sessionEvents.some((event) => event.type === 'ready')).toBe(true));
+            await vi.waitFor(() => expect(harness.close).toHaveBeenCalledTimes(1));
+            expect(harness.connectArgs).toHaveLength(1);
+
+            session.queue.push({ text: 'wake up after hibernate', mode: createMode(), inputMode: 'prompt', localId: 'wake-1' });
+            await vi.waitFor(() => expect(harness.prompts).toContain('wake up after hibernate'));
+            expect(harness.connectArgs).toHaveLength(2);
+            expect(harness.connectArgs[1]).toMatchObject({ resumeSessionId: 'omp-session-1' });
+
+            session.queue.close();
+            await launch;
+        } finally {
+            if (prevEnv === undefined) delete process.env.HAPI_OMP_IDLE_HIBERNATE_MS;
+            else process.env.HAPI_OMP_IDLE_HIBERNATE_MS = prevEnv;
+        }
     });
 });

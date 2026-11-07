@@ -375,12 +375,17 @@ export function updateSessionAgentState(
     })
 }
 
+export interface SetSessionTodosOptions {
+    replaceAtSameTimestamp?: boolean
+}
+
 export function setSessionTodos(
     db: Database,
     id: string,
     todos: unknown,
     todosUpdatedAt: number,
-    namespace: string
+    namespace: string,
+    options?: SetSessionTodosOptions
 ): boolean {
     try {
         const json = todos === null || todos === undefined ? null : JSON.stringify(todos)
@@ -392,12 +397,14 @@ export function setSessionTodos(
                 seq = seq + 1
             WHERE id = @id
               AND namespace = @namespace
-              AND (todos_updated_at IS NULL OR todos_updated_at < @todos_updated_at)
+              AND (todos_updated_at IS NULL OR todos_updated_at < @todos_updated_at
+                   OR (@replace_at_same_timestamp = 1 AND todos_updated_at = @todos_updated_at))
         `).run({
             id,
             todos: json,
             todos_updated_at: todosUpdatedAt,
             updated_at: todosUpdatedAt,
+            replace_at_same_timestamp: options?.replaceAtSameTimestamp ? 1 : 0,
             namespace
         })
 

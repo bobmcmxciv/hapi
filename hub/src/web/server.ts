@@ -381,7 +381,7 @@ function createWebApp(options: {
     // /api/events 双路由陷阱同型，这里改为显式不挂载，不再依赖注册顺序。
     // 副作用：上游 usageService 的 usage_events 投影不再被喂数（fork 引擎直读
     // messages），usage_events/usage_scan_state 两表保持为空，见 trunk-patches.md。
-    app.route('/api', createGitRoutes(options.getSyncEngine, { blobs: options.blobs }))
+    app.route('/api', createGitRoutes(options.getSyncEngine, { blobs: options.blobs, jwtSecret: options.jwtSecret }))
     // 中文注释：这里提供两类 Codex 辅助能力：扫描本地 transcript 以导入到 Hapi，以及按需重启 Codex Desktop 客户端。
     app.route('/api', createCodexDesktopRoutes({
         store: options.store,
@@ -588,7 +588,9 @@ export async function startWebServer(options: {
     const server = (Bun.serve as any)({
         hostname: configuration.listenHost,
         port: configuration.listenPort,
-        idleTimeout: Math.max(30, socketHandler.idleTimeout),
+        // Lifecycle requests include cleanup RPCs, spawn, and up to 60s of
+        // native readiness. Keep the response alive through verified rollback.
+        idleTimeout: Math.max(255, socketHandler.idleTimeout),
         maxRequestBodySize: Math.max(socketHandler.maxRequestBodySize, 68 * 1024 * 1024),
         websocket: {
             ...originalWsHandler,

@@ -474,6 +474,42 @@ describe('parseSingleByteRange', () => {
 })
 
 describe('file search route', () => {
+    it('normalizes Windows query separators for drive and UNC sessions regardless of hub OS', async () => {
+        for (const path of ['C:\\project', 'D:/project', '\\\\server\\share\\project', '//server/share/project']) {
+            const session = { id: 'session-1', namespace: 'default', active: true, metadata: { path } } as unknown as Session
+            const calls: unknown[][] = []
+            const engine = {
+                resolveSessionAccess: () => ({ ok: true as const, sessionId: 'session-1', session }),
+                runRipgrep: async (...args: unknown[]) => {
+                    calls.push(args)
+                    return { success: true, stdout: 'src\\nested\\file.ts\r\n' }
+                },
+                statFiles: async (_sessionId: string, paths: string[]) => {
+                    expect(paths).toEqual(['src/nested/file.ts'])
+                    return { success: true, entries: [{ path: 'src/nested/file.ts', size: 10, modified: 100 }] }
+                }
+            } as unknown as Partial<SyncEngine>
+            const response = await buildApp(engine).request(`/api/sessions/session-1/files?query=${encodeURIComponent('src\\nested')}`)
+            expect(response.status).toBe(200)
+            expect(calls).toEqual([['session-1', ['--files', '--iglob', '*src/nested*'], path]])
+            expect(await response.json()).toMatchObject({ success: true, files: [{
+                fileName: 'file.ts', filePath: 'src/nested', fullPath: 'src/nested/file.ts', size: 10, modified: 100
+            }] })
+        }
+    })
+
+    it('preserves backslashes in POSIX queries', async () => {
+        const session = { id: 'session-1', namespace: 'default', active: true, metadata: { path: '/project' } } as unknown as Session
+        const calls: unknown[][] = []
+        const engine = {
+            resolveSessionAccess: () => ({ ok: true as const, sessionId: 'session-1', session }),
+            runRipgrep: async (...args: unknown[]) => { calls.push(args); return { success: true, stdout: '' } },
+            statFiles: async () => ({ success: true, entries: [] })
+        } as unknown as Partial<SyncEngine>
+        await buildApp(engine).request(`/api/sessions/session-1/files?query=${encodeURIComponent('file\\name')}`)
+        expect(calls).toEqual([['session-1', ['--files', '--iglob', '*file\\name*'], '/project']])
+    })
+
     it('adds size and modification metadata to search results', async () => {
         const session = {
             id: 'session-1',

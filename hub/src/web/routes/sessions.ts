@@ -132,7 +132,22 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null): Ho
             return sessionResult
         }
 
-        const result = engine.getSessionExport(sessionResult.sessionId, sessionResult.session)
+        const rawLimit = c.req.query('limit')
+        const rawOffset = c.req.query('offset')
+        const parsedLimit = rawLimit !== undefined ? Number.parseInt(rawLimit, 10) : undefined
+        const parsedOffset = rawOffset !== undefined ? Number.parseInt(rawOffset, 10) : undefined
+        const exportOptions = (
+            (parsedLimit !== undefined && Number.isFinite(parsedLimit) && parsedLimit > 0)
+            || (parsedOffset !== undefined && Number.isFinite(parsedOffset) && parsedOffset >= 0)
+        )
+            ? {
+                ...(parsedLimit !== undefined && Number.isFinite(parsedLimit) && parsedLimit > 0 ? { limit: parsedLimit } : {}),
+                ...(parsedOffset !== undefined && Number.isFinite(parsedOffset) && parsedOffset >= 0 ? { offset: parsedOffset } : {})
+            }
+            : undefined
+        const result = exportOptions
+            ? engine.getSessionExport(sessionResult.sessionId, sessionResult.session, exportOptions)
+            : engine.getSessionExport(sessionResult.sessionId, sessionResult.session)
         if (result.type === 'too-large') {
             return c.json({
                 error: 'Session export too large',
@@ -436,12 +451,12 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null): Ho
     })
 
     app.post('/sessions/:id/archive', async (c) => {
-        // tiann/hapi#916: relax the blanket `requireActive: true` guard so
-        // the endpoint is idempotent for already-archived rows AND can clean
-        // up split-brain rows after a hub-restart cascade (inactive in cache
-        // but metadata.lifecycleState still 'running'). Normal inactive rows
-        // that are not archived (completed stubs, UI Delete/Reopen targets)
-        // keep the old 409 contract.
+        // Archive = user-requested exit. The engine serializes this against
+        // resume/reopen/restart per session, awaits session-owned cleanup
+        // (kill RPC), then verifies runner-side process termination before
+        // marking the row inactive + archived. Repeated calls always re-run
+        // cleanup verification, so retrying after a partial cleanup still
+        // converges; `alreadyArchived` keeps the idempotent response shape.
         const engine = requireSyncEngine(c, getSyncEngine)
         if (engine instanceof Response) {
             return engine
@@ -452,17 +467,17 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null): Ho
             return sessionResult
         }
 
-        const lifecycleState = sessionResult.session.metadata?.lifecycleState
-        if (!sessionResult.session.active && lifecycleState === 'archived') {
-            return c.json({ ok: true, alreadyArchived: true })
-        }
 
-        if (!sessionResult.session.active && lifecycleState !== 'running') {
-            return c.json({ error: 'Session is inactive' }, 409)
+        try {
+            const result = await engine.archiveSession(sessionResult.sessionId)
+            if (result.type === 'error') {
+                const status = result.code === 'session_still_running' ? 409 : 500
+                return c.json({ error: result.message, code: result.code }, status)
+            }
+            return c.json({ ok: true, ...(result.alreadyArchived ? { alreadyArchived: true } : {}) })
+        } catch (error) {
+            return c.json({ error: error instanceof Error ? error.message : 'Failed to archive session', code: 'archive_failed' }, 500)
         }
-
-        await engine.archiveSession(sessionResult.sessionId)
-        return c.json({ ok: true })
     })
 
     app.post('/sessions/:id/migrate-to-acp', async (c) => {

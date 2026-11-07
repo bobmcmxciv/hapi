@@ -3,6 +3,13 @@ import { toSessionSummary } from '@hapi/protocol'
 import { Store } from '../store'
 import { RpcRegistry } from '../socket/rpcRegistry'
 import { SyncEngine } from './syncEngine'
+import type { RpcGateway } from './rpcGateway'
+
+function gatewayForTest(engine: SyncEngine): RpcGateway {
+    // Inspect the engine's real private gateway solely to stub its RPC boundary.
+    const runtime = engine as unknown as { rpcGateway: RpcGateway }
+    return runtime.rpcGateway
+}
 
 // Integration coverage for issue #4 Feature A: explicit archive must persist an
 // `archivedAt` marker (distinct from natural session end / timeout) so the web
@@ -18,7 +25,7 @@ function createEngine(store: Store): SyncEngine {
     )
     // archiveSession calls rpcGateway.killSession; the gateway is stubbed in
     // this harness, so provide a no-op.
-    ;(engine as any).rpcGateway.killSession = async () => {}
+    gatewayForTest(engine).killSession = async () => {}
     engine.stop()
     return engine
 }
@@ -98,5 +105,63 @@ describe('archive persistence', () => {
         const after = engine.getSession(session.id)
         expect(after?.active).toBe(false)
         expect(after?.metadata?.archivedAt).toBeUndefined()
+    })
+    it('does not mark inactive or archived when runner cleanup is unverified', async () => {
+        const store = new Store(':memory:')
+        const engine = createEngine(store)
+        const session = engine.getOrCreateSession('unverified', {
+            path: '/tmp/project', host: 'localhost', flavor: 'omp', machineId: 'machine-1'
+        }, { requests: {}, completedRequests: {} }, 'default')
+        const gateway = gatewayForTest(engine)
+        gateway.stopRunnerSession = async () => 'still_alive'
+        engine.handleSessionAlive({ sid: session.id, time: Date.now() })
+        expect(engine.getSession(session.id)?.active).toBe(true)
+        const beforeActive = engine.getSession(session.id)?.active
+
+        const result = await engine.archiveSession(session.id)
+
+        expect(result.type).toBe('error')
+        expect(engine.getSession(session.id)?.active).toBe(beforeActive)
+        expect(engine.getSession(session.id)?.metadata?.archivedAt).toBeUndefined()
+        expect(engine.getSession(session.id)?.metadata?.lifecycleState).not.toBe('archived')
+    })
+
+    it('dedupes concurrent archive requests and retries verification afterwards', async () => {
+        const store = new Store(':memory:')
+        const engine = createEngine(store)
+        const session = engine.getOrCreateSession('dedupe', {
+            path: '/tmp/project', host: 'localhost', flavor: 'omp', machineId: 'machine-1'
+        }, { requests: {}, completedRequests: {} }, 'default')
+        const { promise: barrier, resolve: release } = Promise.withResolvers<void>()
+        let kills = 0
+        let stops = 0
+        const gateway = gatewayForTest(engine)
+        gateway.killSession = async () => { kills += 1; await barrier }
+        gateway.stopRunnerSession = async () => { stops += 1; return 'already_gone' }
+
+        const first = engine.archiveSession(session.id)
+        const second = engine.archiveSession(session.id)
+        release()
+        expect(await first).toEqual({ type: 'success', alreadyArchived: false })
+        expect(await second).toEqual({ type: 'success', alreadyArchived: false })
+        expect(kills).toBe(1)
+        expect(stops).toBe(1)
+
+        expect(await engine.archiveSession(session.id)).toEqual({ type: 'success', alreadyArchived: true })
+        expect(kills).toBe(2)
+        expect(stops).toBe(2)
+    })
+
+    it('surfaces runner RPC failure without writing archive metadata', async () => {
+        const store = new Store(':memory:')
+        const engine = createEngine(store)
+        const session = engine.getOrCreateSession('offline', {
+            path: '/tmp/project', host: 'localhost', flavor: 'omp', machineId: 'machine-1'
+        }, { requests: {}, completedRequests: {} }, 'default')
+        gatewayForTest(engine).stopRunnerSession = async () => { throw new Error('Runner offline') }
+        expect(await engine.archiveSession(session.id)).toEqual({
+            type: 'error', message: 'Runner offline', code: 'archive_failed'
+        })
+        expect(engine.getSession(session.id)?.metadata?.archivedAt).toBeUndefined()
     })
 })
