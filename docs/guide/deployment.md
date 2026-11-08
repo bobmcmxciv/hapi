@@ -314,8 +314,11 @@ journalctl --user -u hapi-hub -f
 ## Subscription quota collection stalls
 
 Subscription quota cards use `GET /api/subscription/summary`, separately from the
-message-token usage totals. Check each snapshot's `reported_at` and `error` before
-treating a visible number as current.
+message-token usage totals. Only successful snapshots no older than 15 minutes
+are displayed as current quota. The page checks age every minute independently
+of query refresh, so a stalled request cannot keep an old number on screen.
+Expired reports remain stored for diagnosis; the panel reports how many results
+are hidden while waiting for fresh data. A valid zero balance is still displayed.
 
 Keep the collection routes separate:
 
@@ -376,3 +379,44 @@ terminate their agents. Verify the live binary hash, real GPT gateway snapshots,
 existing session reconnection, preserved formal/Beta entrypoints, and gateway
 security again after activation. Collector deployment remains a separate host
 operation, not proof supplied by a successful Hub rollout.
+
+### Moving the Windows collector to another machine
+
+On 2026-11-08, collection moved to the ThinkPad T14s Gen 2i
+(`DESKTOP-26GU3SD`), with `HAPI_SUB_MACHINE=T14s`. The old local task had
+been reporting as `vircs`; its separate Hub credential returned HTTP 401 after
+the shared-key retirement. Do not infer the physical source of an old snapshot
+from its configured machine label.
+
+For a host migration:
+
+1. Verify the physical host and provider credentials with real read-only quota
+   requests before reporting. Preserve each provider's existing network route.
+2. Back up the existing task XML and collector environment under an
+   ACL-restricted directory. Disable only `HapiSubscriptionCollector` while
+   replacing it; inspect for orphan collector processes before starting another.
+3. Deploy the reviewed collector independently of active development worktrees.
+   The T14s installation is
+   `D:/services/hapi-subscription-collector/releases/34a2a7b3`, containing the
+   PowerShell wrapper, TypeScript entrypoint, subscription domain types, and four
+   collector modules. Source and installed file SHA-256 values were compared.
+4. Issue a dedicated admin API token through `/api/tokens`, store it only in the
+   ACL-restricted `~/.hapi/subscription-collector.env`, and use a distinct machine
+   label. Never copy or rotate an active Runner's credential for this purpose.
+5. Replace the existing task, not its name: hidden PowerShell window, login and
+   startup triggers, `IgnoreNew`, no execution time limit, one-minute failure
+   retries, and permission to continue on battery. The T14s task retains its
+   existing interactive user principal: it runs while that user is logged in;
+   disconnecting RDP is not logging out. It does not guarantee collection while
+   the laptop is asleep/offline or the user is logged out.
+6. Observe at least two naturally scheduled successful reports on the production
+   summary endpoint and the real `/usage` page. Check that original machine
+   snapshots remain unchanged, only one collector process exists, and Runner
+   process identity and existing sessions are preserved. Keep the private backup
+   for recovery; do not restore its retired credential.
+
+T14s reuses its existing AGY login, locally discovered Devin credentials, and
+configured DeepSeek/GLM keys. This migration does not supply absent Anthropic or
+Kimi credentials, nor does it require restarting the Hub or Runner. Historical
+`vircs` snapshots are retained rather than overwritten by T14s, but no longer
+appear as current quota after the 15-minute freshness window.

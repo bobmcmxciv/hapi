@@ -977,7 +977,7 @@ export class SessionCache {
      * or `undefined` for other flavors. Throws on version mismatch / store error.
      * No-op when metadata is null (callers should pre-check).
      */
-    async clearSessionArchiveMetadata(sessionId: string): Promise<{ cursorSessionProtocol?: 'acp' | 'stream-json' }> {
+    async clearSessionArchiveMetadata(sessionId: string, opts?: { finishReopen?: boolean }): Promise<{ cursorSessionProtocol?: 'acp' | 'stream-json' }> {
         // tiann/hapi#919: retry-with-refresh on version-mismatch. The reopen
         // flow runs this on every archived-session resume — a stale snapshot
         // here used to forever-409 the only reopen affordance.
@@ -993,11 +993,17 @@ export class SessionCache {
             }
 
             const next: Record<string, unknown> = { ...currentMetadata }
-            delete next.lifecycleState
+            if (!opts?.finishReopen || currentMetadata.lifecycleState === 'archived') {
+                delete next.lifecycleState
+                next.lifecycleStateSince = Date.now()
+            }
             delete next.archivedBy
             delete next.archiveReason
             delete next.archivedAt
-            next.lifecycleStateSince = Date.now()
+            if (opts?.finishReopen) {
+                delete next.reopenArchiveSnapshot
+                delete next.ptyResumeAttempt
+            }
 
             let cursorSessionProtocol: 'acp' | 'stream-json' | undefined
             if (currentMetadata.flavor === 'cursor') {
@@ -1054,7 +1060,8 @@ export class SessionCache {
             archiveReason?: string
             lifecycleStateSince?: number
             archivedAt?: number
-        }
+        },
+        opts?: { finishReopen?: boolean }
     ): Promise<void> {
         // tiann/hapi#919: retry-with-refresh on version-mismatch. This is the
         // /reopen rollback path — if it fails the session is left in a
@@ -1091,6 +1098,10 @@ export class SessionCache {
                 next.archivedAt = snapshot.archivedAt
             } else {
                 delete next.archivedAt
+            }
+            if (opts?.finishReopen) {
+                delete next.reopenArchiveSnapshot
+                delete next.ptyResumeAttempt
             }
 
             const result = this.store.sessions.updateSessionMetadata(
@@ -1613,6 +1624,10 @@ export class SessionCache {
 
                 if (candidates.length <= 1) continue
 
+                // A pending reopen owns its original row/history, including when
+                // an uncertain runner bootstraps a second row with the same native ID.
+                if (candidates.some(({ session }) => session.metadata?.reopenArchiveSnapshot)) continue
+
                 const activeCandidates = candidates.filter(({ session }) => session.active)
                 if (activeCandidates.length > 1) {
                     // Do not move history between two live session ids. The web may
@@ -1638,6 +1653,7 @@ export class SessionCache {
 
                 for (const { id } of candidates.slice(1)) {
                     if (id === targetId) continue
+                    if (candidates.some(({ id }) => this.sessions.get(id)?.metadata?.reopenArchiveSnapshot)) break
                     try {
                         const candidate = this.sessions.get(id)
                         if (candidate?.active) {

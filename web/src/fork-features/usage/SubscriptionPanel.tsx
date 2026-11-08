@@ -1,4 +1,4 @@
-import { useMemo } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { useAppContext } from '@/lib/app-context'
 import { useTranslation } from '@/lib/use-translation'
@@ -6,7 +6,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { cn } from '@/lib/utils'
 
 // fork-features/subscription：订阅配额 / API 余额面板。数据来自 hub 的
-// GET /api/subscription/summary（admin-only）。快照由 vircs 上的 collector 推送，
+// GET /api/subscription/summary（admin-only）。快照由采集机上的 collector 推送，
 // cx2cc 那一路由 hub 自己轮询——本组件对来源无感，只渲染归一化后的快照。
 
 export type SubscriptionWindow = {
@@ -42,8 +42,8 @@ export type SubscriptionSummaryResponse = {
     generatedAt: number
 }
 
-/** 超过这个时长没更新就判为 stale（灰化 + 提示）。collector 间隔 5 分钟，
- *  给 3 倍余量：偶尔一轮网络失败不该立刻把整排卡片打成灰的。 */
+/** 超过这个时长没更新就不再作为当前余量展示。collector 间隔 5 分钟，
+ *  给 3 倍余量，保留短暂网络故障的容错窗口。 */
 export const STALE_THRESHOLD_MS = 15 * 60 * 1000
 
 /**
@@ -218,18 +218,11 @@ function SnapshotCard(props: { snapshot: SubscriptionSnapshot; now: number }) {
     const { snapshot, now } = props
     const { t } = useTranslation()
     const age = now - snapshot.reported_at
-    const stale = age > STALE_THRESHOLD_MS
     const primary = pickPrimaryWindow(snapshot.windows)
     const others = snapshot.windows.filter(w => w !== primary)
 
     return (
-        <div
-            className={cn(
-                'rounded-lg border border-[var(--app-divider)] p-3',
-                // stale 不隐藏数据，只降透明度 + 打标——「旧数据」比「没有数据」信息量大。
-                stale && 'opacity-60'
-            )}
-        >
+        <div className="rounded-lg border border-[var(--app-divider)] p-3">
             <div className="mb-2 flex items-baseline justify-between gap-2">
                 <div className="min-w-0">
                     <div className="truncate text-sm font-medium">
@@ -243,7 +236,6 @@ function SnapshotCard(props: { snapshot: SubscriptionSnapshot; now: number }) {
                     </div>
                 </div>
                 <div className="shrink-0 text-[11px] text-[var(--app-hint)]">
-                    {stale && <span className="mr-1 text-amber-600 dark:text-amber-400">⚠</span>}
                     {formatRelativeAge(age, t)}
                 </div>
             </div>
@@ -281,6 +273,12 @@ function SnapshotCard(props: { snapshot: SubscriptionSnapshot; now: number }) {
 export default function SubscriptionPanel() {
     const { baseUrl, token } = useAppContext()
     const { t } = useTranslation()
+    const [now, setNow] = useState(() => Date.now())
+    useEffect(() => {
+        // 缓存未变化或网络离线时，旧快照也必须按本地时钟到期。
+        const timer = setInterval(() => setNow(Date.now()), 60_000)
+        return () => clearInterval(timer)
+    }, [])
 
     const query = useQuery({
         queryKey: ['fork-subscription-summary'],
@@ -306,10 +304,11 @@ export default function SubscriptionPanel() {
     //
     // 但**不能完全不吭声**：如果所有 provider 都挂了，面板会静默变空，看起来
     // 像「没配置」而不是「全炸了」。所以错误行从卡片里剔除，改在页脚记一行。
-    const { healthy, failed } = useMemo(() => {
+    const { healthy, failed, expired } = useMemo(() => {
         const rows = query.data?.snapshots ?? []
-        const healthy = rows.filter(s => s.error === null)
+        const healthy = rows.filter(s => s.error === null && now - s.reported_at <= STALE_THRESHOLD_MS)
         const failed = rows.filter(s => s.error !== null)
+        const expired = rows.filter(s => s.error === null && now - s.reported_at > STALE_THRESHOLD_MS)
         // 排序：先按机器，再把有窗口的排前面（纯余额型信息密度低，放后面）。
         // 同机同类再按 provider 名，保证每次渲染顺序稳定不跳动。
         healthy.sort((a, b) =>
@@ -317,18 +316,15 @@ export default function SubscriptionPanel() {
             || Number(b.windows.length > 0) - Number(a.windows.length > 0)
             || a.provider.localeCompare(b.provider)
         )
-        return { healthy, failed }
-    }, [query.data])
+        return { healthy, failed, expired }
+    }, [query.data, now])
     const snapshots = healthy
 
     if (query.isError && query.error instanceof Error && query.error.message === 'FORBIDDEN') return null
     // 首次加载中也不占位——用量页主体先出来，这块补上即可，避免顶部跳动。
     if (query.isLoading) return null
-    // 全部失败时仍要渲染（下面的页脚会说明哪些挂了），否则「全炸」和「没配置」
-    // 在界面上长得一模一样。只有真的一条快照都没有才整块隐藏。
-    if (query.isSuccess && snapshots.length === 0 && failed.length === 0) return null
-
-    const now = Date.now()
+    // 没有有效结果时保留失败/过期提示，不能把停止采集误显示成尚未配置。
+    if (query.isSuccess && snapshots.length === 0 && failed.length === 0 && expired.length === 0) return null
 
     return (
         <Card>
@@ -348,6 +344,11 @@ export default function SubscriptionPanel() {
                                 <SnapshotCard key={`${s.machine}/${s.provider}/${s.account_key}`} snapshot={s} now={now} />
                             ))}
                         </div>
+                        {expired.length > 0 && (
+                            <div className="mt-2.5 text-xs text-[var(--app-hint)]">
+                                {t('subscription.hiddenStale', { n: expired.length })}
+                            </div>
+                        )}
                         {failed.length > 0 && (
                             // 采集失败的不占卡片位，但也不能一声不吭——这里一行带过，
                             // title 里给出各自的错误原因，需要排查时鼠标一悬停就有。

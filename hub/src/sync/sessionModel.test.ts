@@ -7,6 +7,7 @@ import { registerSessionHandlers } from '../socket/handlers/cli/sessionHandlers'
 import type { EventPublisher } from './eventPublisher'
 import { SessionCache } from './sessionCache'
 import { SyncEngine } from './syncEngine'
+import type { RpcGateway } from './rpcGateway'
 
 function createPublisher(events: SyncEvent[]): EventPublisher {
     return {
@@ -2678,6 +2679,74 @@ describe('session model', () => {
         } finally { engine.stop() }
     })
 
+    it.each([1000, undefined])('restores durable Pi archive markers after Hub restart (snapshot archivedAt=%s)', async (archivedAt) => {
+        const store = new Store(':memory:')
+        const first = new SyncEngine(store, {} as never, new RpcRegistry(), { broadcast() {} } as never)
+        const session = first.getOrCreateSession('pi-archive-durable', {
+            path: '/tmp/project', host: 'localhost', machineId: 'machine-1', flavor: 'pi', piSessionId: 'pi-native-durable',
+            lifecycleState: 'archived', lifecycleStateSince: 90, archivedAt,
+            archivedBy: 'hub', archiveReason: 'User exited', preferredPermissionMode: 'default',
+        }, null, 'default', 'pi-stored-model')
+        store.messages.addMessage(session.id, { type: 'text', text: 'preserve history' })
+        try {
+            first.getOrCreateMachine('machine-1', { host: 'localhost', platform: 'linux', happyCliVersion: '0.1.0' }, {
+                status: 'running', capabilities: { piExistingSessionResume: true },
+            }, 'default')
+            first.handleMachineAlive({ machineId: 'machine-1', time: Date.now() })
+            first.handleSessionEnd({ sid: session.id, time: Date.now() })
+            // Inject only the internal runner/cache boundary; keep the real store and lifecycle code.
+            const internals = first as unknown as { rpcGateway: RpcGateway; sessionCache: SessionCache }
+            internals.rpcGateway.spawnSession = async () => {
+                // Bootstrap drops the visible archive marker but keeps the
+                // durable attempt, just as the real CLI sessionFactory does.
+                await internals.sessionCache.clearSessionArchiveMetadata(session.id)
+                return { type: 'error', message: 'webhook timeout' }
+            }
+            internals.rpcGateway.stopRunnerSession = async () => 'still_alive'
+            expect(await first.reopenSession(session.id, 'default')).toMatchObject({ type: 'error', rollbackSafe: false })
+        } finally { first.stop() }
+
+        const restarted = new SyncEngine(store, {} as never, new RpcRegistry(), { broadcast() {} } as never)
+        try {
+            // Replace the runner RPC only; this new engine reloads the persisted attempt.
+            const internals = restarted as unknown as { rpcGateway: RpcGateway }
+            internals.rpcGateway.stopRunnerSession = async () => 'already_gone'
+            expect(await restarted.reopenSession(session.id, 'default')).toMatchObject({
+                type: 'error', message: 'Previous Pi resume attempt was cleaned up; retry',
+            })
+            const restored = restarted.getSessionByNamespace(session.id, 'default')!
+            expect(restored.metadata).toMatchObject({
+                lifecycleState: 'archived', lifecycleStateSince: 90, archivedBy: 'hub', archiveReason: 'User exited',
+                path: '/tmp/project', piSessionId: 'pi-native-durable', preferredPermissionMode: 'default',
+            })
+            expect(restored.metadata?.archivedAt).toBe(archivedAt)
+            expect(restored.metadata?.piResumeAttempt).toBeUndefined()
+            expect(restored.model).toBe('pi-stored-model')
+            expect(store.messages.getFirstMessages(session.id, 10)).toHaveLength(1)
+        } finally { restarted.stop() }
+    })
+
+    it('keeps an existing archive marker when reconciling a legacy Pi snapshot without archivedAt', async () => {
+        const store = new Store(':memory:')
+        const engine = new SyncEngine(store, {} as never, new RpcRegistry(), { broadcast() {} } as never)
+        try {
+            const session = engine.getOrCreateSession('pi-old-snapshot-marker', {
+                path: '/tmp/project', host: 'localhost', machineId: 'machine-1', flavor: 'pi', piSessionId: 'pi-legacy',
+                lifecycleState: 'archived', archivedAt: 700,
+                piResumeAttempt: {
+                    state: 'quarantined', machineId: 'machine-1', startedAt: 1,
+                    archiveSnapshot: { lifecycleState: 'archived', archiveReason: 'User exited' },
+                },
+            }, null, 'default')
+            // Exercise legacy persisted metadata through the real reconciliation path.
+            const internals = engine as unknown as { rpcGateway: RpcGateway }
+            internals.rpcGateway.stopRunnerSession = async () => 'already_gone'
+            expect(await engine.reopenSession(session.id, 'default')).toMatchObject({ type: 'error' })
+            expect(engine.getSession(session.id)?.metadata?.archivedAt).toBe(700)
+            expect(engine.getSession(session.id)?.metadata?.piResumeAttempt).toBeUndefined()
+        } finally { engine.stop() }
+    })
+
     it('does not quarantine an in-place Pi row when session-end wins the stop response race', async () => {
         const store = new Store(':memory:')
         const engine = new SyncEngine(store, {} as never, new RpcRegistry(), { broadcast() {} } as never)
@@ -4385,6 +4454,77 @@ describe('session model', () => {
     })
 
     describe('reopenSession rollback', () => {
+        it('keeps a nonnative archive durable during spawn and retries with its original configuration', async () => {
+            const store = new Store(':memory:')
+            const engine = new SyncEngine(store, {} as never, new RpcRegistry(), { broadcast() {} } as never)
+            const session = engine.getOrCreateSession('codex-durable-reopen', {
+                path: '/tmp/project', host: 'localhost', machineId: 'machine-1', flavor: 'codex', codexSessionId: 'codex-native',
+                lifecycleState: 'archived', archivedAt: 100, lifecycleStateSince: 90, archivedBy: 'hub', archiveReason: 'User exited',
+                preferredPermissionMode: 'default',
+            }, null, 'default', 'gpt-5.5')
+            const archive = { lifecycleState: 'archived', archivedAt: 100, lifecycleStateSince: 90, archivedBy: 'hub', archiveReason: 'User exited' }
+            const { promise: spawned, resolve: reachedSpawn } = Promise.withResolvers<void>()
+            const { promise: response, resolve: finishSpawn } = Promise.withResolvers<{ type: 'error'; message: string }>()
+            // Inject only RPC and readiness boundaries; use real metadata persistence.
+            const internals = engine as unknown as { rpcGateway: RpcGateway }
+            const calls: Parameters<RpcGateway['spawnSession']>[] = []
+            try {
+                engine.getOrCreateMachine('machine-1', { host: 'localhost', platform: 'linux', happyCliVersion: '0.1.0' }, null, 'default')
+                engine.handleMachineAlive({ machineId: 'machine-1', time: Date.now() })
+                engine.handleSessionEnd({ sid: session.id, time: Date.now() })
+                internals.rpcGateway.spawnSession = async (...args) => { calls.push(args); reachedSpawn(); return response }
+                const reopening = engine.reopenSession(session.id, 'default')
+                await spawned
+                // A fresh Hub cache at this boundary must still see the archive.
+                const restarted = new SyncEngine(store, {} as never, new RpcRegistry(), { broadcast() {} } as never)
+                try { expect(restarted.getSession(session.id)?.metadata).toMatchObject(archive) }
+                finally { restarted.stop() }
+                finishSpawn({ type: 'error', message: 'runner refused spawn' })
+                expect(await reopening).toMatchObject({ type: 'error' })
+                expect(engine.getSession(session.id)?.metadata).toMatchObject(archive)
+                internals.rpcGateway.spawnSession = async (...args) => { calls.push(args); return { type: 'success', sessionId: session.id } }
+                engine.waitForSessionActive = async () => true
+                expect(await engine.reopenSession(session.id, 'default')).toMatchObject({ type: 'success', sessionId: session.id })
+                expect(calls).toHaveLength(2)
+                for (const args of calls) {
+                    expect(args[0]).toBe('machine-1')
+                    expect(args[1]).toBe('/tmp/project')
+                    expect(args[3]).toBe('gpt-5.5')
+                    expect(args[8]).toBe('codex-native')
+                    expect(args[10]).toBe('default')
+                    expect(args[14]).toBe(session.id)
+                }
+                expect(engine.getSession(session.id)?.metadata?.archivedAt).toBeUndefined()
+            } finally { finishSpawn({ type: 'error', message: 'test cleanup' }); engine.stop() }
+        })
+
+        it('returns the final Cursor protocol instead of the pre-bootstrap archive protocol', async () => {
+            const store = new Store(':memory:')
+            const engine = new SyncEngine(store, {} as never, new RpcRegistry(), { broadcast() {} } as never)
+            const session = engine.getOrCreateSession('cursor-final-reopen-protocol', {
+                path: '/tmp/project', host: 'localhost', machineId: 'machine-1', flavor: 'cursor', cursorSessionId: 'cursor-native',
+                cursorSessionProtocol: 'stream-json', lifecycleState: 'archived', archivedAt: 100,
+            }, null, 'default')
+            // Simulate the CLI's authoritative protocol update during bootstrap.
+            const internals = engine as unknown as { rpcGateway: RpcGateway; sessionCache: SessionCache }
+            try {
+                engine.getOrCreateMachine('machine-1', { host: 'localhost', platform: 'linux', happyCliVersion: '0.1.0' }, null, 'default')
+                engine.handleMachineAlive({ machineId: 'machine-1', time: Date.now() })
+                engine.handleSessionEnd({ sid: session.id, time: Date.now() })
+                internals.rpcGateway.getCursorChatStoreStatus = async () => ({ onDisk: true, store: 'acp' })
+                internals.rpcGateway.spawnSession = async () => {
+                    const current = engine.getSession(session.id)!
+                    const result = store.sessions.updateSessionMetadata(session.id, { ...current.metadata!, cursorSessionProtocol: 'acp' }, current.metadataVersion, 'default')
+                    expect(result.result).toBe('success')
+                    internals.sessionCache.refreshSession(session.id)
+                    return { type: 'success', sessionId: session.id }
+                }
+                engine.waitForSessionActive = async () => true
+                engine.waitForSessionReady = async () => 'ready'
+                expect(await engine.reopenSession(session.id, 'default')).toEqual({ type: 'success', sessionId: session.id, resumed: true, cursorSessionProtocol: 'acp' })
+            } finally { engine.stop() }
+        })
+
         it('restores archive metadata when resumeSession fails after the clear', async () => {
             const store = new Store(':memory:')
             const engine = new SyncEngine(

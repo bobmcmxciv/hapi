@@ -426,6 +426,50 @@ describe('cli session handlers', () => {
         })
     })
 
+    it.each([undefined, null, { machineId: 'forged-target', archivedAt: 0 }])('keeps the Hub reopen checkpoint across old CLI bootstrap metadata (%j)', (incomingCheckpoint) => {
+        const store = new Store(':memory:')
+        const checkpoint = { machineId: 'original-target', lifecycleState: 'archived', archivedAt: 100, lifecycleStateSince: 90, archivedBy: 'hub', archiveReason: 'User exited' }
+        const session = store.sessions.getOrCreateSession('checkpoint-bootstrap', {
+            path: '/tmp/project', host: 'example', flavor: 'omp',
+            ompSession: { id: 'native-original', file: '/tmp/native-original.jsonl' },
+            cursorSessionId: 'legacy-cursor', cursorSessionProtocol: 'stream-json',
+            lifecycleState: 'archived', archivedAt: 100, reopenArchiveSnapshot: checkpoint,
+        }, null, 'default')
+        const socket = new FakeSocket()
+        registerSessionHandlers(socket as unknown as CliSocketWithData, {
+            store,
+            resolveSessionAccess: () => ({ ok: true, value: store.sessions.getSession(session.id)! }),
+            emitAccessError: () => { throw new Error('unexpected access error') },
+        })
+        socket.trigger('update-metadata', {
+            sid: session.id, expectedVersion: session.metadataVersion,
+            metadata: {
+                path: '/tmp/project', host: 'example', lifecycleState: 'running', lifecycleStateSince: 200,
+                name: 'User renamed while resuming', reopenArchiveSnapshot: incomingCheckpoint,
+            },
+        }, () => {})
+        const metadata = store.sessions.getSession(session.id)?.metadata
+        expect(metadata).toMatchObject({
+            reopenArchiveSnapshot: checkpoint, name: 'User renamed while resuming', lifecycleState: 'running',
+            ompSession: { id: 'native-original', file: '/tmp/native-original.jsonl' },
+            cursorSessionId: 'legacy-cursor', cursorSessionProtocol: 'stream-json',
+        })
+    })
+
+    it('rejects a CLI-created reopen checkpoint when no Hub transaction owns one', () => {
+        const store = new Store(':memory:')
+        const session = store.sessions.getOrCreateSession('forged-reopen-checkpoint', { path: '/tmp/project' }, null, 'default')
+        const socket = new FakeSocket()
+        registerSessionHandlers(socket as unknown as CliSocketWithData, {
+            store, resolveSessionAccess: () => ({ ok: true, value: session }), emitAccessError: () => {},
+        })
+        socket.trigger('update-metadata', {
+            sid: session.id, expectedVersion: session.metadataVersion,
+            metadata: { path: '/tmp/project', reopenArchiveSnapshot: { machineId: 'foreign', archivedAt: 100 } },
+        }, () => {})
+        expect(store.sessions.getSession(session.id)?.metadata).not.toHaveProperty('reopenArchiveSnapshot')
+    })
+
     it('update-metadata persists the sanitized title, never the raw CLI payload', () => {
         const store = new Store(':memory:')
         const session = store.sessions.getOrCreateSession(

@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'bun:test'
+import { describe, expect, it, spyOn } from 'bun:test'
 import { toSessionSummary } from '@hapi/protocol'
 import { Store } from '../store'
 import { RpcRegistry } from '../socket/rpcRegistry'
@@ -163,5 +163,62 @@ describe('archive persistence', () => {
             type: 'error', message: 'Runner offline', code: 'archive_failed'
         })
         expect(engine.getSession(session.id)?.metadata?.archivedAt).toBeUndefined()
+    })
+
+    it.each(['already_gone', 'still_alive'] as const)('archives a pending reopen only on its recorded target after cleanup proof (%s)', async (status) => {
+        const store = new Store(':memory:')
+        const engine = createEngine(store)
+        const session = engine.getOrCreateSession('pending-reopen-archive', {
+            path: '/tmp/project', host: 'localhost', flavor: 'omp', machineId: 'old-machine',
+            lifecycleState: 'running',
+            reopenArchiveSnapshot: { machineId: 'spawn-target', lifecycleState: 'archived', archivedAt: 1, archiveReason: 'Previous archive' },
+        }, null, 'default')
+        const proof: string[] = []
+        gatewayForTest(engine).stopRunnerSession = async (machineId) => { proof.push(machineId); return status }
+        const result = await engine.archiveSession(session.id)
+        expect(proof).toEqual(['spawn-target'])
+        if (status === 'still_alive') {
+            expect(result.type).toBe('error')
+            expect(engine.getSession(session.id)?.metadata?.reopenArchiveSnapshot).toBeDefined()
+            expect(engine.getSession(session.id)?.metadata?.archivedAt).toBeUndefined()
+        } else {
+            expect(result.type).toBe('success')
+            expect(engine.getSession(session.id)?.metadata?.reopenArchiveSnapshot).toBeUndefined()
+            expect(engine.getSession(session.id)?.metadata?.archivedAt).toBeGreaterThan(1)
+            expect(engine.getSession(session.id)?.metadata?.lifecycleState).toBe('archived')
+        }
+    })
+
+    it('atomically supersedes a quarantined PTY reopen after verified exit and permits another reopen', async () => {
+        const store = new Store(':memory:')
+        const engine = createEngine(store)
+        const session = engine.getOrCreateSession('quarantined-pty-archive', {
+            path: '/tmp/project', host: 'localhost', flavor: 'agy', machineId: 'machine-x', lifecycleState: 'running',
+            reopenArchiveSnapshot: { machineId: 'machine-x', lifecycleState: 'archived', archivedAt: 1 },
+            ptyResumeAttempt: { machineId: 'machine-x', state: 'quarantined', startedAt: 1 },
+        }, { startingMode: 'pty' }, 'default')
+        // Preserve the real lifecycle; inject only runner proof and the quarantine.
+        const internals = engine as unknown as { ptyResumeQuarantinedIds: Set<string> }
+        internals.ptyResumeQuarantinedIds.add(session.id)
+        gatewayForTest(engine).stopRunnerSession = async () => 'stopped'
+        const failure = spyOn(store.sessions, 'updateSessionMetadata').mockReturnValue({ result: 'error' })
+        try {
+            expect(await engine.archiveSession(session.id)).toMatchObject({ type: 'error', code: 'archive_failed' })
+            expect(engine.getSession(session.id)?.metadata?.reopenArchiveSnapshot).toBeDefined()
+            expect(engine.getSession(session.id)?.metadata?.ptyResumeAttempt).toBeDefined()
+            expect(engine.getSession(session.id)?.metadata?.archivedAt).toBeUndefined()
+            expect(internals.ptyResumeQuarantinedIds.has(session.id)).toBe(true)
+            failure.mockRestore()
+            const writes = spyOn(store.sessions, 'updateSessionMetadata')
+            try {
+                expect(await engine.archiveSession(session.id)).toMatchObject({ type: 'success' })
+                expect(writes).toHaveBeenCalledTimes(1)
+                expect(engine.getSession(session.id)?.metadata?.reopenArchiveSnapshot).toBeUndefined()
+                expect(engine.getSession(session.id)?.metadata?.ptyResumeAttempt).toBeUndefined()
+                expect(engine.getSession(session.id)?.metadata?.lifecycleState).toBe('archived')
+                expect(internals.ptyResumeQuarantinedIds.has(session.id)).toBe(false)
+                expect(await engine.reopenSession(session.id, 'default')).toMatchObject({ type: 'error', code: 'no_machine_online' })
+            } finally { writes.mockRestore() }
+        } finally { failure.mockRestore(); engine.stop() }
     })
 })

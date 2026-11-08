@@ -109,6 +109,7 @@ export const MetadataSchema = z.object({
             lifecycleStateSince: z.number().optional(),
             archivedBy: z.string().optional(),
             archiveReason: z.string().optional(),
+            archivedAt: z.number().optional(),
         }).optional(),
     }).optional(),
     ompSession: OmpNativeSessionSchema.optional(),
@@ -117,6 +118,18 @@ export const MetadataSchema = z.object({
         state: z.enum(['resuming', 'quarantined']),
         machineId: z.string(),
         startedAt: z.number(),
+    }).optional(),
+    // Hub-owned transaction checkpoint; old CLIs may omit it during bootstrap.
+    reopenArchiveSnapshot: z.object({
+        machineId: z.string(),
+        childSessionId: z.string().optional(),
+        // Empty until the spawn RPC responds; a nonempty ID is diagnostic, not kill authority.
+        unverifiedChildSessionId: z.string().optional(),
+        lifecycleState: z.string().optional(),
+        lifecycleStateSince: z.number().optional(),
+        archivedBy: z.string().optional(),
+        archiveReason: z.string().optional(),
+        archivedAt: z.number().optional(),
     }).optional(),
     tools: z.array(z.string()).optional(),
     slashCommands: z.array(z.string()).optional(),

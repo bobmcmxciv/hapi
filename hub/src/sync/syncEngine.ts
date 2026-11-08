@@ -63,6 +63,7 @@ import { SessionCache } from './sessionCache'
 
 type PiResumeAttempt = NonNullable<NonNullable<Session['metadata']>['piResumeAttempt']>
 type PtyResumeAttempt = NonNullable<NonNullable<Session['metadata']>['ptyResumeAttempt']>
+type ReopenArchiveSnapshot = NonNullable<NonNullable<Session['metadata']>['reopenArchiveSnapshot']>
 
 export type { Session, SyncEvent } from '@hapi/protocol/types'
 export type { Machine } from './machineCache'
@@ -581,7 +582,7 @@ export class SyncEngine {
         if (ownsPiAttempt || isPiAttemptChild) {
             void this.clearPiAttemptForEndedSession(payload.sid, restorePiArchive)
         }
-        if (ownsPtyAttempt) {
+        if (ownsPtyAttempt && !before?.metadata?.reopenArchiveSnapshot) {
             void this.writePtyResumeAttempt(payload.sid, before!.namespace, null).catch(() => {})
         }
 
@@ -1605,6 +1606,79 @@ async uploadScratchlistAttachment(
         }
     }
 
+    private async terminateInPlaceOmpResume(machineId: string, sessionId: string): Promise<boolean> {
+        try {
+            await this.cleanupOmpWrapper(sessionId)
+            const status = await this.rpcGateway.stopRunnerSession(machineId, sessionId)
+            if (status === 'still_alive') return false
+            this.handleSessionEnd({ sid: sessionId, time: Date.now(), reason: 'error' })
+            await this.finishReopenArchiveSnapshot(sessionId, true)
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    private async writeReopenArchiveSnapshot(sessionId: string, namespace: string, snapshot: ReopenArchiveSnapshot, ptyAttempt?: PtyResumeAttempt): Promise<void> {
+        for (let attempt = 0; attempt < 5; attempt += 1) {
+            const session = this.sessionCache.getSessionByNamespace(sessionId, namespace) ?? this.sessionCache.refreshSession(sessionId)
+            if (!session?.metadata) throw new Error('Reopen checkpoint session metadata is unavailable')
+            const next = { ...session.metadata }
+            next.reopenArchiveSnapshot = snapshot
+            if (ptyAttempt) next.ptyResumeAttempt = ptyAttempt
+            const result = this.store.sessions.updateSessionMetadata(sessionId, next, session.metadataVersion, namespace, { touchUpdatedAt: false })
+            if (result.result === 'success') { this.sessionCache.refreshSession(sessionId); return }
+            if (result.result !== 'version-mismatch') throw new Error('Failed to persist reopen checkpoint')
+            this.sessionCache.refreshSession(sessionId)
+        }
+        throw new Error('Reopen checkpoint metadata was modified concurrently')
+    }
+
+    private async finishReopenArchiveSnapshot(sessionId: string, restore: boolean): Promise<void> {
+        const session = this.sessionCache.getSession(sessionId) ?? this.sessionCache.refreshSession(sessionId)
+        const snapshot = session?.metadata?.reopenArchiveSnapshot
+        if (!session) return
+        if (restore) {
+            if (snapshot) await this.sessionCache.restoreSessionArchiveMetadata(sessionId, snapshot, { finishReopen: true })
+            else if (session.metadata?.ptyResumeAttempt) await this.writePtyResumeAttempt(sessionId, session.namespace, null)
+        } else {
+            await this.sessionCache.clearSessionArchiveMetadata(sessionId, { finishReopen: true })
+        }
+    }
+
+    private async reconcileReopenArchiveSnapshot(session: Session): Promise<boolean> {
+        const snapshot = session.metadata?.reopenArchiveSnapshot
+        if (!snapshot) return true
+        if (snapshot.unverifiedChildSessionId !== undefined) return false
+        try {
+            // A native-ready event validated in this Hub is stronger evidence
+            // than a pending commit. Retry the commit, not runtime termination.
+            if (!snapshot.childSessionId && session.active && this.sessionReadyIds.has(session.id)) {
+                await this.finishReopenArchiveSnapshot(session.id, false)
+                this.ptyResumeQuarantinedIds.delete(session.id)
+                return true
+            }
+            if (snapshot.childSessionId && snapshot.childSessionId !== session.id) {
+                await this.cleanupOmpWrapper(snapshot.childSessionId)
+                const childStatus = await this.rpcGateway.stopRunnerSession(snapshot.machineId, snapshot.childSessionId)
+                if (childStatus === 'still_alive') return false
+                this.handleSessionEnd({ sid: snapshot.childSessionId, time: Date.now(), reason: 'error' })
+                if (this.sessionCache.getSession(snapshot.childSessionId)) {
+                    await this.sessionCache.deleteSession(snapshot.childSessionId)
+                }
+            }
+            if (session.metadata?.flavor === 'omp') await this.cleanupOmpWrapper(session.id)
+            const status = await this.rpcGateway.stopRunnerSession(snapshot.machineId, session.id)
+            if (status === 'still_alive') return false
+            this.handleSessionEnd({ sid: session.id, time: Date.now(), reason: 'error' })
+            await this.finishReopenArchiveSnapshot(session.id, true)
+            this.ptyResumeQuarantinedIds.delete(session.id)
+            return true
+        } catch {
+            return false
+        }
+    }
+
     async stopSessionOnMachine(machineId: string, sessionId: string): Promise<void> {
         return this.enqueueSessionLifecycleOp(sessionId, `stop:${machineId}`, async () => {
             if (this.sessionCache.getSession(sessionId)?.metadata?.flavor === 'omp') await this.cleanupOmpWrapper(sessionId)
@@ -1721,10 +1795,27 @@ async uploadScratchlistAttachment(
             ? !before.active && before.metadata?.lifecycleState === 'archived'
             : false
         let unreachableReason: string | null = null
+        if (before?.metadata?.reopenArchiveSnapshot?.unverifiedChildSessionId !== undefined) {
+            return { type: 'error', message: `OMP spawn response identity is unconfirmed; inspect this spawn's processes on target Runner ${before.metadata.reopenArchiveSnapshot.machineId}; archive remains blocked`, code: 'archive_failed' }
+        }
 
         // Step 1 — session-owned cleanup via the kill RPC (tiann/hapi#916:
         // a missing CLI target is benign; real RPC failures surface).
         try {
+            const checkpoint = before?.metadata?.reopenArchiveSnapshot
+            if (checkpoint?.childSessionId && checkpoint.childSessionId !== sessionId) {
+                try {
+                    await this.cleanupOmpWrapper(checkpoint.childSessionId)
+                    const childStatus = await this.rpcGateway.stopRunnerSession(checkpoint.machineId, checkpoint.childSessionId)
+                    if (childStatus === 'still_alive') return { type: 'error', message: 'Attributed OMP child cleanup is unverified', code: 'session_still_running' }
+                    this.handleSessionEnd({ sid: checkpoint.childSessionId, time: Date.now(), reason: 'terminated' })
+                    if (this.sessionCache.getSession(checkpoint.childSessionId)) {
+                        await this.sessionCache.deleteSession(checkpoint.childSessionId)
+                    }
+                } catch (error) {
+                    return { type: 'error', message: error instanceof Error ? error.message : 'Failed to verify attributed OMP child cleanup', code: 'archive_failed' }
+                }
+            }
             await this.rpcGateway.killSession(sessionId)
         } catch (error) {
             if (error instanceof RpcTargetMissingError) {
@@ -1741,7 +1832,7 @@ async uploadScratchlistAttachment(
         // Step 2 — runner-side process-ownership verification. Runs on EVERY
         // call, including already-archived rows, so a retry after a partial
         // cleanup still converges the runner state.
-        const machineId = before?.metadata?.machineId
+        const machineId = before?.metadata?.reopenArchiveSnapshot?.machineId ?? before?.metadata?.machineId
         if (!machineId && (unreachableReason !== null || before?.metadata?.flavor === 'omp')) {
             return { type: 'error', message: 'Session machine is unavailable; cleanup cannot be verified', code: 'archive_failed' }
         }
@@ -1769,29 +1860,37 @@ async uploadScratchlistAttachment(
         // handleSessionEnd/expireInactive — so naturally-ended or timed-out
         // sessions are never mistaken for user-archived ones.
         this.handleSessionEnd({ sid: sessionId, time: Date.now() })
-        if (unreachableReason !== null) {
-            this.sessionCache.markSessionArchivedFromHub(sessionId, unreachableReason)
+        try {
+            // Persist the archive and remove both pending markers in one CAS.
+            this.markSessionArchived(sessionId, unreachableReason ?? undefined)
+            this.ptyResumeQuarantinedIds.delete(sessionId)
+        } catch (error) {
+            return { type: 'error', message: error instanceof Error ? error.message : 'Failed to persist archive metadata', code: 'archive_failed' }
         }
-        this.markSessionArchived(sessionId)
         return { type: 'success', alreadyArchived }
     }
 
-    private markSessionArchived(sessionId: string): void {
-        for (let attempt = 0; attempt < 2; attempt += 1) {
+    private markSessionArchived(sessionId: string, unreachableReason?: string): void {
+        for (let attempt = 0; attempt < 5; attempt += 1) {
             const latest = this.sessionCache.getSession(sessionId)
                 ?? this.sessionCache.refreshSession(sessionId)
             if (!latest) throw new Error('Session not found while archiving')
-            if (latest.metadata?.archivedAt != null && latest.metadata.lifecycleState === 'archived') return
+            if (latest.metadata?.archivedAt != null && latest.metadata.lifecycleState === 'archived'
+                && !latest.metadata.reopenArchiveSnapshot && !latest.metadata.ptyResumeAttempt) return
 
             const now = Date.now()
             const nextMetadata = {
                 ...(latest.metadata ?? {}),
-                archivedAt: now,
+                archivedAt: latest.metadata?.archivedAt ?? now,
                 lifecycleState: 'archived',
                 lifecycleStateSince: latest.metadata?.lifecycleState === 'archived' && typeof latest.metadata.lifecycleStateSince === 'number'
                     ? latest.metadata.lifecycleStateSince
-                    : now
+                    : now,
+                ...(unreachableReason && latest.metadata?.lifecycleState !== 'archived'
+                    ? { archivedBy: 'hub' as const, archiveReason: unreachableReason } : {}),
             }
+            delete nextMetadata.reopenArchiveSnapshot
+            delete nextMetadata.ptyResumeAttempt
             const result = this.store.sessions.updateSessionMetadata(
                 sessionId,
                 nextMetadata,
@@ -2965,6 +3064,18 @@ async uploadScratchlistAttachment(
         }
 
         let initialSession = access.session
+        const initialPtyMode = initialSession.agentState?.startingMode === 'pty'
+        if (initialPtyMode && this.ptyResumeInFlightIds.has(access.sessionId)) {
+            return { type: 'error', message: 'PTY resume is already in progress', code: 'resume_failed' }
+        }
+        if (initialSession.metadata?.reopenArchiveSnapshot) {
+            if (!await this.reconcileReopenArchiveSnapshot(initialSession)) {
+                return { type: 'error', message: initialSession.metadata?.reopenArchiveSnapshot?.unverifiedChildSessionId !== undefined
+                    ? `OMP spawn response identity is unconfirmed; inspect this spawn's processes on target Runner ${initialSession.metadata.reopenArchiveSnapshot.machineId}; reopen remains blocked`
+                    : 'Previous resume cleanup is unverified; reopen refused', code: 'resume_failed', rollbackSafe: false }
+            }
+            initialSession = this.sessionCache.getSessionByNamespace(sessionId, namespace) ?? initialSession
+        }
         if (await this.recoverInactiveReservedClear(initialSession, namespace)) {
             initialSession = this.sessionCache.getSessionByNamespace(sessionId, namespace) ?? initialSession
         }
@@ -2974,11 +3085,6 @@ async uploadScratchlistAttachment(
                 message: 'This OpenCode session was replaced by /clear',
                 code: 'resume_unavailable'
             }
-        }
-        const initialPtyMode =
-            (initialSession.agentState as { startingMode?: 'local' | 'remote' | 'pty' } | null)?.startingMode === 'pty'
-        if (initialPtyMode && this.ptyResumeInFlightIds.has(access.sessionId)) {
-            return { type: 'error', message: 'PTY resume is already in progress', code: 'resume_failed' }
         }
         if (
             initialPtyMode
@@ -3072,6 +3178,7 @@ async uploadScratchlistAttachment(
                         lifecycleStateSince: metadata.lifecycleStateSince,
                         archivedBy: metadata.archivedBy,
                         archiveReason: metadata.archiveReason,
+                        archivedAt: metadata.archivedAt,
                     },
                 })
             } catch {
@@ -3119,18 +3226,6 @@ async uploadScratchlistAttachment(
                 return { type: 'error', message: 'PTY resume is already in progress', code: 'resume_failed' }
             }
             this.ptyResumeInFlightIds.add(access.sessionId)
-            // Persist before spawn so a Hub restart cannot forget an in-place
-            // child whose readiness outcome is still unknown.
-            try {
-                await this.writePtyResumeAttempt(access.sessionId, namespace, {
-                    state: 'resuming',
-                    machineId: targetMachine.id,
-                    startedAt: Date.now(),
-                })
-            } catch {
-                this.ptyResumeInFlightIds.delete(access.sessionId)
-                return { type: 'error', message: 'Failed to record PTY resume attempt', code: 'resume_failed' }
-            }
             // PTY reopen intentionally reuses the archived session id. Any
             // readiness bit from the previous process must not satisfy the
             // replacement process's readiness barrier.
@@ -3140,9 +3235,38 @@ async uploadScratchlistAttachment(
             this.sessionReadyIds.delete(access.sessionId)
         }
         let piResumeSucceeded = false
+        let spawnRequested = false
+        let spawnStartedAt = 0
         this.sessionCache.setSessionResuming(access.sessionId, true)
         try {
+            const ptyAttempt: PtyResumeAttempt | undefined = resumedStartingMode === 'pty'
+                ? { state: 'resuming', machineId: targetMachine.id, startedAt: Date.now() }
+                : undefined
+            if (flavor === 'omp' || (resumedStartingMode === 'pty' && (metadata.archivedAt != null || metadata.lifecycleState === 'archived'))) {
+                await this.writeReopenArchiveSnapshot(access.sessionId, namespace, {
+                    machineId: targetMachine.id,
+                    lifecycleState: metadata.lifecycleState,
+                    lifecycleStateSince: metadata.lifecycleStateSince,
+                    archivedBy: metadata.archivedBy,
+                    archiveReason: metadata.archiveReason,
+                    archivedAt: metadata.archivedAt,
+                    unverifiedChildSessionId: flavor === 'omp' ? '' : undefined,
+                }, ptyAttempt)
+            } else if (ptyAttempt) {
+                await this.writePtyResumeAttempt(access.sessionId, namespace, ptyAttempt)
+            }
             const includeStoredModelParameters = flavor !== 'claude' || session.resumeWithSessionModel
+            // Millisecond creation times alone cannot exclude preexisting rows.
+            const existingOmpSessionIds = flavor === 'omp' ? new Set<string>() : undefined
+            if (existingOmpSessionIds) {
+                for (const existing of this.sessionCache.getSessions()) {
+                    if (existing.namespace === namespace && existing.metadata?.machineId === targetMachine.id && existing.metadata.flavor === 'omp') {
+                        existingOmpSessionIds.add(existing.id)
+                    }
+                }
+            }
+            spawnStartedAt = Date.now()
+            spawnRequested = true
             const spawnResult = await this.rpcGateway.spawnSession(
                 targetMachine.id,
                 directory,
@@ -3162,9 +3286,32 @@ async uploadScratchlistAttachment(
                 session.collaborationMode ?? undefined,
                 session.copilotAgentMode ?? undefined,
                 resumedStartingMode
-            )
+            ).catch((error: unknown) => ({
+                type: 'error' as const,
+                message: error instanceof Error ? error.message : 'Failed to spawn resumed session',
+            }))
 
+            if (flavor === 'omp' && (spawnResult.type !== 'success' || spawnResult.sessionId === access.sessionId)) {
+                const pending = this.sessionCache.getSession(access.sessionId)?.metadata?.reopenArchiveSnapshot
+                if (pending) {
+                    const confirmed = { ...pending }
+                    delete confirmed.unverifiedChildSessionId
+                    await this.writeReopenArchiveSnapshot(access.sessionId, namespace, confirmed)
+                }
+            }
             if (spawnResult.type !== 'success') {
+                // A spawn RPC timeout is not proof that the runner failed to
+                // launch a child. Verify ownership cleanup before archive rollback.
+                if (flavor === 'omp' && !await this.terminateInPlaceOmpResume(targetMachine.id, access.sessionId)) {
+                    return { type: 'error', message: `${spawnResult.message}; OMP cleanup is unverified`, code: 'resume_failed', rollbackSafe: false }
+                }
+                if (resumedStartingMode === 'pty') {
+                    const current = this.sessionCache.getSessionByNamespace(access.sessionId, namespace)
+                    if (!current || !await this.reconcilePersistedPtyResumeAttempt(current)) {
+                        this.ptyResumeQuarantinedIds.add(access.sessionId)
+                        return { type: 'error', message: `${spawnResult.message}; PTY cleanup is unverified`, code: 'resume_failed', rollbackSafe: false }
+                    }
+                }
                 if (requiresPiNativeReady) {
                     const stopped = await this.terminateInPlacePiResume(
                         targetMachine.id,
@@ -3184,10 +3331,39 @@ async uploadScratchlistAttachment(
                 return { type: 'error', message: spawnResult.message, code: 'resume_failed' }
             }
             if (flavor === 'omp' && spawnResult.sessionId !== access.sessionId) {
+                const child = this.sessionCache.getSessionByNamespace(spawnResult.sessionId, namespace)
+                const attributable = child?.metadata?.flavor === 'omp'
+                    && !existingOmpSessionIds?.has(child.id)
+                    && child.metadata.machineId === targetMachine.id
+                    && child.metadata.startedBy === 'runner'
+                    && child.createdAt >= spawnStartedAt
+                    && child.metadata.ompSession?.id === resumeToken
+                const checkpoint = this.sessionCache.getSession(access.sessionId)?.metadata?.reopenArchiveSnapshot
+                let stopped = false
+                if (attributable && checkpoint) {
+                    try {
+                        const attributed = { ...checkpoint, childSessionId: spawnResult.sessionId }
+                        delete attributed.unverifiedChildSessionId
+                        await this.writeReopenArchiveSnapshot(access.sessionId, namespace, attributed)
+                        const current = this.sessionCache.getSessionByNamespace(access.sessionId, namespace)
+                        stopped = current ? await this.reconcileReopenArchiveSnapshot(current) : false
+                    } catch {
+                        return { type: 'error', message: 'OMP returned a different ID and child ownership could not be persisted; cleanup is unverified', code: 'resume_failed', rollbackSafe: false }
+                    }
+                } else if (checkpoint) {
+                    try {
+                        await this.writeReopenArchiveSnapshot(access.sessionId, namespace, { ...checkpoint, unverifiedChildSessionId: spawnResult.sessionId })
+                    } catch {
+                        // The pre-spawn unresolved marker already blocks retries after a crash.
+                        return { type: 'error', message: `OMP returned an unowned session ID and its diagnostic ID could not be persisted; inspect this spawn's processes on target Runner ${targetMachine.id}; reopen remains blocked`, code: 'resume_failed', rollbackSafe: false }
+                    }
+                }
                 return {
                     type: 'error',
-                    message: 'OMP runner returned a different HAPI session ID; refusing to merge or replace history',
-                    code: 'resume_failed', rollbackSafe: false
+                    message: 'OMP runner returned a different HAPI session ID; refusing to merge or replace history'
+                        + (stopped ? '' : attributable ? '; OMP cleanup is unverified'
+                            : `; returned ID ${spawnResult.sessionId} is unowned; inspect this spawn's processes on target Runner ${targetMachine.id}; retries remain blocked`),
+                    code: 'resume_failed', rollbackSafe: stopped
                 }
             }
 
@@ -3210,17 +3386,8 @@ async uploadScratchlistAttachment(
 
             const becameActive = await this.waitForSessionActive(spawnResult.sessionId)
             if (!becameActive) {
-                if (flavor === 'omp') {
-                    try {
-                        await this.cleanupOmpWrapper(access.sessionId)
-                        const status = await this.rpcGateway.stopRunnerSession(targetMachine.id, access.sessionId)
-                        if (status === 'still_alive') {
-                            return { type: 'error', message: 'OMP resume failed and cleanup is unverified', code: 'resume_failed', rollbackSafe: false }
-                        }
-                        this.handleSessionEnd({ sid: access.sessionId, time: Date.now(), reason: 'error' })
-                    } catch (error) {
-                        return { type: 'error', message: error instanceof Error ? error.message : 'OMP resume cleanup failed', code: 'resume_failed', rollbackSafe: false }
-                    }
+                if (flavor === 'omp' && !await this.terminateInPlaceOmpResume(targetMachine.id, access.sessionId)) {
+                    return { type: 'error', message: 'OMP resume failed and cleanup is unverified', code: 'resume_failed', rollbackSafe: false }
                 }
                 if (resumedStartingMode === 'pty') {
                     const current = this.sessionCache.getSessionByNamespace(access.sessionId, namespace)
@@ -3262,7 +3429,7 @@ async uploadScratchlistAttachment(
             if (needsReadyBeforeSuccess) {
                 const readyResult = await this.waitForSessionReady(spawnResult.sessionId)
                 if (readyResult !== 'ready') {
-                    if (flavor === 'omp' || (resumedStartingMode === 'pty' && readyResult === 'timeout')) {
+                    if (flavor === 'omp' || resumedStartingMode === 'pty') {
                         let status: 'stopped' | 'already_gone' | 'still_alive'
                         try {
                             if (flavor === 'omp') await this.cleanupOmpWrapper(spawnResult.sessionId)
@@ -3281,12 +3448,10 @@ async uploadScratchlistAttachment(
                             }
                             inactive = true
                         } else if (status === 'stopped') {
-                            if (flavor === 'omp') {
-                                this.handleSessionEnd({ sid: spawnResult.sessionId, time: Date.now(), reason: 'error' })
-                                inactive = true
-                            } else {
-                                inactive = await this.waitForSessionInactive(spawnResult.sessionId)
-                            }
+                            // Runner stop acknowledges actual process-tree exit;
+                            // a force-killed wrapper may never emit session-end.
+                            this.handleSessionEnd({ sid: spawnResult.sessionId, time: Date.now(), reason: 'error' })
+                            inactive = true
                         }
                         if (!inactive) {
                             if (flavor === 'omp') {
@@ -3313,6 +3478,7 @@ async uploadScratchlistAttachment(
                                 rollbackSafe: false,
                             }
                         }
+                        await this.finishReopenArchiveSnapshot(spawnResult.sessionId, true)
                     }
                     if (requiresPiNativeReady && readyResult !== 'ended') {
                         const inactive = await this.terminateInPlacePiResume(
@@ -3323,19 +3489,6 @@ async uploadScratchlistAttachment(
                         if (!inactive) {
                             await this.quarantinePiResume(access.sessionId, namespace, targetMachine.id)
                             return { type: 'error', message: 'Pi native resume timed out and the child is still active', code: 'resume_failed', rollbackSafe: false }
-                        }
-                    }
-                    if (resumedStartingMode === 'pty') {
-                        try {
-                            await this.writePtyResumeAttempt(access.sessionId, namespace, null)
-                        } catch {
-                            this.ptyResumeQuarantinedIds.add(access.sessionId)
-                            return {
-                                type: 'error',
-                                message: 'PTY resume failed and cleanup metadata could not be cleared',
-                                code: 'resume_failed',
-                                rollbackSafe: false,
-                            }
                         }
                     }
                     const message = flavor === 'pi'
@@ -3371,30 +3524,40 @@ async uploadScratchlistAttachment(
 
             this.sessionCache.markSessionActive(spawnResult.sessionId)
             const resumedSession = this.sessionCache.getSession(spawnResult.sessionId)
-            if (resumedStartingMode !== 'pty' && (resumedSession?.metadata?.archivedAt != null || resumedSession?.metadata?.lifecycleState === 'archived')) {
+            if (resumedSession?.metadata?.archivedAt != null || resumedSession?.metadata?.lifecycleState === 'archived'
+                || resumedSession?.metadata?.reopenArchiveSnapshot || resumedSession?.metadata?.ptyResumeAttempt) {
                 try {
-                    await this.sessionCache.clearSessionArchiveMetadata(spawnResult.sessionId)
+                    await this.sessionCache.clearSessionArchiveMetadata(spawnResult.sessionId, { finishReopen: true })
                 } catch (error) {
-                    return { type: 'error', message: error instanceof Error ? error.message : 'Failed to clear archive metadata', code: 'resume_failed', rollbackSafe: false }
+                    return { type: 'error', message: error instanceof Error ? error.message : 'Failed to commit reopen metadata', code: 'resume_failed', rollbackSafe: false }
                 }
             }
             piResumeSucceeded = true
             if (requiresPiNativeReady) await this.writePiResumeAttempt(access.sessionId, namespace, null)
-            if (resumedStartingMode === 'pty') {
+            if (resumedStartingMode === 'pty') this.ptyResumeQuarantinedIds.delete(access.sessionId)
+            return { type: 'success', sessionId: spawnResult.sessionId }
+        } catch (error) {
+            const message = error instanceof Error ? error.message : 'Session resume failed'
+            if (!spawnRequested) {
                 try {
-                    await this.writePtyResumeAttempt(access.sessionId, namespace, null)
-                    this.ptyResumeQuarantinedIds.delete(access.sessionId)
+                    await this.finishReopenArchiveSnapshot(access.sessionId, true)
+                    return { type: 'error', message, code: 'resume_failed' }
                 } catch {
-                    this.ptyResumeQuarantinedIds.add(access.sessionId)
-                    return {
-                        type: 'error',
-                        message: 'PTY resumed but cleanup metadata could not be cleared',
-                        code: 'resume_failed',
-                        rollbackSafe: false,
-                    }
+                    if (resumedStartingMode === 'pty') this.ptyResumeQuarantinedIds.add(access.sessionId)
+                    return { type: 'error', message: `${message}; failed to clear pre-spawn metadata`, code: 'resume_failed', rollbackSafe: false }
                 }
             }
-            return { type: 'success', sessionId: spawnResult.sessionId }
+            let stopped: boolean
+            if (flavor === 'omp') stopped = await this.terminateInPlaceOmpResume(targetMachine.id, access.sessionId)
+            else if (resumedStartingMode === 'pty') {
+                const current = this.sessionCache.getSessionByNamespace(access.sessionId, namespace)
+                stopped = current ? await this.reconcilePersistedPtyResumeAttempt(current) : false
+                if (!stopped) this.ptyResumeQuarantinedIds.add(access.sessionId)
+            } else throw error
+            return {
+                type: 'error', message: message + (stopped ? '' : '; native cleanup is unverified'),
+                code: 'resume_failed', rollbackSafe: stopped,
+            }
         } finally {
             if (resumedStartingMode === 'pty') {
                 this.ptyResumeInFlightIds.delete(access.sessionId)
@@ -3419,11 +3582,10 @@ async uploadScratchlistAttachment(
      * - Active session: idempotent no-op (`resumed: false`).
      * - Non-archived inactive session: forwards to `resumeSession` without touching metadata.
      * - Archived session: validates that the agent has enough metadata to resume (Cursor
-     *   sessions require a `cursorSessionId` once they have any messages), clears the
-     *   archive metadata (`lifecycleState`, `archivedBy`, `archiveReason`), defaults the
-     *   Cursor protocol to `stream-json` for pre-#799 sessions, then forwards to
-     *   `resumeSession`. The CLI's `sessionFactory` will re-stamp `lifecycleState='running'`
-     *   when it boots, so we do not pre-write that here.
+     *   sessions require a `cursorSessionId` once they have any messages), retains
+     *   the archive metadata until CLI bootstrap or successful resume, then clears
+     *   it. Clearing also defaults legacy Cursor protocol to `stream-json`; the
+     *   response reports the final protocol after any automatic migration.
      *
      * Failure rollback: if `resumeSession` fails (no machine online, spawn timeout, etc.)
      * the archive snapshot is restored so the operator can retry without losing
@@ -3453,6 +3615,17 @@ async uploadScratchlistAttachment(
         }
 
         let session = access.session
+        if (session.agentState?.startingMode === 'pty' && this.ptyResumeInFlightIds.has(access.sessionId)) {
+            return { type: 'error', message: 'PTY resume is already in progress', code: 'resume_failed' }
+        }
+        if (session.metadata?.reopenArchiveSnapshot) {
+            if (!await this.reconcileReopenArchiveSnapshot(session)) {
+                return { type: 'error', message: session.metadata?.reopenArchiveSnapshot?.unverifiedChildSessionId !== undefined
+                    ? `OMP spawn response identity is unconfirmed; inspect this spawn's processes on target Runner ${session.metadata.reopenArchiveSnapshot.machineId}; reopen remains blocked`
+                    : 'Previous resume cleanup is unverified; reopen refused', code: 'resume_failed', rollbackSafe: false }
+            }
+            session = this.sessionCache.getSessionByNamespace(sessionId, namespace) ?? session
+        }
         if (await this.recoverInactiveReservedClear(session, namespace)) {
             session = this.sessionCache.getSessionByNamespace(sessionId, namespace) ?? session
         }
@@ -3538,22 +3711,10 @@ async uploadScratchlistAttachment(
                 lifecycleStateSince: metadata.lifecycleStateSince
             }
 
-            let applied: { cursorSessionProtocol?: 'acp' | 'stream-json' } = {}
-            // Pi, OMP and PTY resumes reuse the original HAPI row. Keep the archive
-            // snapshot persisted until the CLI successfully bootstraps that row as
-            // running; this avoids an inactive, non-archived gap if the Hub restarts
-            // before spawn — the in-memory snapshot below cannot survive that, and
-            // ptyResumeAttempt carries no copy of it. The CLI's sessionFactory
-            // re-stamps lifecycleState='running' on boot and does not carry over
-            // archivedBy/archiveReason, so the row still leaves the archived state.
-            if (metadata.flavor !== 'pi' && metadata.flavor !== 'omp' && !isPtyResume) {
-                try {
-                    applied = await this.sessionCache.clearSessionArchiveMetadata(access.sessionId)
-                } catch (error) {
-                    const message = error instanceof Error ? error.message : 'Failed to clear archive metadata'
-                    return { type: 'error', message, code: 'metadata_conflict' }
-                }
-            }
+            // Do not clear before the first await into resume. A Hub crash in
+            // machine selection/spawn must not lose the durable archive marker.
+            // CLI bootstrap clears it when reusing the row; successful resume
+            // also clears any remaining marker before returning to the caller.
 
             const resumeResult = await this.resumeSessionInner(access.sessionId, namespace)
             if (resumeResult.type === 'error') {
@@ -3571,11 +3732,12 @@ async uploadScratchlistAttachment(
                 return resumeResult
             }
 
+            const cursorSessionProtocol = this.sessionCache.getSessionByNamespace(resumeResult.sessionId, namespace)?.metadata?.cursorSessionProtocol
             return {
                 type: 'success',
                 sessionId: resumeResult.sessionId,
                 resumed: true,
-                ...(applied.cursorSessionProtocol ? { cursorSessionProtocol: applied.cursorSessionProtocol } : {})
+                ...(cursorSessionProtocol ? { cursorSessionProtocol } : {})
             }
         }
 
@@ -3926,6 +4088,9 @@ async uploadScratchlistAttachment(
                     else next.archivedBy = snapshot.archivedBy
                     if (snapshot.archiveReason === undefined) delete next.archiveReason
                     else next.archiveReason = snapshot.archiveReason
+                    // Older persisted attempts did not capture this marker.
+                    // Leave any existing value intact when their snapshot omits it.
+                    if (snapshot.archivedAt !== undefined) next.archivedAt = snapshot.archivedAt
                 }
             }
             const result = this.store.sessions.updateSessionMetadata(sessionId, next, current.metadataVersion, namespace, { touchUpdatedAt: false })
@@ -3983,7 +4148,7 @@ async uploadScratchlistAttachment(
 
     private async reconcilePersistedPtyResumeAttempt(session: Session): Promise<boolean> {
         const attempt = session.metadata?.ptyResumeAttempt
-        if (!attempt) return true
+        if (!attempt) return session.metadata?.reopenArchiveSnapshot ? this.reconcileReopenArchiveSnapshot(session) : true
         let status: 'stopped' | 'already_gone' | 'still_alive'
         try {
             status = await this.rpcGateway.stopRunnerSession(attempt.machineId, session.id)
@@ -3997,7 +4162,7 @@ async uploadScratchlistAttachment(
             this.handleSessionEnd({ sid: session.id, time: Date.now(), reason: 'error' })
         }
         try {
-            await this.writePtyResumeAttempt(session.id, session.namespace, null)
+            await this.finishReopenArchiveSnapshot(session.id, true)
             this.ptyResumeQuarantinedIds.delete(session.id)
             return true
         } catch {

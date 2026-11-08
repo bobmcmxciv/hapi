@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react'
+import { act, render, screen, waitFor } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { I18nProvider } from '@/lib/i18n-context'
@@ -14,7 +14,11 @@ import SubscriptionPanel, {
 
 vi.mock('@/lib/app-context', () => ({ useAppContext: () => ({ baseUrl: 'http://hub', token: 'jwt', user: { id: 1 } }) }))
 
-afterEach(() => { vi.restoreAllMocks() })
+afterEach(() => {
+    vi.restoreAllMocks()
+    vi.useRealTimers()
+    vi.unstubAllGlobals()
+})
 
 function win(overrides: Partial<SubscriptionWindow> = {}): SubscriptionWindow {
     return {
@@ -133,12 +137,6 @@ describe('formatRelativeAge', () => {
         expect(formatRelativeAge(50 * 3600_000, t)).toBe('subscription.age.days:2')
     })
 
-    it('stale 阈值是 15 分钟——collector 每 5 分钟一轮，留 3 倍余量', () => {
-        expect(STALE_THRESHOLD_MS).toBe(15 * 60 * 1000)
-        // 一轮失败(10min)不该判 stale；连续失败(16min)才判。
-        expect(10 * 60_000 > STALE_THRESHOLD_MS).toBe(false)
-        expect(16 * 60_000 > STALE_THRESHOLD_MS).toBe(true)
-    })
 })
 
 describe('translateWindowLabel — 标签跟随界面语言，不吃采集器的中文串', () => {
@@ -185,6 +183,46 @@ describe('translateWindowLabel — 标签跟随界面语言，不吃采集器的
 })
 
 describe('SubscriptionPanel 渲染', () => {
+    it('隐藏迁移前的过期余额，但保留新采集机的有效零余额', async () => {
+        mockSummary([
+            claudeSnapshot({
+                machine: 'vircs', provider: 'deepseek', windows: [],
+                balance: { amount: 57.86, currency: 'CNY', granted: 0, topped_up: 57.86 },
+                reported_at: Date.now() - STALE_THRESHOLD_MS - 60_000
+            }),
+            claudeSnapshot({
+                machine: 'T14s', provider: 'deepseek', windows: [],
+                balance: { amount: 0, currency: 'CNY', granted: 0, topped_up: 0 }
+            })
+        ])
+        renderPanel()
+        await waitFor(() => expect(screen.getByText('0.00')).toBeTruthy())
+        expect(screen.queryByText('57.86')).toBeNull()
+        expect(screen.queryByText('vircs · smith_crystal6124@yahoo.com')).toBeNull()
+        expect(screen.getByText('T14s · smith_crystal6124@yahoo.com')).toBeTruthy()
+    })
+
+    it('刷新请求挂起且缓存不变时，也会淘汰到期卡片而保留较新的结果', async () => {
+        vi.useFakeTimers()
+        vi.setSystemTime(new Date('2026-11-08T10:00:00Z'))
+        mockSummary([
+            claudeSnapshot({
+                machine: 'vircs', windows: [win({ used_percent: 81 })],
+                reported_at: Date.now() - STALE_THRESHOLD_MS + 30_000
+            }),
+            claudeSnapshot({ machine: 'T14s', windows: [win({ used_percent: 7 })] })
+        ])
+        renderPanel()
+        await act(async () => { await vi.advanceTimersByTimeAsync(1) })
+        expect(screen.getByText('81%')).toBeTruthy()
+        expect(screen.getByText('7%')).toBeTruthy()
+        vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>(() => {})))
+        await act(async () => { await vi.advanceTimersByTimeAsync(60_000) })
+        expect(screen.queryByText('81%')).toBeNull()
+        expect(screen.getByText('7%')).toBeTruthy()
+        expect(screen.queryByText('vircs · smith_crystal6124@yahoo.com')).toBeNull()
+    })
+
     it('Antigravity 卡片显示各模型组的剩余额度，而不是已用比例', async () => {
         mockSummary([claudeSnapshot({
             provider: 'antigravity', account_key: 'default', plan_name: null,

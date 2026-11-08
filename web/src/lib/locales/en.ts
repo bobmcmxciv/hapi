@@ -1462,6 +1462,7 @@ export default {
   'subscription.noWindows': 'No quota window reported',
   'subscription.collectFailed': 'Collection failed',
   'subscription.hiddenFailures': '{n} provider(s) hidden — collection failed ({providers}). Hover for details.',
+  'subscription.hiddenStale': '{n} expired result(s) hidden — waiting for fresh reports.',
   'subscription.loadFailed': 'Could not load subscription data',
   'subscription.age.justNow': 'just now',
   'subscription.age.minutes': '{n}m ago',

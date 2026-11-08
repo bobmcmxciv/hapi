@@ -35,11 +35,44 @@ PATH or the npm package layout; unsupported installations fail explicitly.
 
 Reopening an archived OMP session preserves its HAPI row and resumes the native
 session recorded in `metadata.ompSession`. Reopen succeeds only after OMP reports
-ready. A readiness failure is surfaced; archive metadata is restored only after
-cleanup is verified and the runtime is inactive. If another native process owns the journal, OMP safely
+ready. A spawn RPC error or timeout, an unexpected returned HAPI ID, and a
+readiness failure all require runner-side cleanup verification before archive
+metadata can be restored. Unknown cleanup remains a visible error, not a
+successful reopen or a confirmed exit. Runner-owned PID/start-marker tracking
+and spawn deduplication prevent retries from launching over an unconfirmed child.
+If another native process owns the journal, OMP safely
 continues the history in a new sibling journal; HAPI immediately updates the
 native ID/file from OMP's authoritative RPC state. It does not take over the
 other process's lease or modify its session header.
+
+OMP and PTY archived resumes also persist a Hub-owned archive checkpoint before
+spawn. CLI bootstrap cannot erase it, including when an older CLI omits the field.
+It is committed only after readiness succeeds, or rolled back after runner-owned
+cleanup is confirmed. After a Hub restart, reopening a pending checkpoint first
+verifies cleanup on its recorded target machine; an offline or still-live result
+refuses another spawn. Restoring archive fields preserves unrelated concurrent
+metadata changes, native session identity, and transport configuration.
+The checkpoint and PTY attempt are created together. Completing or restoring an
+archive removes both in the same versioned metadata write, so a failed write
+leaves a retryable checkpoint. A native-ready child whose commit failed is not
+stopped on retry. A mismatched OMP return ID is cleaned only when the newly
+created row matches this spawn's namespace, machine, runner origin and native
+resume token; its attributed ID stays in the checkpoint until both returned and
+requested IDs have runner-confirmed exit. An existing or otherwise unattributable
+row is never terminated, and the failed reopen reports unverified cleanup.
+Automatic native-ID deduplication does not merge any row while that identity has
+a pending reopen checkpoint. A newly attributed failed child row is removed only
+after its exit is verified and before the original checkpoint is cleared; the
+original HAPI ID, history, and native journal remain intact.
+OMP persists an unresolved-response marker before sending spawn. If a crash
+loses the response, or the returned row cannot be attributed to this spawn,
+that same checkpoint quarantines reopening and explicit archiving. A returned
+unowned ID is diagnostic only, never permission to kill that row. Repeated
+clicks or a Hub restart do not clear this quarantine, even if stopping the
+original requested ID reports `already_gone`: the unconfirmed child may still
+exist. The visible error identifies the target Runner whose actual process
+ownership must be inspected. A known local failure before spawn is invoked can
+roll back its checkpoint; an indeterminate RPC boundary cannot.
 
 Archiving a session is a verified exit: the hub awaits session-owned cleanup,
 then asks the runner to verify session-owned resource cleanup before marking the
