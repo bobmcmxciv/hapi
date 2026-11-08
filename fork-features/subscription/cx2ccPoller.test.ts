@@ -1,5 +1,6 @@
 import { describe, test, expect } from 'bun:test'
 import { SubscriptionStore } from './subscriptionStore'
+import type { SubscriptionSnapshot } from './domain'
 import {
     cx2ccResponseToSnapshot,
     cx2ccAccountToSnapshot,
@@ -156,6 +157,18 @@ describe('cx2cc 账号池（轮换用的多个账号）', () => {
         expect(snap.windows).toHaveLength(0)
         expect(snap.error).toBeNull()
     })
+
+    test('accounts 非数组 / 含 null 元素时安全回落或跳过，不抛异常', () => {
+        // 网关在鉴权失败等路径会返回 {"error": "..."} 而不是 {accounts:[...]}；
+        // 此时 accounts 字段可能是字符串甚至整个 body 不是对象——都当空账号池。
+        const weird = { accounts: 'not-an-array' } as unknown as Cx2ccAccountsResponse
+        expect(cx2ccAccountsToSnapshots(weird, REAL_USAGE, { machine: 'm', reportedAt: 1 })).toHaveLength(0)
+        const withNull = { accounts: [null, REAL_ACCOUNTS.accounts![0]!] } as unknown as Cx2ccAccountsResponse
+        const snaps = cx2ccAccountsToSnapshots(withNull, REAL_USAGE, { machine: 'm', reportedAt: 1 })
+        expect(snaps).toHaveLength(1)
+        expect(snaps[0]?.account_key).toBe('f7bnzpnygj@privaterelay.appleid.com')
+    })
+
 })
 
 describe('startCx2ccPoller', () => {
@@ -300,5 +313,172 @@ describe('startCx2ccPoller', () => {
         // Wait longer than the interval; scheduled next should not fire because stop() clamped it.
         await new Promise(r => setTimeout(r, 40))
         expect(calls).toBe(before)
+    })
+
+    test('/usage 超时记错误快照并可恢复，错误信息点名 timeout 而非裸 AbortError', async () => {
+        // 真实定时器例外：这里测的就是 AbortController 真超时行为，fake timer 驱动不了 undici signal。
+        const store = new SubscriptionStore(':memory:')
+        let timedOut = false
+        const handle = startCx2ccPoller({
+            url: 'https://example.com/cx2cc-api/usage',
+            apiKey: 'k',
+            intervalMs: 999_999_999,
+            timeoutMs: 20,
+            subscriptionStore: store,
+            now: () => 1_700_000_000_000,
+            log: () => {},
+            eager: false,
+            fetchImpl: ((_input: string | URL | Request, init?: RequestInit) => {
+                if (!timedOut) {
+                    timedOut = true
+                    // 网关不回包：挂着直到 AbortController 把我们打断（真实 undici 行为）
+                    const { promise, reject } = Promise.withResolvers<Response>()
+                    init?.signal?.addEventListener('abort', () => {
+                        const e = new Error('The operation was aborted')
+                        e.name = 'AbortError'
+                        reject(e)
+                    })
+                    return promise
+                }
+                return Promise.resolve(new Response(JSON.stringify(REAL_USAGE), { status: 200 }))
+            }) as unknown as typeof fetch
+        })
+        await handle.pollOnce()
+        const [errRow] = store.listAll()
+        expect(errRow?.error).toBe('timeout after 20ms')
+        await handle.pollOnce()
+        const rows = store.listAll()
+        expect(rows).toHaveLength(1)
+        expect(rows[0]?.error).toBeNull()
+        expect(rows[0]?.windows.length).toBeGreaterThan(0)
+        handle.stop()
+    })
+
+    test('/usage 返回 200 但 body 不是 JSON 对象 → 错误快照而非 TypeError 崩溃', async () => {
+        const store = new SubscriptionStore(':memory:')
+        const handle = startCx2ccPoller({
+            url: 'https://example.com/cx2cc-api/usage',
+            apiKey: 'k',
+            intervalMs: 999_999_999,
+            subscriptionStore: store,
+            now: () => 1_700_000_000_000,
+            log: () => {},
+            eager: false,
+            // 网关超时页/代理层直出 JSON null——res.json() 能解析，但转换层会 TypeError
+            fetchImpl: (async () => new Response('null', { status: 200 })) as unknown as typeof fetch
+        })
+        await handle.pollOnce()   // 旧代码这里 reject（TypeError），调用方 unhandled
+        const [row] = store.listAll()
+        expect(row?.error).toContain('/usage')
+        handle.stop()
+    })
+
+    test('/accounts 返回 {error} 而非 {accounts} → 回落到只报生效账号', async () => {
+        const store = new SubscriptionStore(':memory:')
+        const handle = startCx2ccPoller({
+            url: 'https://example.com/cx2cc-api/usage',
+            apiKey: 'k',
+            intervalMs: 999_999_999,
+            subscriptionStore: store,
+            now: () => 1_700_000_000_000,
+            log: () => {},
+            eager: false,
+            fetchImpl: (async (input: string | URL | Request) => {
+                const u = String(input)
+                if (u.endsWith('/accounts')) return new Response(JSON.stringify({ error: 'upstream pool down' }), { status: 200 })
+                return new Response(JSON.stringify(REAL_USAGE), { status: 200 })
+            }) as unknown as typeof fetch
+        })
+        await handle.pollOnce()
+        handle.stop()
+        const rows = store.listAll()
+        expect(rows).toHaveLength(1)
+        expect(rows[0]?.error).toBeNull()
+        expect(rows[0]?.account_key).toBe('f7bnzpnygj@privaterelay.appleid.com')
+    })
+
+    test('定时链在内部异常后不死——每轮都继续调度（余量中断回归）', async () => {
+        // 真实定时器例外：被测对象本身就是真 setTimeout 驱动的调度链，没有可注入的调度器。
+        const real = new SubscriptionStore(':memory:')
+        let failWrites = true
+        // 包一层让 upsert 按需抛错：模拟落库/转换阶段炸了（旧代码定时链就此中断）
+        const flakyStore = {
+            upsertSnapshots(s: SubscriptionSnapshot[]) {
+                if (failWrites) throw new Error('boom')
+                real.upsertSnapshots(s)
+            }
+        }
+        let fetches = 0
+        const handle = startCx2ccPoller({
+            url: 'https://example.com/cx2cc-api/usage',
+            apiKey: 'k',
+            intervalMs: 5,
+            subscriptionStore: flakyStore as unknown as SubscriptionStore,
+            log: () => {},
+            fetchImpl: (async () => {
+                fetches++
+                return new Response(JSON.stringify(REAL_USAGE), { status: 200 })
+            }) as unknown as typeof fetch
+        })
+        await new Promise(r => setTimeout(r, 30))
+        const afterFailures = fetches
+        expect(afterFailures).toBeGreaterThanOrEqual(4)  // ≥2 轮 ×(/usage+/accounts)：链还活着
+        failWrites = false
+        await new Promise(r => setTimeout(r, 30))
+        expect(fetches).toBeGreaterThan(afterFailures)   // 恢复后仍在轮询
+        handle.stop()
+        expect(real.listAll().length).toBeGreaterThan(0) // 且恢复后数据真的落库了
+    })
+
+    test('in-flight 并发 pollOnce() 只发一轮请求（手动刷新不放大流量）', async () => {
+        const store = new SubscriptionStore(':memory:')
+        let fetches = 0
+        const gate = Promise.withResolvers<Response>()
+        const handle = startCx2ccPoller({
+            url: 'https://example.com/cx2cc-api/usage',
+            apiKey: 'k',
+            intervalMs: 999_999_999,
+            subscriptionStore: store,
+            log: () => {},
+            // 门闩代替 sleep：首个请求（eager 首轮的 /usage）挂起直到我们放行，
+            // 保证两次手动 pollOnce() 与首轮真实重叠，无时序猜测。
+            fetchImpl: (async () => {
+                fetches++
+                if (fetches === 1) return gate.promise
+                return new Response(JSON.stringify(REAL_USAGE), { status: 200 })
+            }) as unknown as typeof fetch
+        })
+        // 构造器的 eager 首轮卡在门闩上——两次手动 pollOnce 复用同一轮，不重复发请求
+        const p = Promise.all([handle.pollOnce(), handle.pollOnce()])
+        gate.resolve(new Response(JSON.stringify(REAL_USAGE), { status: 200 }))
+        await p
+        handle.stop()
+        expect(fetches).toBe(2)   // 一轮 = /usage + /accounts 各一次
+    })
+
+    test('HTTP 错误响应体不消费也不影响下一轮（连接不被脏响应挂住）', async () => {
+        const store = new SubscriptionStore(':memory:')
+        let calls = 0
+        const handle = startCx2ccPoller({
+            url: 'https://example.com/cx2cc-api/usage',
+            apiKey: 'k',
+            intervalMs: 999_999_999,
+            subscriptionStore: store,
+            now: () => 1_700_000_000_000,
+            log: () => {},
+            eager: false,
+            fetchImpl: (async () => {
+                calls++
+                if (calls === 1) return new Response('x'.repeat(8192), { status: 500 })
+                return new Response(JSON.stringify(REAL_USAGE), { status: 200 })
+            }) as unknown as typeof fetch
+        })
+        await handle.pollOnce()
+        expect(store.listAll()[0]?.error).toBe('HTTP 500')
+        await handle.pollOnce()
+        const rows = store.listAll()
+        expect(rows[0]?.error).toBeNull()
+        expect(rows[0]?.account_key).toBe('f7bnzpnygj@privaterelay.appleid.com')
+        handle.stop()
     })
 })

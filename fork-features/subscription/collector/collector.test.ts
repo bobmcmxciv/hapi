@@ -192,6 +192,7 @@ describe('collectAll', () => {
         expect(snapshots[0]?.provider).toBe('antigravity')
         expect(snapshots[0]?.windows[0]?.used_percent).toBe(25)
     })
+
 })
 
 describe('authenticate / pushSnapshots', () => {
@@ -379,6 +380,63 @@ describe('startCollector', () => {
             baseConfig({ hubTimeoutMs: 50 }), 'jwt', [snap], hangingFetch as unknown as typeof fetch
         )).rejects.toThrow(/abort/i)
     }, 45_000)
+
+    /** 响应头已到、body 永远不到的连接：fetch 早就 resolve 了，旧代码在这时已经
+     *  把 abort 定时器清掉，res.json() 会永远挂住——停 13 小时那次就是这类形状。 */
+    const hangingBodyFetch = (() => (_url: string, init?: RequestInit) =>
+        Promise.resolve(new Response(
+            new ReadableStream<Uint8Array>({ start(controller) {
+                init?.signal?.addEventListener('abort', () => controller.error(new Error('The operation was aborted.')))
+            } }),
+            { status: 200, headers: { 'content-type': 'application/json' } }
+        ))) ()
+
+    test('authenticate 超时必须盖到响应体读完——headers 到了不算完', async () => {
+        await expect(authenticate(
+            baseConfig({ hubTimeoutMs: 50 }),
+            hangingBodyFetch as unknown as typeof fetch
+        )).rejects.toThrow(/abort/i)
+    }, 45_000)
+
+    test('pushSnapshots 超时同样盖到响应体读完', async () => {
+        const snap: SubscriptionSnapshot = {
+            machine: 'v', provider: 'p', account_key: 'a', plan_name: null,
+            windows: [], balance: null, error: null, reported_at: 1
+        }
+        await expect(pushSnapshots(
+            baseConfig({ hubTimeoutMs: 50 }), 'jwt', [snap], hangingBodyFetch as unknown as typeof fetch
+        )).rejects.toThrow(/abort/i)
+    }, 45_000)
+
+    test('看门狗跑在自己的定时器上——某一轮 await 挂死也必须退出', async () => {
+        // 旧形状：checkWatchdog 在轮询回调的 finally 里，那轮 await 不返回它就
+        // 永远轮不到，看门狗和轮询死在同一条路上。现在它是独立 interval。
+        // 必须用真时钟：被测代码自己持有 watchdog interval，没有注入点可假驱动——
+        // 与文件里其余轮询/超时测试一致，都是故意覆盖真实定时器行为。
+        const realExit = process.exit
+        const observed: { exitCode: number | null } = { exitCode: null }
+        process.exit = ((code?: number) => { observed.exitCode = code ?? 0 }) as never
+        try {
+            const handle = startCollector(baseConfig({
+                intervalMs: 999_999,
+                watchdogMs: 50,
+                now: () => Date.now(), // 看门狗要真实时钟，固定 clock 的 silentFor 恒为 0
+                credentials: { anthropicAccessToken: null, deepseekApiKey: 'd', kimiApiKey: null, glmApiKey: null },
+                // deepseek 正常返回、auth 永不响应也不认 abort——runOnce 死锁在 getToken 里，
+                // 模拟所有已知的 abort 兜底都失效时还剩的最后一道防线。
+                fetchImpl: (async (url: string) => {
+                    if (String(url).endsWith('/api/auth')) return new Promise<Response>(() => {})
+                    return jsonResponse({ is_available: true, balance_infos: [{ currency: 'CNY', total_balance: '1' }] })
+                }) as unknown as typeof fetch
+            }))
+            handle.runOnce().catch(() => {}) // 故意不 await——它本来就永远不会返回
+            await new Promise(r => setTimeout(r, 150))
+            handle.stop()
+            expect(observed.exitCode).toBe(1)
+        } finally {
+            process.exit = realExit
+        }
+    })
 
     test('看门狗：连续没有成功推送就退出，让计划任务重启', async () => {
         // 不真的 process.exit，替换掉观察调用。

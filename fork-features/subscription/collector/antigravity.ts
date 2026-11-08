@@ -112,8 +112,11 @@ export async function collectAntigravity(
         })
     } catch (error) {
         // CLI stderr may contain private paths or account details. Never forward it to hub.
-        const code = asRecord(error)?.code
-        const message = code === 'ETIMEDOUT' ? 'agy /usage 超时'
+        // execFile timeout terminates with a signal rather than an exit code.
+        const err = asRecord(error)
+        const killedByTimeout = err?.code === 'ETIMEDOUT' || err?.timedOut === true
+            || (err?.code == null && err?.killed === true && err?.signal != null)
+        const message = killedByTimeout ? 'agy /usage 超时'
             : error instanceof SyntaxError ? 'agy /usage 响应格式无效'
             : error instanceof Error && (
                 error.message === 'agy /usage 响应格式无效' || error.message === 'agy /usage 未返回额度窗口'

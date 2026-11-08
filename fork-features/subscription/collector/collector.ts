@@ -17,7 +17,7 @@ import {
  * 订阅采集器主体。跑在 **vircs**(用户确认:claude 只在 vircs 上请求),
  * 周期性地对各 provider 取一次配额/余额,归一化后推给 ECS 上的 hub。
  *
- * 认证链路:collector 用 hub 的 `cliApiToken` 打 `POST /api/auth`(**网关那条**,
+ * 认证链路:collector 用独立的 admin API token 打 `POST /api/auth`(**网关那条**,
  * 注册顺序上遮蔽了上游同路径路由),换回带 `gaid` + `role=admin` 的 JWT,
  * 再用它 `POST /api/subscription/report`。JWT 有效期 4h,这里每次 flush 前
  * 检查剩余寿命,过半就换新的——省去精确计时,也不会踩到边界过期。
@@ -32,7 +32,7 @@ import {
 export type CollectorConfig = {
     /** hub 基址,如 `https://hapi.bobmcmxciv.xin`。 */
     hubUrl: string
-    /** hub 的 cliApiToken,用来换 gateway JWT。 */
+    /** 独立、可撤销的 admin API token，用来换 gateway JWT。 */
     hubToken: string
     /** 本机标识,默认 os.hostname()。 */
     machine?: string
@@ -54,7 +54,6 @@ export type CollectorConfig = {
     watchdogMs?: number
     /** 与 hub 通信（换 JWT、推快照）的超时，默认 30s。测试里调小以免拖慢整套。 */
     hubTimeoutMs?: number
-    /** 各 provider 凭据。缺省的那家直接跳过采集(不报错、不写空快照)。 */
     credentials: {
         /** Claude 订阅 OAuth accessToken。留空则自动从 ~/.claude/.credentials.json 读。 */
         anthropicAccessToken?: string | null
@@ -129,7 +128,6 @@ export async function collectAll(config: CollectorConfig): Promise<SubscriptionS
         now: config.now ?? (() => Date.now()),
         fetchImpl: config.fetchImpl ?? fetch
     }
-
     const jobs: Array<Promise<SubscriptionSnapshot>> = []
 
     // anthropic 的 token 每轮重读——CLI 刷新后无需重启采集器。
@@ -163,32 +161,38 @@ type TokenCache = { token: string; issuedAt: number }
  *  停了 13 小时，进程还在、数据冻结在最后一次采集）。 */
 const HUB_TIMEOUT_MS = 30_000
 
-/** 给任意 fetch 套上超时。AbortController 是唯一能真正打断挂起连接的手段。 */
-async function fetchWithTimeout(
+/** Keep the deadline armed until response consumption completes, not just until headers arrive. */
+async function fetchWithTimeout<T>(
     fetchImpl: typeof fetch,
     url: string,
     init: RequestInit,
+    consume: (response: Response) => Promise<T>,
     timeoutMs = HUB_TIMEOUT_MS
-): Promise<Response> {
+): Promise<T> {
     const controller = new AbortController()
     const cancel = setTimeout(() => controller.abort(), timeoutMs)
     try {
-        return await fetchImpl(url, { ...init, signal: controller.signal })
+        const res = await fetchImpl(url, { ...init, signal: controller.signal })
+        return await consume(res)
     } finally {
         clearTimeout(cancel)
     }
 }
 
 export async function authenticate(config: CollectorConfig, fetchImpl: typeof fetch): Promise<string> {
-    const res = await fetchWithTimeout(fetchImpl, new URL('/api/auth', config.hubUrl).toString(), {
+    return await fetchWithTimeout(fetchImpl, new URL('/api/auth', config.hubUrl).toString(), {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ accessToken: config.hubToken })
+    }, async (res) => {
+        if (!res.ok) {
+            await res.body?.cancel()
+            throw new Error(`auth failed: HTTP ${res.status}`)
+        }
+        const body = await res.json() as { token?: string }
+        if (!body.token) throw new Error('auth response has no token')
+        return body.token
     }, config.hubTimeoutMs)
-    if (!res.ok) throw new Error(`auth failed: HTTP ${res.status}`)
-    const body = await res.json() as { token?: string }
-    if (!body.token) throw new Error('auth response has no token')
-    return body.token
 }
 
 export async function pushSnapshots(
@@ -197,15 +201,17 @@ export async function pushSnapshots(
     snapshots: SubscriptionSnapshot[],
     fetchImpl: typeof fetch
 ): Promise<void> {
-    const res = await fetchWithTimeout(fetchImpl, new URL('/api/subscription/report', config.hubUrl).toString(), {
+    await fetchWithTimeout(fetchImpl, new URL('/api/subscription/report', config.hubUrl).toString(), {
         method: 'POST',
         headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
         body: JSON.stringify({ snapshots })
+    }, async (res) => {
+        if (!res.ok) {
+            const text = await res.text()
+            throw new Error(`report failed: HTTP ${res.status} ${text.slice(0, 200)}`)
+        }
+        await res.arrayBuffer()
     }, config.hubTimeoutMs)
-    if (!res.ok) {
-        const text = await res.text().catch(() => '')
-        throw new Error(`report failed: HTTP ${res.status} ${text.slice(0, 200)}`)
-    }
 }
 
 export type CollectorHandle = {
@@ -255,12 +261,12 @@ export function startCollector(config: CollectorConfig): CollectorHandle {
     async function runOnce(): Promise<{ collected: number; pushed: boolean }> {
         const snapshots = await collectAll(config)
         if (snapshots.length === 0) {
-            log('没有配置任何 provider 凭据,本轮无采集')
+            safeLog('没有配置任何 provider 凭据,本轮无采集')
             return { collected: 0, pushed: false }
         }
         const failed = snapshots.filter(s => s.error !== null)
         if (failed.length > 0) {
-            log(`采集完成 ${snapshots.length} 条,其中 ${failed.length} 条失败: ` +
+            safeLog(`采集完成 ${snapshots.length} 条,其中 ${failed.length} 条失败: ` +
                 failed.map(s => `${s.provider}(${s.error})`).join(', '))
         }
         try {
@@ -288,7 +294,6 @@ export function startCollector(config: CollectorConfig): CollectorHandle {
                 // **必须在 finally**。放在 catch 之后的话，只要 catch 里那句 log 抛了
                 // （计划任务里 stdout 是关闭的句柄，写它会 EPIPE），就再也不会重新
                 // 武装定时器：进程活着、循环已死、页面数据永远停在最后一次。
-                checkWatchdog()
                 scheduleNext()
             }
         }, intervalMs)
@@ -297,18 +302,26 @@ export function startCollector(config: CollectorConfig): CollectorHandle {
     /**
      * 看门狗：连续多久没有一次成功推送就主动退出。
      *
-     * 上面那些修补堵的是**已知**的挂死路径；这条兜的是未知的。计划任务配了
-     * 失败每分钟重启，所以退出即自愈，比一个活着但什么都不干的进程强得多。
+     * 注意它**必须跑在自己的定时器上**，不能挂进轮询回调的 finally——那一轮 await 挂住
+     * 时 finally 永不到达，看门狗跟着一起死，等于没有看门狗。独立 interval 保证
+     * "某一轮永远不返回"这条路也会被它终结。
      */
     function checkWatchdog(): void {
+        if (stopped) return
         const silentFor = now() - lastSuccessAt
         if (silentFor < watchdogMs) return
         safeLog(`看门狗触发：已连续 ${Math.round(silentFor / 60000)} 分钟没有成功推送，退出让计划任务重启`)
         stopped = true
         if (timer) { clearTimeout(timer); timer = null }
+        if (watchdogTimer) { clearInterval(watchdogTimer); watchdogTimer = null }
         // 非零退出，让计划任务的重启策略接手。
         if (typeof process !== 'undefined') process.exit(1)
     }
+
+    // 独立看门狗定时器：检查周期封顶 1 分钟（再密的检查也没意义，窗口通常几十分钟），
+    // 下限跟 watchdogMs——测试把窗口调到 ms 级时照样能及时触发。
+    let watchdogTimer: ReturnType<typeof setTimeout> | null =
+        setInterval(checkWatchdog, Math.min(watchdogMs, 60_000))
 
     // 启动即跑一轮,不等首个 interval(测试里用 eager:false 关掉以便精确计数)。
     if (config.eager !== false) {
@@ -325,6 +338,7 @@ export function startCollector(config: CollectorConfig): CollectorHandle {
         stop: () => {
             stopped = true
             if (timer) { clearTimeout(timer); timer = null }
+            if (watchdogTimer) { clearInterval(watchdogTimer); watchdogTimer = null }
         }
     }
 }

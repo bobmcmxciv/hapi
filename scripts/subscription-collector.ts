@@ -11,7 +11,7 @@
  *
  * 必需环境变量:
  *   HAPI_SUB_HUB_URL     hub 基址,如 https://hapi.bobmcmxciv.xin
- *   HAPI_SUB_HUB_TOKEN   hub 的 cliApiToken(换 gateway JWT 用)
+ *   HAPI_SUB_HUB_TOKEN   独立、可撤销的 admin API token(换 gateway JWT 用)
  *
  * 可选:
  *   HAPI_SUB_MACHINE     本机标识,默认 os.hostname()

@@ -172,6 +172,22 @@ describe('deepseek adapter', () => {
         expect(snap.error).toBe('ECONNRESET')
         expect(snap.account_key).toBe('…12345678')
     })
+
+    test('headers 到了但 body 迟迟不到——超时必须盖到响应体读完', async () => {
+        // 真实 fetch 的行为：Response 一到 promise 就 resolve，信号 abort 时挂起的
+        // 读取被 reject。timeout 若只包到 headers，这种连接会让 await 永不返回。
+        const fetchImpl = ((_url: string, init?: RequestInit) => Promise.resolve(new Response(
+            new ReadableStream<Uint8Array>({ start(controller) {
+                init?.signal?.addEventListener('abort', () => controller.error(new Error('aborted')))
+            } }),
+            { status: 200, headers: { 'content-type': 'application/json' } }
+        ))) as unknown as typeof fetch
+
+        const snap = await collectDeepSeek({ ...ctxWith(fetchImpl), timeoutMs: 30 }, 'sk-abcdefgh12345678')
+        expect(snap.provider).toBe('deepseek')
+        expect(snap.error).not.toBeNull()
+        expect(snap.error).toContain('abort')
+    })
 })
 
 describe('kimi adapter', () => {

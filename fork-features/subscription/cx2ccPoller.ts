@@ -93,8 +93,8 @@ export function cx2ccResponseToSnapshot(
     response: Cx2ccRawUsage,
     opts: { machine: string; reportedAt: number }
 ): SubscriptionSnapshot {
-    const primary = response.rate_limit?.primary_window ?? null
-    const secondary = response.rate_limit?.secondary_window ?? null
+    const primary = response?.rate_limit?.primary_window ?? null
+    const secondary = response?.rate_limit?.secondary_window ?? null
     // 主窗口选 used_percent 更高的那个(与 cc-switch extractor 同规则),
     // 便于顶部进度条一眼看出瓶颈在哪。
     const primaryIsMain = !!primary && (!secondary || (primary.used_percent ?? 0) >= (secondary.used_percent ?? 0))
@@ -104,16 +104,16 @@ export function cx2ccResponseToSnapshot(
     if (w1) windows.push(w1)
     if (w2) windows.push(w2)
 
-    const email = typeof response.email === 'string' ? response.email : null
+    const email = typeof response?.email === 'string' ? response.email : null
     const who = email ? ` · ${email.split('@')[0]?.slice(0, 8) ?? ''}` : ''
-    const planName = `ChatGPT ${response.plan_type ?? '?'}${who}`
+    const planName = `ChatGPT ${response?.plan_type ?? '?'}${who}`
 
     return {
         machine: opts.machine,
         provider: 'cx2cc',
         // account_key 首选邮箱;没邮箱就退回到 plan_type,再没有就固定 'default'。
         // 保持稳定的目的:同一账号多次采集要 upsert 到同一行。
-        account_key: email ?? response.plan_type ?? 'default',
+        account_key: email ?? response?.plan_type ?? 'default',
         plan_name: planName,
         windows,
         balance: null,
@@ -160,7 +160,6 @@ export function cx2ccAccountToSnapshot(
 ): SubscriptionSnapshot {
     const email = typeof account.email === 'string' && account.email ? account.email : null
     const plan = typeof account.plan === 'string' && account.plan ? account.plan : '?'
-
     let windows: SubscriptionWindow[]
     if (opts.detailedWindows && opts.detailedWindows.length > 0) {
         windows = opts.detailedWindows
@@ -204,12 +203,18 @@ export function cx2ccAccountsToSnapshots(
     usage: Cx2ccRawUsage | null,
     opts: { machine: string; reportedAt: number }
 ): SubscriptionSnapshot[] {
-    const list = accounts.accounts ?? []
+    // accounts 可能是 null / 非对象；accounts.accounts 也可能不是数组（网关异常时返回
+    // {error:...} 之类）。一切异形都当「空账号池」回落，而不是让本函数抛出去。
+    const rawList = accounts && typeof accounts === 'object' ? accounts.accounts : null
+    const list = (Array.isArray(rawList) ? rawList : []).filter(
+        (a): a is Cx2ccAccount => a !== null && typeof a === 'object'
+    )
     if (list.length === 0) return []
 
     // 生效账号的详细窗口来自 /usage。判定优先用顶层 `active` 字段对 id,
     // 退而求其次看各条目自己的 active 标记。
-    const activeId = typeof accounts.active === 'string' ? accounts.active : null
+    const activeId = accounts && typeof accounts === 'object' && typeof accounts.active === 'string'
+        ? accounts.active : null
     const detailed = usage ? cx2ccResponseToSnapshot(usage, opts).windows : []
 
     return list.map(account => {
@@ -257,8 +262,11 @@ export function startCx2ccPoller(opts: Cx2ccPollerOptions): Cx2ccPollerHandle {
 
     let stopped = false
     let timer: ReturnType<typeof setTimeout> | null = null
+    let inFlight: Promise<void> | null = null
 
-    /** `/usage` 的兄弟路径。opts.url 指向 `.../usage`，把末段换成 `accounts`。 */
+    /** `/usage` 的兄弟路径。opts.url 指向 `.../usage`，把末段换成 `accounts`。
+     *  推导失败（URL 不以 /usage 结尾）时保持原样，pollOnce 会跳过 /accounts
+     *  而不是把 /usage 当 /accounts 再拉一遍。 */
     const accountsUrl = opts.accountsUrl ?? opts.url.replace(/\/usage(\?|$)/, '/accounts$1')
 
     async function getJson(url: string): Promise<{ ok: true; body: unknown } | { ok: false; message: string }> {
@@ -270,58 +278,107 @@ export function startCx2ccPoller(opts: Cx2ccPollerOptions): Cx2ccPollerHandle {
                 headers: { 'x-api-key': opts.apiKey, 'User-Agent': 'hapi-hub-cx2cc-poller/1.0' },
                 signal: controller.signal
             })
-            if (!res.ok) return { ok: false, message: `HTTP ${res.status}` }
+            if (!res.ok) {
+                // 不读 body 也要把它放掉——keep-alive 连接上未消费的错误响应会挂住
+                // socket,后续请求复用到这条连接就表现为莫名其妙的超时。
+                await res.arrayBuffer().catch(() => new ArrayBuffer(0))
+                return { ok: false, message: `HTTP ${res.status}` }
+            }
             return { ok: true, body: await res.json() }
         } catch (err) {
+            if (controller.signal.aborted) return { ok: false, message: `timeout after ${timeoutMs}ms` }
             return { ok: false, message: err instanceof Error ? err.message : String(err) }
         } finally {
             clearTimeout(cancel)
         }
     }
 
-    async function pollOnce(): Promise<void> {
+    /** 写一条错误快照。写库本身也可能坏（DB 关了/磁盘满），再失败就只记日志。 */
+    function writeErrorSnapshot(reportedAt: number, message: string): void {
+        try {
+            opts.subscriptionStore.upsertSnapshots([errorSnapshot({ machine, reportedAt, message })])
+        } catch (storeErr) {
+            log(`错误快照落库也失败：${storeErr instanceof Error ? storeErr.message : String(storeErr)}`)
+        }
+    }
+
+    function isPlainObject(v: unknown): v is Record<string, unknown> {
+        return v !== null && typeof v === 'object' && !Array.isArray(v)
+    }
+
+    async function pollOnceInner(): Promise<void> {
         const reportedAt = now()
 
         // /usage 是主信息源（生效账号的 primary/secondary 窗口明细），它失败就算这轮失败。
         const usage = await getJson(opts.url)
         if (!usage.ok) {
-            opts.subscriptionStore.upsertSnapshots([errorSnapshot({ machine, reportedAt, message: usage.message })])
+            writeErrorSnapshot(reportedAt, usage.message)
             log(usage.message)
+            return
+        }
+        // 200 但 body 不是 JSON 对象（HTML 错误页、null、字符串）——转换层不背这个锅。
+        if (!isPlainObject(usage.body)) {
+            const message = '/usage 响应不是 JSON 对象'
+            writeErrorSnapshot(reportedAt, message)
+            log(message)
             return
         }
         const usageBody = usage.body as Cx2ccRawUsage
 
         // /accounts 是增量信息（把备用账号也拉出来）。它不可用时**不算失败**——
         // 老版本 cx2cc 没有这个路径，回落到只报生效账号，与加这个功能之前等价。
-        const accounts = await getJson(accountsUrl)
-        if (accounts.ok) {
-            const snapshots = cx2ccAccountsToSnapshots(
-                accounts.body as Cx2ccAccountsResponse,
-                usageBody,
-                { machine, reportedAt }
-            )
-            if (snapshots.length > 0) {
-                opts.subscriptionStore.upsertSnapshots(snapshots)
-                return
+        // accountsUrl 推导失败（==url）时干脆不拉，别把 /usage 当 /accounts 再请求一遍。
+        if (accountsUrl !== opts.url) {
+            const accounts = await getJson(accountsUrl)
+            if (accounts.ok) {
+                const snapshots = isPlainObject(accounts.body)
+                    ? cx2ccAccountsToSnapshots(accounts.body as Cx2ccAccountsResponse, usageBody, { machine, reportedAt })
+                    : []
+                if (snapshots.length > 0) {
+                    opts.subscriptionStore.upsertSnapshots(snapshots)
+                    return
+                }
+            } else {
+                log(`/accounts 不可用（${accounts.message}），本轮只报当前生效账号`)
             }
-        } else {
-            log(`/accounts 不可用（${accounts.message}），本轮只报当前生效账号`)
         }
 
         opts.subscriptionStore.upsertSnapshots([cx2ccResponseToSnapshot(usageBody, { machine, reportedAt })])
     }
 
+    /**
+     * 单轮采集。**永不抛出**——网络错、异形响应、转换异常、落库异常全部变成
+     * 错误快照 + 日志。这点是「失败恢复」的地基：调度器靠 pollOnce 不拒绝
+     * 才能保证一轮坏了下一轮照常跑（曾经一轮 TypeError 就把整条定时链打断，
+     * 页面从此显示几小时前的旧数据，就是「余量中断」的根因）。
+     *
+     * 同时用 inFlight 去重：定时器回调与运维手调的 pollOnce() 并发触发时只发一轮请求。
+     */
+    function pollOnce(): Promise<void> {
+        if (!inFlight) {
+            inFlight = pollOnceInner()
+                .catch(err => {
+                    const message = err instanceof Error ? err.message : String(err)
+                    writeErrorSnapshot(now(), message)
+                    log(`poll 内部异常：${message}`)
+                })
+                .finally(() => { inFlight = null })
+        }
+        return inFlight
+    }
+
     function scheduleNext(): void {
         if (stopped) return
-        timer = setTimeout(async () => {
-            await pollOnce()
-            scheduleNext()
+        timer = setTimeout(() => {
+            // pollOnce 自吞异常；.then(onOk,onErr) 双回调再兜一层，保证无论
+            // 发生什么下一轮调度都会发生——绝不出现「一轮失败 → 整条链死掉」。
+            pollOnce().then(scheduleNext, scheduleNext)
         }, opts.intervalMs)
     }
 
     // 立刻跑一次,不等首个 interval——启动窗口内前端就能看到当前快照。
     if (opts.eager !== false) {
-        pollOnce().finally(() => scheduleNext())
+        pollOnce().then(scheduleNext, scheduleNext)
     } else {
         scheduleNext()
     }

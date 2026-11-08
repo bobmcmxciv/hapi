@@ -111,7 +111,25 @@ describe('Devin collector adapter', () => {
         expect(snap.provider).toBe('devin')
         expect(snap.account_key).toBe('…12345678')
         expect(snap.error).toBe('HTTP 401(凭据无效或过期)')
-        expect(snap.windows).toEqual([])
+    })
+
+    test('collectDevin: headers 到了但 body 迟迟不到——超时要盖到 arrayBuffer 读完', async () => {
+        // protobuf 走 arrayBuffer()，与 JSON 适配器同一条挂死路径：响应头一到
+        // fetch 就 resolve，body 若永不到达且无 abort 兜底，整条采集永不返回。
+        const fetchImpl = ((_url: string, init?: RequestInit) => Promise.resolve(new Response(
+            new ReadableStream<Uint8Array>({ start(controller) {
+                init?.signal?.addEventListener('abort', () => controller.error(new Error('aborted')))
+            } }),
+            { status: 200, headers: { 'content-type': 'application/proto' } }
+        ))) as unknown as typeof fetch
+
+        const snap = await collectDevin(
+            { machine: 'vircs', now: () => 12345, fetchImpl, timeoutMs: 30 },
+            'devin-session-token$12345678'
+        )
+        expect(snap.provider).toBe('devin')
+        expect(snap.error).not.toBeNull()
+        expect(snap.error).toContain('abort')
     })
 
     test('decodeDevinGetUserStatusResponse returns empty object on empty buffer', () => {

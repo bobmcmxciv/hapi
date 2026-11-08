@@ -310,3 +310,45 @@ journalctl --user -u hapi-hub -f
 > loginctl enable-linger $USER
 > ```
 </details>
+
+## Subscription quota collection stalls
+
+Subscription quota cards use `GET /api/subscription/summary`, separately from the
+message-token usage totals. Check each snapshot's `reported_at` and `error` before
+treating a visible number as current.
+
+Keep the collection routes separate:
+
+- **GPT/cx2cc:** the Hub polls `HAPI_CX2CC_USAGE_URL` and its account-pool endpoint
+  using `HAPI_CX2CC_API_KEY`. Check the gateway and its configured upstream; this
+  path does not depend on the Windows subscription collector.
+- **Antigravity:** the Windows collector invokes the installed `agy -p /usage`
+  command. It keeps the CLI's own authentication and network/proxy configuration.
+- **Devin/DeepSeek:** the Windows collector queries the provider endpoints with
+  its local credentials. Do not redirect these requests through the GPT gateway
+  or force Antigravity's proxy settings onto them.
+
+If all Windows-collected providers share an old timestamp while GPT still
+updates, inspect `HapiSubscriptionCollector` and
+`~/.hapi/logs/subscription-collector.log` on the **collector host** first. Runner
+connectivity alone does not prove that the separate collector task is running.
+The Windows wrapper redirects output directly to a file to avoid console
+QuickEdit blocking its event loop.
+
+`HAPI_SUB_HUB_TOKEN` must contain a valid, independently revocable **admin API
+token**. Retiring an old shared Hub key does not update this separate environment
+file or an already-running collector process. Persistent HTTP 401 requires
+updating that credential on the collector host, not restoring the retired key.
+Keep the environment file ACL-restricted and never print its values in logs.
+
+Hub authentication and report deadlines cover response-body consumption as well
+as response headers. The collector watchdog runs independently of the polling
+callback; after prolonged failed delivery it exits only the collector process,
+allowing its scheduled-task restart policy to take effect. GPT polling schedules
+the next round even after a failed response or snapshot write.
+
+Updating source files does not change a running compiled Hub. Coordinate its
+release window separately from updating the collector host. Do not restart the
+Hub or runners, kill agent sessions, or launch duplicate collectors merely to
+refresh quota cards during session recovery. Leave unreachable hosts' snapshots
+stale rather than publishing another host's data under their identity.

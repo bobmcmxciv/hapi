@@ -42,4 +42,17 @@ describe('Antigravity /usage collector', () => {
         expect(snapshot.error).toBe('agy /usage 执行失败')
         expect(JSON.stringify(snapshot)).not.toContain('secret')
     })
+
+    test('execFile timeout（进程被杀、code=null）报超时而不是执行失败', async () => {
+        // Node execFile timeout 杀掉的进程是 SIGTERM 终止：err.code 为 null，
+        // 标志在 killed/signal/timedOut 上。只认 code==='ETIMEDOUT' 会把超时
+        // 误报成"执行失败"，线上排查方向就跑偏了。
+        const err = Object.assign(new Error('Command failed'), { killed: true, signal: 'SIGTERM', code: null })
+        const snapshot = await collectAntigravity({ machine: 'vircs', now: () => 123 }, 'agy', 'default', async () => { throw err })
+        expect(snapshot.error).toBe('agy /usage 超时')
+
+        const syncErr = Object.assign(new Error('Timed out'), { code: 'ETIMEDOUT' })
+        const snap2 = await collectAntigravity({ machine: 'vircs', now: () => 123 }, 'agy', 'default', async () => { throw syncErr })
+        expect(snap2.error).toBe('agy /usage 超时')
+    })
 })
