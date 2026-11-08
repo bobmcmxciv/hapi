@@ -2,6 +2,7 @@ import { z } from 'zod'
 import type { CodexCollaborationMode, PermissionMode } from './modes'
 import type { CopilotAgentMode } from './copilotModes'
 import type { SessionEndReason } from './schemas'
+import { RuntimePublicationSchema, type RuntimePublication } from './runtimeTimeline'
 export { SessionEndReasonSchema, type SessionEndReason } from './schemas'
 
 export type SocketErrorReason = 'namespace-missing' | 'access-denied' | 'not-found'
@@ -158,6 +159,18 @@ export const CancelQueuedMessageAckSchema = z.object({
 
 export type CancelQueuedMessageAck = z.infer<typeof CancelQueuedMessageAckSchema>
 
+// Live runtime frames use a dedicated channel, never the legacy message stream.
+export const SessionRuntimePayloadSchema = z.object({
+    sid: z.string(),
+    publication: RuntimePublicationSchema
+})
+
+export type SessionRuntimePayload = z.infer<typeof SessionRuntimePayloadSchema>
+export type SessionRuntimeAck =
+    | { result: 'ok' }
+    | { result: 'resync' }
+    | { result: 'error' }
+
 export const UpdateSchema = z.object({
     id: z.string(),
     seq: z.number(),
@@ -234,6 +247,7 @@ export interface ServerToClientEvents {
     // Sent to the CLI when the last agent-terminal viewer leaves, so it stops
     // streaming PTY output to the hub until someone subscribes again.
     'agent-terminal:idle': (data: AgentTerminalRefreshPayload) => void
+    'session-runtime:resync': (data: { sid: string; epoch?: string }) => void
     error: (data: { message: string; code?: SocketErrorReason; scope?: 'session' | 'machine'; id?: string }) => void
 }
 
@@ -260,6 +274,7 @@ export interface ClientToServerEvents {
     'session-ready': (data: { sid: string; time: number }) => void
     'session-end': (data: { sid: string; time: number; reason?: SessionEndReason }) => void
     'messages-consumed': (data: { sid: string; localIds: string[] }) => void
+    'session-runtime': (data: { sid: string; publication: RuntimePublication }, ack?: (result: SessionRuntimeAck) => void) => void
     'update-metadata': (data: { sid: string; expectedVersion: number; metadata: unknown }, cb: (answer: UpdateMetadataAck) => void) => void
     'update-state': (data: { sid: string; expectedVersion: number; agentState: unknown | null }, cb: (answer: UpdateStateAck) => void) => void
     'machine-alive': (data: { machineId: string; time: number; health?: unknown }) => void

@@ -16,7 +16,8 @@ export class ExecutionDispatcher {
     constructor(
         private readonly store: MultiUserGatewayStore,
         private readonly resolveSessionMachineId?: SessionMachineResolver,
-        private readonly resolveSessionPath?: SessionPathResolver
+        private readonly resolveSessionPath?: SessionPathResolver,
+        private readonly resolveResourceNamespace?: (type: ResourceType, id: string) => string | null
     ) {}
 
     authorize(input: { accountId: number; capability: Capability; resource?: { type: ResourceType; id: string } }): DispatchDecision {
@@ -26,7 +27,15 @@ export class ExecutionDispatcher {
             return { kind: 'allow', context: { account, namespace: account.defaultNamespace, capability: input.capability, resource: null } }
         }
         const resource = this.store.getResource(input.resource.type, input.resource.id)
-        if (!resource) return { kind: 'deny', reason: 'resource-not-found' }
+        if (!resource) {
+            // Global admin reads use the real core namespace, never an ownership binding.
+            const namespace = account.role === 'admin' && input.capability === 'read'
+                ? this.resolveResourceNamespace?.(input.resource.type, input.resource.id)
+                : null
+            return namespace != null
+                ? { kind: 'allow', context: { account, namespace, capability: input.capability, resource: null } }
+                : { kind: 'deny', reason: 'resource-not-found' }
+        }
         const level = input.resource.type === 'session'
             ? sessionAccessLevel(this.store, account.id, input.resource.id, this.resolveSessionMachineId, this.resolveSessionPath)
             : this.store.accessLevel('machine', input.resource.id, account.id)

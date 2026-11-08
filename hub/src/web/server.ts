@@ -43,8 +43,11 @@ import type { Server as SocketEngine } from '@socket.io/bun-engine'
 import { jwtVerify } from 'jose'
 import type { WebSocketData } from '@socket.io/bun-engine'
 import { loadEmbeddedAssetMap, type EmbeddedWebAsset } from './embeddedAssets'
+import { mountBetaAssets } from './betaAssets'
 import { isBunCompiled } from '../utils/bunCompiled'
 import type { Store } from '../store'
+import type { RuntimeTimelineRegistry } from '../sync/runtimeTimeline'
+import { createRuntimeTimelineRoutes } from './routes/runtimeTimeline'
 import { mountMultiUserGateway, mountMultiUserPostAuth } from '../../../fork-features/multi-user/hubMount'
 import { createSseRequestFilterFactory } from '../../../fork-features/multi-user/sseVisibility'
 import type { MultiUserGatewayStore } from '../../../fork-features/multi-user/gatewayStore'
@@ -245,6 +248,7 @@ function createWebApp(options: {
     multiUser: { store: MultiUserGatewayStore; coreUserId: number; subscriptionStore: SubscriptionStore }
     blobs?: GeneratedBlobServices
     getEventLoopLag?: () => EventLoopLagSnapshot
+    runtimeRegistry: RuntimeTimelineRegistry
 }): Hono<WebAppEnv> {
     const app = new Hono<WebAppEnv>()
 
@@ -351,6 +355,11 @@ function createWebApp(options: {
             createSessionPathResolver(options.getSyncEngine)
         )
     ))
+    app.route('/api', createRuntimeTimelineRoutes(
+        () => options.runtimeRegistry,
+        options.getSyncEngine,
+        { gatewayStore: multiUserStore, jwtSecret: options.jwtSecret }
+    ))
     // ⚠️ 顺序是承重的（fork multi-user 隔离）：createSessionsRoutes 里的
     // `GET /sessions` 用 `getSessionsByNamespace(c.get('namespace'))` 列会话，而
     // 网关下所有账号共享同一 core namespace（default），这一句会返回**全部账号**
@@ -439,6 +448,8 @@ function createWebApp(options: {
         app.get('/download/:token/:file', (c) => serveDownload(c, false))
         app.on('HEAD', '/download/:token/:file', (c) => serveDownload(c, true))
     }
+
+    mountBetaAssets(app, process.env.HAPI_BETA_WEB_DIR || join(configuration.dataDir, 'web-beta'))
 
     // Skip static serving in relay mode, show helpful message on root
     if (options.relayMode) {
@@ -557,6 +568,7 @@ export async function startWebServer(options: {
     multiUser: { store: MultiUserGatewayStore; coreUserId: number; subscriptionStore: SubscriptionStore }
     blobs?: GeneratedBlobServices
     getEventLoopLag?: () => EventLoopLagSnapshot
+    runtimeRegistry: RuntimeTimelineRegistry
 }): Promise<BunServer<WebSocketData>> {
     const isCompiled = isBunCompiled()
     const embeddedAssetMap = isCompiled ? await loadEmbeddedAssetMap() : null
@@ -573,7 +585,8 @@ export async function startWebServer(options: {
         officialWebUrl: options.officialWebUrl,
         multiUser: options.multiUser,
         blobs: options.blobs,
-        getEventLoopLag: options.getEventLoopLag
+        getEventLoopLag: options.getEventLoopLag,
+        runtimeRegistry: options.runtimeRegistry
     })
 
     const configuration = getConfiguration()

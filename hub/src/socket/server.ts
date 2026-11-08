@@ -14,6 +14,9 @@ import type { SyncEvent } from '../sync/syncEngine'
 import { TerminalRegistry } from './terminalRegistry'
 import { clearUserTerminalBuffer } from './userTerminalBuffer'
 import type { CliSocketWithData, SocketData, SocketServer } from './socketTypes'
+import type { RuntimeTimelineRegistry } from '../sync/runtimeTimeline'
+import type { MultiUserGatewayStore } from '../../../fork-features/multi-user/gatewayStore'
+import type { SessionMachineResolver, SessionPathResolver } from '../../../fork-features/multi-user/machineInheritance'
 
 const jwtPayloadSchema = z.object({
     uid: z.number(),
@@ -49,6 +52,11 @@ export type SocketServerDeps = {
     resolveTerminalNamespace?: (accountId: number, sessionId: string) => string | null
     resolveCliNamespace?: (token: string) => string | null
     sanitizeSessionMetadata?: (metadata: unknown) => unknown
+    runtimeRegistry?: RuntimeTimelineRegistry
+    resolveCliIdentity?: (token: string) => { accountId: number; tokenId: number; namespace: string } | null
+    gatewayStore?: MultiUserGatewayStore
+    resolveSessionMachineId?: SessionMachineResolver
+    resolveSessionPath?: SessionPathResolver
 }
 
 export function createSocketServer(deps: SocketServerDeps): {
@@ -116,15 +124,30 @@ export function createSocketServer(deps: SocketServerDeps): {
     cliNs.use((socket, next) => {
         const auth = socket.handshake.auth as Record<string, unknown> | undefined
         const token = typeof auth?.token === 'string' ? auth.token : null
-        const parsedToken = token ? parseAccessToken(token) : null
-        if (!parsedToken || !constantTimeEquals(parsedToken.baseToken, configuration.cliApiToken)) {
-            const gatewayNamespace = token ? deps.resolveCliNamespace?.(token) ?? null : null
-            if (!gatewayNamespace) return next(new Error('Invalid token'))
-            socket.data.namespace = gatewayNamespace
+        // A configured gateway is authoritative, including rejection/revocation.
+        // Never let the legacy shared key bypass its token inventory.
+        if (deps.resolveCliIdentity) {
+            const identity = token ? deps.resolveCliIdentity(token) : null
+            if (!identity) return next(new Error('Invalid token'))
+            socket.data.namespace = identity.namespace
+            socket.data.gatewayAccountId = identity.accountId
+            socket.data.gatewayTokenId = identity.tokenId
             next()
             return
         }
+        if (deps.resolveCliNamespace) {
+            const namespace = token ? deps.resolveCliNamespace(token) : null
+            if (!namespace) return next(new Error('Invalid token'))
+            socket.data.namespace = namespace
+            next()
+            return
+        }
+        const parsedToken = token ? parseAccessToken(token) : null
+        if (!parsedToken || !constantTimeEquals(parsedToken.baseToken, configuration.cliApiToken)) {
+            return next(new Error('Invalid token'))
+        }
         socket.data.namespace = parsedToken.namespace
+        socket.data.cliTrusted = true
         next()
     })
     cliNs.on('connection', (socket) => registerCliHandlers(socket as CliSocketWithData, {
@@ -141,7 +164,11 @@ export function createSocketServer(deps: SocketServerDeps): {
         onSessionActivity: deps.onSessionActivity,
         onSweepImmediateQueued: deps.onSweepImmediateQueued,
         onMessagesConsumed: deps.onMessagesConsumed,
-        sanitizeSessionMetadata: deps.sanitizeSessionMetadata
+        sanitizeSessionMetadata: deps.sanitizeSessionMetadata,
+        runtimeRegistry: deps.runtimeRegistry,
+        gatewayStore: deps.gatewayStore,
+        resolveSessionMachineId: deps.resolveSessionMachineId,
+        resolveSessionPath: deps.resolveSessionPath
     }))
 
     terminalNs.use(async (socket, next) => {

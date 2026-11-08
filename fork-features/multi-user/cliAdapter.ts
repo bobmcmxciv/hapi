@@ -2,6 +2,12 @@ import type { MultiUserGatewayStore } from './gatewayStore'
 import { parseAccessToken } from '../../hub/src/utils/accessToken'
 import { hashApiToken } from './token'
 
+export type GatewayCliIdentity = {
+    accountId: number
+    tokenId: number
+    namespace: string
+}
+
 /**
  * 把 CLI 的 bearer token 解析成它所属的 namespace。两种候选哈希按序尝试：
  *
@@ -15,7 +21,7 @@ import { hashApiToken } from './token'
  * 不能自证身份。这条是 pre-gateway 时代就有的安全属性，别退化。
  * base64url 字母表不含 `:`，两种取值空间不重叠，先后顺序不会误判。
  */
-export function resolveGatewayCliNamespace(store: MultiUserGatewayStore, plaintextToken: string): string | null {
+export function resolveGatewayCliIdentity(store: MultiUserGatewayStore, plaintextToken: string): GatewayCliIdentity | null {
     const candidates = [plaintextToken]
     const parsed = parseAccessToken(plaintextToken)
     if (parsed && parsed.baseToken !== plaintextToken) candidates.push(parsed.baseToken)
@@ -26,7 +32,11 @@ export function resolveGatewayCliNamespace(store: MultiUserGatewayStore, plainte
         const account = store.getAccount(token.accountId)
         if (!account || account.disabledAt !== null) return null
         store.touchTokenLastUsed(token.id)
-        return token.namespace
+        return { accountId: token.accountId, tokenId: token.id, namespace: token.namespace }
     }
     return null
+}
+
+export function resolveGatewayCliNamespace(store: MultiUserGatewayStore, plaintextToken: string): string | null {
+    return resolveGatewayCliIdentity(store, plaintextToken)?.namespace ?? null
 }

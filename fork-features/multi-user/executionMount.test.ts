@@ -150,7 +150,7 @@ describe('createExecutionMiddleware', () => {
             getStore: () => null
         })
         const controller = new AbortController()
-        const response = await app.request('/api/events', {
+        const response = await app.request('/api/events?allNamespaces=true', {
             headers: { authorization: `Bearer ${token}` },
             signal: controller.signal
         })
@@ -205,6 +205,8 @@ describe('列表可见性：admin 看整个 namespace，普通用户看自己的
         const records = new Map(sessions.map(s => [s.id, { id: s.id, namespace: 'default', metadata: null, agentState: null, active: false, createdAt: 1, updatedAt: 1, seq: 0 }]))
         const machines = [{ id: 'm-admin', namespace: 'default' }, { id: 'm-peter', namespace: 'default' }]
         const engine = {
+            getSessions: () => [...records.values()],
+            getMachines: () => machines,
             getSessionsByNamespace: () => [...records.values()],
             getSession: (id: string) => records.get(id),
             getOnlineMachinesByNamespace: () => machines,
@@ -271,10 +273,10 @@ describe('列表可见性：admin 看整个 namespace，普通用户看自己的
         store.close()
     })
 
-    it('发现模式只读 vs 列表模式认领：带 limit 不认领未绑定会话，不带则认领', async () => {
+    it('普通用户发现模式只读，列表模式仍认领自己 namespace 的未绑定会话', async () => {
         // 引擎里放一条未绑定的孤儿会话（default namespace，无 resource binding）。
         const store = new MultiUserGatewayStore(':memory:')
-        const admin = store.createAccount('admin', 'admin', 'default', null)
+        const owner = store.createAccount('owner', 'user', 'default', null)
         const orphan = { id: 's-orphan', namespace: 'default', metadata: null, agentState: null, active: false, createdAt: 1, updatedAt: 5, seq: 0 }
         const engine = {
             getSessionsByNamespace: () => [orphan],
@@ -286,12 +288,12 @@ describe('列表可见性：admin 看整个 namespace，普通用户看自己的
         mountExecutionRoutes(app, { store, jwtSecret, getSyncEngine: () => engine, getSseManager: () => null, getStore: () => null })
 
         // 发现模式（带 order/limit）：只读，孤儿会话不被认领。
-        await app.request('/api/sessions?order=updatedAt&limit=30', { headers: { authorization: `Bearer ${await sign(admin.id)}` } })
+        await app.request('/api/sessions?order=updatedAt&limit=30', { headers: { authorization: `Bearer ${await sign(owner.id)}` } })
         expect(store.getResource('session', 's-orphan')).toBeNull()
 
-        // 列表模式（web，无参）：bind-on-view 认领孤儿到 admin（既有契约不变）。
-        await app.request('/api/sessions', { headers: { authorization: `Bearer ${await sign(admin.id)}` } })
-        expect(store.getResource('session', 's-orphan')?.ownerAccountId).toBe(admin.id)
+        // 普通用户列表模式仍认领自己的孤儿；admin 全局读取不认领。
+        await app.request('/api/sessions', { headers: { authorization: `Bearer ${await sign(owner.id)}` } })
+        expect(store.getResource('session', 's-orphan')?.ownerAccountId).toBe(owner.id)
         store.close()
     })
 })
@@ -330,6 +332,7 @@ describe('机器授权向下继承：被授权机器上新建的会话自动出�
             agentState: null, active: false, createdAt: 1, updatedAt: 1, seq: 0
         }]))
         const engine = {
+            getSessions: () => [...records.values()],
             getSessionsByNamespace: (namespace: string) => namespace === 'default' ? [...records.values()] : [],
             getSession: (id: string) => records.get(id),
             getOnlineMachinesByNamespace: () => [],
@@ -549,6 +552,7 @@ describe('/api/usage/summary：可见性与会话列表同构，聚合走真实 
             id: spec.id, namespace: 'default', metadata: { path: `/tmp/${spec.id}`, host: spec.host, machineId: `${spec.host}-machine` }, agentState: null, active: false, createdAt: 1, updatedAt: 1, seq: 0
         }]))
         const engine = {
+            getSessions: () => [...records.values()],
             getSessionsByNamespace: () => [...records.values()],
             getSession: (id: string) => records.get(id)
         } as unknown as SyncEngine
@@ -768,6 +772,8 @@ describe('目录限定的机器授权：只放行限定目录内的机器写操�
 
         const machines = [{ id: 'm-vircs', namespace: 'default' }]
         const engine = {
+            getSessions: () => [...records.values()],
+            getMachines: () => machines,
             getSessionsByNamespace: () => [...records.values()],
             getSession: (id: string) => records.get(id),
             getOnlineMachinesByNamespace: () => machines,
@@ -936,6 +942,8 @@ describe('bind-on-view 不抢别人机器上的会话（2026-08-10 生产事故�
         ])
         const machines = [{ id: 'm-vircs', namespace: 'default' }]
         const engine = {
+            getSessions: () => [...records.values()],
+            getMachines: () => machines,
             getSessionsByNamespace: () => [...records.values()],
             getSession: (id: string) => records.get(id),
             getOnlineMachinesByNamespace: () => machines,
@@ -967,12 +975,13 @@ describe('bind-on-view 不抢别人机器上的会话（2026-08-10 生产事故�
         store.close()
     })
 
-    it('admin 列表后：经机器继承支绑定给机器主人而不是 admin，且 admin 仍看得到', async () => {
-        const { store, app, admin, owner } = seedUnbound()
+    it('admin 列表全局可见但不创建或转移任何会话归属', async () => {
+        const { store, app, admin } = seedUnbound()
         const response = await list(app, admin.id)
         const ids = ((await response.json()) as { sessions: Array<{ id: string }> }).sessions.map(s => s.id)
         expect(ids).toContain('s-unbound-vircs')
-        expect(store.getResource('session', 's-unbound-vircs')?.ownerAccountId).toBe(owner.id)
+        expect(store.getResource('session', 's-unbound-vircs')).toBeNull()
+        expect(store.getResource('session', 's-orphan-unregistered')).toBeNull()
         store.close()
     })
 
@@ -990,5 +999,86 @@ describe('bind-on-view 不抢别人机器上的会话（2026-08-10 生产事故�
         // s-unbound-vircs 在 hapi\ 下（限定外）：第 1 支跳过（别人机器）、第 3 支跳过（越界）
         expect(store.getResource('session', 's-unbound-vircs')).toBeNull()
         store.close()
+    })
+})
+
+describe('admin global visibility without ownership mutation', () => {
+    const jwtSecret = new TextEncoder().encode('test-secret-test-secret-test-secret')
+
+    it('lists and reads bound and orphan resources across namespaces without claiming them', async () => {
+        const store = new MultiUserGatewayStore(':memory:')
+        try {
+            const admin = store.createAccount('admin', 'admin', 'admin-ns')
+            const owner = store.createAccount('owner', 'user', 'foreign-ns')
+            store.bindResource({ resourceType: 'session', resourceId: 'bound', ownerAccountId: owner.id, coreNamespace: 'foreign-ns' })
+            store.bindResource({ resourceType: 'machine', resourceId: 'bound-machine', ownerAccountId: owner.id, coreNamespace: 'foreign-ns' })
+            const sessions = ['bound', 'orphan'].map(id => ({
+                id, namespace: 'foreign-ns', metadata: null, agentState: null,
+                active: false, createdAt: 1, updatedAt: 1, seq: 0
+            }))
+            const machines = ['bound-machine', 'orphan-machine'].map(id => ({ id, namespace: 'foreign-ns' }))
+            const engine = {
+                getSessions: () => sessions,
+                getMachines: () => machines,
+                getSessionsByNamespace: (namespace: string) => sessions.filter(session => session.namespace === namespace),
+                getOnlineMachinesByNamespace: (namespace: string) => machines.filter(machine => machine.namespace === namespace),
+                getSession: (id: string) => sessions.find(session => session.id === id),
+                getMachine: (id: string) => machines.find(machine => machine.id === id)
+            } as unknown as SyncEngine
+            const app = new Hono<WebAppEnv>()
+            mountExecutionRoutes(app, { store, jwtSecret, getSyncEngine: () => engine, getSseManager: () => null, getStore: () => null })
+            app.use('/api/*', createExecutionMiddleware({ store, jwtSecret, getSyncEngine: () => engine }))
+            app.get('/api/sessions/:id', c => c.json({ namespace: c.get('namespace') }))
+            app.get('/api/machines/:id', c => c.json({ namespace: c.get('namespace') }))
+            const token = await new SignJWT({ gaid: admin.id }).setProtectedHeader({ alg: 'HS256' }).sign(jwtSecret)
+            const headers = { authorization: `Bearer ${token}` }
+            const sessionResponse = await app.request('/api/sessions', { headers })
+            expect(sessionResponse.status).toBe(200)
+            expect(await sessionResponse.json()).toMatchObject({ sessions: [{ id: 'bound' }, { id: 'orphan' }] })
+            const machineResponse = await app.request('/api/machines', { headers })
+            expect(machineResponse.status).toBe(200)
+            expect(await machineResponse.json()).toEqual({ machines: [{ ...machines[0], ownerUsername: 'owner' }, machines[1]] })
+            for (const path of ['/api/sessions/bound', '/api/sessions/orphan', '/api/machines/bound-machine', '/api/machines/orphan-machine']) {
+                const response = await app.request(path, { headers })
+                expect(response.status).toBe(200)
+                expect(await response.json()).toEqual({ namespace: 'foreign-ns' })
+            }
+            expect(store.getResource('session', 'bound')?.ownerAccountId).toBe(owner.id)
+            expect(store.getResource('machine', 'bound-machine')?.ownerAccountId).toBe(owner.id)
+            expect(store.getResource('session', 'orphan')).toBeNull()
+            expect(store.getResource('machine', 'orphan-machine')).toBeNull()
+        } finally {
+            store.close()
+        }
+    })
+
+    it('streams events and toasts for a namespace created after the admin connects', async () => {
+        const store = new MultiUserGatewayStore(':memory:')
+        const manager = new SSEManager(0, new VisibilityTracker())
+        const controller = new AbortController()
+        let cancelReader: (() => Promise<void>) | undefined
+        try {
+            const admin = store.createAccount('admin', 'admin', 'admin-ns')
+            const token = await new SignJWT({ gaid: admin.id }).setProtectedHeader({ alg: 'HS256' }).sign(jwtSecret)
+            const app = new Hono<WebAppEnv>()
+            mountExecutionRoutes(app, { store, jwtSecret, getSyncEngine: () => null, getSseManager: () => manager, getStore: () => null })
+            const response = await app.request(`/api/events?token=${encodeURIComponent(token)}`, { signal: controller.signal })
+            expect(response.status).toBe(200)
+            const reader = response.body!.getReader()
+            cancelReader = () => reader.cancel()
+            expect(new TextDecoder().decode((await reader.read()).value)).toContain('connected')
+            manager.broadcast({ type: 'session-updated', sessionId: 'future-session', namespace: 'future-ns' })
+            expect(new TextDecoder().decode((await reader.read()).value)).toContain('future-session')
+            expect(await manager.sendToast('future-ns', {
+                type: 'toast', data: { title: 'Done', body: 'Ready', sessionId: 'future-session', url: '/sessions/future-session' }
+            })).toBe(1)
+            expect(new TextDecoder().decode((await reader.read()).value)).toContain('"type":"toast"')
+            expect(store.getResource('session', 'future-session')).toBeNull()
+        } finally {
+            controller.abort()
+            await cancelReader?.()
+            manager.stop()
+            store.close()
+        }
     })
 })

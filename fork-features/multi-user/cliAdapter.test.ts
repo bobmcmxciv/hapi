@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest'
-import { resolveGatewayCliNamespace } from './cliAdapter'
+import { resolveGatewayCliIdentity, resolveGatewayCliNamespace } from './cliAdapter'
 import { MultiUserGatewayStore } from './gatewayStore'
 import { createApiToken, hashApiToken } from './token'
 
@@ -14,9 +14,13 @@ describe('gateway CLI adapter', () => {
         const generated = createApiToken()
         const token = store.createToken(account.id, 'runner', generated.hash, 'token-runtime')
         expect(resolveGatewayCliNamespace(store, generated.plaintext)).toBe('token-runtime')
+        expect(resolveGatewayCliIdentity(store, `${generated.plaintext}:forged-namespace`)).toEqual({
+            accountId: account.id, tokenId: token.id, namespace: 'token-runtime'
+        })
         expect(store.getToken(token.id)?.lastUsedAt).not.toBeNull()
         store.revokeToken(token.id, account.id)
         expect(resolveGatewayCliNamespace(store, generated.plaintext)).toBeNull()
+        expect(resolveGatewayCliIdentity(store, `${generated.plaintext}:token-runtime`)).toBeNull()
     })
 
     it('接受带 :namespace 后缀的 pre-gateway token —— 哈希按 baseToken 存', () => {

@@ -8,6 +8,11 @@ import type { AccessErrorReason, AccessResult } from './types'
 import { registerMachineHandlers } from './machineHandlers'
 import { registerRpcHandlers } from './rpcHandlers'
 import { registerSessionHandlers } from './sessionHandlers'
+import { registerRuntimeHandlers } from './runtimeHandlers'
+import type { RuntimeTimelineRegistry } from '../../../sync/runtimeTimeline'
+import { ExecutionDispatcher } from '../../../../../fork-features/multi-user/executionDispatcher'
+import type { MultiUserGatewayStore } from '../../../../../fork-features/multi-user/gatewayStore'
+import type { SessionMachineResolver, SessionPathResolver } from '../../../../../fork-features/multi-user/machineInheritance'
 import { cleanupTerminalHandlers, registerTerminalHandlers } from './terminalHandlers'
 
 type SessionAlivePayload = {
@@ -53,10 +58,14 @@ export type CliHandlersDeps = {
     onMessagesConsumed?: (sessionId: string) => void
     /** fork-features/multi-user: strips injected gateway memory out of CLI-reported titles. */
     sanitizeSessionMetadata?: (metadata: unknown) => unknown
+    runtimeRegistry?: RuntimeTimelineRegistry
+    gatewayStore?: MultiUserGatewayStore
+    resolveSessionMachineId?: SessionMachineResolver
+    resolveSessionPath?: SessionPathResolver
 }
 
 export function registerCliHandlers(socket: CliSocketWithData, deps: CliHandlersDeps): void {
-    const { io, store, rpcRegistry, terminalRegistry, onSessionAlive, onSessionReady, onSessionEnd, onMachineAlive, onWebappEvent, onBackgroundTaskDelta, onSessionActivity, onSweepImmediateQueued, onMessagesConsumed, sanitizeSessionMetadata } = deps
+    const { io, store, rpcRegistry, terminalRegistry, onSessionAlive, onSessionReady, onSessionEnd, onMachineAlive, onWebappEvent, onBackgroundTaskDelta, onSessionActivity, onSweepImmediateQueued, onMessagesConsumed, sanitizeSessionMetadata, runtimeRegistry, gatewayStore, resolveSessionMachineId, resolveSessionPath } = deps
     const terminalNamespace = io.of('/terminal')
     const namespace = typeof socket.data.namespace === 'string' ? socket.data.namespace : null
 
@@ -136,6 +145,36 @@ export function registerCliHandlers(socket: CliSocketWithData, deps: CliHandlers
         resolveSessionAccess,
         emitAccessError
     })
+    if (runtimeRegistry) {
+        const runtimeDispatcher = gatewayStore
+            ? new ExecutionDispatcher(gatewayStore, resolveSessionMachineId, resolveSessionPath)
+            : null
+        const authorizeSessionPublication = socket.data.cliTrusted === true
+            ? () => true
+            : (sessionId: string): boolean => {
+                const accountId = socket.data.gatewayAccountId
+                const tokenId = socket.data.gatewayTokenId
+                if (!runtimeDispatcher || !gatewayStore || typeof accountId !== 'number' || typeof tokenId !== 'number') {
+                    return false
+                }
+                const token = gatewayStore.getToken(tokenId)
+                if (!token || token.revokedAt !== null || token.accountId !== accountId) {
+                    return false
+                }
+                return runtimeDispatcher.authorize({
+                    accountId,
+                    capability: 'operate',
+                    resource: { type: 'session', id: sessionId }
+                }).kind === 'allow'
+            }
+        registerRuntimeHandlers(socket, {
+            store,
+            registry: runtimeRegistry,
+            resolveSessionAccess,
+            emitAccessError,
+            authorizeSessionPublication
+        })
+    }
 
     socket.on('ping', (callback: () => void) => {
         callback()

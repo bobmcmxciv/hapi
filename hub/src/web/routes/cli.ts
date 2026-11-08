@@ -107,13 +107,18 @@ export function createCliRoutes(
         }
 
         const token = parsed.data.replace(/^Bearer\s+/i, '')
-        const configuration = getConfiguration()
-        const parsedToken = parseAccessToken(token)
-        if (!parsedToken || !constantTimeEquals(parsedToken.baseToken, configuration.cliApiToken)) {
-            const namespace = resolveExternalNamespace?.(token) ?? null
+        // Gateway token inventory is authoritative when enabled, even for a
+        // token equal to CLI_API_TOKEN or carrying a namespace suffix.
+        if (resolveExternalNamespace) {
+            const namespace = resolveExternalNamespace(token)
             if (!namespace) return c.json({ error: 'Invalid token' }, 401)
             c.set('namespace', namespace)
             return await next()
+        }
+        const configuration = getConfiguration()
+        const parsedToken = parseAccessToken(token)
+        if (!parsedToken || !constantTimeEquals(parsedToken.baseToken, configuration.cliApiToken)) {
+            return c.json({ error: 'Invalid token' }, 401)
         }
 
         c.set('namespace', parsedToken.namespace)

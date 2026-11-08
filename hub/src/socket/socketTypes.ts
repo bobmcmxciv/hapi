@@ -5,6 +5,9 @@ export type SocketData = {
     namespace?: string
     userId?: number
     gatewayAccountId?: number
+    /** Server-resolved API-token row; rechecked for each runtime publication. */
+    gatewayTokenId?: number
+    cliTrusted?: boolean
 }
 
 export type SocketServer = Server<DefaultEventsMap, DefaultEventsMap, DefaultEventsMap, SocketData>

@@ -12,6 +12,8 @@ export type SSESubscription = {
 }
 
 type SSEConnection = SSESubscription & {
+    /** Trusted gateway-admin scope, never populated from client query parameters. */
+    allNamespaces: boolean
     send: (event: SyncEvent, eventId?: string) => void | Promise<void>
     sendHeartbeat: () => void | Promise<void>
     /**
@@ -69,6 +71,7 @@ export class SSEManager {
         id: string
         namespace: string
         all?: boolean
+        allNamespaces?: boolean
         sessionId?: string | null
         machineId?: string | null
         visibility?: VisibilityState
@@ -82,6 +85,7 @@ export class SSEManager {
             id: options.id,
             namespace: options.namespace,
             all: Boolean(options.all),
+            allNamespaces: options.allNamespaces ?? false,
             sessionId: options.sessionId ?? null,
             machineId: options.machineId ?? null,
             send: options.send,
@@ -228,7 +232,7 @@ export class SSEManager {
             : { ...event, namespace }
         const deliveries: Array<Promise<{ id: string; ok: boolean }>> = []
         for (const connection of this.connections.values()) {
-            if (connection.namespace !== namespace) {
+            if (!connection.allNamespaces && connection.namespace !== namespace) {
                 continue
             }
             if (connection.canDeliver && !connection.canDeliver(scoped)) {
@@ -320,7 +324,7 @@ export class SSEManager {
         }
         if (event.type !== 'connection-changed') {
             const eventNamespace = event.namespace
-            if (!eventNamespace || eventNamespace !== connection.namespace) {
+            if (!eventNamespace || (!connection.allNamespaces && eventNamespace !== connection.namespace)) {
                 return false
             }
         }

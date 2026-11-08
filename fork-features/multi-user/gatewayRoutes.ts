@@ -7,6 +7,7 @@ import { ExecutionDispatcher } from './executionDispatcher'
 import type { MultiUserGatewayStore } from './gatewayStore'
 import { hashPassword, verifyPassword } from './password'
 import { createApiToken, hashApiToken } from './token'
+import { validateGatewayCredential } from './executionMount'
 
 type GatewayEnv = { Variables: { gatewayAccountId: number; gatewayRole: 'admin' | 'user' } }
 type PublicAccount = Pick<
@@ -273,26 +274,12 @@ export function createMultiUserGatewayRoutes(deps: {
         const authorization = c.req.header('authorization')
         const bearerToken = authorization?.startsWith('Bearer ') ? authorization.slice(7) : undefined
         const queryToken = c.req.path.endsWith('/events') ? c.req.query('token') : undefined
-        const rawToken = bearerToken ?? queryToken
-        if (!rawToken) return c.json({ error: 'Missing authorization token' }, 401)
-        try {
-            const verified = await jwtVerify(rawToken, deps.jwtSecret, { algorithms: ['HS256'] })
-            const accountId = verified.payload.gaid
-            if (typeof accountId !== 'number') return c.json({ error: 'Invalid token payload' }, 401)
-            const account = deps.store.getAccount(accountId)
-            if (!account || account.disabledAt !== null) return c.json({ error: 'Invalid token' }, 401)
-            const tokenId = verified.payload.tid
-            if (typeof tokenId === 'number') {
-                const apiToken = deps.store.getToken(tokenId)
-                if (!apiToken || apiToken.revokedAt !== null) return c.json({ error: 'Invalid token' }, 401)
-            }
-            c.set('gatewayAccountId', account.id)
-            c.set('gatewayRole', account.role)
-            await next()
-            return
-        } catch {
-            return c.json({ error: 'Invalid token' }, 401)
-        }
+        if (!bearerToken && !queryToken) return c.json({ error: 'Missing authorization token' }, 401)
+        const result = await validateGatewayCredential(c.req.raw, deps.store, deps.jwtSecret, { allowQueryToken: c.req.path.endsWith('/events') })
+        if (!result.ok) return c.json({ error: 'Invalid token' }, 401)
+        c.set('gatewayAccountId', result.accountId)
+        c.set('gatewayRole', deps.store.getAccount(result.accountId)!.role)
+        return next()
     })
 
     app.get('/accounts', (c) => {

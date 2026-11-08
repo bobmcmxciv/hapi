@@ -4,6 +4,9 @@ import type { SyncEngine } from '../../sync/syncEngine'
 import { createConfiguration } from '../../configuration'
 import { createCliRoutes } from './cli'
 import { SessionIdentityConflictError } from '../../store/sessions'
+import { MultiUserGatewayStore } from '../../../../fork-features/multi-user/gatewayStore'
+import { resolveGatewayCliNamespace } from '../../../../fork-features/multi-user/cliAdapter'
+import { hashApiToken } from '../../../../fork-features/multi-user/token'
 
 function createApp(engine: Partial<SyncEngine>) {
     const app = new Hono()
@@ -20,6 +23,38 @@ function authHeaders() {
 beforeAll(async () => {
     const config = await createConfiguration()
     config._setCliApiToken('test-token', 'env', false)
+})
+
+describe('gateway CLI authentication boundary', () => {
+    it('rejects retired master keys and suffixes while honoring independent token namespace and revocation', async () => {
+        const store = new MultiUserGatewayStore(':memory:')
+        try {
+            const owner = store.createAccount('runner-owner', 'user', 'owner-ns')
+            const retired = store.createToken(owner.id, 'retired shared key', hashApiToken('test-token'))
+            store.revokeToken(retired.id, owner.id)
+            const independent = store.createToken(owner.id, 'independent', hashApiToken('independent-token'), 'runner-ns')
+            const listLocalResumableSessions = mock(() => [])
+            const app = new Hono()
+            app.route('/cli', createCliRoutes(
+                () => ({ listLocalResumableSessions }) as unknown as SyncEngine,
+                token => resolveGatewayCliNamespace(store, token)
+            ))
+            const request = (token: string) => app.request('/cli/sessions/resumable', {
+                headers: { authorization: `Bearer ${token}` }
+            })
+            for (const token of ['test-token', 'test-token:default', 'test-token:other']) {
+                expect((await request(token)).status).toBe(401)
+            }
+            expect(listLocalResumableSessions).not.toHaveBeenCalled()
+            expect((await request('independent-token:forged-ns')).status).toBe(200)
+            expect(listLocalResumableSessions).toHaveBeenCalledWith('runner-ns', { machineId: undefined })
+            store.revokeToken(independent.id, owner.id)
+            expect((await request('independent-token')).status).toBe(401)
+            expect((await request('independent-token:runner-ns')).status).toBe(401)
+        } finally {
+            store.close()
+        }
+    })
 })
 
 describe('cli resume routes', () => {

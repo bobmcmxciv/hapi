@@ -1,6 +1,7 @@
 import { Hono } from 'hono'
-import { decodeJwt } from 'jose'
+import { decodeJwt, SignJWT } from 'jose'
 import { afterEach, describe, expect, it } from 'vitest'
+import { z } from 'zod'
 
 import { createMultiUserGatewayRoutes, type TelegramGatewayAdapter } from './gatewayRoutes'
 import { MultiUserGatewayStore } from './gatewayStore'
@@ -19,6 +20,45 @@ function jsonRequest(path: string, body?: unknown, token?: string, method = 'POS
 }
 
 describe('multi-user gateway routes', () => {
+    it('keeps retired shared credentials and prior JWTs rejected without changing passwords or independent tokens', async () => {
+        const store = new MultiUserGatewayStore(':memory:')
+        stores.push(store)
+        const passwordHash = hashPassword('unchanged-admin-password')
+        const admin = store.createAccount('admin', 'admin', 'admin-ns', passwordHash)
+        const retired = store.createToken(admin.id, 'retired shared key', hashApiToken('retired-shared-key'))
+        store.createToken(admin.id, 'independent', hashApiToken('independent-token'), 'independent-ns')
+        const jwtSecret = new TextEncoder().encode('x'.repeat(32))
+        const app = new Hono()
+        app.route('/api', createMultiUserGatewayRoutes({ store, jwtSecret, coreUserId: 7 }))
+        app.get('/api/protected', c => c.json({ ok: true }))
+        const login = async (body: unknown) => app.fetch(jsonRequest('/api/auth', body))
+        const oldLogin = await login({ accessToken: 'retired-shared-key' })
+        const priorLogin = z.object({ token: z.string() }).parse(await oldLogin.json())
+        const priorApiJwt = priorLogin.token
+        store.revokeToken(retired.id, admin.id)
+
+        for (const accessToken of ['retired-shared-key', 'retired-shared-key:default', 'retired-shared-key:admin-ns']) {
+            expect((await login({ accessToken })).status).toBe(401)
+        }
+        const priorLegacyJwt = await new SignJWT({ uid: 7, ns: 'admin-ns' })
+            .setProtectedHeader({ alg: 'HS256' }).setExpirationTime('4h').sign(jwtSecret)
+        for (const token of [priorLegacyJwt, priorApiJwt]) {
+            expect((await app.fetch(jsonRequest('/api/protected', undefined, token, 'GET'))).status).toBe(401)
+            expect((await app.fetch(jsonRequest('/api/auth/refresh', undefined, token))).status).toBe(401)
+        }
+        for (const body of [
+            { username: 'admin', password: 'unchanged-admin-password' },
+            { accessToken: 'independent-token' }
+        ]) {
+            const response = await login(body)
+            expect(response.status).toBe(200)
+            const loginResult = z.object({ token: z.string() }).parse(await response.json())
+            const token = loginResult.token
+            expect((await app.fetch(jsonRequest('/api/protected', undefined, token, 'GET'))).status).toBe(200)
+        }
+        expect(store.getAccount(admin.id)?.passwordHash).toBe(passwordHash)
+    })
+
     it('supports password login and admin account creation without core account tables', async () => {
         const store = new MultiUserGatewayStore(':memory:')
         stores.push(store)

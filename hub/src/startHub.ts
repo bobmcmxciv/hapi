@@ -8,6 +8,7 @@ import { HappyBot } from './telegram/bot'
 import { startWebServer } from './web/server'
 import { getOrCreateJwtSecret } from './config/jwtSecret'
 import { createSocketServer } from './socket/server'
+import { runtimeTimelineRegistry } from './sync/runtimeTimeline'
 import { SSEManager } from './sse/sseManager'
 import { getOrCreateVapidKeys } from './config/vapidKeys'
 import { PushService } from './push/pushService'
@@ -32,7 +33,8 @@ import {
     createTelegramNotificationNamespaceResolver,
     MultiUserNotificationAdapter
 } from '../../fork-features/multi-user/notificationAdapter'
-import { resolveGatewayCliNamespace } from '../../fork-features/multi-user/cliAdapter'
+import { resolveGatewayCliIdentity, resolveGatewayCliNamespace } from '../../fork-features/multi-user/cliAdapter'
+import { createSessionMachineResolver, createSessionPathResolver } from '../../fork-features/multi-user/machineInheritance'
 import { createGatewayMemoryDelivery } from '../../fork-features/multi-user/memoryAdapter'
 import { startCx2ccPoller, type Cx2ccPollerHandle } from '../../fork-features/subscription/cx2ccPoller'
 import { projectKeyOf, startDigestService, type DigestSessionView } from '../../fork-features/session-digest/digestService'
@@ -236,10 +238,18 @@ export async function startHub(options: StartHubOptions = {}): Promise<HubInstan
             getCoreSession: (id) => syncEngine?.getSession(id) ?? store.sessions.getSession(id)
         }),
         resolveCliNamespace: token => resolveGatewayCliNamespace(multiUserGatewayStore, token),
-        sanitizeSessionMetadata: metadata => gatewayMemoryDelivery.sanitizeMetadata(metadata)
+        sanitizeSessionMetadata: metadata => gatewayMemoryDelivery.sanitizeMetadata(metadata),
+        runtimeRegistry: runtimeTimelineRegistry,
+        resolveCliIdentity: token => resolveGatewayCliIdentity(multiUserGatewayStore, token),
+        gatewayStore: multiUserGatewayStore,
+        resolveSessionMachineId: createSessionMachineResolver(() => syncEngine),
+        resolveSessionPath: createSessionPathResolver(() => syncEngine)
     })
 
     syncEngine = new SyncEngine(store, socketServer.io, socketServer.rpcRegistry, sseManager, gatewayMemoryDelivery.decorateForCli)
+    syncEngine.subscribe(event => {
+        if (event.type === 'session-removed') runtimeTimelineRegistry.drop(event.sessionId)
+    })
     logStartupPhase('session and machine caches loaded')
 
     const fcmConfig = resolveFcmConfig()
@@ -351,7 +361,8 @@ export async function startHub(options: StartHubOptions = {}): Promise<HubInstan
             store: multiUserGatewayStore,
             coreUserId: await getOrCreateOwnerId(),
             subscriptionStore
-        }
+        },
+        runtimeRegistry: runtimeTimelineRegistry
     })
 
     // Start the bot if configured

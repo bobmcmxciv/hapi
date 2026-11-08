@@ -22,6 +22,38 @@ import { streamSSE } from 'hono/streaming'
 import { randomUUID } from 'node:crypto'
 import { parseBlobDownloadRoutePath, verifyBlobDownloadTicket } from '../../hub/src/blobs'
 
+export type GatewayCredentialResult =
+    | { ok: true; accountId: number }
+    | { ok: false; reason: 'missing' | 'invalid' }
+
+/** Validate JWT signature/expiry and the live account/API-token inventory. */
+export async function validateGatewayCredential(
+    request: Request,
+    store: MultiUserGatewayStore,
+    secret: Uint8Array,
+    options?: { allowQueryToken?: boolean }
+): Promise<GatewayCredentialResult> {
+    const authorization = request.headers.get('authorization')
+    const queryToken = (options?.allowQueryToken ?? true) ? new URL(request.url).searchParams.get('token') : null
+    const token = authorization?.startsWith('Bearer ') ? authorization.slice(7) : queryToken
+    if (!token) return { ok: false, reason: 'missing' }
+    try {
+        const verified = await jwtVerify(token, secret, { algorithms: ['HS256'] })
+        const accountId = verified.payload.gaid
+        if (typeof accountId !== 'number') return { ok: false, reason: 'invalid' }
+        const account = store.getAccount(accountId)
+        if (!account || account.disabledAt !== null) return { ok: false, reason: 'invalid' }
+        const tokenId = verified.payload.tid
+        if (typeof tokenId === 'number') {
+            const apiToken = store.getToken(tokenId)
+            if (!apiToken || apiToken.revokedAt !== null) return { ok: false, reason: 'invalid' }
+        }
+        return { ok: true, accountId: account.id }
+    } catch {
+        return { ok: false, reason: 'invalid' }
+    }
+}
+
 export async function gatewayAccountId(request: Request, secret: Uint8Array): Promise<number | null> {
     const authorization = request.headers.get('authorization')
     const url = new URL(request.url)
@@ -81,7 +113,11 @@ export function createExecutionMiddleware(deps: {
     const dispatcher = new ExecutionDispatcher(
         deps.store,
         deps.getSyncEngine ? createSessionMachineResolver(deps.getSyncEngine) : undefined,
-        deps.getSyncEngine ? createSessionPathResolver(deps.getSyncEngine) : undefined
+        deps.getSyncEngine ? createSessionPathResolver(deps.getSyncEngine) : undefined,
+        (type, id) => {
+            const engine = deps.getSyncEngine?.()
+            return (type === 'session' ? engine?.getSession(id) : engine?.getMachine(id))?.namespace ?? null
+        }
     )
     return async (c, next) => {
         const resource = resourceFromPath(c.req.path)
@@ -157,6 +193,8 @@ function collectVisibleSessions(
     account: Account,
     options: { claimUnbound: boolean }
 ): Session[] {
+    // Viewing all core resources must not claim or reassign them to the admin.
+    if (account.role === 'admin') return engine.getSessions()
     if (options.claimUnbound) {
         for (const session of engine.getSessionsByNamespace(account.defaultNamespace)) {
             if (store.getResource('session', session.id)) continue
@@ -188,7 +226,7 @@ function collectVisibleSessions(
 
     const machineBindings = store.listAccessibleResources('machine', account.id)
     const machineOwners = new Map(machineBindings.map(binding => [binding.resourceId, binding.ownerAccountId]))
-    // 目录限定只是 grant 的属性：机器主人（以及 admin，压根没有 grant 行）恒为 null，
+    // 目录限定只是 grant 的属性：机器主人恒为 null，
     // 照旧看得到整机。逐机器算一次，别在会话循环里逐条查库。
     const machineScopes = new Map(machineBindings.map(binding => [
         binding.resourceId,
@@ -269,7 +307,8 @@ export function mountExecutionRoutes(app: Hono<WebAppEnv>, deps: {
         // 是随时会变的（机器上随时会新建会话），逐条订阅只能覆盖连接建立那一刻
         // 已存在的资源，新会话的事件永远进不来。改成覆盖所有相关 namespace，
         // 由 canDeliver 谓词逐事件判权。
-        const reachableNamespaces = new Set([
+        // A single global subscription also covers namespaces created after connection.
+        const reachableNamespaces = account.role === 'admin' ? new Set([account.defaultNamespace]) : new Set([
             account.defaultNamespace,
             ...deps.store.listAccessibleResources('session', account.id).map(binding => binding.coreNamespace),
             ...deps.store.listAccessibleResources('machine', account.id).map(binding => binding.coreNamespace)
@@ -292,8 +331,8 @@ export function mountExecutionRoutes(app: Hono<WebAppEnv>, deps: {
                     id,
                     namespace,
                     all: true,
-                    // 只有首条（账号自己的 namespace）算 visible：sendToast 只投给
-                    // visible 连接，借此避免把别人 namespace 的 toast 串给本账号。
+                    allNamespaces: account.role === 'admin',
+                    // Only the account's own subscription receives ordinary-user toasts.
                     visibility: index === 0 ? 'visible' : 'hidden',
                     canDeliver,
                     send: event => stream.writeSSE({ data: JSON.stringify(event) }),
@@ -350,7 +389,7 @@ export function mountExecutionRoutes(app: Hono<WebAppEnv>, deps: {
 
     // fork-features/usage：token 用量统计。数据本就随实时同步/导入写进了
     // messages.content，这里只做“读取+聚合”，不新增采集逻辑。
-    // 可见集与上面 GET /api/sessions 完全同构：admin 看整个 namespace，普通
+    // 可见集与上面 GET /api/sessions 完全同构：admin 跨全部 namespace，普通
     // 用户只统计自己拥有的 + 被授权的会话 —— 不泄漏他人用量。与列表不同的是
     // 这里**不做** bind-on-view 副作用（只读端点不该改写资源归属）。
     // hub 重启后用量缓存要分段预热约 2 分钟（生产 130 万行）；请求最多等 25 秒，没热就回 503 让前端稍后重试。
@@ -492,7 +531,7 @@ export function mountExecutionRoutes(app: Hono<WebAppEnv>, deps: {
         const account = accountId === null ? null : deps.store.getAccount(accountId)
         const engine = deps.getSyncEngine()
         if (!account || !engine) return c.json({ error: 'Not connected' }, account ? 503 : 401)
-        for (const machine of engine.getOnlineMachinesByNamespace(account.defaultNamespace)) {
+        for (const machine of account.role === 'admin' ? [] : engine.getOnlineMachinesByNamespace(account.defaultNamespace)) {
             if (!deps.store.getResource('machine', machine.id)) deps.store.bindResource({ resourceType: 'machine', resourceId: machine.id, ownerAccountId: account.id, coreNamespace: account.defaultNamespace })
         }
         // 归属人随机器下发：生产上所有账号共用一个 namespace，机器对象自带的
@@ -504,12 +543,17 @@ export function mountExecutionRoutes(app: Hono<WebAppEnv>, deps: {
             }
             return usernameByAccountId.get(accountId) ?? undefined
         }
-        const machines = deps.store.listAccessibleResources('machine', account.id)
-            .map(binding => {
-                const machine = engine.getMachine(binding.resourceId)
-                return machine ? { ...machine, ownerUsername: ownerUsernameOf(binding.ownerAccountId) } : null
-            })
-            .filter(machine => machine !== null)
+        const visibleMachines = account.role === 'admin'
+            ? engine.getMachines()
+            : deps.store.listAccessibleResources('machine', account.id)
+                .flatMap(binding => {
+                    const machine = engine.getMachine(binding.resourceId)
+                    return machine ? [machine] : []
+                })
+        const machines = visibleMachines.map(machine => {
+            const binding = deps.store.getResource('machine', machine.id)
+            return { ...machine, ownerUsername: binding ? ownerUsernameOf(binding.ownerAccountId) : undefined }
+        })
         return c.json({ machines })
     })
 }

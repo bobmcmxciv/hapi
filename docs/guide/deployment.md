@@ -357,3 +357,22 @@ Before compiling a production replacement, retain its exact source revision,
 tracked patch, required untracked sources and assets, and binary SHA-256. A build
 from a dirty worktree cannot be reproduced from the revision alone. Do not use a
 bare-commit rebuild that could undo already-deployed authentication changes.
+
+Formal quota releases must preserve the deployed gateway authentication and
+shared runtime API, not pull in unrelated unfinished Beta work. Retain the
+existing embedded formal UI and `HAPI_BETA_WEB_DIR` directory/mount when neither
+UI is part of the release; compare their served entrypoint hashes in preflight.
+
+Run the compiled candidate against isolated database copies first. Exercise
+scheduled GPT recovery after a malformed response, retired shared credentials
+(plain and namespace-suffixed) on Web/CLI/Socket.IO, independent credentials,
+revoked JWTs and runtime streams, and admin reads of foreign unbound resources.
+Admin visibility must not change password hashes or resource ownership.
+
+For an authorized Hub-only cutover, retain the previous executable and consistent
+online database backups. Atomically replace the verified executable on the host
+and restart only the `hapi-hub` container; do not upgrade or restart runners or
+terminate their agents. Verify the live binary hash, real GPT gateway snapshots,
+existing session reconnection, preserved formal/Beta entrypoints, and gateway
+security again after activation. Collector deployment remains a separate host
+operation, not proof supplied by a successful Hub rollout.

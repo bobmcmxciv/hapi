@@ -6,6 +6,26 @@ const stores: MultiUserGatewayStore[] = []
 afterEach(() => { for (const store of stores.splice(0)) store.close() })
 
 describe('ExecutionDispatcher', () => {
+    it('allows only admin reads of unbound core resources without creating ownership', () => {
+        const store = new MultiUserGatewayStore(':memory:')
+        stores.push(store)
+        const admin = store.createAccount('admin', 'admin', 'admin-ns')
+        const user = store.createAccount('user', 'user', 'user-ns')
+        const dispatcher = new ExecutionDispatcher(store, undefined, undefined,
+            (_type, id) => id === 'unbound' ? 'foreign-ns' : null)
+        for (const type of ['session', 'machine'] as const) {
+            const resource = { type, id: 'unbound' }
+            expect(dispatcher.authorize({ accountId: admin.id, capability: 'read', resource }))
+                .toMatchObject({ kind: 'allow', context: { namespace: 'foreign-ns', resource: null } })
+            for (const capability of ['operate', 'administer'] as const) {
+                expect(dispatcher.authorize({ accountId: admin.id, capability, resource }).kind).toBe('deny')
+            }
+            expect(dispatcher.authorize({ accountId: user.id, capability: 'read', resource }).kind).toBe('deny')
+            expect(dispatcher.authorize({ accountId: admin.id, capability: 'read', resource: { type, id: 'missing' } }).kind).toBe('deny')
+            expect(store.getResource(type, 'unbound')).toBeNull()
+        }
+    })
+
     it('routes owner and operator through the resource core namespace without changing core state', () => {
         const store = new MultiUserGatewayStore(':memory:')
         stores.push(store)
