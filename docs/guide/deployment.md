@@ -352,3 +352,8 @@ release window separately from updating the collector host. Do not restart the
 Hub or runners, kill agent sessions, or launch duplicate collectors merely to
 refresh quota cards during session recovery. Leave unreachable hosts' snapshots
 stale rather than publishing another host's data under their identity.
+
+Before compiling a production replacement, retain its exact source revision,
+tracked patch, required untracked sources and assets, and binary SHA-256. A build
+from a dirty worktree cannot be reproduced from the revision alone. Do not use a
+bare-commit rebuild that could undo already-deployed authentication changes.
