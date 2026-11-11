@@ -9,14 +9,16 @@ import { ChildProcess } from 'child_process';
  * Session tracking for runner
  */
 export interface TrackedSession {
-  startedBy: 'runner' | string;
-  happySessionId?: string;
-  /** HAPI row requested for this process generation before its webhook arrives. */
-  requestedHappySessionId?: string;
-  happySessionMetadataFromLocalWebhook?: Metadata;
-  pid: number;
-  childProcess?: ChildProcess;
-  error?: string;
-  directoryCreated?: boolean;
-  message?: string;
+ startedBy: 'runner' | string;
+ happySessionId?: string;
+ /** HAPI row requested for this process generation before its webhook arrives. */
+ requestedHappySessionId?: string;
+ /** Known at spawn, even when native startup never reaches its webhook. */
+ requiresCleanupReceipt?: boolean;
+ happySessionMetadataFromLocalWebhook?: Metadata;
+ pid: number;
+ childProcess?: ChildProcess;
+ error?: string;
+ directoryCreated?: boolean;
+ message?: string;
 }

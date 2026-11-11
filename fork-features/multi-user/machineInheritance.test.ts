@@ -1,11 +1,17 @@
 import { describe, expect, it } from 'bun:test'
+import { Database } from 'bun:sqlite'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import type { SyncEngine } from '../../hub/src/sync/syncEngine'
 import { MultiUserGatewayStore } from './gatewayStore'
 import {
     createSessionMachineResolver,
     createSessionPathResolver,
     machineInheritedLevel,
+    normalizeMachineScope,
     pathWithinScope,
+    pathWithinScopes,
     sessionAccessLevel
 } from './machineInheritance'
 
@@ -124,6 +130,14 @@ describe('pathWithinScope：目录前缀判定', () => {
         expect(pathWithinScope('C:\\Users\\Administrator\\peter\\mac', 'C:\\Users\\Administrator\\peter\\')).toBe(true)
     })
 
+    it('keeps a normalized drive-root grant usable without granting other drives', () => {
+        const scopes = normalizeMachineScope(['C:\\'])
+        expect(pathWithinScopes('c:/Users/Peter/project', scopes)).toBe(true)
+        expect(pathWithinScopes('C:\\', scopes)).toBe(true)
+        expect(pathWithinScopes('D:\\project', scopes)).toBe(false)
+        expect(pathWithinScopes('C:relative', scopes)).toBe(false)
+    })
+
     it('POSIX 路径区分大小写', () => {
         expect(pathWithinScope('/Users/wu/proj', '/Users/wu')).toBe(true)
         expect(pathWithinScope('/users/WU/proj', '/Users/wu')).toBe(false)
@@ -133,6 +147,22 @@ describe('pathWithinScope：目录前缀判定', () => {
     it('含 .. 段一律拒 —— 不碰文件系统就解析不了它', () => {
         expect(pathWithinScope('C:\\Users\\Administrator\\peter\\..\\hapi', PREFIX)).toBe(false)
         expect(pathWithinScope('C:\\Users\\Administrator\\peter\\mac\\..', PREFIX)).toBe(false)
+    })
+
+    it('多目录并集：只允许两个不相邻目录子树，不缩成 C:\\；空数组或坏路径 fail-closed', () => {
+        const scopes = ['C:\\Users\\Tadokoro', 'C:\\Peter']
+        expect(pathWithinScopes('C:\\Users\\Tadokoro', scopes)).toBe(true)
+        expect(pathWithinScopes('c:/users/tadokoro/work/sub', scopes)).toBe(true)
+        expect(pathWithinScopes('C:\\Peter\\repo\\file.ts', scopes)).toBe(true)
+        expect(pathWithinScopes('C:\\', scopes)).toBe(false)
+        expect(pathWithinScopes('C:\\vircs-projects', scopes)).toBe(false)
+        expect(pathWithinScopes('C:\\Users\\Other', scopes)).toBe(false)
+        expect(pathWithinScopes('C:\\PeterX', scopes)).toBe(false)
+        expect(pathWithinScopes('C:\\Peter\\..\\vircs-projects', scopes)).toBe(false)
+        expect(pathWithinScopes('C:\\Peter', [])).toBe(false)
+        expect(pathWithinScopes('C:\\Peter', ['C:\\Peter', 'relative'])).toBe(false)
+        expect(() => normalizeMachineScope([])).toThrow()
+        expect(() => normalizeMachineScope(['C:\\Peter\\..\\x'])).toThrow()
     })
 })
 
@@ -208,11 +238,58 @@ describe('目录限定的机器授权（machineInheritedLevel / sessionAccessLev
     it('改授权时 path_prefix 可原地更新与清除', () => {
         const { store, grantee, resolve, resolvePath } = scopedSetup()
         store.grant('machine', 'fa608', grantee.id, 'operator', SCOPE)
-        expect(store.machineGrantScope('fa608', grantee.id)).toBe(SCOPE)
+        expect(store.machineGrantScope('fa608', grantee.id)).toEqual(['c:/users/administrator/peter'])
         store.grant('machine', 'fa608', grantee.id, 'operator')
         expect(store.machineGrantScope('fa608', grantee.id)).toBeNull()
         expect(sessionAccessLevel(store, grantee.id, 's-outside', resolve, resolvePath)).toBe('operator')
         store.close()
+    })
+
+    it('同一机器多目录授权原子替换、跨重启持久化、旧单列只读兼容且不扩权', () => {
+        const dir = mkdtempSync(join(tmpdir(), 'hapi-scope-'))
+        const file = join(dir, 'gateway.sqlite')
+        let legacy: Database | undefined
+        let store: MultiUserGatewayStore | undefined
+        let reopened: MultiUserGatewayStore | undefined
+        try {
+            legacy = new Database(file, { create: true })
+            legacy.exec(`
+                CREATE TABLE gateway_accounts(id INTEGER PRIMARY KEY, username TEXT UNIQUE, password_hash TEXT, role TEXT, default_namespace TEXT, disabled_at INTEGER);
+                CREATE TABLE gateway_resources(resource_type TEXT, resource_id TEXT, owner_account_id INTEGER, core_namespace TEXT, PRIMARY KEY(resource_type,resource_id));
+                CREATE TABLE gateway_grants(resource_type TEXT, resource_id TEXT, grantee_account_id INTEGER, role TEXT, path_prefix TEXT, PRIMARY KEY(resource_type,resource_id,grantee_account_id));
+                INSERT INTO gateway_accounts(id,username,role,default_namespace) VALUES (1,'admin','admin','default'),(2,'peter','user','default'),(3,'other','user','default');
+                INSERT INTO gateway_resources VALUES ('machine','t14s',1,'default');
+                INSERT INTO gateway_grants VALUES ('machine','t14s',2,'operator','C:\\Legacy'),('machine','t14s',3,'operator',NULL);
+            `)
+            legacy.close()
+            legacy = undefined
+            store = new MultiUserGatewayStore(file)
+            expect(store.machineGrantScope('t14s', 2)).toEqual(['c:/legacy'])
+            expect(store.machineGrantScope('t14s', 3)).toBeNull()
+            store.grant('machine', 't14s', 2, 'operator', ['C:\\Users\\Tadokoro\\', 'c:/peter'])
+            store.close()
+            store = undefined
+
+            reopened = new MultiUserGatewayStore(file)
+            reopened.bindResource({ resourceType: 'session', resourceId: 't14s-session', ownerAccountId: 1, coreNamespace: 'default' })
+            expect(reopened.machineGrantScope('t14s', 2)).toEqual(['c:/users/tadokoro', 'c:/peter'])
+            expect(reopened.machineGrantScope('t14s', 3)).toBeNull()
+            expect(reopened.listAudienceAccountIds('session', 't14s-session', 'operate', 't14s', 'C:\\Peter\\job')).toContain(2)
+            expect(reopened.listAudienceAccountIds('session', 't14s-session', 'operate', 't14s', 'C:\\Users\\Other')).not.toContain(2)
+            reopened.grant('machine', 't14s', 2, 'operator', ['C:\\Peter'])
+            expect(reopened.machineGrantScope('t14s', 2)).toEqual(['c:/peter'])
+            reopened.close()
+            reopened = undefined
+        } finally {
+            reopened?.close()
+            store?.close()
+            legacy?.close()
+            try {
+                rmSync(dir, { recursive: true, force: true })
+            } catch (error) {
+                if (process.platform !== 'win32') throw error
+            }
+        }
     })
 })
 

@@ -8,340 +8,414 @@ import { getUserTerminalBuffer } from '../userTerminalBuffer'
 const terminalCreateSchema = TerminalOpenPayloadSchema
 
 const terminalWriteSchema = z.object({
-    terminalId: z.string().min(1),
-    data: z.string()
+ terminalId: z.string().min(1),
+ data: z.string()
 })
 
 const terminalResizeSchema = z.object({
-    terminalId: z.string().min(1),
-    cols: z.number().int().positive(),
-    rows: z.number().int().positive()
+ terminalId: z.string().min(1),
+ cols: z.number().int().positive(),
+ rows: z.number().int().positive()
 })
 
 const terminalCloseSchema = z.object({
-    terminalId: z.string().min(1)
+ terminalId: z.string().min(1)
 })
 
 export type TerminalHandlersDeps = {
-    io: SocketServer
-    getSession: (sessionId: string) => { active: boolean; namespace: string } | null
-    terminalRegistry: TerminalRegistry
-    maxTerminalsPerSocket: number
-    maxTerminalsPerSession: number
-    resolveNamespaceForSession?: (socket: SocketWithData, sessionId: string) => string | null
+ io: SocketServer
+ getSession: (sessionId: string) => { active: boolean; namespace: string } | null
+ terminalRegistry: TerminalRegistry
+ maxTerminalsPerSocket: number
+ maxTerminalsPerSession: number
+ /**
+  * Authoritative per-session ACL. When provided its verdict is final —
+  * there is no namespace fallback after a denial. 'read' covers viewing
+  * (subscribe/replay/output); 'operate' is required to create or drive a
+  * PTY. Absent => legacy same-namespace rule.
+  */
+ resolveNamespaceForSession?: (socket: SocketWithData, sessionId: string, capability?: 'read' | 'operate') => string | null
 }
 
 export function registerTerminalHandlers(socket: SocketWithData, deps: TerminalHandlersDeps): void {
-    const { io, getSession, terminalRegistry, maxTerminalsPerSocket, maxTerminalsPerSession } = deps
-    const cliNamespace = io.of('/cli')
-    const currentNamespace = () => typeof socket.data.namespace === 'string' ? socket.data.namespace : null
+ const { io, getSession, terminalRegistry, maxTerminalsPerSocket, maxTerminalsPerSession } = deps
+ const cliNamespace = io.of('/cli')
+ const currentNamespace = () => typeof socket.data.namespace === 'string' ? socket.data.namespace : null
 
-    const emitTerminalError = (terminalId: string, message: string) => {
-        socket.emit('terminal:error', { terminalId, message })
-    }
+ const emitTerminalError = (terminalId: string, message: string) => {
+  socket.emit('terminal:error', { terminalId, message })
+ }
 
-    const resolveEntryForSocket = (terminalId: string): TerminalRegistryEntry | null => {
-        const entry = terminalRegistry.get(terminalId)
-        if (!entry || entry.socketId !== socket.id) {
-            return null
-        }
-        return entry
-    }
+ const resolveEntryForSocket = (terminalId: string): TerminalRegistryEntry | null => {
+  const entry = terminalRegistry.get(terminalId)
+  if (!entry || entry.socketId !== socket.id) {
+   return null
+  }
+  return entry
+ }
 
-    const resolveCliSocket = (entry: TerminalRegistryEntry, reportError: boolean): SocketWithData | null => {
-        const cliSocket = cliNamespace.sockets.get(entry.cliSocketId)
-        if (!cliSocket || cliSocket.data.namespace !== currentNamespace()) {
-            terminalRegistry.remove(entry.terminalId)
-            if (reportError) {
-                emitTerminalError(entry.terminalId, 'CLI disconnected.')
-            }
-            return null
-        }
-        return cliSocket
-    }
+ const resolveCliSocket = (entry: TerminalRegistryEntry, reportError: boolean): SocketWithData | null => {
+  const cliSocket = cliNamespace.sockets.get(entry.cliSocketId)
+  if (!cliSocket || cliSocket.data.namespace !== currentNamespace()) {
+   terminalRegistry.remove(entry.terminalId)
+   if (reportError) {
+    emitTerminalError(entry.terminalId, 'CLI disconnected.')
+   }
+   return null
+  }
+  return cliSocket
+ }
 
-    const emitCloseToCli = (entry: TerminalRegistryEntry): void => {
-        const cliSocket = cliNamespace.sockets.get(entry.cliSocketId)
-        if (!cliSocket || cliSocket.data.namespace !== currentNamespace()) {
-            return
-        }
-        cliSocket.emit('terminal:close', {
-            sessionId: entry.sessionId,
-            terminalId: entry.terminalId
-        })
-    }
+ const emitCloseToCli = (entry: TerminalRegistryEntry): void => {
+  const cliSocket = cliNamespace.sockets.get(entry.cliSocketId)
+  if (!cliSocket || cliSocket.data.namespace !== currentNamespace()) {
+   return
+  }
+  cliSocket.emit('terminal:close', {
+   sessionId: entry.sessionId,
+   terminalId: entry.terminalId
+  })
+ }
 
-    const pickCliSocketId = (sessionId: string): string | null => {
-        const room = cliNamespace.adapter.rooms.get(`session:${sessionId}`)
-        if (!room || room.size === 0) {
-            return null
-        }
-        for (const socketId of room) {
-            const cliSocket = cliNamespace.sockets.get(socketId)
-            if (cliSocket && cliSocket.data.namespace === currentNamespace()) {
-                return cliSocket.id
-            }
-        }
-        return null
-    }
+ const pickCliSocketId = (sessionId: string): string | null => {
+  const room = cliNamespace.adapter.rooms.get(`session:${sessionId}`)
+  if (!room || room.size === 0) {
+   return null
+  }
+  for (const socketId of room) {
+   const cliSocket = cliNamespace.sockets.get(socketId)
+   if (cliSocket && cliSocket.data.namespace === currentNamespace()) {
+    return cliSocket.id
+   }
+  }
+  return null
+ }
 
-    socket.on('terminal:create', (data: unknown) => {
-        const parsed = terminalCreateSchema.safeParse(data)
-        if (!parsed.success) {
-            return
-        }
+ /**
+  * Authoritative namespace resolution for `sessionId`. A configured
+  * resolver's null is a real denial — it never falls back to the socket's
+  * JWT namespace. Successful resolution normalizes socket.data.namespace to
+  * the session's core namespace so CLI-socket matching keeps working.
+  */
+ const authorizeNamespace = (sessionId: string, capability: 'read' | 'operate'): string | null => {
+  const resolved = deps.resolveNamespaceForSession
+   ? deps.resolveNamespaceForSession(socket, sessionId, capability)
+   : currentNamespace()
+  if (!resolved) return null
+  const session = getSession(sessionId)
+  if (!session || session.namespace !== resolved) return null
+  socket.data.namespace = resolved
+  return resolved
+ }
 
-        const { sessionId, terminalId, cols, rows } = parsed.data
-        const namespace = deps.resolveNamespaceForSession?.(socket, sessionId) ?? currentNamespace()
-        if (namespace) socket.data.namespace = namespace
-        const session = getSession(sessionId)
-        if (!namespace || !session || session.namespace !== namespace || !session.active) {
-            emitTerminalError(terminalId, 'Session is inactive or unavailable.')
-            return
-        }
+ socket.on('terminal:create', (data: unknown) => {
+  const parsed = terminalCreateSchema.safeParse(data)
+  if (!parsed.success) {
+   return
+  }
 
-        const existingEntry = terminalRegistry.get(terminalId)
-        const isReconnect = existingEntry?.sessionId === sessionId
-        const shouldReplayBuffer = existingEntry?.socketId !== socket.id
+  const { sessionId, terminalId, cols, rows } = parsed.data
+  const session = getSession(sessionId)
+  const namespace = authorizeNamespace(sessionId, 'operate')
+  if (!namespace || !session || session.namespace !== namespace || !session.active) {
+   emitTerminalError(terminalId, 'Session is inactive or unavailable.')
+   return
+  }
 
-        if (!isReconnect && terminalRegistry.countForSocket(socket.id) >= maxTerminalsPerSocket) {
-            emitTerminalError(terminalId, `Too many terminals open (max ${maxTerminalsPerSocket}).`)
-            return
-        }
+  const existingEntry = terminalRegistry.get(terminalId)
+  // A terminal belongs to the credential that opened it: reconnect takeover
+  // (new socket id, same terminalId) is reserved for the same account —
+  // otherwise knowing a UUID is enough to inherit someone else's live PTY
+  // and its scrollback buffer.
+  const ownerKey = typeof socket.data.gatewayAccountId === 'number'
+   ? `account:${socket.data.gatewayAccountId}`
+   : `user:${socket.data.userId ?? 'unknown'}`
+  const isReconnect = existingEntry?.sessionId === sessionId && existingEntry.ownerKey === ownerKey
+  if (existingEntry && existingEntry.sessionId === sessionId && existingEntry.ownerKey !== ownerKey) {
+   emitTerminalError(terminalId, 'Terminal ID is already in use.')
+   return
+  }
+  const shouldReplayBuffer = existingEntry?.socketId !== socket.id
+  if (!isReconnect && terminalRegistry.countForSocket(socket.id) >= maxTerminalsPerSocket) {
+   emitTerminalError(terminalId, `Too many terminals open (max ${maxTerminalsPerSocket}).`)
+   return
+  }
 
-        if (!isReconnect && terminalRegistry.countForSession(sessionId) >= maxTerminalsPerSession) {
-            emitTerminalError(terminalId, `Too many terminals open for this session (max ${maxTerminalsPerSession}).`)
-            return
-        }
+  if (!isReconnect && terminalRegistry.countForSession(sessionId) >= maxTerminalsPerSession) {
+   emitTerminalError(terminalId, `Too many terminals open for this session (max ${maxTerminalsPerSession}).`)
+   return
+  }
 
-        const cliSocketId = pickCliSocketId(sessionId)
-        if (!cliSocketId) {
-            emitTerminalError(terminalId, 'CLI is not connected for this session.')
-            return
-        }
+  const cliSocketId = pickCliSocketId(sessionId)
+  if (!cliSocketId) {
+   emitTerminalError(terminalId, 'CLI is not connected for this session.')
+   return
+  }
 
-        const entry = terminalRegistry.register(terminalId, sessionId, socket.id, cliSocketId)
-        if (!entry) {
-            emitTerminalError(terminalId, 'Terminal ID is already in use.')
-            return
-        }
+  const entry = terminalRegistry.register(terminalId, sessionId, socket.id, cliSocketId, ownerKey)
+  if (!entry) {
+   emitTerminalError(terminalId, 'Terminal ID is already in use.')
+   return
+  }
 
-        const cliSocket = cliNamespace.sockets.get(cliSocketId)
-        if (!cliSocket) {
-            terminalRegistry.remove(terminalId)
-            emitTerminalError(terminalId, 'CLI is not connected for this session.')
-            return
-        }
+  const cliSocket = cliNamespace.sockets.get(cliSocketId)
+  if (!cliSocket) {
+   terminalRegistry.remove(terminalId)
+   emitTerminalError(terminalId, 'CLI is not connected for this session.')
+   return
+  }
 
-        socket.join(`session:${sessionId}`)
+  socket.join(`session:${sessionId}`)
 
-        cliSocket.emit('terminal:open', {
-            sessionId,
-            terminalId,
-            cols,
-            rows
-        })
-        terminalRegistry.markActivity(terminalId)
+  cliSocket.emit('terminal:open', {
+   sessionId,
+   terminalId,
+   cols,
+   rows
+  })
+  terminalRegistry.markActivity(terminalId)
 
-        // Replay buffered output so the terminal shows scrollback immediately
-        // instead of staying black until the next output from CLI.
-        // The buffer is never explicitly cleared here: it persists so a client
-        // whose socket reconnects with the same terminalId still sees the
-        // accumulated output. It is bounded to 256KB per terminal.
-        const buffered = getUserTerminalBuffer(sessionId, terminalId)
-        if (buffered && shouldReplayBuffer) {
-            socket.emit('terminal:output', { terminalId, data: buffered })
-        }
-    })
+  // Replay buffered output so the terminal shows scrollback immediately
+  // instead of staying black until the next output from CLI.
+  // The buffer is never explicitly cleared here: it persists so a client
+  // whose socket reconnects with the same terminalId still sees the
+  // accumulated output. It is bounded to 256KB per terminal.
+  const buffered = getUserTerminalBuffer(sessionId, terminalId)
+  if (buffered && shouldReplayBuffer) {
+   socket.emit('terminal:output', { terminalId, data: buffered })
+  }
+ })
 
-    socket.on('terminal:write', (data: unknown) => {
-        const parsed = terminalWriteSchema.safeParse(data)
-        if (!parsed.success) {
-            return
-        }
+ socket.on('terminal:write', (data: unknown) => {
+  const parsed = terminalWriteSchema.safeParse(data)
+  if (!parsed.success) {
+   return
+  }
 
-        const { terminalId, data: payload } = parsed.data
-        const entry = resolveEntryForSocket(terminalId)
-        if (!entry) {
-            return
-        }
+  const { terminalId, data: payload } = parsed.data
+  const entry = resolveEntryForSocket(terminalId)
+  if (!entry || !ensureOperateAccess(entry.sessionId, terminalId)) {
+   return
+  }
 
-        const cliSocket = resolveCliSocket(entry, true)
-        if (!cliSocket) {
-            return
-        }
-        cliSocket.emit('terminal:write', {
-            sessionId: entry.sessionId,
-            terminalId,
-            data: payload
-        })
-        terminalRegistry.markActivity(terminalId)
-    })
+  const cliSocket = resolveCliSocket(entry, true)
+  if (!cliSocket) {
+   return
+  }
+  cliSocket.emit('terminal:write', {
+   sessionId: entry.sessionId,
+   terminalId,
+   data: payload
+  })
+  terminalRegistry.markActivity(terminalId)
+ })
 
-    socket.on('terminal:resize', (data: unknown) => {
-        const parsed = terminalResizeSchema.safeParse(data)
-        if (!parsed.success) {
-            return
-        }
+ socket.on('terminal:resize', (data: unknown) => {
+  const parsed = terminalResizeSchema.safeParse(data)
+  if (!parsed.success) {
+   return
+  }
 
-        const { terminalId, cols, rows } = parsed.data
-        const entry = resolveEntryForSocket(terminalId)
-        if (!entry) {
-            return
-        }
+  const { terminalId, cols, rows } = parsed.data
+  const entry = resolveEntryForSocket(terminalId)
+  if (!entry || !ensureOperateAccess(entry.sessionId, terminalId)) {
+   return
+  }
 
-        const cliSocket = resolveCliSocket(entry, true)
-        if (!cliSocket) {
-            return
-        }
-        cliSocket.emit('terminal:resize', {
-            sessionId: entry.sessionId,
-            terminalId,
-            cols,
-            rows
-        })
-        terminalRegistry.markActivity(terminalId)
-    })
+  const cliSocket = resolveCliSocket(entry, true)
+  if (!cliSocket) {
+   return
+  }
+  cliSocket.emit('terminal:resize', {
+   sessionId: entry.sessionId,
+   terminalId,
+   cols,
+   rows
+  })
+  terminalRegistry.markActivity(terminalId)
+ })
 
-    socket.on('terminal:close', (data: unknown) => {
-        const parsed = terminalCloseSchema.safeParse(data)
-        if (!parsed.success) {
-            return
-        }
+ socket.on('terminal:close', (data: unknown) => {
+  const parsed = terminalCloseSchema.safeParse(data)
+  if (!parsed.success) {
+   return
+  }
 
-        const { terminalId } = parsed.data
-        const entry = resolveEntryForSocket(terminalId)
-        if (!entry) {
-            return
-        }
+  const { terminalId } = parsed.data
+  const entry = resolveEntryForSocket(terminalId)
+  if (!entry) {
+   return
+  }
 
-        terminalRegistry.remove(terminalId)
-        emitCloseToCli(entry)
-    })
+  terminalRegistry.remove(terminalId)
+  emitCloseToCli(entry)
+ })
 
-    /** Returns false when no CLI socket owns this session in the caller's namespace. */
-    const emitToCliForSession = (sessionId: string, event: 'agent-terminal:resize' | 'agent-terminal:refresh' | 'agent-terminal:idle' | 'agent-terminal:input', payload: Record<string, unknown>): boolean => {
-        const cliSocketId = pickCliSocketId(sessionId)
-        if (!cliSocketId) return false
-        const cliSocket = cliNamespace.sockets.get(cliSocketId)
-        if (!cliSocket || cliSocket.data.namespace !== currentNamespace()) return false
-        cliSocket.emit(event, payload as never)
-        return true
-    }
+ /**
+  * Live grant re-check for driving an existing PTY. Three outcomes:
+  * full 'operate' access → true; view-only ('read' but no 'operate') → the
+  * keystroke/resize is dropped but the dead PTY is left alone; access fully
+  * revoked → the terminal is torn down (viewer error + PTY close + agent
+  * subscription cleanup) so no unauthorized traffic continues.
+  */
+ const ensureOperateAccess = (sessionId: string, terminalId: string): boolean => {
+  const session = getSession(sessionId)
+  if (session?.active && authorizeNamespace(sessionId, 'operate') !== null) return true
+  if (authorizeNamespace(sessionId, 'read') !== null) return false
+  const entry = terminalRegistry.get(terminalId)
+  if (entry) {
+   emitTerminalError(terminalId, 'Terminal access revoked.')
+   emitCloseToCli(entry)
+   terminalRegistry.remove(terminalId)
+  }
+  revokeSessionAccess(sessionId)
+  return false
+ }
 
-    // Sessions this socket is viewing the agent terminal for. When the last
-    // viewer of a session leaves (this socket unsubscribes or disconnects and the
-    // room empties), tell the CLI to stop streaming that PTY.
-    //
-    // Agent-terminal viewers get their OWN room, distinct from the user-terminal's
-    // `session:${id}` room: the streaming-teardown count must reflect agent-terminal
-    // viewers only, otherwise a user-terminal viewer in `session:${id}` would keep
-    // the agent PTY streaming forever after every agent-terminal viewer has left.
-    const agentTerminalRoom = (sessionId: string): string => `agent-session:${sessionId}`
-    const subscribedAgentSessions = new Set<string>()
-    // A valid token for one namespace must not be able to act on (subscribe to,
-    // replay, or drive) a session in another namespace. Same shape as the
-    // terminal:create guard (terminal.ts:95). Callers drop silently rather than
-    // emitting an error: surfacing "session inactive/unavailable" to an
-    // unauthorized caller would leak existence, and the only honest-client
-    // rejection path (a session that just went inactive) unmounts the terminal
-    // view anyway via canViewAgentTerminal, so there is no live viewer to inform.
-    const isAuthorizedSession = (sessionId: string): boolean => {
-        const namespace = currentNamespace()
-        const session = getSession(sessionId)
-        return Boolean(namespace && session && session.namespace === namespace && session.active)
-    }
-    const tellCliIfNoViewers = (sessionId: string): void => {
-        const size = socket.nsp.adapter.rooms.get(agentTerminalRoom(sessionId))?.size ?? 0
-        if (size === 0) {
-            emitToCliForSession(sessionId, 'agent-terminal:idle', { sessionId })
-        }
-    }
+ /** Returns false when no CLI socket owns this session in the caller's namespace. */
+ const emitToCliForSession = (sessionId: string, event: 'agent-terminal:resize' | 'agent-terminal:refresh' | 'agent-terminal:idle' | 'agent-terminal:input', payload: Record<string, unknown>): boolean => {
+  const cliSocketId = pickCliSocketId(sessionId)
+  if (!cliSocketId) return false
+  const cliSocket = cliNamespace.sockets.get(cliSocketId)
+  if (!cliSocket || cliSocket.data.namespace !== currentNamespace()) return false
+  cliSocket.emit(event, payload as never)
+  return true
+ }
 
-    socket.on('agent-terminal:subscribe', (data: unknown) => {
-        const parsed = z.object({ sessionId: z.string().min(1) }).safeParse(data)
-        if (!parsed.success) {
-            return
-        }
-        const { sessionId } = parsed.data
-        if (!isAuthorizedSession(sessionId)) {
-            return
-        }
-        socket.join(agentTerminalRoom(sessionId))
-        subscribedAgentSessions.add(sessionId)
-        // Full-screen TUIs (agy's bubbletea alt-screen, claude's ink) can't always
-        // be reconstructed from a byte-ring replay (truncated alt-screen enter,
-        // stale alt-screen-exit from a prior spawn). Ask the CLI to repaint the
-        // current screen so a freshly (re)subscribed viewer never sees black.
-        const askedCliToRepaint = emitToCliForSession(sessionId, 'agent-terminal:refresh', { sessionId })
-        // That repaint is rebroadcast through this same room, so emitting the
-        // buffered copy as well would push the whole screen into the ring twice
-        // on every toggle. Fall back to the buffer only when no CLI can repaint.
-        // terminalId must match the web client's filter ('agent'), not a
-        // synthetic id, otherwise the replayed data is silently dropped.
-        if (!askedCliToRepaint) {
-            const buffered = getAgentTerminalReplay(sessionId)
-            if (buffered) {
-                socket.emit('agent-terminal:output', { sessionId, terminalId: 'agent', data: buffered })
-            }
-        }
-    })
+ // Sessions this socket is viewing the agent terminal for. When the last
+ // viewer of a session leaves (this socket unsubscribes or disconnects and the
+ // room empties), tell the CLI to stop streaming that PTY.
+ //
+ // Agent-terminal viewers get their OWN room, distinct from the user-terminal's
+ // `session:${id}` room: the streaming-teardown count must reflect agent-terminal
+ // viewers only, otherwise a user-terminal viewer in `session:${id}` would keep
+ // the agent PTY streaming forever after every agent-terminal viewer has left.
+ const agentTerminalRoom = (sessionId: string): string => `agent-session:${sessionId}`
+ const subscribedAgentSessions = new Set<string>()
+ // A valid token for one namespace must not be able to act on (subscribe to,
+ // replay, or drive) a session it has no grant for. `capability` splits
+ // watching the agent TUI ('read') from driving it ('operate'); a configured
+ // resolver's denial is final — same namespace does not bypass it. Callers
+ // drop silently rather than emitting an error: surfacing "session
+ // inactive/unavailable" to an unauthorized caller would leak existence.
+ const isAuthorizedSession = (sessionId: string, capability: 'read' | 'operate'): boolean => {
+  const session = getSession(sessionId)
+  return Boolean(session?.active) && authorizeNamespace(sessionId, capability) !== null
+ }
+ // Drop this socket's viewer state for a revoked session: leave the
+ // agent-terminal room so broadcasts stop reaching it, and stop the CLI's
+ // stream when no authorized viewers remain.
+ const revokeSessionAccess = (sessionId: string): void => {
+  if (!subscribedAgentSessions.delete(sessionId)) return
+  socket.leave(agentTerminalRoom(sessionId))
+  socket.emit('agent-terminal:error', { sessionId, message: 'Terminal access revoked.' })
+  tellCliIfNoViewers(sessionId)
+ }
+ // 'operate' recheck for agent-PTY actions. Fully-revoked viewers are evicted
+ // from the agent-terminal room; a 'read' holder (viewer grant) attempting to
+ // drive the TUI is just dropped — it keeps watching.
+ const dropUnlessRead = (sessionId: string): void => {
+  if (authorizeNamespace(sessionId, 'read') === null) {
+   revokeSessionAccess(sessionId)
+  }
+ }
+ const tellCliIfNoViewers = (sessionId: string): void => {
+  const size = socket.nsp.adapter.rooms.get(agentTerminalRoom(sessionId))?.size ?? 0
+  if (size === 0) {
+   emitToCliForSession(sessionId, 'agent-terminal:idle', { sessionId })
+  }
+ }
 
-    socket.on('agent-terminal:unsubscribe', (data: unknown) => {
-        const parsed = z.object({ sessionId: z.string().min(1) }).safeParse(data)
-        if (!parsed.success) {
-            return
-        }
-        const { sessionId } = parsed.data
-        socket.leave(agentTerminalRoom(sessionId))
-        subscribedAgentSessions.delete(sessionId)
-        tellCliIfNoViewers(sessionId)
-    })
+ socket.on('agent-terminal:subscribe', (data: unknown) => {
+  const parsed = z.object({ sessionId: z.string().min(1) }).safeParse(data)
+  if (!parsed.success) {
+   return
+  }
+  const { sessionId } = parsed.data
+  if (!isAuthorizedSession(sessionId, 'read')) {
+   return
+  }
+  socket.join(agentTerminalRoom(sessionId))
+  subscribedAgentSessions.add(sessionId)
+  // Full-screen TUIs (agy's bubbletea alt-screen, claude's ink) can't always
+  // be reconstructed from a byte-ring replay (truncated alt-screen enter,
+  // stale alt-screen-exit from a prior spawn). Ask the CLI to repaint the
+  // current screen so a freshly (re)subscribed viewer never sees black.
+  const askedCliToRepaint = emitToCliForSession(sessionId, 'agent-terminal:refresh', { sessionId })
+  // That repaint is rebroadcast through this same room, so emitting the
+  // buffered copy as well would push the whole screen into the ring twice
+  // on every toggle. Fall back to the buffer only when no CLI can repaint.
+  // terminalId must match the web client's filter ('agent'), not a
+  // synthetic id, otherwise the replayed data is silently dropped.
+  if (!askedCliToRepaint) {
+   const buffered = getAgentTerminalReplay(sessionId)
+   if (buffered) {
+    socket.emit('agent-terminal:output', { sessionId, terminalId: 'agent', data: buffered })
+   }
+  }
+ })
 
-    socket.on('agent-terminal:resize', (data: unknown) => {
-        const parsed = z.object({
-            sessionId: z.string().min(1),
-            cols: z.number().int().positive(),
-            rows: z.number().int().positive()
-        }).safeParse(data)
-        if (!parsed.success) {
-            return
-        }
-        const { sessionId, cols, rows } = parsed.data
-        if (!isAuthorizedSession(sessionId)) {
-            return
-        }
-        emitToCliForSession(sessionId, 'agent-terminal:resize', { sessionId, cols, rows })
-    })
+ socket.on('agent-terminal:unsubscribe', (data: unknown) => {
+  const parsed = z.object({ sessionId: z.string().min(1) }).safeParse(data)
+  if (!parsed.success) {
+   return
+  }
+  const { sessionId } = parsed.data
+  socket.leave(agentTerminalRoom(sessionId))
+  subscribedAgentSessions.delete(sessionId)
+  tellCliIfNoViewers(sessionId)
+ })
 
-    // Raw keystroke(s) from a viewer → relay to the CLI to write into the agent
-    // PTY. Same authorization guard as resize: only an authorized viewer of an
-    // active session in this namespace may drive its TUI.
-    socket.on('agent-terminal:input', (data: unknown) => {
-        const parsed = z.object({
-            sessionId: z.string().min(1),
-            data: z.string().min(1)
-        }).safeParse(data)
-        if (!parsed.success) {
-            return
-        }
-        const { sessionId, data: keys } = parsed.data
-        if (!isAuthorizedSession(sessionId)) {
-            return
-        }
-        emitToCliForSession(sessionId, 'agent-terminal:input', { sessionId, data: keys })
-    })
+ socket.on('agent-terminal:resize', (data: unknown) => {
+  const parsed = z.object({
+   sessionId: z.string().min(1),
+   cols: z.number().int().positive(),
+   rows: z.number().int().positive()
+  }).safeParse(data)
+  if (!parsed.success) {
+   return
+  }
+  const { sessionId, cols, rows } = parsed.data
+  if (!isAuthorizedSession(sessionId, 'operate')) {
+   dropUnlessRead(sessionId)
+   return
+  }
+  emitToCliForSession(sessionId, 'agent-terminal:resize', { sessionId, cols, rows })
+ })
 
-    socket.on('disconnect', () => {
-        // Socket.IO reconnects with a new socket id. Keep the PTY and its
-        // scrollback alive until the normal idle timeout; terminal:create with
-        // the same terminal id will rebind it to the replacement socket.
-        terminalRegistry.detachBySocket(socket.id)
-        // On disconnect the socket has already left its rooms, so the room size
-        // now reflects the remaining viewers — tell the CLI to stop streaming any
-        // agent terminal this socket was the last viewer of.
-        for (const sessionId of subscribedAgentSessions) {
-            tellCliIfNoViewers(sessionId)
-        }
-    })
+ // Raw keystroke(s) from a viewer → relay to the CLI to write into the agent
+ // PTY. Same authorization guard as resize: only an authorized viewer of an
+ // active session in this namespace may drive its TUI.
+ socket.on('agent-terminal:input', (data: unknown) => {
+  const parsed = z.object({
+   sessionId: z.string().min(1),
+   data: z.string().min(1)
+  }).safeParse(data)
+  if (!parsed.success) {
+   return
+  }
+  const { sessionId, data: keys } = parsed.data
+  if (!isAuthorizedSession(sessionId, 'operate')) {
+   dropUnlessRead(sessionId)
+   return
+  }
+  emitToCliForSession(sessionId, 'agent-terminal:input', { sessionId, data: keys })
+ })
+
+ socket.on('disconnect', () => {
+  // Socket.IO reconnects with a new socket id. Keep the PTY and its
+  // scrollback alive until the normal idle timeout; terminal:create with
+  // the same terminal id will rebind it to the replacement socket.
+  terminalRegistry.detachBySocket(socket.id)
+  // On disconnect the socket has already left its rooms, so the room size
+  // now reflects the remaining viewers — tell the CLI to stop streaming any
+  // agent terminal this socket was the last viewer of.
+  for (const sessionId of subscribedAgentSessions) {
+   tellCliIfNoViewers(sessionId)
+  }
+ })
+
+ socket.on('ping', (callback: () => void) => {
+  if (typeof callback === 'function') callback()
+ })
 }

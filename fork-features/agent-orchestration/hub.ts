@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto'
 import { Hono, type Context } from 'hono'
-import { MessagesQuerySchema, type Session, type SyncEvent } from '@hapi/protocol'
+import { MessagesQuerySchema, messageQueryPosition, type Session, type SyncEvent } from '@hapi/protocol'
 import type { SyncEngine } from '../../hub/src/sync/syncEngine'
+import { MessageTurnQueryError } from '../../hub/src/sync/messageService'
 import type { WebAppEnv } from '../../hub/src/web/middleware/auth'
 import {
     AgentCallerRequestSchema,
@@ -148,7 +149,7 @@ export function watchMessageConsumption(
     localId: string
 ): MessageConsumptionWatcher {
     let settled = false
-    let resolvePromise: () => void = () => {}
+    let resolvePromise: () => void = () => { }
     const promise = new Promise<void>((resolve) => {
         resolvePromise = resolve
     })
@@ -262,7 +263,7 @@ export function mountAgentOrchestrationRoutes(
         }
     })
 
-    app.get('/api/agent/sessions/:id/messages', (c) => {
+    app.get('/api/agent/sessions/:id/messages', async (c) => {
         try {
             const orchestrationQuery = AgentMessageQuerySchema.safeParse(c.req.query())
             const messagesQuery = MessagesQuerySchema.safeParse(c.req.query())
@@ -274,11 +275,19 @@ export function mountAgentOrchestrationRoutes(
             const caller = requireCaller(engine, namespace, orchestrationQuery.data.caller)
             const target = requireScopedTarget(engine, namespace, caller, c.req.param('id'))
             const query = messagesQuery.data
+            if (query.turns !== undefined || query.turnId !== undefined) {
+                await engine.prepareMessageTurnIndex(target.id)
+                const currentCaller = requireCaller(engine, namespace, orchestrationQuery.data.caller)
+                requireScopedTarget(engine, namespace, currentCaller, target.id)
+            }
             const response = engine.getMessagesPage(target.id, {
                 limit: query.limit ?? 50,
-                before: query.beforeAt === undefined ? null : { at: query.beforeAt, seq: query.beforeSeq! },
-                after: query.afterAt === undefined ? null : { at: query.afterAt, seq: query.afterSeq! },
-                until: query.untilAt === undefined ? null : { at: query.untilAt, seq: query.untilSeq! },
+                orderVersion: query.orderVersion,
+                turns: query.turns,
+                turnId: query.turnId,
+                before: messageQueryPosition(query, 'before'),
+                after: messageQueryPosition(query, 'after'),
+                until: messageQueryPosition(query, 'until'),
                 epoch: query.epoch ?? null
             })
             if (orchestrationQuery.data.raw) {
@@ -286,6 +295,9 @@ export function mountAgentOrchestrationRoutes(
             }
             return c.json(projectAgentMessages(response))
         } catch (error) {
+            if (error instanceof MessageTurnQueryError) {
+                return agentErrorResponse(c, new AgentRouteError(error.status === 404 ? 'not_found' : 'bad_args', error.message))
+            }
             return routeFailure(c, error)
         }
     })

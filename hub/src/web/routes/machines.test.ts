@@ -68,7 +68,7 @@ describe('machines routes', () => {
         const app = new Hono<WebAppEnv>()
         app.use('*', async (c, next) => {
             c.set('namespace', 'default')
-            c.set('machinePathScope', 'C:\\Users\\Administrator\\peter')
+            c.set('machinePathScope', ['C:\\Users\\Administrator\\peter', 'C:\\Peter'])
             await next()
         })
         app.route('/api', createMachinesRoutes(() => engine as SyncEngine))
@@ -80,7 +80,9 @@ describe('machines routes', () => {
                 paths: [
                     'C:\\Users\\Administrator\\peter\\mac',
                     'C:\\Users\\Administrator\\hapi',
-                    'C:\\Users\\Administrator\\peter'
+                    'C:\\Users\\Administrator\\peter',
+                    'C:\\Peter\\work',
+                    'C:\\PeterX'
                 ]
             })
         })
@@ -90,11 +92,12 @@ describe('machines routes', () => {
             exists: {
                 'C:\\Users\\Administrator\\peter\\mac': true,
                 'C:\\Users\\Administrator\\peter': true,
-                'C:\\Users\\Administrator\\hapi': false
+                'C:\\Peter\\work': true,
+                'C:\\Users\\Administrator\\hapi': false,
+                'C:\\PeterX': false
             }
         })
-        // 越界路径绝不能被真正探测——答 false 是过滤出来的，不是机器答的
-        expect(probed).toEqual([['C:\\Users\\Administrator\\peter\\mac', 'C:\\Users\\Administrator\\peter']])
+        expect(probed).toEqual([['C:\\Users\\Administrator\\peter\\mac', 'C:\\Users\\Administrator\\peter', 'C:\\Peter\\work']])
     })
 
     it('paths/exists 全部越界时不打机器，直接全 false', async () => {
@@ -108,7 +111,7 @@ describe('machines routes', () => {
         const app = new Hono<WebAppEnv>()
         app.use('*', async (c, next) => {
             c.set('namespace', 'default')
-            c.set('machinePathScope', 'C:\\Users\\Administrator\\peter')
+            c.set('machinePathScope', ['C:\\Users\\Administrator\\peter'])
             await next()
         })
         app.route('/api', createMachinesRoutes(() => engine as SyncEngine))

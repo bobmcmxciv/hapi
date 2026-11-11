@@ -1,5 +1,5 @@
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { MachineFilterItem } from './MachineFilterBar'
 import { MachineFilterBar, MachineFilterMenu, getMachineFilterMenuClampStyle, groupMachinesByOwner } from './MachineFilterBar'
 import { I18nProvider } from '@/lib/i18n-context'
@@ -77,6 +77,8 @@ function renderMenu(props: Partial<Parameters<typeof MachineFilterMenu>[0]> = {}
 }
 
 describe('MachineFilterBar', () => {
+    beforeEach(() => localStorage.clear())
+
     it('renders an "All" chip plus one chip per machine with counts', () => {
         renderBar()
 
@@ -144,15 +146,23 @@ describe('MachineFilterBar', () => {
         expect(mint.className).toContain('w-full')
     })
 
-    it('lays chips out in an aligned auto-fill grid and never collapses at any width', () => {
-        // fork：不再按视口断点折叠；布局是 auto-fill 网格，各要素纵向对齐。
+    it('lays chips out in an aligned auto-fill grid by default on desktop and allows collapsing', () => {
+        localStorage.clear()
         renderBar()
 
         const group = screen.getByRole('group', { name: 'Filter sessions by machine' })
         expect(group.className).not.toContain('max-md:hidden')
-        const grid = group.firstElementChild!
+        const toggle = screen.getByRole('button', { name: 'Hide machine list' })
+        expect(toggle.getAttribute('aria-expanded')).toBe('true')
+        const grid = group.children[1]!
         expect(grid.className).toContain('grid')
         expect(grid.className).toContain('auto-fill')
+
+        fireEvent.click(toggle)
+        const collapsedSummary = screen.getByRole('button', { name: /All 5/ })
+        expect(collapsedSummary.getAttribute('aria-expanded')).toBe('false')
+        expect(screen.queryByRole('button', { name: /Mint 3/ })).toBeNull()
+        expect(localStorage.getItem('hapi-session-list-machine-filter-expanded')).toBe('0')
     })
 
     it('shows an OS icon matching each machine platform', () => {
@@ -360,6 +370,74 @@ describe('MachineFilterBar', () => {
         expect(chip.getAttribute('aria-expanded')).toBe('false')
         expect(await screen.findByPlaceholderText('TEEMO-PC')).toBeTruthy()
     })
+})
+
+describe('MachineFilterBar mobile collapse', () => {
+    // jsdom has no real matchMedia; swap in a stub whose `matches` answers the
+    // 919px mobile query so the collapse branch is exercised deterministically.
+    function setMobileMatchMedia(mobile: boolean) {
+        Object.defineProperty(window, 'matchMedia', {
+            writable: true,
+            configurable: true,
+            value: vi.fn().mockImplementation((query: string) => ({
+                matches: mobile && query.includes('max-width: 919px'),
+                media: query,
+                onchange: null,
+                addListener: vi.fn(),
+                removeListener: vi.fn(),
+                addEventListener: vi.fn(),
+                removeEventListener: vi.fn(),
+                dispatchEvent: vi.fn(() => false),
+            })),
+        })
+    }
+
+    beforeEach(() => {
+        localStorage.clear()
+        setMobileMatchMedia(true)
+    })
+    afterEach(() => setMobileMatchMedia(false))
+
+    it('shows a summary row of the current filter instead of the chip grid', () => {
+        renderBar()
+
+        const summary = screen.getByRole('button', { name: /All 5/ })
+        expect(summary.getAttribute('aria-expanded')).toBe('false')
+        expect(summary.textContent).toContain('2 machines')
+        expect(screen.queryByRole('button', { name: /Mint 3/ })).toBeNull()
+    })
+
+    it('expands to the full chip grid and filters machines', () => {
+        const onChange = vi.fn()
+        renderBar({ onChange })
+
+        fireEvent.click(screen.getByRole('button', { name: /All 5/ }))
+        expect(screen.getByRole('button', { name: /Teemo 2/ })).toBeTruthy()
+
+        fireEvent.click(screen.getByRole('button', { name: /Teemo 2/ }))
+        expect(onChange).toHaveBeenCalledWith('machine-2')
+    })
+
+    it('summarizes the active machine selection while collapsed', () => {
+        renderBar({ value: 'machine-2' })
+
+        const summary = screen.getByRole('button', { name: /Teemo 2/ })
+        expect(summary.getAttribute('aria-expanded')).toBe('false')
+        expect(summary.textContent).toContain('2 machines')
+        expect(screen.queryByRole('button', { name: /Mint 3/ })).toBeNull()
+    })
+
+    it('persists the expanded preference across remounts', () => {
+        const first = renderBar()
+        fireEvent.click(screen.getByRole('button', { name: /All 5/ }))
+        expect(localStorage.getItem('hapi-session-list-machine-filter-expanded')).toBe('1')
+        first.unmount()
+
+        renderBar()
+        expect(screen.getByRole('button', { name: /Teemo 2/ })).toBeTruthy()
+    })
+
+
 })
 
 describe('groupMachinesByOwner', () => {

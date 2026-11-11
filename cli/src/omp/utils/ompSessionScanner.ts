@@ -308,6 +308,47 @@ export async function resolveOmpSessionPath(
     return match?.file ?? null;
 }
 
+/** Archived restore is exact; unlike interactive /resume it never accepts prefixes. */
+export async function prepareOmpSessionResume(
+    sessionId: string,
+    nativeSession: OmpNativeSession | undefined,
+    workingDirectory: string,
+    options: Parameters<typeof resolveOmpSessionsDirectory>[0] = {}
+): Promise<{ kind: 'resume'; sessionFile: string } | { kind: 'empty' }> {
+    if (nativeSession && nativeSession.id !== sessionId) {
+        throw new Error('OMP resume snapshot does not match the requested native session');
+    }
+    if (nativeSession) {
+        try {
+            const info = await stat(nativeSession.file);
+            if (!info.isFile()) throw new Error(`OMP native journal is not a file: ${nativeSession.file}`);
+        } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+            if (nativeSession.persistence === 'never-persisted') return { kind: 'empty' };
+            throw new Error(`OMP native history is missing: ${nativeSession.file}`, { cause: error });
+        }
+        const prefix = await readPrefix(nativeSession.file);
+        const header = prefix === null ? null : parseSessionHeader(prefix);
+        if (header?.id !== sessionId) {
+            throw new Error(`OMP native journal identity does not match ${sessionId}: ${nativeSession.file}`);
+        }
+        return { kind: 'resume', sessionFile: path.resolve(nativeSession.file) };
+    }
+    const matches: ResumableSessionCandidate[] = [];
+    for (const file of await listOmpSessionFiles(resolveOmpSessionsDirectory(options))) {
+        const candidate = await resumableSessionCandidate(file);
+        if (candidate?.id === sessionId) matches.push(candidate);
+    }
+    const local = matches.filter((candidate) => samePath(candidate.cwd, workingDirectory));
+    const candidates = local.length > 0 ? local : matches;
+    if (candidates.length !== 1) {
+        throw new Error(candidates.length === 0
+            ? `OMP native history is missing for session ${sessionId}`
+            : `OMP native history is ambiguous for session ${sessionId}`);
+    }
+    return { kind: 'resume', sessionFile: candidates[0].file };
+}
+
 async function snapshotFromSessionFile(
     sessionFile: string,
     expectedCwd: string

@@ -15,7 +15,7 @@ import { spawnHappyCLI } from '@/utils/spawnHappyCLI';
 import { writeRunnerState, RunnerLocallyPersistedState, readRunnerState, readSettings, acquireRunnerLock, releaseRunnerLock } from '@/persistence';
 import { getCliArgs } from '@/utils/cliArgs';
 import { isBenignChildPipeError } from '@/utils/benignPipeErrors';
-import { getProcessStartMarker, isProcessAlive, isWindows, killProcess, killProcessByChildProcess, killProcessTreeByPid } from '@/utils/process';
+import { getProcessStartMarkerAsync, isProcessAlive, isWindows, killProcess, killProcessByChildProcess, killProcessTreeByPid } from '@/utils/process';
 import { getCcSwitchProviderLaunchEnv } from '@/modules/common/ccSwitch';
 import { PERMISSION_MODES } from '@hapi/protocol/modes';
 import { RUNNER_CAPABILITIES, resolveMachineLaunchDefaults } from '@hapi/protocol';
@@ -33,6 +33,9 @@ import { hashRunnerCliApiToken, hashRunnerExtraHeaders } from './runnerIdentity'
 import { scheduleCursorModelsPrewarm } from '@/modules/common/cursorModelsPrewarm';
 import { detectOmpMachineAvailability } from '../../../fork-features/omp-host-integration/machine';
 import { isLinkedGitWorktree } from '@/utils/isLinkedGitWorktree';
+import { canConfirmSessionProcessStarted, classifySessionProcessOwnership, matchesSessionCleanupReceipt, SessionCleanupReceiptStore, type SessionProcessOwnership } from './cleanupReceipt';
+import { stopSessionWrapper } from './stopSessionWrapper';
+import { captureSpawnProcessOwnership } from './spawnProcessOwnership';
 
 /**
  * Deduplicates a preallocated HAPI-row spawn only while its child is alive.
@@ -40,82 +43,92 @@ import { isLinkedGitWorktree } from '@/utils/isLinkedGitWorktree';
  * child exits must be allowed to start a new child for the same HAPI row.
  */
 export type SpawnDeduplicator = ((options: SpawnSessionOptions) => Promise<SpawnSessionResult>) & {
-  recoverChild: (existingSessionId: string, result: SpawnSessionResult) => void
-  markChildAlive: (existingSessionId: string) => void
-  markChildStopping: (existingSessionId: string) => void
-  onChildExited: (existingSessionId: string) => void
+ recoverChild: (existingSessionId: string, result: SpawnSessionResult, ompResumeAttemptId?: string) => void
+ markChildAlive: (existingSessionId: string, ompResumeAttemptId?: string) => void
+ markChildStopping: (existingSessionId: string) => void
+ onChildExited: (existingSessionId: string) => void
 }
 
 export function createSpawnDeduplicator(
-  spawnOnce: (options: SpawnSessionOptions) => Promise<SpawnSessionResult>
+ spawnOnce: (options: SpawnSessionOptions) => Promise<SpawnSessionResult>
 ): SpawnDeduplicator {
-  const completedOrInFlight = new Map<string, Promise<SpawnSessionResult>>();
-  const childState = new Map<string, 'alive' | 'stopping'>();
+ const completedOrInFlight = new Map<string, Promise<SpawnSessionResult>>();
+ const childState = new Map<string, 'alive' | 'stopping'>();
+ const childAttemptIds = new Map<string, string | undefined>();
 
-  const dedupe = async (options: SpawnSessionOptions): Promise<SpawnSessionResult> => {
-    const key = options.existingSessionId;
-    if (!key) {
-      return await spawnOnce(options);
-    }
-    const existing = completedOrInFlight.get(key);
-    if (existing) {
-      return await existing;
-    }
+ const dedupe = async (options: SpawnSessionOptions): Promise<SpawnSessionResult> => {
+  const key = options.existingSessionId;
+  if (!key) {
+   return await spawnOnce(options);
+  }
+  const existing = completedOrInFlight.get(key);
+  if (existing) {
+   if (options.agent === 'omp' && childAttemptIds.get(key) !== options.ompResumeAttemptId) {
+    return { type: 'error', errorMessage: 'Existing OMP wrapper belongs to a different resume attempt; verified cleanup is required before replacement' };
+   }
+   return await existing;
+  }
 
-    const task = spawnOnce(options);
-    completedOrInFlight.set(key, task);
-    task.then((result) => {
-      // A failure before a PID exists can retry immediately. Once startRunner
-      // has registered a child PID, keep its result until exit/stale detection
-      // confirms that the child is gone.
-      if (result.type !== 'success' && !childState.has(key) && completedOrInFlight.get(key) === task) {
-        completedOrInFlight.delete(key);
-      }
-    }, () => {
-      if (!childState.has(key) && completedOrInFlight.get(key) === task) {
-        completedOrInFlight.delete(key);
-      }
-    });
-    return await task;
-  };
-  dedupe.recoverChild = (existingSessionId: string, result: SpawnSessionResult) => {
-    childState.set(existingSessionId, 'alive');
-    completedOrInFlight.set(existingSessionId, Promise.resolve(result));
-  };
-  dedupe.markChildAlive = (existingSessionId: string) => {
-    childState.set(existingSessionId, 'alive');
-  };
-  dedupe.markChildStopping = (existingSessionId: string) => {
-    if (childState.has(existingSessionId)) {
-      childState.set(existingSessionId, 'stopping');
-    }
-  };
-  dedupe.onChildExited = (existingSessionId: string) => {
-    childState.delete(existingSessionId);
-    completedOrInFlight.delete(existingSessionId);
-  };
-  return dedupe;
+  const task = spawnOnce(options);
+  completedOrInFlight.set(key, task);
+  childAttemptIds.set(key, options.ompResumeAttemptId);
+  task.then((result) => {
+   // A failure before a PID exists can retry immediately. Once startRunner
+   // has registered a child PID, keep its result until exit/stale detection
+   // confirms that the child is gone.
+   if (result.type !== 'success' && !childState.has(key) && completedOrInFlight.get(key) === task) {
+    completedOrInFlight.delete(key);
+    childAttemptIds.delete(key);
+   }
+  }, () => {
+   if (!childState.has(key) && completedOrInFlight.get(key) === task) {
+    completedOrInFlight.delete(key);
+    childAttemptIds.delete(key);
+   }
+  });
+  return await task;
+ };
+ dedupe.recoverChild = (existingSessionId: string, result: SpawnSessionResult, ompResumeAttemptId?: string) => {
+  childState.set(existingSessionId, 'alive');
+  childAttemptIds.set(existingSessionId, ompResumeAttemptId);
+  completedOrInFlight.set(existingSessionId, Promise.resolve(result));
+ };
+ dedupe.markChildAlive = (existingSessionId: string, ompResumeAttemptId?: string) => {
+  childState.set(existingSessionId, 'alive');
+  childAttemptIds.set(existingSessionId, ompResumeAttemptId);
+ };
+ dedupe.markChildStopping = (existingSessionId: string) => {
+  if (childState.has(existingSessionId)) {
+   childState.set(existingSessionId, 'stopping');
+  }
+ };
+ dedupe.onChildExited = (existingSessionId: string) => {
+  childState.delete(existingSessionId);
+  childAttemptIds.delete(existingSessionId);
+  completedOrInFlight.delete(existingSessionId);
+ };
+ return dedupe;
 }
 
 export function classifyRecoveredProcessGeneration(
-  processAlive: boolean,
-  currentMarker: string | null,
-  persistedMarker: string
+ processAlive: boolean,
+ currentMarker: string | null,
+ persistedMarker: string
 ): 'verified' | 'quarantined' | 'exited' {
-  if (!processAlive) return 'exited';
-  if (currentMarker === null) return 'quarantined';
-  return currentMarker === persistedMarker ? 'verified' : 'exited';
+ if (!processAlive) return 'exited';
+ if (currentMarker === null || !persistedMarker) return 'quarantined';
+ return currentMarker === persistedMarker ? 'verified' : 'exited';
 }
 
 export function releaseRecoveredSpawnDedupe(
-  pid: number,
-  existingSessionIdByChildPid: Map<number, string>,
-  spawnSession: SpawnDeduplicator
+ pid: number,
+ existingSessionIdByChildPid: Map<number, string>,
+ spawnSession: SpawnDeduplicator
 ): void {
-  const existingSessionId = existingSessionIdByChildPid.get(pid);
-  if (!existingSessionId) return;
-  spawnSession.onChildExited(existingSessionId);
-  existingSessionIdByChildPid.delete(pid);
+ const existingSessionId = existingSessionIdByChildPid.get(pid);
+ if (!existingSessionId) return;
+ spawnSession.onChildExited(existingSessionId);
+ existingSessionIdByChildPid.delete(pid);
 }
 
 /** Set on a runner spawned to replace one that crashed; holds the crashed runner's PID. */
@@ -124,1640 +137,1767 @@ const RESTART_AFTER_CRASH_OF_PID_ENV = 'HAPI_RUNNER_RESTART_AFTER_CRASH_OF_PID';
 const CRASH_LOOP_WINDOW_SECONDS = 600;
 
 export async function startRunner(options: { workspaceRoots?: string[] } = {}): Promise<void> {
-  // We don't have cleanup function at the time of server construction
-  // Control flow is:
-  // 1. Create promise that will resolve when shutdown is requested
-  // 2. Setup signal handlers to resolve this promise with the source of the shutdown
-  // 3. Once our setup is complete - if all goes well - we await this promise
-  // 4. When it resolves we can cleanup and exit
-  //
-  // In case the setup malfunctions - our signal handlers will not properly
-  // shut down. We will force exit the process with code 1.
-  let requestShutdown: (source: 'hapi-app' | 'hapi-cli' | 'os-signal' | 'exception', errorMessage?: string) => void;
-  let resolvesWhenShutdownRequested = new Promise<({ source: 'hapi-app' | 'hapi-cli' | 'os-signal' | 'exception', errorMessage?: string })>((resolve) => {
-    requestShutdown = (source, errorMessage) => {
-      logger.debug(`[RUNNER RUN] Requesting shutdown (source: ${source}, errorMessage: ${errorMessage})`);
-
-      // Fallback - in case startup malfunctions - we will force exit the process with code 1
-      setTimeout(async () => {
-        logger.debug('[RUNNER RUN] Startup malfunctioned, forcing exit with code 1');
-
-        // Give time for logs to be flushed
-        await new Promise(resolve => setTimeout(resolve, 100))
-
-        process.exit(1);
-      }, 1_000);
-
-      // Start graceful shutdown
-      resolve({ source, errorMessage });
-    };
-  });
-
-  // Setup signal handlers
-  process.on('SIGINT', () => {
-    logger.debug('[RUNNER RUN] Received SIGINT');
-    requestShutdown('os-signal');
-  });
-
-  process.on('SIGTERM', () => {
-    logger.debug('[RUNNER RUN] Received SIGTERM');
-    requestShutdown('os-signal');
-  });
-
-  if (isWindows()) {
-    process.on('SIGBREAK', () => {
-      logger.debug('[RUNNER RUN] Received SIGBREAK');
-      requestShutdown('os-signal');
-    });
+ // We don't have cleanup function at the time of server construction
+ // Control flow is:
+ // 1. Create promise that will resolve when shutdown is requested
+ // 2. Setup signal handlers to resolve this promise with the source of the shutdown
+ // 3. Once our setup is complete - if all goes well - we await this promise
+ // 4. When it resolves we can cleanup and exit
+ //
+ // In case the setup malfunctions - our signal handlers will not properly
+ // shut down. We will force exit the process with code 1.
+ let requestShutdown: (source: 'hapi-app' | 'hapi-cli' | 'os-signal' | 'exception', errorMessage?: string) => void;
+ // The watchdog exists only to force-exit when STARTUP malfunctions: it is
+ // armed on the first shutdown request and disarmed once cleanup begins. It
+ // is not a cleanup deadline - graceful shutdown legitimately drains in-flight
+ // HTTP requests (e.g. a session webhook still registering) past 1s.
+ let startupMalfunctionWatchdog: NodeJS.Timeout | null = null;
+ let shutdownRequested = false;
+ const disarmStartupMalfunctionWatchdog = () => {
+  if (startupMalfunctionWatchdog) {
+   clearTimeout(startupMalfunctionWatchdog);
+   startupMalfunctionWatchdog = null;
   }
+ };
+ const { promise: resolvesWhenShutdownRequested, resolve: resolveShutdown } = Promise.withResolvers<{
+  source: 'hapi-app' | 'hapi-cli' | 'os-signal' | 'exception';
+  errorMessage?: string;
+ }>();
+ requestShutdown = (source, errorMessage) => {
+  if (shutdownRequested) return;
+  shutdownRequested = true;
+  logger.debug(`[RUNNER RUN] Requesting shutdown (source: ${source}, errorMessage: ${errorMessage})`);
+  startupMalfunctionWatchdog = setTimeout(() => {
+   logger.debug('[RUNNER RUN] Startup malfunctioned, forcing exit with code 1');
+   setTimeout(() => process.exit(1), 100);
+  }, 1_000);
+  resolveShutdown({ source, errorMessage });
+ };
 
-  // The Windows scheduled tasks and launchd jobs that start runners do not
-  // restart one that exits, so a crashed runner left its machine offline until
-  // someone noticed. A genuine crash now spawns a replacement runner (which
-  // waits for this process to exit) and exits with code 1.
-  const crashedRunnerPid = Number(process.env[RESTART_AFTER_CRASH_OF_PID_ENV]);
-  const isCrashReplacement = Number.isInteger(crashedRunnerPid) && crashedRunnerPid > 0;
-  delete process.env[RESTART_AFTER_CRASH_OF_PID_ENV];
-  let shutdownExitCode = 0;
-  let crashRestartAttempted = false;
-  const restartAfterCrash = () => {
-    shutdownExitCode = 1;
-    if (crashRestartAttempted) {
-      return;
+ // Setup signal handlers
+ process.on('SIGINT', () => {
+  logger.debug('[RUNNER RUN] Received SIGINT');
+  requestShutdown('os-signal');
+ });
+
+ process.on('SIGTERM', () => {
+  logger.debug('[RUNNER RUN] Received SIGTERM');
+  requestShutdown('os-signal');
+ });
+
+ if (isWindows()) {
+  process.on('SIGBREAK', () => {
+   logger.debug('[RUNNER RUN] Received SIGBREAK');
+   requestShutdown('os-signal');
+  });
+ }
+
+ // The Windows scheduled tasks and launchd jobs that start runners do not
+ // restart one that exits, so a crashed runner left its machine offline until
+ // someone noticed. A genuine crash now spawns a replacement runner (which
+ // waits for this process to exit) and exits with code 1.
+ const crashedRunnerPid = Number(process.env[RESTART_AFTER_CRASH_OF_PID_ENV]);
+ const isCrashReplacement = Number.isInteger(crashedRunnerPid) && crashedRunnerPid > 0;
+ delete process.env[RESTART_AFTER_CRASH_OF_PID_ENV];
+ let shutdownExitCode = 0;
+ let crashRestartAttempted = false;
+ const restartAfterCrash = () => {
+  shutdownExitCode = 1;
+  if (crashRestartAttempted) {
+   return;
+  }
+  crashRestartAttempted = true;
+  if (isCrashReplacement && process.uptime() < CRASH_LOOP_WINDOW_SECONDS) {
+   logger.debug(`[RUNNER RUN] Crashed again ${Math.round(process.uptime())}s after replacing crashed runner PID ${crashedRunnerPid}; not respawning`);
+   return;
+  }
+  const argv = getCliArgs();
+  const restartArgv = argv[0] === 'runner' ? argv : ['runner', 'start-sync'];
+  try {
+   spawnHappyCLI(restartArgv, {
+    detached: true,
+    stdio: 'ignore',
+    env: {
+     ...process.env,
+     [RESTART_AFTER_CRASH_OF_PID_ENV]: String(process.pid)
     }
-    crashRestartAttempted = true;
-    if (isCrashReplacement && process.uptime() < CRASH_LOOP_WINDOW_SECONDS) {
-      logger.debug(`[RUNNER RUN] Crashed again ${Math.round(process.uptime())}s after replacing crashed runner PID ${crashedRunnerPid}; not respawning`);
-      return;
-    }
-    const argv = getCliArgs();
-    const restartArgv = argv[0] === 'runner' ? argv : ['runner', 'start-sync'];
-    try {
-      spawnHappyCLI(restartArgv, {
-        detached: true,
-        stdio: 'ignore',
-        env: {
-          ...process.env,
-          [RESTART_AFTER_CRASH_OF_PID_ENV]: String(process.pid)
-        }
-      }).unref();
-      logger.debug(`[RUNNER RUN] Spawned replacement runner after crash with argv: ${JSON.stringify(restartArgv)}`);
-    } catch (error) {
-      logger.debug('[RUNNER RUN] Failed to spawn replacement runner after crash', error);
-    }
+   }).unref();
+   logger.debug(`[RUNNER RUN] Spawned replacement runner after crash with argv: ${JSON.stringify(restartArgv)}`);
+  } catch (error) {
+   logger.debug('[RUNNER RUN] Failed to spawn replacement runner after crash', error);
+  }
+ };
+
+ process.on('uncaughtException', (error) => {
+  if (isBenignChildPipeError(error)) {
+   logger.debug('[RUNNER RUN] Ignoring write to a closed child process pipe', error);
+   return;
+  }
+  logger.debug('[RUNNER RUN] FATAL: Uncaught exception', error);
+  logger.debug(`[RUNNER RUN] Stack trace: ${error.stack}`);
+  restartAfterCrash();
+  requestShutdown('exception', error.message);
+ });
+
+ process.on('unhandledRejection', (reason, promise) => {
+  if (isBenignChildPipeError(reason)) {
+   logger.debug('[RUNNER RUN] Ignoring rejected write to a closed child process pipe', reason);
+   return;
+  }
+  logger.debug('[RUNNER RUN] FATAL: Unhandled promise rejection', reason);
+  logger.debug(`[RUNNER RUN] Rejected promise:`, promise);
+  const error = reason instanceof Error ? reason : new Error(`Unhandled promise rejection: ${reason}`);
+  logger.debug(`[RUNNER RUN] Stack trace: ${error.stack}`);
+  restartAfterCrash();
+  requestShutdown('exception', error.message);
+ });
+
+ process.on('exit', (code) => {
+  logger.debug(`[RUNNER RUN] Process exiting with code: ${code}`);
+ });
+
+ process.on('beforeExit', (code) => {
+  logger.debug(`[RUNNER RUN] Process about to exit with code: ${code}`);
+ });
+
+ logger.debug('[RUNNER RUN] Starting runner process...');
+ logger.debugLargeJson('[RUNNER RUN] Environment', getEnvironmentInfo());
+
+ if (isCrashReplacement) {
+  // Let the crashed runner finish its cleanup so the lock and state file are
+  // free (or stale) before the normal startup checks below look at them.
+  const deadline = Date.now() + 30_000;
+  while (isProcessAlive(crashedRunnerPid) && Date.now() < deadline) {
+   await new Promise(resolve => setTimeout(resolve, 250));
+  }
+  logger.debug(`[RUNNER RUN] Replacing crashed runner PID ${crashedRunnerPid} (still alive: ${isProcessAlive(crashedRunnerPid)})`);
+ }
+
+ // Detect authorized handoff from a parent runner doing the
+ // mtime-drift self-restart (see heartbeat block below). The parent sets
+ // HAPI_RUNNER_HANDOFF_FROM_PID=<parent_pid> on the spawned child's env;
+ // if it matches the live state pid, we are the explicit replacement and
+ // must NOT trigger `stopRunner()` (parent will voluntarily release the
+ // lock and exit once it sees our pid in state).
+ //
+ // Codex review #814 [Major] on run.ts:892 -- previously the child
+ // unconditionally called `stopRunner()` before acquiring the lock or
+ // writing its own state. `/stop` resolved the parent's shutdown,
+ // deleted runner.state.json, and released the lock BEFORE the child
+ // had committed itself; if the child then failed (lock contention,
+ // auth error, anything between stopRunner and writeRunnerState), the
+ // machine went offline with no runner at all.
+ //
+ // New protocol:
+ //   - Parent: spawn child with HAPI_RUNNER_HANDOFF_FROM_PID env, then
+ //     release lock, then wait for state.pid to change to a different
+ //     live pid. On wait-timeout the parent re-acquires the lock and
+ //     defers retry; on wait-success the parent clearInterval + exit.
+ //   - Child: detect env, skip stopRunner(), skip the version-match
+ //     early-exit, acquire the lock with a longer retry window (parent
+ //     releases asynchronously, so we may need to wait).
+ const handoffFromPidRaw = process.env.HAPI_RUNNER_HANDOFF_FROM_PID;
+ const handoffFromPid = handoffFromPidRaw ? Number(handoffFromPidRaw) : NaN;
+ let isAuthorizedHandoff = false;
+ if (Number.isFinite(handoffFromPid) && handoffFromPid > 0) {
+  const existingState = await readRunnerState();
+  if (existingState?.pid === handoffFromPid && isProcessAlive(handoffFromPid)) {
+   isAuthorizedHandoff = true;
+   logger.debug(`[RUNNER RUN] Authorized handoff from parent runner PID ${handoffFromPid}; skipping stopRunner() and version-match short-circuit`);
+  } else {
+   logger.debug(`[RUNNER RUN] HAPI_RUNNER_HANDOFF_FROM_PID=${handoffFromPidRaw} set but no matching live parent in state (state.pid=${existingState?.pid ?? 'none'}); ignoring handoff signal`);
+  }
+ }
+
+ if (!isAuthorizedHandoff) {
+  // Check if already running
+  // Check if running runner version matches current CLI version
+  const runningRunnerVersionMatches = await isRunnerRunningCurrentlyInstalledHappyVersion();
+  if (!runningRunnerVersionMatches) {
+   logger.debug('[RUNNER RUN] Runner version mismatch detected, restarting runner with current CLI version');
+   await stopRunner();
+  } else {
+   logger.debug('[RUNNER RUN] Runner version matches, keeping existing runner');
+   console.log('Runner already running with matching version');
+   process.exit(0);
+  }
+ }
+
+ // Acquire exclusive lock (proves runner is running).
+ // In authorized-handoff mode the parent is still alive holding the lock
+ // and will release it asynchronously once we are spawned, so wait longer
+ // (30s) instead of giving up after the standard 1s. Outside handoff,
+ // preserve the original 5x200ms = 1s "already running" semantics.
+ const lockMaxAttempts = isAuthorizedHandoff ? 60 : 5;
+ const lockDelayIncrementMs = isAuthorizedHandoff ? 500 : 200;
+ const initialLockHandle = await acquireRunnerLock(lockMaxAttempts, lockDelayIncrementMs);
+ if (!initialLockHandle) {
+  logger.debug('[RUNNER RUN] Runner lock file already held, another runner is running');
+  process.exit(0);
+ }
+ // `let` because the heartbeat-restart handoff path below may release and
+ // re-acquire it. After the null guard above, the initial handle is
+ // non-null; the heartbeat path's failure branches either reassign to a
+ // re-acquired handle or process.exit() before any subsequent release.
+ let runnerLockHandle = initialLockHandle;
+
+ // At this point we should be safe to startup the runner:
+ // 1. Not have a stale runner state
+ // 2. Should not have another runner process running
+
+ try {
+  // Ensure auth and machine registration BEFORE anything else
+  const { machineId } = await authAndSetupMachineIfNeeded();
+  logger.debug('[RUNNER RUN] Auth and machine setup complete');
+
+  // Setup state - key by PID
+  const pidToTrackedSession = new Map<number, TrackedSession>();
+  // Retained until actual child exit even if webhook timeout removes normal
+  // tracking, so confirmed exit can be attributed to the requested HAPI row.
+  const pidToRequestedSessionId = new Map<number, string>();
+  const pidToConfirmedSessionId = new Map<number, string>();
+  // Only actual observed child exits may create a stop-session tombstone.
+  // Tracking loss (notably webhook timeout) is deliberately not evidence.
+  const exitTombstoneFile = `${configuration.runnerStateFile}.verified-exits.json`;
+  const verifiedExitTombstones = (() => {
+   try {
+    if (!existsSync(exitTombstoneFile)) return new Set<string>();
+    const parsed = JSON.parse(readFileSync(exitTombstoneFile, 'utf8'));
+    return new Set<string>(Array.isArray(parsed) ? parsed.filter((value): value is string => typeof value === 'string' && !value.startsWith('PID-')) : []);
+   } catch (error) {
+    logger.debug('[RUNNER RUN] Failed to load verified exit tombstones:', error);
+    return new Set<string>();
+   }
+  })();
+  // PID aliases are generation-local and must not survive runner restart,
+  // because the OS may reuse a PID for an unrelated process.
+  const verifiedPidExitTombstones = new Set<string>();
+  const persistVerifiedExits = () => {
+   const tmp = `${exitTombstoneFile}.${process.pid}.tmp`;
+   try {
+    writeFileSync(tmp, JSON.stringify([...verifiedExitTombstones]));
+    renameSync(tmp, exitTombstoneFile);
+   } catch (error) {
+    logger.debug('[RUNNER RUN] Failed to persist verified exit tombstones:', error);
+   }
+  };
+  const rememberVerifiedExit = (id: string) => {
+   if (id.startsWith('PID-')) {
+    verifiedPidExitTombstones.add(id);
+    return;
+   }
+   // Refreshing an existing key should also refresh its insertion order so
+   // capacity eviction removes the oldest verified generation.
+   verifiedExitTombstones.delete(id);
+   verifiedExitTombstones.add(id);
+   persistVerifiedExits();
+  };
+  const hasVerifiedExit = (id: string): boolean => {
+   return id.startsWith('PID-')
+    ? verifiedPidExitTombstones.has(id)
+    : verifiedExitTombstones.has(id);
+  };
+  const invalidateVerifiedExit = (id: string) => {
+   if (id.startsWith('PID-')) {
+    verifiedPidExitTombstones.delete(id);
+   } else if (verifiedExitTombstones.delete(id)) {
+    persistVerifiedExits();
+   }
   };
 
-  process.on('uncaughtException', (error) => {
-    if (isBenignChildPipeError(error)) {
-      logger.debug('[RUNNER RUN] Ignoring write to a closed child process pipe', error);
-      return;
-    }
-    logger.debug('[RUNNER RUN] FATAL: Uncaught exception', error);
-    logger.debug(`[RUNNER RUN] Stack trace: ${error.stack}`);
-    restartAfterCrash();
-    requestShutdown('exception', error.message);
-  });
-
-  process.on('unhandledRejection', (reason, promise) => {
-    if (isBenignChildPipeError(reason)) {
-      logger.debug('[RUNNER RUN] Ignoring rejected write to a closed child process pipe', reason);
-      return;
-    }
-    logger.debug('[RUNNER RUN] FATAL: Unhandled promise rejection', reason);
-    logger.debug(`[RUNNER RUN] Rejected promise:`, promise);
-    const error = reason instanceof Error ? reason : new Error(`Unhandled promise rejection: ${reason}`);
-    logger.debug(`[RUNNER RUN] Stack trace: ${error.stack}`);
-    restartAfterCrash();
-    requestShutdown('exception', error.message);
-  });
-
-  process.on('exit', (code) => {
-    logger.debug(`[RUNNER RUN] Process exiting with code: ${code}`);
-  });
-
-  process.on('beforeExit', (code) => {
-    logger.debug(`[RUNNER RUN] Process about to exit with code: ${code}`);
-  });
-
-  logger.debug('[RUNNER RUN] Starting runner process...');
-  logger.debugLargeJson('[RUNNER RUN] Environment', getEnvironmentInfo());
-
-  if (isCrashReplacement) {
-    // Let the crashed runner finish its cleanup so the lock and state file are
-    // free (or stale) before the normal startup checks below look at them.
-    const deadline = Date.now() + 30_000;
-    while (isProcessAlive(crashedRunnerPid) && Date.now() < deadline) {
-      await new Promise(resolve => setTimeout(resolve, 250));
-    }
-    logger.debug(`[RUNNER RUN] Replacing crashed runner PID ${crashedRunnerPid} (still alive: ${isProcessAlive(crashedRunnerPid)})`);
+  type PersistedResumeProcess = SessionProcessOwnership;
+  const cleanupReceipts = new SessionCleanupReceiptStore(configuration.runnerStateFile);
+  const resumeProcessFile = `${configuration.runnerStateFile}.resume-processes.json`;
+  const persistedResumeProcesses = (() => {
+   try {
+    if (!existsSync(resumeProcessFile)) return new Map<number, PersistedResumeProcess>();
+    const parsed = JSON.parse(readFileSync(resumeProcessFile, 'utf8'));
+    const records = Array.isArray(parsed) ? parsed : [];
+    return new Map<number, PersistedResumeProcess>(records.flatMap((record): Array<[number, PersistedResumeProcess]> => {
+     const requestedSessionId = typeof record?.requestedSessionId === 'string'
+      ? record.requestedSessionId
+      : typeof record?.sessionId === 'string'
+       ? record.sessionId
+       : null;
+     if (!requestedSessionId || typeof record.pid !== 'number' || typeof record.processStartMarker !== 'string') return [];
+     return [[record.pid, {
+      requestedSessionId,
+      confirmedSessionId: typeof record.confirmedSessionId === 'string' ? record.confirmedSessionId : undefined,
+      pid: record.pid,
+      processStartMarker: record.processStartMarker,
+      requiresCleanupReceipt: record.requiresCleanupReceipt === true,
+      cleanupVerified: record.cleanupVerified === true,
+      ompResumeAttemptId: typeof record.ompResumeAttemptId === 'string' ? record.ompResumeAttemptId : undefined,
+     }]];
+    }));
+   } catch (error) {
+    logger.debug('[RUNNER RUN] Failed to load persisted resume processes:', error);
+    return new Map<number, PersistedResumeProcess>();
+   }
+  })();
+  const persistResumeProcesses = () => {
+   const tmp = `${resumeProcessFile}.${process.pid}.tmp`;
+   try {
+    writeFileSync(tmp, JSON.stringify([...persistedResumeProcesses.values()]));
+    renameSync(tmp, resumeProcessFile);
+    return true;
+   } catch (error) {
+    logger.debug('[RUNNER RUN] Failed to persist resume processes:', error);
+    return false;
+   }
+  };
+  const refreshCleanupProof = (ownership: PersistedResumeProcess): void => {
+   cleanupReceipts.recover(ownership, persistResumeProcesses);
+  };
+  for (const [pid, record] of [...persistedResumeProcesses]) {
+   refreshCleanupProof(record);
+   const alive = isProcessAlive(pid);
+   const marker = alive ? await getProcessStartMarkerAsync(pid) : null;
+   const generation = classifyRecoveredProcessGeneration(alive, marker, record.processStartMarker);
+   if (generation === 'verified') {
+    pidToRequestedSessionId.set(pid, record.requestedSessionId);
+    if (record.confirmedSessionId) pidToConfirmedSessionId.set(pid, record.confirmedSessionId);
+   } else if (generation === 'exited' && !(record.requiresCleanupReceipt && !record.cleanupVerified)) {
+    persistedResumeProcesses.delete(pid);
+    rememberVerifiedExit(record.requestedSessionId);
+    if (record.confirmedSessionId) rememberVerifiedExit(record.confirmedSessionId);
+   } else {
+    // Retain ownership when PID probing or native disposal cannot be verified.
+    // Root exit alone does not prove that session resources were disposed.
+    logger.debug(`[RUNNER RUN] Could not verify resource cleanup for PID ${pid}; keeping persisted resume quarantine`);
+   }
   }
+  persistResumeProcesses();
 
-  // Detect authorized handoff from a parent runner doing the
-  // mtime-drift self-restart (see heartbeat block below). The parent sets
-  // HAPI_RUNNER_HANDOFF_FROM_PID=<parent_pid> on the spawned child's env;
-  // if it matches the live state pid, we are the explicit replacement and
-  // must NOT trigger `stopRunner()` (parent will voluntarily release the
-  // lock and exit once it sees our pid in state).
-  //
-  // Codex review #814 [Major] on run.ts:892 -- previously the child
-  // unconditionally called `stopRunner()` before acquiring the lock or
-  // writing its own state. `/stop` resolved the parent's shutdown,
-  // deleted runner.state.json, and released the lock BEFORE the child
-  // had committed itself; if the child then failed (lock contention,
-  // auth error, anything between stopRunner and writeRunnerState), the
-  // machine went offline with no runner at all.
-  //
-  // New protocol:
-  //   - Parent: spawn child with HAPI_RUNNER_HANDOFF_FROM_PID env, then
-  //     release lock, then wait for state.pid to change to a different
-  //     live pid. On wait-timeout the parent re-acquires the lock and
-  //     defers retry; on wait-success the parent clearInterval + exit.
-  //   - Child: detect env, skip stopRunner(), skip the version-match
-  //     early-exit, acquire the lock with a longer retry window (parent
-  //     releases asynchronously, so we may need to wait).
-  const handoffFromPidRaw = process.env.HAPI_RUNNER_HANDOFF_FROM_PID;
-  const handoffFromPid = handoffFromPidRaw ? Number(handoffFromPidRaw) : NaN;
-  let isAuthorizedHandoff = false;
-  if (Number.isFinite(handoffFromPid) && handoffFromPid > 0) {
-    const existingState = await readRunnerState();
-    if (existingState?.pid === handoffFromPid && isProcessAlive(handoffFromPid)) {
-      isAuthorizedHandoff = true;
-      logger.debug(`[RUNNER RUN] Authorized handoff from parent runner PID ${handoffFromPid}; skipping stopRunner() and version-match short-circuit`);
+  // Webhook timeout tolerance. Opus 1M + --resume can legitimately take
+  // longer than the default 15s to reach the "Session started" webhook
+  // (observed real-world durations of 30s – 60min under rate-limit /
+  // heavy session restore). Allow advanced users to raise this ceiling
+  // so that slow starts no longer leave orphaned child processes which
+  // later report back as ghost sessions.
+  const envWebhookTimeout = Number(process.env.HAPI_RUNNER_WEBHOOK_TIMEOUT_MS);
+  const webhookTimeoutMs =
+   Number.isFinite(envWebhookTimeout) && envWebhookTimeout > 0
+    ? envWebhookTimeout
+    : 15_000;
+
+  // Session spawning awaiter system
+  // Awaiters are bound to the TrackedSession that registered them: a PID may
+  // be recycled into a different generation, and resolving or deleting the
+  // newer generation's awaiter from an older child's bookkeeping is a clobber.
+  type SessionAwaiter = {
+   tracked: TrackedSession;
+   resolve: (session: TrackedSession) => void;
+  };
+  type SessionErrorAwaiter = {
+   tracked: TrackedSession;
+   resolve: (errorMessage: string) => void;
+  };
+  const pidToAwaiter = new Map<number, SessionAwaiter>();
+  const pidToErrorAwaiter = new Map<number, SessionErrorAwaiter>();
+  // Shared only by this exact ChildProcess/TrackedSession, never by numeric PID.
+  const childBirthProofs = new WeakMap<TrackedSession, Promise<string | null>>();
+  const cancelledStartupOwnerships = new WeakSet<PersistedResumeProcess>();
+  // existingSessionId identifies the HAPI row, not a permanent spawn request.
+  // Keep the dedupe entry only while this runner still owns the child PID.
+  const existingSessionIdByChildPid = new Map<number, string>();
+  type SpawnFailureDetails = {
+   message: string
+   pid?: number
+   exitCode?: number | null
+   signal?: NodeJS.Signals | null
+  };
+  let reportSpawnOutcomeToHub: ((outcome: { type: 'success' } | { type: 'error'; details: SpawnFailureDetails }) => void) | null = null;
+  const formatSpawnError = (error: unknown): string => {
+   if (error instanceof Error) {
+    return error.message;
+   }
+   return String(error);
+  };
+
+  // Helper functions
+  const getCurrentChildren = () => Array.from(pidToTrackedSession.values());
+
+  // Handle webhook from HAPI session reporting itself
+  const onHappySessionWebhook = async (sessionId: string, sessionMetadata: Metadata): Promise<void> => {
+   logger.debugLargeJson('[RUNNER RUN] Session reported', sessionMetadata);
+   const pid = sessionMetadata.hostPid;
+   if (!pid) return;
+   const beforeSession = pidToTrackedSession.get(pid);
+   const beforeOwnership = persistedResumeProcesses.get(pid);
+   if (beforeOwnership && cancelledStartupOwnerships.has(beforeOwnership)) return;
+   if (!beforeSession && !beforeOwnership && sessionMetadata.startedBy === 'runner') {
+    logger.debug(`[RUNNER RUN] Ignoring webhook without runner ownership for PID ${pid}`);
+    return;
+   }
+   if (beforeOwnership) refreshCleanupProof(beforeOwnership);
+   // Shared only by this exact ChildProcess, not by numeric PID. Avoid a
+   // second PowerShell per webhook while the spawn birth probe is in flight.
+   const birthProof = beforeSession ? childBirthProofs.get(beforeSession) : undefined;
+   const marker = await (birthProof ?? getProcessStartMarkerAsync(pid));
+   if (pidToTrackedSession.get(pid) !== beforeSession) return;
+   const ownership = persistedResumeProcesses.get(pid);
+   if (ownership && cancelledStartupOwnerships.has(ownership)) return;
+   if (ownership !== beforeOwnership) {
+    // Only this child's birth probe may have created a record during await.
+    if (!birthProof || beforeOwnership || !ownership || !beforeSession
+     || ownership.requestedSessionId !== beforeSession.requestedHappySessionId
+     || ownership.processStartMarker !== marker) return;
+   }
+   const child = beforeSession?.childProcess;
+   if (!marker || !isProcessAlive(pid)
+    || (child && (child.pid !== pid || child.exitCode !== null || child.signalCode !== null))) return;
+   if (ownership && !canConfirmSessionProcessStarted(ownership, sessionId, marker)) return;
+   const session: TrackedSession = beforeSession ?? {
+    startedBy: ownership ? 'runner' : 'hapi directly - likely by user from terminal',
+    requestedHappySessionId: ownership?.requestedSessionId,
+    pid,
+   };
+   const requestedId = session.requestedHappySessionId ?? ownership?.requestedSessionId ?? sessionId;
+   const record: PersistedResumeProcess = ownership ?? {
+    pid,
+    requestedSessionId: requestedId,
+    processStartMarker: marker,
+    requiresCleanupReceipt: sessionMetadata.flavor === 'omp',
+   };
+   record.confirmedSessionId = sessionId;
+   record.requiresCleanupReceipt ||= sessionMetadata.flavor === 'omp';
+   persistedResumeProcesses.set(pid, record);
+   persistResumeProcesses();
+   // Publish only once generation proof is ready. HTTP stays responsive while
+   // probing, without exposing a half-registered terminal row to /stop.
+   session.happySessionId = sessionId;
+   session.happySessionMetadataFromLocalWebhook = sessionMetadata;
+   pidToTrackedSession.set(pid, session);
+   pidToConfirmedSessionId.set(pid, sessionId);
+   invalidateVerifiedExit(sessionId);
+   invalidateVerifiedExit(`PID-${pid}`);
+   if (session.startedBy === 'runner') {
+    existingSessionIdByChildPid.set(pid, requestedId);
+    spawnSession.recoverChild(requestedId, { type: 'success', sessionId }, record.ompResumeAttemptId);
+   }
+   const awaiter = pidToAwaiter.get(pid);
+   if (awaiter?.tracked === session) {
+    pidToAwaiter.delete(pid);
+    if (pidToErrorAwaiter.get(pid)?.tracked === session) pidToErrorAwaiter.delete(pid);
+    awaiter.resolve(session);
+   }
+   logger.debug(`[RUNNER RUN] Registered ${session.startedBy} session ${sessionId}`);
+  };
+
+  // Spawn a new session (sessionId reserved for future --resume functionality)
+  let spawnSession!: SpawnDeduplicator;
+  const spawnSessionOnce = async (options: SpawnSessionOptions): Promise<SpawnSessionResult> => {
+   logger.debugLargeJson('[RUNNER RUN] Spawning session', options);
+
+   const { directory, sessionId, machineId, approvedNewDirectoryCreation = true } = options;
+   const agent = options.agent ?? 'claude';
+   if (agent === 'gemini') {
+    throw new Error('Gemini CLI is no longer supported and cannot be launched (Google sunset the consumer Gemini CLI on 2026-06-18). Existing Gemini sessions remain viewable in the web UI.');
+   }
+   const yolo = options.yolo === true;
+   const sessionType = options.sessionType ?? 'simple';
+   const worktreeName = options.worktreeName;
+   let directoryCreated = false;
+   let spawnDirectory = directory;
+   let worktreeInfo: WorktreeInfo | null = null;
+   let happyProcess: ReturnType<typeof spawnHappyCLI> | null = null;
+
+   if (sessionType === 'simple') {
+    const validation = await validateWorkspaceDirectory(directory, {
+     approvedNewDirectoryCreation
+    });
+    if (validation.type === 'requestApproval') {
+     logger.debug(`[RUNNER RUN] Directory creation not approved for: ${directory}`);
+     return {
+      type: 'requestToApproveDirectoryCreation',
+      directory
+     };
+    }
+    if (validation.type === 'error') {
+     logger.debug(`[RUNNER RUN] Workspace directory validation failed: ${validation.errorMessage}`);
+     return {
+      type: 'error',
+      errorMessage: validation.errorMessage
+     };
+    }
+    directoryCreated = validation.created;
+    if (validation.created) {
+     logger.debug(`[RUNNER RUN] Successfully created directory: ${directory}`);
     } else {
-      logger.debug(`[RUNNER RUN] HAPI_RUNNER_HANDOFF_FROM_PID=${handoffFromPidRaw} set but no matching live parent in state (state.pid=${existingState?.pid ?? 'none'}); ignoring handoff signal`);
+     logger.debug(`[RUNNER RUN] Directory exists: ${directory}`);
     }
-  }
-
-  if (!isAuthorizedHandoff) {
-    // Check if already running
-    // Check if running runner version matches current CLI version
-    const runningRunnerVersionMatches = await isRunnerRunningCurrentlyInstalledHappyVersion();
-    if (!runningRunnerVersionMatches) {
-      logger.debug('[RUNNER RUN] Runner version mismatch detected, restarting runner with current CLI version');
-      await stopRunner();
-    } else {
-      logger.debug('[RUNNER RUN] Runner version matches, keeping existing runner');
-      console.log('Runner already running with matching version');
-      process.exit(0);
+   } else {
+    try {
+     await fs.access(directory);
+     logger.debug(`[RUNNER RUN] Worktree base directory exists: ${directory}`);
+    } catch (error) {
+     logger.debug(`[RUNNER RUN] Worktree base directory missing: ${directory}`);
+     return {
+      type: 'error',
+      errorMessage: `Worktree sessions require an existing Git repository. Directory not found: ${directory}`
+     };
     }
-  }
+   }
 
-  // Acquire exclusive lock (proves runner is running).
-  // In authorized-handoff mode the parent is still alive holding the lock
-  // and will release it asynchronously once we are spawned, so wait longer
-  // (30s) instead of giving up after the standard 1s. Outside handoff,
-  // preserve the original 5x200ms = 1s "already running" semantics.
-  const lockMaxAttempts = isAuthorizedHandoff ? 60 : 5;
-  const lockDelayIncrementMs = isAuthorizedHandoff ? 500 : 200;
-  const initialLockHandle = await acquireRunnerLock(lockMaxAttempts, lockDelayIncrementMs);
-  if (!initialLockHandle) {
-    logger.debug('[RUNNER RUN] Runner lock file already held, another runner is running');
-    process.exit(0);
-  }
-  // `let` because the heartbeat-restart handoff path below may release and
-  // re-acquire it. After the null guard above, the initial handle is
-  // non-null; the heartbeat path's failure branches either reassign to a
-  // re-acquired handle or process.exit() before any subsequent release.
-  let runnerLockHandle = initialLockHandle;
-
-  // At this point we should be safe to startup the runner:
-  // 1. Not have a stale runner state
-  // 2. Should not have another runner process running
-
-  try {
-    // Ensure auth and machine registration BEFORE anything else
-    const { machineId } = await authAndSetupMachineIfNeeded();
-    logger.debug('[RUNNER RUN] Auth and machine setup complete');
-
-    // Setup state - key by PID
-    const pidToTrackedSession = new Map<number, TrackedSession>();
-    // Retained until actual child exit even if webhook timeout removes normal
-    // tracking, so confirmed exit can be attributed to the requested HAPI row.
-    const pidToRequestedSessionId = new Map<number, string>();
-    const pidToConfirmedSessionId = new Map<number, string>();
-    // Only actual observed child exits may create a stop-session tombstone.
-    // Tracking loss (notably webhook timeout) is deliberately not evidence.
-    const exitTombstoneFile = `${configuration.runnerStateFile}.verified-exits.json`;
-    const verifiedExitTombstones = (() => {
-      try {
-        if (!existsSync(exitTombstoneFile)) return new Set<string>();
-        const parsed = JSON.parse(readFileSync(exitTombstoneFile, 'utf8'));
-        return new Set<string>(Array.isArray(parsed) ? parsed.filter((value): value is string => typeof value === 'string' && !value.startsWith('PID-')) : []);
-      } catch (error) {
-        logger.debug('[RUNNER RUN] Failed to load verified exit tombstones:', error);
-        return new Set<string>();
-      }
-    })();
-    // PID aliases are generation-local and must not survive runner restart,
-    // because the OS may reuse a PID for an unrelated process.
-    const verifiedPidExitTombstones = new Set<string>();
-    const persistVerifiedExits = () => {
-      const tmp = `${exitTombstoneFile}.${process.pid}.tmp`;
-      try {
-        writeFileSync(tmp, JSON.stringify([...verifiedExitTombstones]));
-        renameSync(tmp, exitTombstoneFile);
-      } catch (error) {
-        logger.debug('[RUNNER RUN] Failed to persist verified exit tombstones:', error);
-      }
-    };
-    const rememberVerifiedExit = (id: string) => {
-      if (id.startsWith('PID-')) {
-        verifiedPidExitTombstones.add(id);
-        return;
-      }
-      // Refreshing an existing key should also refresh its insertion order so
-      // capacity eviction removes the oldest verified generation.
-      verifiedExitTombstones.delete(id);
-      verifiedExitTombstones.add(id);
-      persistVerifiedExits();
-    };
-    const hasVerifiedExit = (id: string): boolean => {
-      return id.startsWith('PID-')
-        ? verifiedPidExitTombstones.has(id)
-        : verifiedExitTombstones.has(id);
-    };
-    const invalidateVerifiedExit = (id: string) => {
-      if (id.startsWith('PID-')) {
-        verifiedPidExitTombstones.delete(id);
-      } else if (verifiedExitTombstones.delete(id)) {
-        persistVerifiedExits();
-      }
-    };
-
-    type PersistedResumeProcess = {
-      requestedSessionId: string;
-      confirmedSessionId?: string;
-      pid: number;
-      processStartMarker: string;
-      requiresCleanupReceipt?: boolean;
-      cleanupVerified?: boolean;
-    };
-    const resumeProcessFile = `${configuration.runnerStateFile}.resume-processes.json`;
-    const persistedResumeProcesses = (() => {
-      try {
-        if (!existsSync(resumeProcessFile)) return new Map<number, PersistedResumeProcess>();
-        const parsed = JSON.parse(readFileSync(resumeProcessFile, 'utf8'));
-        const records = Array.isArray(parsed) ? parsed : [];
-        return new Map<number, PersistedResumeProcess>(records.flatMap((record): Array<[number, PersistedResumeProcess]> => {
-          const requestedSessionId = typeof record?.requestedSessionId === 'string'
-            ? record.requestedSessionId
-            : typeof record?.sessionId === 'string'
-              ? record.sessionId
-              : null;
-          if (!requestedSessionId || typeof record.pid !== 'number' || typeof record.processStartMarker !== 'string') return [];
-          return [[record.pid, {
-            requestedSessionId,
-            confirmedSessionId: typeof record.confirmedSessionId === 'string' ? record.confirmedSessionId : undefined,
-            pid: record.pid,
-            processStartMarker: record.processStartMarker,
-            requiresCleanupReceipt: record.requiresCleanupReceipt === true,
-            cleanupVerified: record.cleanupVerified === true,
-          }]];
-        }));
-      } catch (error) {
-        logger.debug('[RUNNER RUN] Failed to load persisted resume processes:', error);
-        return new Map<number, PersistedResumeProcess>();
-      }
-    })();
-    const persistResumeProcesses = () => {
-      const tmp = `${resumeProcessFile}.${process.pid}.tmp`;
-      try {
-        writeFileSync(tmp, JSON.stringify([...persistedResumeProcesses.values()]));
-        renameSync(tmp, resumeProcessFile);
-        return true;
-      } catch (error) {
-        logger.debug('[RUNNER RUN] Failed to persist resume processes:', error);
-        return false;
-      }
-    };
-    for (const [pid, record] of [...persistedResumeProcesses]) {
-      const alive = isProcessAlive(pid);
-      const marker = alive ? getProcessStartMarker(pid) : null;
-      const generation = classifyRecoveredProcessGeneration(alive, marker, record.processStartMarker);
-      if (generation === 'verified') {
-        pidToRequestedSessionId.set(pid, record.requestedSessionId);
-        if (record.confirmedSessionId) pidToConfirmedSessionId.set(pid, record.confirmedSessionId);
-      } else if (generation === 'exited' && !(record.requiresCleanupReceipt && !record.cleanupVerified)) {
-        persistedResumeProcesses.delete(pid);
-        rememberVerifiedExit(record.requestedSessionId);
-        if (record.confirmedSessionId) rememberVerifiedExit(record.confirmedSessionId);
-      } else {
-        // Retain ownership when PID probing or native disposal cannot be verified.
-        // Root exit alone does not prove that session resources were disposed.
-        logger.debug(`[RUNNER RUN] Could not verify resource cleanup for PID ${pid}; keeping persisted resume quarantine`);
-      }
-    }
-    persistResumeProcesses();
-
-    // Webhook timeout tolerance. Opus 1M + --resume can legitimately take
-    // longer than the default 15s to reach the "Session started" webhook
-    // (observed real-world durations of 30s – 60min under rate-limit /
-    // heavy session restore). Allow advanced users to raise this ceiling
-    // so that slow starts no longer leave orphaned child processes which
-    // later report back as ghost sessions.
-    const envWebhookTimeout = Number(process.env.HAPI_RUNNER_WEBHOOK_TIMEOUT_MS);
-    const webhookTimeoutMs =
-      Number.isFinite(envWebhookTimeout) && envWebhookTimeout > 0
-        ? envWebhookTimeout
-        : 15_000;
-
-    // Session spawning awaiter system
-    const pidToAwaiter = new Map<number, (session: TrackedSession) => void>();
-    const pidToErrorAwaiter = new Map<number, (errorMessage: string) => void>();
-    // existingSessionId identifies the HAPI row, not a permanent spawn request.
-    // Keep the dedupe entry only while this runner still owns the child PID.
-    const existingSessionIdByChildPid = new Map<number, string>();
-    type SpawnFailureDetails = {
-      message: string
-      pid?: number
-      exitCode?: number | null
-      signal?: NodeJS.Signals | null
-    };
-    let reportSpawnOutcomeToHub: ((outcome: { type: 'success' } | { type: 'error'; details: SpawnFailureDetails }) => void) | null = null;
-    const formatSpawnError = (error: unknown): string => {
-      if (error instanceof Error) {
-        return error.message;
-      }
-      return String(error);
-    };
-
-    // Helper functions
-    const getCurrentChildren = () => Array.from(pidToTrackedSession.values());
-
-    // Handle webhook from HAPI session reporting itself
-    const onHappySessionWebhook = (sessionId: string, sessionMetadata: Metadata) => {
-      logger.debugLargeJson(`[RUNNER RUN] Session reported`, sessionMetadata);
-
-      const pid = sessionMetadata.hostPid;
-      if (!pid) {
-        logger.debug(`[RUNNER RUN] Session webhook missing hostPid for sessionId: ${sessionId}`);
-        return;
-      }
-
-      logger.debug(`[RUNNER RUN] Session webhook: ${sessionId}, PID: ${pid}, started by: ${sessionMetadata.startedBy || 'unknown'}`);
-      logger.debug(`[RUNNER RUN] Current tracked sessions before webhook: ${Array.from(pidToTrackedSession.keys()).join(', ')}`);
-
-      // Check if we already have this PID (runner-spawned)
-      const existingSession = pidToTrackedSession.get(pid);
-
-      if (existingSession && existingSession.startedBy === 'runner') {
-        // Update runner-spawned session with reported data
-        invalidateVerifiedExit(sessionId);
-        invalidateVerifiedExit(`PID-${pid}`);
-        existingSession.happySessionId = sessionId;
-        pidToConfirmedSessionId.set(pid, sessionId);
-        const persisted = persistedResumeProcesses.get(pid);
-        if (persisted) {
-          persisted.confirmedSessionId = sessionId;
-          persisted.requiresCleanupReceipt = sessionMetadata.flavor === 'omp';
-          persistResumeProcesses();
-        } else {
-          const startMarker = getProcessStartMarker(pid);
-          if (startMarker) {
-            const reqId = existingSession.requestedHappySessionId ?? sessionId;
-            existingSessionIdByChildPid.set(pid, reqId);
-            persistedResumeProcesses.set(pid, {
-              pid,
-              requestedSessionId: reqId,
-              confirmedSessionId: sessionId,
-              processStartMarker: startMarker,
-              requiresCleanupReceipt: sessionMetadata.flavor === 'omp',
-            });
-            persistResumeProcesses();
-          }
-        }
-        existingSession.happySessionMetadataFromLocalWebhook = sessionMetadata;
-        logger.debug(`[RUNNER RUN] Updated runner-spawned session ${sessionId} with metadata`);
-
-        // Resolve any awaiter for this PID
-        const awaiter = pidToAwaiter.get(pid);
-        if (awaiter) {
-          pidToAwaiter.delete(pid);
-          pidToErrorAwaiter.delete(pid);
-          awaiter(existingSession);
-          logger.debug(`[RUNNER RUN] Resolved session awaiter for PID ${pid}`);
-        }
-      } else if (!existingSession) {
-        // No tracked session for this PID. Two possibilities:
-        //  1. The child was spawned externally from a terminal (legitimate).
-        //  2. The child was runner-spawned but already had its tracking
-        //     entry removed because its webhook arrived after the timeout
-        //     (orphaned / ghost-session case).
-        //
-        // Differentiate via the webhook's own `startedBy` field: genuine
-        // terminal-launched children report `startedBy: 'terminal'`, so
-        // anything claiming `'runner'` here must be the second case and
-        // should be ignored + terminated instead of silently promoted.
-        if (sessionMetadata.startedBy === 'runner' && sessionMetadata.flavor !== 'omp') {
-          logger.debug(
-            `[RUNNER RUN] Ignoring late webhook from orphaned runner-spawned PID ${pid} (session ${sessionId}). Terminating child.`
-          );
-          // Use killProcess (SIGTERM → SIGKILL escalation) rather than a
-          // bare process.kill() so the orphan is reliably reaped even if
-          // it ignores SIGTERM.  We don't have a ChildProcess reference
-          // here (tracking entry was already removed by the timeout
-          // handler), so tree-kill via killProcessByChildProcess is not
-          // available — but the timeout handler should have already
-          // tree-killed the process group; this is defence-in-depth.
-          void killProcess(pid);
-          return;
-        }
-
-        // New session started externally (terminal)
-        const trackedSession: TrackedSession = {
-          startedBy: 'hapi directly - likely by user from terminal',
-          happySessionId: sessionId,
-          happySessionMetadataFromLocalWebhook: sessionMetadata,
-          pid
-        };
-        invalidateVerifiedExit(sessionId);
-        invalidateVerifiedExit(`PID-${pid}`);
-        pidToTrackedSession.set(pid, trackedSession);
-        const processStartMarker = getProcessStartMarker(pid);
-        if (processStartMarker) {
-          persistedResumeProcesses.set(pid, {
-            requestedSessionId: sessionId,
-            confirmedSessionId: sessionId,
-            pid,
-            processStartMarker,
-            requiresCleanupReceipt: sessionMetadata.flavor === 'omp'
-          });
-          pidToConfirmedSessionId.set(pid, sessionId);
-          persistResumeProcesses();
-        }
-        logger.debug(`[RUNNER RUN] Registered externally-started session ${sessionId}`);
-      }
-    };
-
-    // Spawn a new session (sessionId reserved for future --resume functionality)
-    let spawnSession!: SpawnDeduplicator;
-    const spawnSessionOnce = async (options: SpawnSessionOptions): Promise<SpawnSessionResult> => {
-      logger.debugLargeJson('[RUNNER RUN] Spawning session', options);
-
-      const { directory, sessionId, machineId, approvedNewDirectoryCreation = true } = options;
-      const agent = options.agent ?? 'claude';
-      if (agent === 'gemini') {
-        throw new Error('Gemini CLI is no longer supported and cannot be launched (Google sunset the consumer Gemini CLI on 2026-06-18). Existing Gemini sessions remain viewable in the web UI.');
-      }
-      const yolo = options.yolo === true;
-      const sessionType = options.sessionType ?? 'simple';
-      const worktreeName = options.worktreeName;
-      let directoryCreated = false;
-      let spawnDirectory = directory;
-      let worktreeInfo: WorktreeInfo | null = null;
-      let happyProcess: ReturnType<typeof spawnHappyCLI> | null = null;
-
-      if (sessionType === 'simple') {
-        const validation = await validateWorkspaceDirectory(directory, {
-          approvedNewDirectoryCreation
-        });
-        if (validation.type === 'requestApproval') {
-          logger.debug(`[RUNNER RUN] Directory creation not approved for: ${directory}`);
-          return {
-            type: 'requestToApproveDirectoryCreation',
-            directory
-          };
-        }
-        if (validation.type === 'error') {
-          logger.debug(`[RUNNER RUN] Workspace directory validation failed: ${validation.errorMessage}`);
-          return {
-            type: 'error',
-            errorMessage: validation.errorMessage
-          };
-        }
-        directoryCreated = validation.created;
-        if (validation.created) {
-          logger.debug(`[RUNNER RUN] Successfully created directory: ${directory}`);
-        } else {
-          logger.debug(`[RUNNER RUN] Directory exists: ${directory}`);
-        }
-      } else {
-        try {
-          await fs.access(directory);
-          logger.debug(`[RUNNER RUN] Worktree base directory exists: ${directory}`);
-        } catch (error) {
-          logger.debug(`[RUNNER RUN] Worktree base directory missing: ${directory}`);
-          return {
-            type: 'error',
-            errorMessage: `Worktree sessions require an existing Git repository. Directory not found: ${directory}`
-          };
-        }
-      }
-
-      if (sessionType === 'worktree') {
-        // Cursor Agent has native `--worktree` under ~/.cursor/worktrees/. Prefer that
-        // over HAPI's sibling-directory worktree so Cursor sandbox/skills see the same layout.
-        // Exception: if `directory` is already a linked git worktree (e.g. HAPI feature
-        // worktree or driver/), nesting `--cursor-worktree` hangs ACP initialize (#1085).
-        if (agent === 'cursor') {
-          spawnDirectory = directory;
-          if (isLinkedGitWorktree(directory)) {
-            logger.debug(
-              `[RUNNER RUN] Directory is already a linked git worktree; skipping Cursor --worktree (cwd=${directory})`
-            );
-          } else {
-            logger.debug(`[RUNNER RUN] Cursor-native worktree requested (nameHint=${worktreeName ?? '(auto)'})`);
-          }
-        } else {
-          const worktreeResult = await createWorktree({
-            basePath: directory,
-            nameHint: worktreeName
-          });
-          if (!worktreeResult.ok) {
-            logger.debug(`[RUNNER RUN] Worktree creation failed: ${worktreeResult.error}`);
-            return {
-              type: 'error',
-              errorMessage: worktreeResult.error
-            };
-          }
-          worktreeInfo = worktreeResult.info;
-          spawnDirectory = worktreeInfo.worktreePath;
-          logger.debug(`[RUNNER RUN] Created worktree ${worktreeInfo.worktreePath} (branch ${worktreeInfo.branch})`);
-        }
-      }
-
-      const cleanupWorktree = async () => {
-        if (!worktreeInfo) {
-          return;
-        }
-        const result = await removeWorktree({
-          repoRoot: worktreeInfo.basePath,
-          worktreePath: worktreeInfo.worktreePath
-        });
-        if (!result.ok) {
-          logger.debug(`[RUNNER RUN] Failed to remove worktree ${worktreeInfo.worktreePath}: ${result.error}`);
-        }
-      };
-      const maybeCleanupWorktree = async (reason: string) => {
-        if (!worktreeInfo) {
-          return;
-        }
-        const pid = happyProcess?.pid;
-        if (pid && isProcessAlive(pid)) {
-          logger.debug(`[RUNNER RUN] Skipping worktree cleanup after ${reason}; child still running`, {
-            pid,
-            worktreePath: worktreeInfo.worktreePath
-          });
-          return;
-        }
-        await cleanupWorktree();
-      };
-
-      try {
-
-        // Resolve authentication token if provided
-        let extraEnv: Record<string, string> = {};
-        if (options.token) {
-          if (options.agent === 'codex') {
-
-            // Create a temporary directory for Codex
-            const codexHomeDir = await fs.mkdtemp(join(os.tmpdir(), 'hapi-codex-'));
-
-            // Write the token to the temporary directory
-            await fs.writeFile(join(codexHomeDir, 'auth.json'), options.token);
-
-            // Set the environment variable for Codex
-            extraEnv = {
-              CODEX_HOME: codexHomeDir
-            };
-          } else if (options.agent === 'claude' || !options.agent) {
-            extraEnv = {
-              CLAUDE_CODE_OAUTH_TOKEN: options.token
-            };
-          }
-        }
-
-        if (worktreeInfo) {
-          extraEnv = {
-            ...extraEnv,
-            HAPI_WORKTREE_BASE_PATH: worktreeInfo.basePath,
-            HAPI_WORKTREE_BRANCH: worktreeInfo.branch,
-            HAPI_WORKTREE_NAME: worktreeInfo.name,
-            HAPI_WORKTREE_PATH: worktreeInfo.worktreePath,
-            HAPI_WORKTREE_CREATED_AT: String(worktreeInfo.createdAt)
-          };
-        }
-
-        const args = buildCliArgs(agent, options, yolo);
-
-        // sessionId reserved for future use
-        const MAX_TAIL_CHARS = 4000;
-        let stderrTail = '';
-        const appendTail = (current: string, chunk: Buffer | string): string => {
-          const text = chunk.toString();
-          if (!text) {
-            return current;
-          }
-          const combined = current + text;
-          return combined.length > MAX_TAIL_CHARS ? combined.slice(-MAX_TAIL_CHARS) : combined;
-        };
-        const logStderrTail = () => {
-          const trimmed = stderrTail.trim();
-          if (!trimmed) {
-            return;
-          }
-          logger.debug('[RUNNER RUN] Child stderr tail', trimmed);
-        };
-
-        const providerEnv = agent === 'claude' && options.ccSwitchProviderId
-          ? getCcSwitchProviderLaunchEnv(options.ccSwitchProviderId)
-          : {};
-        // fork(claude-proxy-models)：进程 env 会被 Claude Code 的 settings 级 env 盖掉——
-        // wrapper 生成的 --settings 钩子文件整份复制了 ~/.claude/settings.json（含 cc-switch
-        // 写进去的当前供应商 ANTHROPIC_*），命令行级设置优先级高于进程 env（2026-09-06
-        // 生产实测：吹雪3080 当前供应商 GLM，选 cx2cc 供应商 + gpt-6-astra 仍跑 glm-5.3）。
-        // 所以同时把供应商 env 交给 wrapper，让它在生成钩子设置时覆盖 settings.env。
-        const providerSettingsOverride = Object.keys(providerEnv).length > 0
-          ? { HAPI_CLAUDE_SETTINGS_ENV_OVERRIDE: JSON.stringify(providerEnv) }
-          : {};
-        happyProcess = spawnHappyCLI(args, {
-          cwd: spawnDirectory,
-          detached: true,  // Sessions stay alive when runner stops
-          stdio: ['ignore', 'pipe', 'pipe'],  // Capture stdout/stderr for debugging
-          env: {
-            ...process.env,
-            ...extraEnv,
-            ...providerEnv,
-            ...providerSettingsOverride
-          }
-        });
-
-        happyProcess.stderr?.on('data', (data) => {
-          stderrTail = appendTail(stderrTail, data);
-        });
-
-        let spawnErrorBeforePidCheck: Error | null = null;
-        const captureSpawnErrorBeforePidCheck = (error: Error) => {
-          spawnErrorBeforePidCheck = error;
-        };
-        happyProcess.once('error', captureSpawnErrorBeforePidCheck);
-
-        if (!happyProcess.pid) {
-          // Allow the async 'error' event to fire before we read it
-          await new Promise((resolve) => setImmediate(resolve));
-          const details = [`cwd=${spawnDirectory}`];
-          if (spawnErrorBeforePidCheck) {
-            details.push(formatSpawnError(spawnErrorBeforePidCheck));
-          }
-          const errorMessage = `Failed to spawn HAPI process - no PID returned (${details.join('; ')})`;
-          logger.debug('[RUNNER RUN] Failed to spawn process - no PID returned', spawnErrorBeforePidCheck ?? null);
-          reportSpawnOutcomeToHub?.({
-            type: 'error',
-            details: {
-              message: errorMessage
-            }
-          });
-          await maybeCleanupWorktree('no-pid');
-          return {
-            type: 'error',
-            errorMessage
-          };
-        }
-        happyProcess.removeListener('error', captureSpawnErrorBeforePidCheck);
-
-        // The OS process now exists, so this is the point where a new generation
-        // invalidates exit evidence left by an older child with the same HAPI ID.
-        for (const id of [options.sessionId, options.existingSessionId]) {
-          if (id) invalidateVerifiedExit(id);
-        }
-
-        const pid = happyProcess.pid;
-        if (options.existingSessionId) {
-          existingSessionIdByChildPid.set(pid, options.existingSessionId);
-          spawnSession.markChildAlive(options.existingSessionId);
-        }
-        invalidateVerifiedExit(`PID-${pid}`);
-        logger.debug(`[RUNNER RUN] Spawned process with PID ${pid}`);
-        let observedExitCode: number | null = null;
-        let observedExitSignal: NodeJS.Signals | null = null;
-        const buildWebhookFailureMessage = (reason: 'timeout' | 'exit-before-webhook' | 'process-error-before-webhook'): string => {
-          let message = '';
-          if (reason === 'exit-before-webhook') {
-            message = `Session process exited before webhook for PID ${pid}`;
-          } else if (reason === 'process-error-before-webhook') {
-            message = `Session process error before webhook for PID ${pid}`;
-          } else {
-            message = `Session webhook timeout for PID ${pid}`;
-          }
-
-          if (observedExitCode !== null || observedExitSignal) {
-            if (observedExitCode !== null) {
-              message += ` (exit code ${observedExitCode})`;
-            } else {
-              message += ` (signal ${observedExitSignal})`;
-            }
-          }
-
-          const trimmedTail = stderrTail.trim();
-          if (trimmedTail) {
-            const compactTail = trimmedTail.replace(/\s+/g, ' ');
-            const tailForMessage = compactTail.length > 800 ? compactTail.slice(-800) : compactTail;
-            message += `. stderr: ${tailForMessage}`;
-          }
-
-          return message;
-        };
-
-        const trackedSession: TrackedSession = {
-          startedBy: 'runner',
-          pid,
-          requestedHappySessionId: options.existingSessionId ?? options.sessionId,
-          childProcess: happyProcess,
-          directoryCreated,
-          message: directoryCreated ? `The path '${directory}' did not exist. We created a new folder and spawned a new session there.` : undefined
-        };
-
-        pidToTrackedSession.set(pid, trackedSession);
-        if (trackedSession.requestedHappySessionId) {
-          pidToRequestedSessionId.set(pid, trackedSession.requestedHappySessionId);
-          const processStartMarker = getProcessStartMarker(pid);
-          if (processStartMarker) {
-            persistedResumeProcesses.set(pid, {
-              requestedSessionId: trackedSession.requestedHappySessionId,
-              pid,
-              processStartMarker,
-              requiresCleanupReceipt: agent === 'omp',
-            });
-            persistResumeProcesses();
-          }
-        }
-
-        happyProcess.on('exit', (code, signal) => {
-          observedExitCode = typeof code === 'number' ? code : null;
-          observedExitSignal = signal ?? null;
-          logger.debug(`[RUNNER RUN] Child PID ${pid} exited with code ${code}, signal ${signal}`);
-          if (code !== 0 || signal) {
-            logStderrTail();
-          }
-          const errorAwaiter = pidToErrorAwaiter.get(pid);
-          if (errorAwaiter) {
-            pidToErrorAwaiter.delete(pid);
-            pidToAwaiter.delete(pid);
-            errorAwaiter(buildWebhookFailureMessage('exit-before-webhook'));
-          }
-          onChildExited(pid);
-        });
-
-        happyProcess.on('error', (error) => {
-          logger.debug(`[RUNNER RUN] Child process error:`, error);
-          const errorAwaiter = pidToErrorAwaiter.get(pid);
-          if (errorAwaiter) {
-            pidToErrorAwaiter.delete(pid);
-            pidToAwaiter.delete(pid);
-            errorAwaiter(buildWebhookFailureMessage('process-error-before-webhook'));
-          }
-          // A ChildProcess error is not itself proof that the OS process exited.
-          // Keep tracking a live PID so machine StopSession can still terminate it.
-          if (!isProcessAlive(pid)) onChildExited(pid);
-        });
-
-        // Wait for webhook to populate session with happySessionId
-        logger.debug(`[RUNNER RUN] Waiting for session webhook for PID ${pid}`);
-
-        const spawnResult = await new Promise<SpawnSessionResult>((resolve) => {
-          // Set timeout for webhook. Default is 15s but can be raised via
-          // HAPI_RUNNER_WEBHOOK_TIMEOUT_MS for users on slow models
-          // (e.g. opus[1m] --resume).
-          const timeout = setTimeout(() => {
-            pidToAwaiter.delete(pid);
-            pidToErrorAwaiter.delete(pid);
-
-            // Native OMP can own a shared broker beneath its process tree.
-            // Keep its ownership and accept its late webhook so an explicit
-            // native cleanup can still complete; never blindly /T this tree.
-            if (agent !== 'omp') {
-              pidToTrackedSession.delete(pid);
-              if (happyProcess) void killProcessByChildProcess(happyProcess);
-            }
-
-            // If this was a worktree session, the worktree can only be
-            // safely removed after the child has actually exited (the
-            // child may still be writing to it).  Register a one-shot
-            // exit listener so cleanup happens once the tree-kill lands.
-            if (worktreeInfo && happyProcess) {
-              happyProcess.once('exit', () => {
-                void cleanupWorktree();
-              });
-            }
-
-            logger.debug(`[RUNNER RUN] Session webhook timeout for PID ${pid}`);
-            logStderrTail();
-            resolve({
-              type: 'error',
-              errorMessage: buildWebhookFailureMessage('timeout')
-            });
-          }, webhookTimeoutMs);
-
-          // Register awaiter
-          pidToAwaiter.set(pid, (completedSession) => {
-            clearTimeout(timeout);
-            pidToErrorAwaiter.delete(pid);
-            logger.debug(`[RUNNER RUN] Session ${completedSession.happySessionId} fully spawned with webhook`);
-            resolve({
-              type: 'success',
-              sessionId: completedSession.happySessionId!
-            });
-          });
-          pidToErrorAwaiter.set(pid, (errorMessage) => {
-            clearTimeout(timeout);
-            resolve({
-              type: 'error',
-              errorMessage
-            });
-          });
-        });
-        if (spawnResult.type === 'error') {
-          reportSpawnOutcomeToHub?.({
-            type: 'error',
-            details: {
-              message: spawnResult.errorMessage,
-              pid,
-              exitCode: observedExitCode,
-              signal: observedExitSignal
-            }
-          });
-          await maybeCleanupWorktree('spawn-error');
-        } else {
-          reportSpawnOutcomeToHub?.({ type: 'success' });
-        }
-        return spawnResult;
-      } catch (error) {
-        const errorMessage = error instanceof Error ? error.message : String(error);
-        logger.debug('[RUNNER RUN] Failed to spawn session:', error);
-        await maybeCleanupWorktree('exception');
-        reportSpawnOutcomeToHub?.({
-          type: 'error',
-          details: {
-            message: `Failed to spawn session: ${errorMessage}`
-          }
-        });
-        return {
-          type: 'error',
-          errorMessage: `Failed to spawn session: ${errorMessage}`
-        };
-      }
-    };
-
-    spawnSession = createSpawnDeduplicator(spawnSessionOnce);
-    for (const [pid, record] of persistedResumeProcesses) {
-      const verified = pidToRequestedSessionId.get(pid) === record.requestedSessionId;
-      existingSessionIdByChildPid.set(pid, record.requestedSessionId);
-      spawnSession.recoverChild(
-        record.requestedSessionId,
-        verified && record.confirmedSessionId
-          ? { type: 'success', sessionId: record.confirmedSessionId }
-          : { type: 'error', errorMessage: `Session ${record.requestedSessionId} process verification is pending` }
+   if (sessionType === 'worktree') {
+    // Cursor Agent has native `--worktree` under ~/.cursor/worktrees/. Prefer that
+    // over HAPI's sibling-directory worktree so Cursor sandbox/skills see the same layout.
+    // Exception: if `directory` is already a linked git worktree (e.g. HAPI feature
+    // worktree or driver/), nesting `--cursor-worktree` hangs ACP initialize (#1085).
+    if (agent === 'cursor') {
+     spawnDirectory = directory;
+     if (isLinkedGitWorktree(directory)) {
+      logger.debug(
+       `[RUNNER RUN] Directory is already a linked git worktree; skipping Cursor --worktree (cwd=${directory})`
       );
-    }
-
-    // Stop a session by sessionId or PID fallback
-    const stopSession = async (sessionId: string): Promise<'stopped' | 'already_gone' | 'still_alive'> => {
-      logger.debug(`[RUNNER RUN] Attempting to stop session ${sessionId}`);
-
-      let stoppedAny = false;
-      let alreadyGoneAny = false;
-      // Try to find by sessionId first
-      for (const [pid, session] of pidToTrackedSession.entries()) {
-        if (session.happySessionId === sessionId ||
-          session.requestedHappySessionId === sessionId ||
-          (sessionId.startsWith('PID-') && pid === parseInt(sessionId.replace('PID-', '')))) {
-          const ownership = persistedResumeProcesses.get(pid);
-          const nativeSession = ownership?.requiresCleanupReceipt
-            || session.happySessionMetadataFromLocalWebhook?.flavor === 'omp';
-          if (nativeSession && !ownership?.cleanupVerified) {
-            logger.debug(`[RUNNER RUN] Refusing to terminate OMP ${sessionId} before native cleanup acknowledgement`);
-            return 'still_alive';
-          }
-          if (ownership) {
-            const marker = getProcessStartMarker(pid);
-            if (marker === null && isProcessAlive(pid)) return 'still_alive';
-            if (marker !== ownership.processStartMarker) {
-              onChildExited(pid);
-              alreadyGoneAny = true;
-              continue;
-            }
-          }
-
-          if (session.startedBy === 'runner' && session.childProcess) {
-            try {
-              const treeStopped = await killProcessByChildProcess(session.childProcess);
-              if (!treeStopped) {
-                logger.debug(`[RUNNER RUN] Process tree for session ${sessionId} is still alive after stop request`);
-                return 'still_alive';
-              }
-              logger.debug(`[RUNNER RUN] Requested termination for runner-spawned session ${sessionId}`);
-            } catch (error) {
-              logger.debug(`[RUNNER RUN] Failed to kill session ${sessionId}:`, error);
-              return 'still_alive';
-            }
-          } else {
-            // For externally started sessions, try to kill by PID
-            try {
-              if (!(await killProcess(pid))) return 'still_alive';
-              logger.debug(`[RUNNER RUN] Requested termination for external session PID ${pid}`);
-            } catch (error) {
-              logger.debug(`[RUNNER RUN] Failed to kill external session PID ${pid}:`, error);
-              return 'still_alive';
-            }
-          }
-
-          // A stop request starts termination but does not prove that a detached
-          // child is gone. Keep its HAPI-row dedupe key until exit/stale detection.
-          const existingSessionId = existingSessionIdByChildPid.get(pid);
-          if (existingSessionId) {
-            spawnSession.markChildStopping(existingSessionId);
-          }
-          const deadline = Date.now() + 5_000;
-          while (isProcessAlive(pid) && Date.now() < deadline) {
-            await new Promise(resolve => setTimeout(resolve, 50));
-          }
-          if (isProcessAlive(pid)) {
-            logger.debug(`[RUNNER RUN] Session ${sessionId} process ${pid} is still alive after stop request`);
-            return 'still_alive';
-          }
-          if (session.happySessionId) rememberVerifiedExit(session.happySessionId);
-          if (session.requestedHappySessionId) rememberVerifiedExit(session.requestedHappySessionId);
-          rememberVerifiedExit(`PID-${pid}`);
-          pidToTrackedSession.delete(pid);
-          pidToRequestedSessionId.delete(pid);
-          pidToConfirmedSessionId.delete(pid);
-          if (persistedResumeProcesses.delete(pid)) persistResumeProcesses();
-          logger.debug(`[RUNNER RUN] Removed terminated session ${sessionId} from tracking`);
-          stoppedAny = true; continue;
-        }
-      }
-
-      // Webhook timeout can remove the normal TrackedSession before the process
-      // actually exits. Retain the requested HAPI ID -> PID relation so Hub can
-      // still terminate that exact generation by HAPI ID.
-      const fallbackPids = new Set([
-        ...pidToRequestedSessionId.keys(),
-        ...pidToConfirmedSessionId.keys(),
-        ...persistedResumeProcesses.keys(),
-      ]);
-      for (const pid of fallbackPids) {
-        const persisted = persistedResumeProcesses.get(pid);
-        const requestedSessionId = pidToRequestedSessionId.get(pid) ?? persisted?.requestedSessionId;
-        const confirmedSessionId = pidToConfirmedSessionId.get(pid) ?? persisted?.confirmedSessionId;
-        if (requestedSessionId !== sessionId && confirmedSessionId !== sessionId) continue;
-        if (persisted?.requiresCleanupReceipt && !persisted.cleanupVerified) {
-          logger.debug(`[RUNNER RUN] Native cleanup was not verified for ${sessionId}; retaining ownership`);
-          return 'still_alive';
-        }
-        if (isProcessAlive(pid)) {
-          if (!persisted) return 'still_alive';
-          const currentMarker = getProcessStartMarker(pid);
-          if (currentMarker === null) {
-            if (isProcessAlive(pid)) return 'still_alive';
-            onChildExited(pid);
-            alreadyGoneAny = true;
-            continue;
-          }
-          if (currentMarker !== persisted.processStartMarker) {
-            persistedResumeProcesses.delete(pid);
-            persistResumeProcesses();
-            pidToRequestedSessionId.delete(pid);
-            pidToConfirmedSessionId.delete(pid);
-            if (requestedSessionId) rememberVerifiedExit(requestedSessionId);
-            if (confirmedSessionId) rememberVerifiedExit(confirmedSessionId);
-            releaseRecoveredSpawnDedupe(pid, existingSessionIdByChildPid, spawnSession);
-            alreadyGoneAny = true; continue;
-          }
-          if (!(await killProcessTreeByPid(pid))) return 'still_alive';
-          if (requestedSessionId) rememberVerifiedExit(requestedSessionId);
-          if (confirmedSessionId) rememberVerifiedExit(confirmedSessionId);
-          rememberVerifiedExit(`PID-${pid}`);
-          pidToRequestedSessionId.delete(pid);
-          pidToConfirmedSessionId.delete(pid);
-          if (persistedResumeProcesses.delete(pid)) persistResumeProcesses();
-          releaseRecoveredSpawnDedupe(pid, existingSessionIdByChildPid, spawnSession);
-          stoppedAny = true; continue;
-        }
-        if (requestedSessionId) rememberVerifiedExit(requestedSessionId);
-        if (confirmedSessionId) rememberVerifiedExit(confirmedSessionId);
-        rememberVerifiedExit(`PID-${pid}`);
-        pidToRequestedSessionId.delete(pid);
-        pidToConfirmedSessionId.delete(pid);
-        if (persistedResumeProcesses.delete(pid)) persistResumeProcesses();
-        releaseRecoveredSpawnDedupe(pid, existingSessionIdByChildPid, spawnSession);
-        alreadyGoneAny = true;
-      }
-
-      if (stoppedAny) return 'stopped';
-      if (alreadyGoneAny) return 'already_gone';
-      if (hasVerifiedExit(sessionId)) {
-        logger.debug(`[RUNNER RUN] Session ${sessionId} was previously observed exited`);
-        return 'already_gone';
-      }
-      logger.debug(`[RUNNER RUN] Session ${sessionId} not found without verified exit`);
-      return 'still_alive';
-    };
-
-    // Handle child process exit
-    const onChildExited = (pid: number) => {
-      const session = pidToTrackedSession.get(pid);
-      const ownership = persistedResumeProcesses.get(pid);
-      if ((ownership?.requiresCleanupReceipt || session?.happySessionMetadataFromLocalWebhook?.flavor === 'omp')
-        && !ownership?.cleanupVerified) {
-        logger.debug(`[RUNNER RUN] Wrapper ${pid} exited without native cleanup proof; retaining session ownership`);
-        const id = ownership?.requestedSessionId ?? session?.requestedHappySessionId ?? session?.happySessionId;
-        if (id) spawnSession.recoverChild(id, {
-          type: 'error',
-          errorMessage: 'Previous OMP session exited without verified resource cleanup; cannot start another instance'
-        });
-        pidToTrackedSession.delete(pid);
-        pidToAwaiter.delete(pid);
-        pidToErrorAwaiter.delete(pid);
-        return;
-      }
-      const requestedSessionId = session?.requestedHappySessionId ?? pidToRequestedSessionId.get(pid);
-      if (requestedSessionId) rememberVerifiedExit(requestedSessionId);
-      const confirmedSessionId = session?.happySessionId ?? pidToConfirmedSessionId.get(pid);
-      if (confirmedSessionId) rememberVerifiedExit(confirmedSessionId);
-      rememberVerifiedExit(`PID-${pid}`);
-      logger.debug(`[RUNNER RUN] Removing exited process PID ${pid} from tracking`);
-      const existingSessionId = existingSessionIdByChildPid.get(pid);
-      if (existingSessionId) {
-        spawnSession.onChildExited(existingSessionId);
-        existingSessionIdByChildPid.delete(pid);
-      }
-      pidToTrackedSession.delete(pid);
-      pidToAwaiter.delete(pid);
-      pidToErrorAwaiter.delete(pid);
-      pidToRequestedSessionId.delete(pid);
-      pidToConfirmedSessionId.delete(pid);
-      if (persistedResumeProcesses.delete(pid)) persistResumeProcesses();
-    };
-
-    // Start control server
-    const { port: controlPort, stop: stopControlServer } = await startRunnerControlServer({
-      getChildren: getCurrentChildren,
-      stopSession,
-      spawnSession,
-      requestShutdown: () => requestShutdown('hapi-cli'),
-      onSessionCleanupVerified: (sessionId, pid, processStartMarker) => {
-        const ownership = persistedResumeProcesses.get(pid);
-        if (!ownership
-          || (ownership.requestedSessionId !== sessionId && ownership.confirmedSessionId !== sessionId)
-          || ownership.processStartMarker !== processStartMarker
-          || getProcessStartMarker(pid) !== processStartMarker) return false;
-        ownership.cleanupVerified = true;
-        if (persistResumeProcesses()) return true;
-        ownership.cleanupVerified = false;
-        return false;
-      },
-      onHappySessionWebhook
-    });
-
-    // Baseline mtime at runner-process start. Immutable: per Codex review #814
-    // [Major], we must NOT refresh this on a failed handoff because the
-    // heartbeat writes it into runner.state.json, and downstream
-    // isRunnerRunningCurrentlyInstalledHappyVersion() compares the stored
-    // value against the live installed mtime - if they match, the live
-    // (still-stale) runner is reported as current. Throttle handoff attempts
-    // via nextHandoffAttemptAt below instead of mutating this baseline.
-    const startedWithCliMtimeMs = getInstalledCliMtimeMs();
-    // Snapshot original CLI argv via the project's canonical normalizer so the
-    // heartbeat's self-restart handoff can rebuild the same `runner start-sync
-    // --workspace-root ...` invocation instead of losing flags.
-    //
-    // Codex review #814 [Major]: previously `process.argv.slice(2)` was used,
-    // but in compiled binary mode (`bun build --compile`) the raw argv shape is
-    // `[hapi, runner, start-sync, ...]` so slice(2) produced `['start-sync', ...]`.
-    // The replacement then spawned `hapi start-sync ...`, which `resolveCommand`
-    // treats as an unknown top-level command - falling back to Claude instead
-    // of starting the runner. `getCliArgs()` strips runtime + entrypoint
-    // correctly in all execution modes.
-    //
-    // Defensive guard: only replay the captured argv when it actually starts
-    // with `runner`. If the normalizer ever returns something else (unexpected
-    // shape, future refactor), fall back to the safe default so the handoff
-    // can never resolve to a non-runner command.
-    const rawStartedWithArgv = getCliArgs();
-    const startedWithArgv = rawStartedWithArgv[0] === 'runner'
-      ? rawStartedWithArgv
-      : ['runner', 'start-sync'];
-    // Snapshot at start: did this runner opt out of version handoff via env?
-    // Persisted to runner.state.json so a later `hapi runner start` from a
-    // shell where the env var is NOT set can still honour the opt-out
-    // (Codex review #814 [Major] - controlClient.ts:192 fix).
-    const startedWithVersionHandoffDisabled = process.env.HAPI_DISABLE_VERSION_HANDOFF === '1';
-
-    // Write initial runner state (no lock needed for state file)
-    const fileState: RunnerLocallyPersistedState = {
-      pid: process.pid,
-      httpPort: controlPort,
-      startTime: new Date().toLocaleString(),
-      startedWithCliVersion: packageJson.version,
-      startedWithCliMtimeMs,
-      startedWithApiUrl: configuration.apiUrl,
-      startedWithMachineId: machineId,
-      startedWithCliApiTokenHash: hashRunnerCliApiToken(configuration.cliApiToken),
-      startedWithExtraHeadersHash: hashRunnerExtraHeaders(configuration.extraHeaders),
-      startedWithArgv,
-      startedWithVersionHandoffDisabled,
-      runnerLogPath: logger.logFilePath
-    };
-    writeRunnerState(fileState);
-    logger.debug('[RUNNER RUN] Runner state written');
-
-    // Prepare initial runner state
-    const initialRunnerState: RunnerState = {
-      status: 'offline',
-      pid: process.pid,
-      httpPort: controlPort,
-      startedAt: Date.now(),
-      capabilities: { ...RUNNER_CAPABILITIES }
-    };
-
-    // Create API client
-    const api = await ApiClient.create();
-
-    const workspaceRoots = resolveWorkspaceRoots(options.workspaceRoots);
-    logger.debug(`[RUNNER RUN] Workspace roots: ${workspaceRoots?.join(', ') ?? '(not set)'}`);
-
-    const ompAvailability = await detectOmpMachineAvailability();
-    if (ompAvailability.available) {
-      logger.debug(`[RUNNER RUN] OMP ${ompAvailability.version.raw} available`);
+     } else {
+      logger.debug(`[RUNNER RUN] Cursor-native worktree requested (nameHint=${worktreeName ?? '(auto)'})`);
+     }
     } else {
-      logger.debug(`[RUNNER RUN] OMP unavailable: ${ompAvailability.error}`);
+     const worktreeResult = await createWorktree({
+      basePath: directory,
+      nameHint: worktreeName
+     });
+     if (!worktreeResult.ok) {
+      logger.debug(`[RUNNER RUN] Worktree creation failed: ${worktreeResult.error}`);
+      return {
+       type: 'error',
+       errorMessage: worktreeResult.error
+      };
+     }
+     worktreeInfo = worktreeResult.info;
+     spawnDirectory = worktreeInfo.worktreePath;
+     logger.debug(`[RUNNER RUN] Created worktree ${worktreeInfo.worktreePath} (branch ${worktreeInfo.branch})`);
+    }
+   }
+
+   const cleanupWorktree = async () => {
+    if (!worktreeInfo) {
+     return;
+    }
+    const result = await removeWorktree({
+     repoRoot: worktreeInfo.basePath,
+     worktreePath: worktreeInfo.worktreePath
+    });
+    if (!result.ok) {
+     logger.debug(`[RUNNER RUN] Failed to remove worktree ${worktreeInfo.worktreePath}: ${result.error}`);
+    }
+   };
+   const maybeCleanupWorktree = async (reason: string) => {
+    if (!worktreeInfo) {
+     return;
+    }
+    const pid = happyProcess?.pid;
+    if (pid && isProcessAlive(pid)) {
+     logger.debug(`[RUNNER RUN] Skipping worktree cleanup after ${reason}; child still running`, {
+      pid,
+      worktreePath: worktreeInfo.worktreePath
+     });
+     return;
+    }
+    await cleanupWorktree();
+   };
+
+   try {
+
+    // Resolve authentication token if provided
+    let extraEnv: Record<string, string> = {};
+    if (options.token) {
+     if (options.agent === 'codex') {
+
+      // Create a temporary directory for Codex
+      const codexHomeDir = await fs.mkdtemp(join(os.tmpdir(), 'hapi-codex-'));
+
+      // Write the token to the temporary directory
+      await fs.writeFile(join(codexHomeDir, 'auth.json'), options.token);
+
+      // Set the environment variable for Codex
+      extraEnv = {
+       CODEX_HOME: codexHomeDir
+      };
+     } else if (options.agent === 'claude' || !options.agent) {
+      extraEnv = {
+       CLAUDE_CODE_OAUTH_TOKEN: options.token
+      };
+     }
     }
 
-    // Operator-set per-machine launch defaults (~/.hapi/settings.json). Read
-    // once at registration; invalid values resolve to undefined and simply
-    // leave the New Session form on its normal `auto` default.
-    const runnerSettings = await readSettings();
-    const machineLaunchDefaults = resolveMachineLaunchDefaults({
-      model: runnerSettings.defaultLaunchModel,
-      effort: runnerSettings.defaultLaunchEffort
-    });
-    logger.debug(`[RUNNER RUN] Machine launch defaults: ${JSON.stringify(machineLaunchDefaults ?? null)}`);
+    if (worktreeInfo) {
+     extraEnv = {
+      ...extraEnv,
+      HAPI_WORKTREE_BASE_PATH: worktreeInfo.basePath,
+      HAPI_WORKTREE_BRANCH: worktreeInfo.branch,
+      HAPI_WORKTREE_NAME: worktreeInfo.name,
+      HAPI_WORKTREE_PATH: worktreeInfo.worktreePath,
+      HAPI_WORKTREE_CREATED_AT: String(worktreeInfo.createdAt)
+     };
+    }
 
-    const registrationMetadata = buildMachineMetadata({
-      workspaceRoots,
-      ompAvailable: ompAvailability.available,
-      launchDefaults: machineLaunchDefaults
-    });
+    const args = buildCliArgs(agent, options, yolo);
 
-    // Get or create machine (with retry for transient connection errors)
-    const machine = await withRetry(
-      () => api.getOrCreateMachine({
-        machineId,
-        metadata: registrationMetadata,
-        runnerState: initialRunnerState
-      }),
-      {
-        maxAttempts: 60,
-        minDelay: 1000,
-        maxDelay: 30000,
-        shouldRetry: isRetryableConnectionError,
-        onRetry: (error, attempt, nextDelayMs) => {
-          const errorMsg = error instanceof Error ? error.message : String(error)
-          logger.debug(`[RUNNER RUN] Failed to register machine (attempt ${attempt}), retrying in ${nextDelayMs}ms: ${errorMsg}`)
-        }
-      }
-    );
-    logger.debug(`[RUNNER RUN] Machine registered: ${machine.id}`);
-
-    // Create realtime machine session
-    const apiMachine = api.machineSyncClient(machine, {
-      workspaceRoots,
-      ompAvailable: ompAvailability.available,
-      launchDefaults: machineLaunchDefaults,
-      registrationMetadata
-    });
-
-    // Set RPC handlers
-    apiMachine.setRPCHandlers({
-      spawnSession,
-      stopSession,
-      requestShutdown: () => requestShutdown('hapi-app')
-    });
-
-    // Connect to server
-    apiMachine.connect();
-    scheduleCursorModelsPrewarm();
-
-    // Visible startup banner. Use console.log so it always appears on stdout,
-    // regardless of the verbose/quiet logger setting.
-    console.log('');
-    console.log('Hapi runner started.');
-    console.log(`  Workspace roots: ${workspaceRoots?.join(', ') ?? '(not set — browse disabled; pass --workspace-root to enable)'}`);
-    console.log(`  Hub URL:        ${configuration.apiUrl}`);
-    console.log(`  Machine ID:     ${machine.id}`);
-    console.log(`  Control port:   ${controlPort}`);
-    console.log('Waiting for sessions. Press Ctrl+C to stop.');
-    console.log('');
-
-    reportSpawnOutcomeToHub = (outcome) => {
-      void apiMachine.updateRunnerState((state: RunnerState | null) => {
-        const baseState: RunnerState = state
-          ? { ...state }
-          : { status: 'running' };
-
-        if (typeof baseState.pid !== 'number') {
-          baseState.pid = process.pid;
-        }
-        if (typeof baseState.httpPort !== 'number') {
-          baseState.httpPort = controlPort;
-        }
-        if (typeof baseState.startedAt !== 'number') {
-          baseState.startedAt = Date.now();
-        }
-
-        if (outcome.type === 'success') {
-          return {
-            ...baseState,
-            lastSpawnError: null
-          };
-        }
-
-        return {
-          ...baseState,
-          lastSpawnError: {
-            message: outcome.details.message,
-            pid: outcome.details.pid,
-            exitCode: outcome.details.exitCode ?? null,
-            signal: outcome.details.signal ?? null,
-            at: Date.now()
-          }
-        };
-      }).catch((error) => {
-        logger.debug('[RUNNER RUN] Failed to update runner state with spawn outcome', error);
-      });
+    // sessionId reserved for future use
+    const MAX_TAIL_CHARS = 4000;
+    let stderrTail = '';
+    const appendTail = (current: string, chunk: Buffer | string): string => {
+     const text = chunk.toString();
+     if (!text) {
+      return current;
+     }
+     const combined = current + text;
+     return combined.length > MAX_TAIL_CHARS ? combined.slice(-MAX_TAIL_CHARS) : combined;
+    };
+    const logStderrTail = () => {
+     const trimmed = stderrTail.trim();
+     if (!trimmed) {
+      return;
+     }
+     logger.debug('[RUNNER RUN] Child stderr tail', trimmed);
     };
 
-    // Every 60 seconds:
-    // 1. Prune stale sessions
-    // 2. Check if runner needs update
-    // 3. If outdated, restart with latest version
-    // 4. Write heartbeat
-    const heartbeatIntervalMs = parseInt(process.env.HAPI_RUNNER_HEARTBEAT_INTERVAL || '60000');
-    let heartbeatRunning = false
-    // Timestamp (ms) gate for handoff retries after a failed spawn or timed-out
-    // handoff. Per Codex review #814 [Major], we previously mutated
-    // startedWithCliMtimeMs to throttle re-attempts, but that polluted
-    // runner.state.json (the heartbeat persists this value) and caused
-    // isRunnerRunningCurrentlyInstalledHappyVersion() to lie about the live
-    // runner being current. The honest fix: leave startedWithCliMtimeMs
-    // immutable, gate handoff entry on this timestamp, and refresh it from
-    // the failure path with a backoff window.
-    let nextHandoffAttemptAt = 0;
-    const HANDOFF_RETRY_BACKOFF_MS = 5 * 60_000;
-    const restartOnStaleVersionAndHeartbeat = setInterval(async () => {
-      if (heartbeatRunning) {
-        return;
-      }
-      heartbeatRunning = true;
+    const providerEnv = agent === 'claude' && options.ccSwitchProviderId
+     ? getCcSwitchProviderLaunchEnv(options.ccSwitchProviderId)
+     : {};
+    // fork(claude-proxy-models)：进程 env 会被 Claude Code 的 settings 级 env 盖掉——
+    // wrapper 生成的 --settings 钩子文件整份复制了 ~/.claude/settings.json（含 cc-switch
+    // 写进去的当前供应商 ANTHROPIC_*），命令行级设置优先级高于进程 env（2026-09-06
+    // 生产实测：吹雪3080 当前供应商 GLM，选 cx2cc 供应商 + gpt-6-astra 仍跑 glm-5.3）。
+    // 所以同时把供应商 env 交给 wrapper，让它在生成钩子设置时覆盖 settings.env。
+    const providerSettingsOverride = Object.keys(providerEnv).length > 0
+     ? { HAPI_CLAUDE_SETTINGS_ENV_OVERRIDE: JSON.stringify(providerEnv) }
+     : {};
+    happyProcess = spawnHappyCLI(args, {
+     cwd: spawnDirectory,
+     detached: true,  // Sessions stay alive when runner stops
+     stdio: ['ignore', 'pipe', 'pipe'],  // Capture stdout/stderr for debugging
+     env: {
+      ...process.env,
+      ...extraEnv,
+      ...providerEnv,
+      ...providerSettingsOverride,
+      // Do not inherit another wrapper's attempt through the runner environment.
+      HAPI_OMP_RESUME_ATTEMPT_ID: agent === 'omp' ? options.ompResumeAttemptId : undefined,
+     }
+    });
 
-      if (process.env.DEBUG) {
-        logger.debug(`[RUNNER RUN] Health check started at ${new Date().toLocaleString()}`);
-      }
+    happyProcess.stderr?.on('data', (data) => {
+     stderrTail = appendTail(stderrTail, data);
+    });
 
-      // Prune stale sessions
-      const pidsToCheck = new Set([
-        ...pidToTrackedSession.keys(),
-        ...existingSessionIdByChildPid.keys()
-      ]);
-      for (const pid of pidsToCheck) {
-        if (!isProcessAlive(pid)) {
-          logger.debug(`[RUNNER RUN] Removing stale session with PID ${pid} (process no longer exists)`);
-          onChildExited(pid);
-          continue;
-        }
-        const persisted = persistedResumeProcesses.get(pid);
-        if (persisted) {
-          const generation = classifyRecoveredProcessGeneration(
-            true,
-            getProcessStartMarker(pid),
-            persisted.processStartMarker
-          );
-          if (generation === 'exited') {
-            logger.debug(`[RUNNER RUN] Removing stale session with reused PID ${pid}`);
-            onChildExited(pid);
-          } else if (generation === 'verified' && pidToRequestedSessionId.get(pid) !== persisted.requestedSessionId) {
-            pidToRequestedSessionId.set(pid, persisted.requestedSessionId);
-            if (persisted.confirmedSessionId) pidToConfirmedSessionId.set(pid, persisted.confirmedSessionId);
-            spawnSession.recoverChild(
-              persisted.requestedSessionId,
-              persisted.confirmedSessionId
-                ? { type: 'success', sessionId: persisted.confirmedSessionId }
-                : { type: 'error', errorMessage: `Session ${persisted.requestedSessionId} is still starting` }
-            );
-          }
-        }
-      }
+    let spawnErrorBeforePidCheck: Error | null = null;
+    const captureSpawnErrorBeforePidCheck = (error: Error) => {
+     spawnErrorBeforePidCheck = error;
+    };
+    happyProcess.once('error', captureSpawnErrorBeforePidCheck);
 
-      // Check if runner needs update.
-      // Skip entirely when the operator owns process supervision (systemd, tmux,
-      // custom rebuild pipelines, etc.) and source mtimes change for reasons
-      // unrelated to an actual npm upgrade. HAPI_DISABLE_VERSION_HANDOFF=1
-      // keeps the rest of the heartbeat (session pruning, state file
-      // persistence) intact.
-      if (process.env.HAPI_DISABLE_VERSION_HANDOFF === '1') {
-        if (process.env.DEBUG) {
-          logger.debug('[RUNNER RUN] HAPI_DISABLE_VERSION_HANDOFF=1 set, skipping mtime/version drift self-restart');
-        }
+    if (!happyProcess.pid) {
+     // Allow the async 'error' event to fire before we read it
+     await new Promise((resolve) => setImmediate(resolve));
+     const details = [`cwd=${spawnDirectory}`];
+     if (spawnErrorBeforePidCheck) {
+      details.push(formatSpawnError(spawnErrorBeforePidCheck));
+     }
+     const errorMessage = `Failed to spawn HAPI process - no PID returned (${details.join('; ')})`;
+     logger.debug('[RUNNER RUN] Failed to spawn process - no PID returned', spawnErrorBeforePidCheck ?? null);
+     reportSpawnOutcomeToHub?.({
+      type: 'error',
+      details: {
+       message: errorMessage
+      }
+     });
+     await maybeCleanupWorktree('no-pid');
+     return {
+      type: 'error',
+      errorMessage
+     };
+    }
+    happyProcess.removeListener('error', captureSpawnErrorBeforePidCheck);
+
+    // The OS process now exists, so this is the point where a new generation
+    // invalidates exit evidence left by an older child with the same HAPI ID.
+    for (const id of [options.sessionId, options.existingSessionId]) {
+     if (id) invalidateVerifiedExit(id);
+    }
+
+    const pid = happyProcess.pid;
+    if (options.existingSessionId) {
+     existingSessionIdByChildPid.set(pid, options.existingSessionId);
+     spawnSession.markChildAlive(options.existingSessionId, options.ompResumeAttemptId);
+    }
+    invalidateVerifiedExit(`PID-${pid}`);
+    logger.debug(`[RUNNER RUN] Spawned process with PID ${pid}`);
+    let observedExitCode: number | null = null;
+    let observedExitSignal: NodeJS.Signals | null = null;
+    const buildWebhookFailureMessage = (reason: 'timeout' | 'exit-before-webhook' | 'process-error-before-webhook'): string => {
+     let message = '';
+     if (reason === 'exit-before-webhook') {
+      message = `Session process exited before webhook for PID ${pid}`;
+     } else if (reason === 'process-error-before-webhook') {
+      message = `Session process error before webhook for PID ${pid}`;
+     } else {
+      message = `Session webhook timeout for PID ${pid}`;
+     }
+
+     if (observedExitCode !== null || observedExitSignal) {
+      if (observedExitCode !== null) {
+       message += ` (exit code ${observedExitCode})`;
       } else {
-        const installedCliMtimeMs = getInstalledCliMtimeMs();
-        if (typeof installedCliMtimeMs === 'number' &&
-            typeof startedWithCliMtimeMs === 'number' &&
-            installedCliMtimeMs !== startedWithCliMtimeMs &&
-            Date.now() >= nextHandoffAttemptAt) {
-          logger.debug('[RUNNER RUN] Runner is outdated, triggering self-restart with latest version');
-
-          // Hand off to a fresh runner that inherits our original argv (workspace
-          // roots, flags, etc). Previously this called `runner start` with no
-          // args, which forwarded an arg-less `runner start-sync` and lost the
-          // operator's --workspace-root configuration. Worse, the old code
-          // cleared the heartbeat interval and process.exit(0)'d unconditionally,
-          // so any failure in the replacement left the machine offline with no
-          // runner at all (especially under systemd Restart=on-failure, which
-          // does not restart on clean exits).
-          //
-          // New behaviour:
-          // 1. Replay the original argv (default: ['runner','start-sync']) so the
-          //    new process boots with the same workspace roots / flags.
-          // 2. Wait for runner.state.json to show a different live PID, proving
-          //    the replacement actually came up.
-          // 3. Only clear the heartbeat + exit when handoff is confirmed; if it
-          //    fails, stay alive so the machine stays online. heartbeatRunning
-          //    re-entry guard prevents this block from running concurrently if
-          //    the next heartbeat fires while we are still waiting.
-          //
-          // startedWithArgv is guaranteed by the normalizer + defensive guard
-          // above to start with `runner`, so we replay it directly.
-          const handoffArgv = startedWithArgv;
-
-          // On any failure path: reschedule the next handoff attempt for
-          // HANDOFF_RETRY_BACKOFF_MS into the future. We deliberately do NOT
-          // touch startedWithCliMtimeMs - the heartbeat must continue to
-          // persist the honest "still on the old code" value into
-          // runner.state.json so external tooling (and the controlClient
-          // mtime check) can see the runner is stale. Codex review #814
-          // [Major].
-          const deferHandoffRetry = () => {
-            nextHandoffAttemptAt = Date.now() + HANDOFF_RETRY_BACKOFF_MS;
-            heartbeatRunning = false;
-          };
-
-          // Spawn the replacement with HAPI_RUNNER_HANDOFF_FROM_PID set so
-          // the child knows it is an authorized handoff and must NOT call
-          // stopRunner() against us before writing its own state.
-          // Codex review #814 [Major] on run.ts:892.
-          try {
-            spawnHappyCLI(handoffArgv, {
-              detached: true,
-              stdio: 'ignore',
-              env: {
-                ...process.env,
-                HAPI_RUNNER_HANDOFF_FROM_PID: String(process.pid)
-              }
-            });
-          } catch (error) {
-            logger.debug(`[RUNNER RUN] Failed to spawn replacement runner; staying alive to avoid an offline machine. Next handoff attempt in ${Math.round(HANDOFF_RETRY_BACKOFF_MS / 1000)}s.`, error);
-            deferHandoffRetry();
-            return;
-          }
-
-          // Release the lock so the child can acquire it. The child is
-          // configured (above, in its startRunner() entry) with a longer
-          // lock-retry window when HAPI_RUNNER_HANDOFF_FROM_PID is set, so
-          // it will wait through this release. We deliberately release
-          // BEFORE waitForRunnerHandoff to break the original deadlock:
-          // child cannot write state (and thus cannot signal handoff
-          // success) until it holds the lock, and the lock is ours until
-          // we release.
-          try {
-            await releaseRunnerLock(runnerLockHandle);
-          } catch (error) {
-            logger.debug('[RUNNER RUN] Failed to release lock for child handoff; continuing wait anyway', error);
-          }
-
-          logger.debug(`[RUNNER RUN] Spawned replacement runner with argv: ${JSON.stringify(handoffArgv)}; released lock; waiting for handoff`);
-
-          const handoffOk = await waitForRunnerHandoff(process.pid, { timeoutMs: 30_000 });
-          if (!handoffOk) {
-            logger.debug(`[RUNNER RUN] Replacement runner did not register within 30s; attempting to re-acquire lock and stay alive to avoid leaving the machine offline.`);
-            // Re-acquire the lock with a long window (the child has likely
-            // either succeeded and we're seeing a stale state, or it gave
-            // up - in either case the lock should be available shortly).
-            const reacquired = await acquireRunnerLock(60, 500);
-            if (!reacquired) {
-              // Lock is held by someone else (third-party runner, or a
-              // child that succeeded but state file hasn't reflected the
-              // new pid yet). Cleanest action: exit, log clearly. The
-              // operator will see an offline machine if the holder also
-              // dies, but staying alive without the lock invariant is
-              // worse - it lets a parallel runner register against the
-              // same machine id.
-              logger.debug('[RUNNER RUN] Could not re-acquire runner lock after failed handoff; another process holds it. Exiting cleanly.');
-              clearInterval(restartOnStaleVersionAndHeartbeat);
-              process.exit(0);
-              return;
-            }
-            runnerLockHandle = reacquired;
-            deferHandoffRetry();
-            return;
-          }
-
-          logger.debug('[RUNNER RUN] Handoff confirmed; clearing heartbeat and exiting cleanly');
-          clearInterval(restartOnStaleVersionAndHeartbeat);
-          process.exit(0);
-        }
+       message += ` (signal ${observedExitSignal})`;
       }
+     }
 
-      // Before wrecklessly overriting the runner state file, we should check if we are the ones who own it
-      // Race condition is possible, but thats okay for the time being :D
-      const runnerState = await readRunnerState();
-      if (runnerState && runnerState.pid !== process.pid) {
-        logger.debug('[RUNNER RUN] Somehow a different runner was started without killing us. We should kill ourselves.')
-        requestShutdown('exception', 'A different runner was started without killing us. We should kill ourselves.')
-      }
+     const trimmedTail = stderrTail.trim();
+     if (trimmedTail) {
+      const compactTail = trimmedTail.replace(/\s+/g, ' ');
+      const tailForMessage = compactTail.length > 800 ? compactTail.slice(-800) : compactTail;
+      message += `. stderr: ${tailForMessage}`;
+     }
 
-      // Heartbeat
-      try {
-        const updatedState: RunnerLocallyPersistedState = {
-          pid: process.pid,
-          httpPort: controlPort,
-          startTime: fileState.startTime,
-          startedWithCliVersion: packageJson.version,
-          startedWithCliMtimeMs,
-          startedWithApiUrl: fileState.startedWithApiUrl,
-          startedWithMachineId: fileState.startedWithMachineId,
-          startedWithCliApiTokenHash: fileState.startedWithCliApiTokenHash,
-          startedWithExtraHeadersHash: fileState.startedWithExtraHeadersHash,
-          startedWithArgv,
-          startedWithVersionHandoffDisabled,
-          lastHeartbeat: new Date().toLocaleString(),
-          runnerLogPath: fileState.runnerLogPath
-        };
-        writeRunnerState(updatedState);
-        if (process.env.DEBUG) {
-          logger.debug(`[RUNNER RUN] Health check completed at ${updatedState.lastHeartbeat}`);
-        }
-      } catch (error) {
-        logger.debug('[RUNNER RUN] Failed to write heartbeat', error);
-      }
-
-      heartbeatRunning = false;
-    }, heartbeatIntervalMs); // Every 60 seconds in production
-
-    // Setup signal handlers
-    const cleanupAndShutdown = async (source: 'hapi-app' | 'hapi-cli' | 'os-signal' | 'exception', errorMessage?: string) => {
-      logger.debug(`[RUNNER RUN] Starting proper cleanup (source: ${source}, errorMessage: ${errorMessage})...`);
-
-      // Clear health check interval
-      if (restartOnStaleVersionAndHeartbeat) {
-        clearInterval(restartOnStaleVersionAndHeartbeat);
-        logger.debug('[RUNNER RUN] Health check interval cleared');
-      }
-
-      // Update runner state before shutting down
-      await apiMachine.updateRunnerState((state: RunnerState | null) => ({
-        ...state,
-        status: 'shutting-down',
-        shutdownRequestedAt: Date.now(),
-        shutdownSource: source
-      }));
-
-      // Give time for metadata update to send
-      await new Promise(resolve => setTimeout(resolve, 100));
-
-      apiMachine.shutdown();
-      await stopControlServer();
-      await cleanupRunnerState();
-      await releaseRunnerLock(runnerLockHandle);
-
-      logger.debug(`[RUNNER RUN] Cleanup completed, exiting process with code ${shutdownExitCode}`);
-      process.exit(shutdownExitCode);
+     return message;
     };
 
-    logger.debug('[RUNNER RUN] Runner started successfully, waiting for shutdown request');
+    const trackedSession: TrackedSession = {
+     startedBy: 'runner',
+     pid,
+     requestedHappySessionId: options.existingSessionId ?? options.sessionId,
+     requiresCleanupReceipt: agent === 'omp',
+     childProcess: happyProcess,
+     directoryCreated,
+     message: directoryCreated ? `The path '${directory}' did not exist. We created a new folder and spawned a new session there.` : undefined
+    };
 
-    // Wait for shutdown request
-    const shutdownRequest = await resolvesWhenShutdownRequested;
-    await cleanupAndShutdown(shutdownRequest.source, shutdownRequest.errorMessage);
-  } catch (error) {
-    logger.debug('[RUNNER RUN][FATAL] Failed somewhere unexpectedly - exiting with code 1', error);
-    process.exit(1);
+    pidToTrackedSession.set(pid, trackedSession);
+    if (trackedSession.requestedHappySessionId) {
+     pidToRequestedSessionId.set(pid, trackedSession.requestedHappySessionId);
+    }
+    const spawnedChild = happyProcess;
+    let childOwnership: PersistedResumeProcess | undefined;
+    const childStartMarkerReady = captureSpawnProcessOwnership({
+     child: spawnedChild,
+     session: trackedSession,
+     tracked: pidToTrackedSession,
+     ownerships: persistedResumeProcesses,
+     attemptId: options.ompResumeAttemptId,
+     probe: getProcessStartMarkerAsync,
+     persist: persistResumeProcesses,
+    }).then((proof) => {
+     childOwnership = proof.ownership;
+     return proof.marker;
+    });
+    childBirthProofs.set(trackedSession, childStartMarkerReady);
+    const stillTracksChild = () => pidToTrackedSession.get(pid) === trackedSession
+     || (childOwnership !== undefined && persistedResumeProcesses.get(pid) === childOwnership);
+    // PID-keyed lookup maps outlive a dropped tracked slot (webhook timeout
+    // keeps requested-id aliases for the fallback kill path). Once this child
+    // is confirmed gone AND no live generation owns the slot, only aliases that
+    // still name this row may be removed - deleting entries a recycled child
+    // just wrote would corrupt its generation.
+    const dropStalePidAliases = () => {
+     if (pidToTrackedSession.has(pid) || persistedResumeProcesses.has(pid)) return;
+     if (trackedSession.requestedHappySessionId
+      && pidToRequestedSessionId.get(pid) === trackedSession.requestedHappySessionId) {
+      pidToRequestedSessionId.delete(pid);
+     }
+     if (trackedSession.happySessionId
+      && pidToConfirmedSessionId.get(pid) === trackedSession.happySessionId) {
+      pidToConfirmedSessionId.delete(pid);
+     }
+     const aliasId = trackedSession.requestedHappySessionId;
+     if (aliasId && existingSessionIdByChildPid.get(pid) === aliasId) {
+      spawnSession.onChildExited(aliasId);
+      existingSessionIdByChildPid.delete(pid);
+     }
+    };
+    // A new generation already owns this PID slot: release only our own
+    // persisted record; every PID-keyed map and row-dedupe alias may already
+    // belong to the recycled generation.
+    const releaseRecycledGeneration = () => {
+     if (childOwnership !== undefined && persistedResumeProcesses.get(pid) === childOwnership) {
+      refreshCleanupProof(childOwnership);
+      if (childOwnership.requiresCleanupReceipt && !childOwnership.cleanupVerified) return;
+      persistedResumeProcesses.delete(pid);
+      persistResumeProcesses();
+     }
+    };
+    const slotOwnedByOther = () => {
+     const owner = pidToTrackedSession.get(pid);
+     return owner !== undefined && owner !== trackedSession;
+    };
+
+    happyProcess.on('exit', (code, signal) => {
+     if (slotOwnedByOther()) {
+      releaseRecycledGeneration();
+      return;
+     }
+     if (!stillTracksChild()) {
+      dropStalePidAliases();
+      return;
+     }
+     observedExitCode = typeof code === 'number' ? code : null;
+     observedExitSignal = signal ?? null;
+     logger.debug(`[RUNNER RUN] Child PID ${pid} exited with code ${code}, signal ${signal}`);
+     if (code !== 0 || signal) {
+      logStderrTail();
+     }
+     const errorAwaiter = pidToErrorAwaiter.get(pid);
+     if (errorAwaiter && errorAwaiter.tracked === trackedSession) {
+      pidToErrorAwaiter.delete(pid);
+      if (pidToAwaiter.get(pid)?.tracked === trackedSession) {
+       pidToAwaiter.delete(pid);
+      }
+      errorAwaiter.resolve(buildWebhookFailureMessage('exit-before-webhook'));
+     }
+     // Ownership release must see the exact marker generation the exit is
+     // being attributed to; defer it until the in-flight probe resolves.
+     void childStartMarkerReady.then((marker) => {
+      if (slotOwnedByOther()) {
+       releaseRecycledGeneration();
+       return;
+      }
+      if (!stillTracksChild()) {
+       dropStalePidAliases();
+       return;
+      }
+      onChildExited(pid, marker ?? '', childOwnership, trackedSession);
+     }).catch((error) => {
+      logger.debug(`[RUNNER RUN] Deferred exit bookkeeping failed for PID ${pid}:`, error);
+     });
+    });
+
+    happyProcess.on('error', (error) => {
+     if (slotOwnedByOther()) {
+      releaseRecycledGeneration();
+      return;
+     }
+     if (!stillTracksChild()) {
+      dropStalePidAliases();
+      return;
+     }
+     logger.debug(`[RUNNER RUN] Child process error:`, error);
+     const errorAwaiter = pidToErrorAwaiter.get(pid);
+     if (errorAwaiter && errorAwaiter.tracked === trackedSession) {
+      pidToErrorAwaiter.delete(pid);
+      if (pidToAwaiter.get(pid)?.tracked === trackedSession) {
+       pidToAwaiter.delete(pid);
+      }
+      errorAwaiter.resolve(buildWebhookFailureMessage('process-error-before-webhook'));
+     }
+     // A ChildProcess error is not itself proof that the OS process exited.
+     if (!isProcessAlive(pid)) void childStartMarkerReady.then((marker) => {
+      if (slotOwnedByOther()) {
+       releaseRecycledGeneration();
+       return;
+      }
+      if (!stillTracksChild()) {
+       dropStalePidAliases();
+       return;
+      }
+      onChildExited(pid, marker ?? '', childOwnership, trackedSession);
+     }).catch((cleanupError) => {
+      logger.debug(`[RUNNER RUN] Deferred exit bookkeeping failed for PID ${pid}:`, cleanupError);
+     });
+    });
+
+    // Wait for webhook to populate session with happySessionId
+    logger.debug(`[RUNNER RUN] Waiting for session webhook for PID ${pid}`);
+
+    const spawnResult = await new Promise<SpawnSessionResult>((resolve) => {
+     // Set timeout for webhook. Default is 15s but can be raised via
+     // HAPI_RUNNER_WEBHOOK_TIMEOUT_MS for users on slow models
+     const timeout = setTimeout(() => {
+      // Only release awaiters/slots that still belong to this generation;
+      // a recycled PID may have re-registered them for a newer spawn.
+      if (pidToAwaiter.get(pid)?.tracked === trackedSession) pidToAwaiter.delete(pid);
+      if (pidToErrorAwaiter.get(pid)?.tracked === trackedSession) pidToErrorAwaiter.delete(pid);
+
+      // Native OMP can own a shared broker beneath its process tree.
+      // Keep its ownership and accept its late webhook so an explicit
+      // native cleanup can still complete; never blindly /T this tree.
+      if (agent !== 'omp') {
+       if (childOwnership && persistedResumeProcesses.get(pid) === childOwnership) {
+        cancelledStartupOwnerships.add(childOwnership);
+       }
+       if (pidToTrackedSession.get(pid) === trackedSession) {
+        pidToTrackedSession.delete(pid);
+       }
+       // The Node handle is the generation proof: once Node observed exit,
+       // this PID may already host a recycled process that must not be killed.
+       if (!slotOwnedByOther() && spawnedChild.exitCode === null && spawnedChild.signalCode === null) {
+        void childStartMarkerReady.then(() => {
+         if (!slotOwnedByOther() && spawnedChild.exitCode === null && spawnedChild.signalCode === null) {
+          return killProcessByChildProcess(spawnedChild);
+         }
+         return false;
+        }).catch((error) => {
+         logger.debug(`[RUNNER RUN] Timeout termination failed for PID ${pid}:`, error);
+        });
+       }
+      }
+
+      // If this was a worktree session, the worktree can only be
+      // safely removed after the child has actually exited (the
+      // child may still be writing to it).  Register a one-shot
+      // exit listener so cleanup happens once the tree-kill lands.
+      if (worktreeInfo && happyProcess) {
+       happyProcess.once('exit', () => {
+        void cleanupWorktree();
+       });
+      }
+
+      logger.debug(`[RUNNER RUN] Session webhook timeout for PID ${pid}`);
+      logStderrTail();
+      resolve({
+       type: 'error',
+       errorMessage: buildWebhookFailureMessage('timeout')
+      });
+     }, webhookTimeoutMs);
+
+     // Register awaiter
+     pidToAwaiter.set(pid, {
+      tracked: trackedSession,
+      resolve: (completedSession) => {
+       clearTimeout(timeout);
+       if (pidToErrorAwaiter.get(pid)?.tracked === trackedSession) {
+        pidToErrorAwaiter.delete(pid);
+       }
+       logger.debug(`[RUNNER RUN] Session ${completedSession.happySessionId} fully spawned with webhook`);
+       resolve({
+        type: 'success',
+        sessionId: completedSession.happySessionId!
+       });
+      }
+     });
+     pidToErrorAwaiter.set(pid, {
+      tracked: trackedSession,
+      resolve: (errorMessage) => {
+       clearTimeout(timeout);
+       resolve({
+        type: 'error',
+        errorMessage
+       });
+      }
+     });
+    });
+    if (spawnResult.type === 'error') {
+     reportSpawnOutcomeToHub?.({
+      type: 'error',
+      details: {
+       message: spawnResult.errorMessage,
+       pid,
+       exitCode: observedExitCode,
+       signal: observedExitSignal
+      }
+     });
+     await maybeCleanupWorktree('spawn-error');
+    } else {
+     reportSpawnOutcomeToHub?.({ type: 'success' });
+    }
+    return spawnResult;
+   } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    logger.debug('[RUNNER RUN] Failed to spawn session:', error);
+    await maybeCleanupWorktree('exception');
+    reportSpawnOutcomeToHub?.({
+     type: 'error',
+     details: {
+      message: `Failed to spawn session: ${errorMessage}`
+     }
+    });
+    return {
+     type: 'error',
+     errorMessage: `Failed to spawn session: ${errorMessage}`
+    };
+   }
+  };
+
+  spawnSession = createSpawnDeduplicator(spawnSessionOnce);
+  for (const [pid, record] of persistedResumeProcesses) {
+   const verified = pidToRequestedSessionId.get(pid) === record.requestedSessionId;
+   existingSessionIdByChildPid.set(pid, record.requestedSessionId);
+   spawnSession.recoverChild(
+    record.requestedSessionId,
+    verified && record.confirmedSessionId
+     ? { type: 'success', sessionId: record.confirmedSessionId }
+     : { type: 'error', errorMessage: `Session ${record.requestedSessionId} process verification is pending` },
+    record.ompResumeAttemptId
+   );
   }
+
+  // Stop a session by sessionId or PID fallback
+  const stopSession = async (sessionId: string): Promise<'stopped' | 'already_gone' | 'still_alive'> => {
+   logger.debug(`[RUNNER RUN] Attempting to stop session ${sessionId}`);
+
+   let stoppedAny = false;
+   let alreadyGoneAny = false;
+   // Try to find by sessionId first
+   for (const [pid, session] of pidToTrackedSession.entries()) {
+    if (session.happySessionId === sessionId ||
+     session.requestedHappySessionId === sessionId ||
+     (sessionId.startsWith('PID-') && pid === parseInt(sessionId.replace('PID-', '')))) {
+     if (!persistedResumeProcesses.has(pid)) {
+      const birthProof = childBirthProofs.get(session);
+      if (birthProof) await birthProof;
+      if (pidToTrackedSession.get(pid) !== session) continue;
+     }
+     const ownership = persistedResumeProcesses.get(pid);
+     if (!ownership) return 'still_alive';
+     if (ownership) refreshCleanupProof(ownership);
+     const nativeSession = ownership?.requiresCleanupReceipt || session.requiresCleanupReceipt
+      || session.happySessionMetadataFromLocalWebhook?.flavor === 'omp';
+     if (nativeSession && !ownership?.cleanupVerified) {
+      logger.debug(`[RUNNER RUN] Refusing to terminate OMP ${sessionId} before native cleanup acknowledgement`);
+      return 'still_alive';
+     }
+     if (ownership) {
+      const marker = isProcessAlive(pid) ? await getProcessStartMarkerAsync(pid) : null;
+      // The record may have been released or replaced while the probe ran;
+      // never apply a generation proof to a different ownership record.
+      if (persistedResumeProcesses.get(pid) !== ownership || pidToTrackedSession.get(pid) !== session) continue;
+      const disposition = classifySessionProcessOwnership(ownership, isProcessAlive(pid), marker);
+      if (disposition === 'blocked') return 'still_alive';
+      if (disposition === 'exited') {
+       onChildExited(pid, ownership.processStartMarker, ownership, session);
+       alreadyGoneAny = true;
+       continue;
+      }
+     }
+     cancelledStartupOwnerships.add(ownership);
+
+     if (nativeSession) {
+      // Native disposal was proved independently; never tree-kill its broker.
+      try {
+       if (!ownership || !(await stopSessionWrapper(ownership))) return 'still_alive';
+       onChildExited(pid, ownership.processStartMarker, ownership, session);
+       stoppedAny = true;
+       continue;
+      } catch (error) {
+       logger.debug(`[RUNNER RUN] Failed to stop disposed OMP wrapper ${pid}:`, error);
+       return 'still_alive';
+      }
+     } else if (session.startedBy === 'runner' && session.childProcess) {
+      try {
+       const treeStopped = await killProcessByChildProcess(session.childProcess);
+       if (!treeStopped) {
+        logger.debug(`[RUNNER RUN] Process tree for session ${sessionId} is still alive after stop request`);
+        return 'still_alive';
+       }
+       logger.debug(`[RUNNER RUN] Requested termination for runner-spawned session ${sessionId}`);
+      } catch (error) {
+       logger.debug(`[RUNNER RUN] Failed to kill session ${sessionId}:`, error);
+       return 'still_alive';
+      }
+     } else {
+      // For externally started sessions, try to kill by PID
+      try {
+       if (!(await killProcess(pid))) return 'still_alive';
+       logger.debug(`[RUNNER RUN] Requested termination for external session PID ${pid}`);
+      } catch (error) {
+       logger.debug(`[RUNNER RUN] Failed to kill external session PID ${pid}:`, error);
+       return 'still_alive';
+      }
+     }
+
+     // A stop request starts termination but does not prove that a detached
+     // child is gone. Keep its HAPI-row dedupe key until exit/stale detection.
+     const existingSessionId = existingSessionIdByChildPid.get(pid);
+     if (existingSessionId) {
+      spawnSession.markChildStopping(existingSessionId);
+     }
+     const deadline = Date.now() + 5_000;
+     while (isProcessAlive(pid) && Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, 50));
+     }
+     if (isProcessAlive(pid)) {
+      logger.debug(`[RUNNER RUN] Session ${sessionId} process ${pid} is still alive after stop request`);
+      return 'still_alive';
+     }
+     // An exit callback can release this row while termination is awaited. Do
+     // not clear a replacement generation or its freshly invalidated tombstone.
+     if (ownership && persistedResumeProcesses.get(pid) !== ownership) {
+      stoppedAny = true;
+      continue;
+     }
+     if (session.happySessionId) rememberVerifiedExit(session.happySessionId);
+     if (session.requestedHappySessionId) rememberVerifiedExit(session.requestedHappySessionId);
+     rememberVerifiedExit(`PID-${pid}`);
+     pidToTrackedSession.delete(pid);
+     pidToRequestedSessionId.delete(pid);
+     pidToConfirmedSessionId.delete(pid);
+     if (persistedResumeProcesses.delete(pid)) persistResumeProcesses();
+     releaseRecoveredSpawnDedupe(pid, existingSessionIdByChildPid, spawnSession);
+     logger.debug(`[RUNNER RUN] Removed terminated session ${sessionId} from tracking`);
+     stoppedAny = true; continue;
+    }
+   }
+
+   // Webhook timeout can remove the normal TrackedSession before the process
+   // actually exits. Retain the requested HAPI ID -> PID relation so Hub can
+   // still terminate that exact generation by HAPI ID.
+   const fallbackPids = new Set([
+    ...pidToRequestedSessionId.keys(),
+    ...pidToConfirmedSessionId.keys(),
+    ...persistedResumeProcesses.keys(),
+   ]);
+   for (const pid of fallbackPids) {
+    const persisted = persistedResumeProcesses.get(pid);
+    if (persisted) refreshCleanupProof(persisted);
+    const requestedSessionId = pidToRequestedSessionId.get(pid) ?? persisted?.requestedSessionId;
+    const confirmedSessionId = pidToConfirmedSessionId.get(pid) ?? persisted?.confirmedSessionId;
+    if (requestedSessionId !== sessionId && confirmedSessionId !== sessionId) continue;
+    if (!persisted) return 'still_alive';
+    const marker = isProcessAlive(pid) ? await getProcessStartMarkerAsync(pid) : null;
+    if (persistedResumeProcesses.get(pid) !== persisted) continue;
+    const disposition = classifySessionProcessOwnership(persisted, isProcessAlive(pid), marker);
+    if (disposition === 'blocked') {
+     logger.debug(`[RUNNER RUN] Native cleanup or process generation was not verified for ${sessionId}; retaining ownership`);
+     return 'still_alive';
+    }
+    if (disposition === 'running') {
+     const stopped = persisted.requiresCleanupReceipt
+      ? await stopSessionWrapper(persisted)
+      : await killProcessTreeByPid(pid);
+     if (!stopped) return 'still_alive';
+     onChildExited(pid, persisted.processStartMarker, persisted);
+     stoppedAny = true;
+    } else {
+     onChildExited(pid, persisted.processStartMarker, persisted);
+     alreadyGoneAny = true;
+    }
+   }
+
+   if (stoppedAny) return 'stopped';
+   if (alreadyGoneAny) return 'already_gone';
+   if (hasVerifiedExit(sessionId)) {
+    logger.debug(`[RUNNER RUN] Session ${sessionId} was previously observed exited`);
+    return 'already_gone';
+   }
+   logger.debug(`[RUNNER RUN] Session ${sessionId} not found without verified exit`);
+   return 'still_alive';
+  };
+
+  // Handle child process exit
+  const onChildExited = (pid: number, expectedMarker?: string | null, expectedOwnership?: PersistedResumeProcess, expectedSession?: TrackedSession) => {
+   const session = pidToTrackedSession.get(pid);
+   if (expectedSession && session !== expectedSession) return;
+   const ownership = persistedResumeProcesses.get(pid);
+   if (expectedOwnership && ownership !== expectedOwnership) return;
+   if (expectedMarker !== undefined && ownership && ownership.processStartMarker !== expectedMarker) return;
+   if (ownership) refreshCleanupProof(ownership);
+   if ((ownership?.requiresCleanupReceipt || session?.requiresCleanupReceipt || session?.happySessionMetadataFromLocalWebhook?.flavor === 'omp')
+    && !ownership?.cleanupVerified) {
+    logger.debug(`[RUNNER RUN] Wrapper ${pid} exited without native cleanup proof; retaining session ownership`);
+    const id = ownership?.requestedSessionId ?? session?.requestedHappySessionId ?? session?.happySessionId;
+    if (id) spawnSession.recoverChild(id, {
+     type: 'error',
+     errorMessage: 'Previous OMP session exited without verified resource cleanup; cannot start another instance'
+    }, ownership?.ompResumeAttemptId);
+    pidToTrackedSession.delete(pid);
+    pidToAwaiter.delete(pid);
+    pidToErrorAwaiter.delete(pid);
+    return;
+   }
+   const requestedSessionId = session?.requestedHappySessionId ?? pidToRequestedSessionId.get(pid);
+   if (requestedSessionId) rememberVerifiedExit(requestedSessionId);
+   const confirmedSessionId = session?.happySessionId ?? pidToConfirmedSessionId.get(pid);
+   if (confirmedSessionId) rememberVerifiedExit(confirmedSessionId);
+   rememberVerifiedExit(`PID-${pid}`);
+   logger.debug(`[RUNNER RUN] Removing exited process PID ${pid} from tracking`);
+   const existingSessionId = existingSessionIdByChildPid.get(pid);
+   if (existingSessionId) {
+    spawnSession.onChildExited(existingSessionId);
+    existingSessionIdByChildPid.delete(pid);
+   }
+   pidToTrackedSession.delete(pid);
+   pidToAwaiter.delete(pid);
+   pidToErrorAwaiter.delete(pid);
+   pidToRequestedSessionId.delete(pid);
+   pidToConfirmedSessionId.delete(pid);
+   if (persistedResumeProcesses.delete(pid)) persistResumeProcesses();
+  };
+
+  // Start control server
+  const { port: controlPort, stop: stopControlServer } = await startRunnerControlServer({
+   getChildren: getCurrentChildren,
+   stopSession,
+   requestShutdown: () => requestShutdown('hapi-cli'),
+   spawnSession,
+   onSessionCleanupVerified: async (sessionId, pid, processStartMarker, ompResumeAttemptId) => {
+    const ownership = persistedResumeProcesses.get(pid);
+    const receipt = { sessionId, pid, processStartMarker, ompResumeAttemptId };
+    if (!ownership || !matchesSessionCleanupReceipt(ownership, receipt)) return false;
+    const currentMarker = await getProcessStartMarkerAsync(pid);
+    // Ownership must be the same record before and after the probe: a
+    // cleanup ack for one generation can never bind a replacement.
+    if (persistedResumeProcesses.get(pid) !== ownership
+     || (currentMarker !== processStartMarker && !cleanupReceipts.has(ownership))) return false;
+    const previousCleanupVerified = ownership.cleanupVerified;
+    ownership.cleanupVerified = true;
+    if (persistResumeProcesses()) {
+     cleanupReceipts.forget(ownership);
+     return true;
+    }
+    ownership.cleanupVerified = previousCleanupVerified;
+    return false;
+   },
+   onHappySessionWebhook
+  });
+
+  // Baseline mtime at runner-process start. Immutable: per Codex review #814
+  // [Major], we must NOT refresh this on a failed handoff because the
+  // heartbeat writes it into runner.state.json, and downstream
+  // isRunnerRunningCurrentlyInstalledHappyVersion() compares the stored
+  // value against the live installed mtime - if they match, the live
+  // (still-stale) runner is reported as current. Throttle handoff attempts
+  // via nextHandoffAttemptAt below instead of mutating this baseline.
+  const startedWithCliMtimeMs = getInstalledCliMtimeMs();
+  // Snapshot original CLI argv via the project's canonical normalizer so the
+  // heartbeat's self-restart handoff can rebuild the same `runner start-sync
+  // --workspace-root ...` invocation instead of losing flags.
+  //
+  // Codex review #814 [Major]: previously `process.argv.slice(2)` was used,
+  // but in compiled binary mode (`bun build --compile`) the raw argv shape is
+  // `[hapi, runner, start-sync, ...]` so slice(2) produced `['start-sync', ...]`.
+  // The replacement then spawned `hapi start-sync ...`, which `resolveCommand`
+  // treats as an unknown top-level command - falling back to Claude instead
+  // of starting the runner. `getCliArgs()` strips runtime + entrypoint
+  // correctly in all execution modes.
+  //
+  // Defensive guard: only replay the captured argv when it actually starts
+  // with `runner`. If the normalizer ever returns something else (unexpected
+  // shape, future refactor), fall back to the safe default so the handoff
+  // can never resolve to a non-runner command.
+  const rawStartedWithArgv = getCliArgs();
+  const startedWithArgv = rawStartedWithArgv[0] === 'runner'
+   ? rawStartedWithArgv
+   : ['runner', 'start-sync'];
+  // Snapshot at start: did this runner opt out of version handoff via env?
+  // Persisted to runner.state.json so a later `hapi runner start` from a
+  // shell where the env var is NOT set can still honour the opt-out
+  // (Codex review #814 [Major] - controlClient.ts:192 fix).
+  const startedWithVersionHandoffDisabled = process.env.HAPI_DISABLE_VERSION_HANDOFF === '1';
+
+  // Write initial runner state (no lock needed for state file)
+  const fileState: RunnerLocallyPersistedState = {
+   pid: process.pid,
+   httpPort: controlPort,
+   startTime: new Date().toLocaleString(),
+   startedWithCliVersion: packageJson.version,
+   startedWithCliMtimeMs,
+   startedWithApiUrl: configuration.apiUrl,
+   startedWithMachineId: machineId,
+   startedWithCliApiTokenHash: hashRunnerCliApiToken(configuration.cliApiToken),
+   startedWithExtraHeadersHash: hashRunnerExtraHeaders(configuration.extraHeaders),
+   startedWithArgv,
+   startedWithVersionHandoffDisabled,
+   runnerLogPath: logger.logFilePath
+  };
+  writeRunnerState(fileState);
+  logger.debug('[RUNNER RUN] Runner state written');
+
+  // Prepare initial runner state
+  const initialRunnerState: RunnerState = {
+   status: 'offline',
+   pid: process.pid,
+   httpPort: controlPort,
+   startedAt: Date.now(),
+   capabilities: { ...RUNNER_CAPABILITIES }
+  };
+
+  // Create API client
+  const api = await ApiClient.create();
+
+  const workspaceRoots = resolveWorkspaceRoots(options.workspaceRoots);
+  logger.debug(`[RUNNER RUN] Workspace roots: ${workspaceRoots?.join(', ') ?? '(not set)'}`);
+
+  const ompAvailability = await detectOmpMachineAvailability();
+  if (ompAvailability.available) {
+   logger.debug(`[RUNNER RUN] OMP ${ompAvailability.version.raw} available`);
+  } else {
+   logger.debug(`[RUNNER RUN] OMP unavailable: ${ompAvailability.error}`);
+  }
+
+  // Operator-set per-machine launch defaults (~/.hapi/settings.json). Read
+  // once at registration; invalid values resolve to undefined and simply
+  // leave the New Session form on its normal `auto` default.
+  const runnerSettings = await readSettings();
+  const machineLaunchDefaults = resolveMachineLaunchDefaults({
+   model: runnerSettings.defaultLaunchModel,
+   effort: runnerSettings.defaultLaunchEffort
+  });
+  logger.debug(`[RUNNER RUN] Machine launch defaults: ${JSON.stringify(machineLaunchDefaults ?? null)}`);
+
+  const registrationMetadata = buildMachineMetadata({
+   workspaceRoots,
+   ompAvailable: ompAvailability.available,
+   launchDefaults: machineLaunchDefaults
+  });
+
+  // Get or create machine (with retry for transient connection errors)
+  const machine = await withRetry(
+   () => api.getOrCreateMachine({
+    machineId,
+    metadata: registrationMetadata,
+    runnerState: initialRunnerState
+   }),
+   {
+    maxAttempts: 60,
+    minDelay: 1000,
+    maxDelay: 30000,
+    shouldRetry: isRetryableConnectionError,
+    onRetry: (error, attempt, nextDelayMs) => {
+     const errorMsg = error instanceof Error ? error.message : String(error)
+     logger.debug(`[RUNNER RUN] Failed to register machine (attempt ${attempt}), retrying in ${nextDelayMs}ms: ${errorMsg}`)
+    }
+   }
+  );
+  logger.debug(`[RUNNER RUN] Machine registered: ${machine.id}`);
+
+  // Create realtime machine session
+  const apiMachine = api.machineSyncClient(machine, {
+   workspaceRoots,
+   ompAvailable: ompAvailability.available,
+   launchDefaults: machineLaunchDefaults,
+   registrationMetadata
+  });
+
+  // Set RPC handlers
+  apiMachine.setRPCHandlers({
+   spawnSession,
+   stopSession,
+   requestShutdown: () => requestShutdown('hapi-app')
+  });
+
+  // Connect to server
+  apiMachine.connect();
+  scheduleCursorModelsPrewarm();
+
+  // Visible startup banner. Use console.log so it always appears on stdout,
+  // regardless of the verbose/quiet logger setting.
+  console.log('');
+  console.log('Hapi runner started.');
+  console.log(`  Workspace roots: ${workspaceRoots?.join(', ') ?? '(not set — browse disabled; pass --workspace-root to enable)'}`);
+  console.log(`  Hub URL:        ${configuration.apiUrl}`);
+  console.log(`  Machine ID:     ${machine.id}`);
+  console.log(`  Control port:   ${controlPort}`);
+  console.log('Waiting for sessions. Press Ctrl+C to stop.');
+  console.log('');
+
+  reportSpawnOutcomeToHub = (outcome) => {
+   void apiMachine.updateRunnerState((state: RunnerState | null) => {
+    const baseState: RunnerState = state
+     ? { ...state }
+     : { status: 'running' };
+
+    if (typeof baseState.pid !== 'number') {
+     baseState.pid = process.pid;
+    }
+    if (typeof baseState.httpPort !== 'number') {
+     baseState.httpPort = controlPort;
+    }
+    if (typeof baseState.startedAt !== 'number') {
+     baseState.startedAt = Date.now();
+    }
+
+    if (outcome.type === 'success') {
+     return {
+      ...baseState,
+      lastSpawnError: null
+     };
+    }
+
+    return {
+     ...baseState,
+     lastSpawnError: {
+      message: outcome.details.message,
+      pid: outcome.details.pid,
+      exitCode: outcome.details.exitCode ?? null,
+      signal: outcome.details.signal ?? null,
+      at: Date.now()
+     }
+    };
+   }).catch((error) => {
+    logger.debug('[RUNNER RUN] Failed to update runner state with spawn outcome', error);
+   });
+  };
+
+  // Every 60 seconds:
+  // 1. Prune stale sessions
+  // 2. Check if runner needs update
+  // 3. If outdated, restart with latest version
+  // 4. Write heartbeat
+  const heartbeatIntervalMs = parseInt(process.env.HAPI_RUNNER_HEARTBEAT_INTERVAL || '60000');
+  let heartbeatRunning = false
+  // Timestamp (ms) gate for handoff retries after a failed spawn or timed-out
+  // handoff. Per Codex review #814 [Major], we previously mutated
+  // startedWithCliMtimeMs to throttle re-attempts, but that polluted
+  // runner.state.json (the heartbeat persists this value) and caused
+  // isRunnerRunningCurrentlyInstalledHappyVersion() to lie about the live
+  // runner being current. The honest fix: leave startedWithCliMtimeMs
+  // immutable, gate handoff entry on this timestamp, and refresh it from
+  // the failure path with a backoff window.
+  let nextHandoffAttemptAt = 0;
+  const HANDOFF_RETRY_BACKOFF_MS = 5 * 60_000;
+  const restartOnStaleVersionAndHeartbeat = setInterval(async () => {
+   if (heartbeatRunning) {
+    return;
+   }
+   heartbeatRunning = true;
+
+   if (process.env.DEBUG) {
+    logger.debug(`[RUNNER RUN] Health check started at ${new Date().toLocaleString()}`);
+   }
+
+   // Prune stale sessions
+   const pidsToCheck = new Set([
+    ...pidToTrackedSession.keys(),
+    ...existingSessionIdByChildPid.keys()
+   ]);
+   for (const pid of pidsToCheck) {
+    if (!isProcessAlive(pid)) {
+     logger.debug(`[RUNNER RUN] Removing stale session with PID ${pid} (process no longer exists)`);
+     onChildExited(pid);
+     continue;
+    }
+    const persisted = persistedResumeProcesses.get(pid);
+    if (persisted) refreshCleanupProof(persisted);
+    if (persisted) {
+     const currentMarker = await getProcessStartMarkerAsync(pid);
+     if (persistedResumeProcesses.get(pid) !== persisted) continue;
+     const generation = classifyRecoveredProcessGeneration(
+      true,
+      currentMarker,
+      persisted.processStartMarker
+     );
+     if (generation === 'exited') {
+      logger.debug(`[RUNNER RUN] Removing stale session with reused PID ${pid}`);
+      onChildExited(pid);
+     } else if (generation === 'verified' && !persisted.cleanupVerified) {
+      pidToRequestedSessionId.set(pid, persisted.requestedSessionId);
+      if (persisted.confirmedSessionId) pidToConfirmedSessionId.set(pid, persisted.confirmedSessionId);
+      spawnSession.recoverChild(
+       persisted.requestedSessionId,
+       persisted.confirmedSessionId
+        ? { type: 'success', sessionId: persisted.confirmedSessionId }
+        : { type: 'error', errorMessage: `Session ${persisted.requestedSessionId} is still starting` },
+       persisted.ompResumeAttemptId
+      );
+     }
+    }
+   }
+
+   // Check if runner needs update.
+   // Skip entirely when the operator owns process supervision (systemd, tmux,
+   // custom rebuild pipelines, etc.) and source mtimes change for reasons
+   // unrelated to an actual npm upgrade. HAPI_DISABLE_VERSION_HANDOFF=1
+   // keeps the rest of the heartbeat (session pruning, state file
+   // persistence) intact.
+   if (process.env.HAPI_DISABLE_VERSION_HANDOFF === '1') {
+    if (process.env.DEBUG) {
+     logger.debug('[RUNNER RUN] HAPI_DISABLE_VERSION_HANDOFF=1 set, skipping mtime/version drift self-restart');
+    }
+   } else {
+    const installedCliMtimeMs = getInstalledCliMtimeMs();
+    if (typeof installedCliMtimeMs === 'number' &&
+     typeof startedWithCliMtimeMs === 'number' &&
+     installedCliMtimeMs !== startedWithCliMtimeMs &&
+     Date.now() >= nextHandoffAttemptAt) {
+     logger.debug('[RUNNER RUN] Runner is outdated, triggering self-restart with latest version');
+
+     // Hand off to a fresh runner that inherits our original argv (workspace
+     // roots, flags, etc). Previously this called `runner start` with no
+     // args, which forwarded an arg-less `runner start-sync` and lost the
+     // operator's --workspace-root configuration. Worse, the old code
+     // cleared the heartbeat interval and process.exit(0)'d unconditionally,
+     // so any failure in the replacement left the machine offline with no
+     // runner at all (especially under systemd Restart=on-failure, which
+     // does not restart on clean exits).
+     //
+     // New behaviour:
+     // 1. Replay the original argv (default: ['runner','start-sync']) so the
+     //    new process boots with the same workspace roots / flags.
+     // 2. Wait for runner.state.json to show a different live PID, proving
+     //    the replacement actually came up.
+     // 3. Only clear the heartbeat + exit when handoff is confirmed; if it
+     //    fails, stay alive so the machine stays online. heartbeatRunning
+     //    re-entry guard prevents this block from running concurrently if
+     //    the next heartbeat fires while we are still waiting.
+     //
+     // startedWithArgv is guaranteed by the normalizer + defensive guard
+     // above to start with `runner`, so we replay it directly.
+     const handoffArgv = startedWithArgv;
+
+     // On any failure path: reschedule the next handoff attempt for
+     // HANDOFF_RETRY_BACKOFF_MS into the future. We deliberately do NOT
+     // touch startedWithCliMtimeMs - the heartbeat must continue to
+     // persist the honest "still on the old code" value into
+     // runner.state.json so external tooling (and the controlClient
+     // mtime check) can see the runner is stale. Codex review #814
+     // [Major].
+     const deferHandoffRetry = () => {
+      nextHandoffAttemptAt = Date.now() + HANDOFF_RETRY_BACKOFF_MS;
+      heartbeatRunning = false;
+     };
+
+     // Spawn the replacement with HAPI_RUNNER_HANDOFF_FROM_PID set so
+     // the child knows it is an authorized handoff and must NOT call
+     // stopRunner() against us before writing its own state.
+     // Codex review #814 [Major] on run.ts:892.
+     try {
+      spawnHappyCLI(handoffArgv, {
+       detached: true,
+       stdio: 'ignore',
+       env: {
+        ...process.env,
+        HAPI_RUNNER_HANDOFF_FROM_PID: String(process.pid)
+       }
+      });
+     } catch (error) {
+      logger.debug(`[RUNNER RUN] Failed to spawn replacement runner; staying alive to avoid an offline machine. Next handoff attempt in ${Math.round(HANDOFF_RETRY_BACKOFF_MS / 1000)}s.`, error);
+      deferHandoffRetry();
+      return;
+     }
+
+     // Release the lock so the child can acquire it. The child is
+     // configured (above, in its startRunner() entry) with a longer
+     // lock-retry window when HAPI_RUNNER_HANDOFF_FROM_PID is set, so
+     // it will wait through this release. We deliberately release
+     // BEFORE waitForRunnerHandoff to break the original deadlock:
+     // child cannot write state (and thus cannot signal handoff
+     // success) until it holds the lock, and the lock is ours until
+     // we release.
+     try {
+      await releaseRunnerLock(runnerLockHandle);
+     } catch (error) {
+      logger.debug('[RUNNER RUN] Failed to release lock for child handoff; continuing wait anyway', error);
+     }
+
+     logger.debug(`[RUNNER RUN] Spawned replacement runner with argv: ${JSON.stringify(handoffArgv)}; released lock; waiting for handoff`);
+
+     const handoffOk = await waitForRunnerHandoff(process.pid, { timeoutMs: 30_000 });
+     if (!handoffOk) {
+      logger.debug(`[RUNNER RUN] Replacement runner did not register within 30s; attempting to re-acquire lock and stay alive to avoid leaving the machine offline.`);
+      // Re-acquire the lock with a long window (the child has likely
+      // either succeeded and we're seeing a stale state, or it gave
+      // up - in either case the lock should be available shortly).
+      const reacquired = await acquireRunnerLock(60, 500);
+      if (!reacquired) {
+       // Lock is held by someone else (third-party runner, or a
+       // child that succeeded but state file hasn't reflected the
+       // new pid yet). Cleanest action: exit, log clearly. The
+       // operator will see an offline machine if the holder also
+       // dies, but staying alive without the lock invariant is
+       // worse - it lets a parallel runner register against the
+       // same machine id.
+       logger.debug('[RUNNER RUN] Could not re-acquire runner lock after failed handoff; another process holds it. Exiting cleanly.');
+       clearInterval(restartOnStaleVersionAndHeartbeat);
+       process.exit(0);
+       return;
+      }
+      runnerLockHandle = reacquired;
+      deferHandoffRetry();
+      return;
+     }
+
+     logger.debug('[RUNNER RUN] Handoff confirmed; clearing heartbeat and exiting cleanly');
+     clearInterval(restartOnStaleVersionAndHeartbeat);
+     process.exit(0);
+    }
+   }
+
+   // Before wrecklessly overriting the runner state file, we should check if we are the ones who own it
+   // Race condition is possible, but thats okay for the time being :D
+   const runnerState = await readRunnerState();
+   if (runnerState && runnerState.pid !== process.pid) {
+    logger.debug('[RUNNER RUN] Somehow a different runner was started without killing us. We should kill ourselves.')
+    requestShutdown('exception', 'A different runner was started without killing us. We should kill ourselves.')
+   }
+
+   // Heartbeat
+   try {
+    const updatedState: RunnerLocallyPersistedState = {
+     pid: process.pid,
+     httpPort: controlPort,
+     startTime: fileState.startTime,
+     startedWithCliVersion: packageJson.version,
+     startedWithCliMtimeMs,
+     startedWithApiUrl: fileState.startedWithApiUrl,
+     startedWithMachineId: fileState.startedWithMachineId,
+     startedWithCliApiTokenHash: fileState.startedWithCliApiTokenHash,
+     startedWithExtraHeadersHash: fileState.startedWithExtraHeadersHash,
+     startedWithArgv,
+     startedWithVersionHandoffDisabled,
+     lastHeartbeat: new Date().toLocaleString(),
+     runnerLogPath: fileState.runnerLogPath
+    };
+    writeRunnerState(updatedState);
+    if (process.env.DEBUG) {
+     logger.debug(`[RUNNER RUN] Health check completed at ${updatedState.lastHeartbeat}`);
+    }
+   } catch (error) {
+    logger.debug('[RUNNER RUN] Failed to write heartbeat', error);
+   }
+
+   heartbeatRunning = false;
+  }, heartbeatIntervalMs); // Every 60 seconds in production
+
+  // Setup signal handlers
+  const cleanupAndShutdown = async (source: 'hapi-app' | 'hapi-cli' | 'os-signal' | 'exception', errorMessage?: string) => {
+   // Reaching cleanup proves startup did not malfunction; the watchdog must
+   // not turn a slow-but-orderly drain into a forced exit code 1.
+   disarmStartupMalfunctionWatchdog();
+   logger.debug(`[RUNNER RUN] Starting proper cleanup (source: ${source}, errorMessage: ${errorMessage})...`);
+
+   // Clear health check interval
+   if (restartOnStaleVersionAndHeartbeat) {
+    clearInterval(restartOnStaleVersionAndHeartbeat);
+    logger.debug('[RUNNER RUN] Health check interval cleared');
+   }
+
+   // Update runner state before shutting down
+   await apiMachine.updateRunnerState((state: RunnerState | null) => ({
+    ...state,
+    status: 'shutting-down',
+    shutdownRequestedAt: Date.now(),
+    shutdownSource: source
+   }));
+
+   // Give time for metadata update to send
+   await new Promise(resolve => setTimeout(resolve, 100));
+
+   apiMachine.shutdown();
+   await stopControlServer();
+   await cleanupRunnerState();
+   await releaseRunnerLock(runnerLockHandle);
+
+   logger.debug(`[RUNNER RUN] Cleanup completed, exiting process with code ${shutdownExitCode}`);
+   process.exit(shutdownExitCode);
+  };
+
+  logger.debug('[RUNNER RUN] Runner started successfully, waiting for shutdown request');
+
+  // Wait for shutdown request
+  const shutdownRequest = await resolvesWhenShutdownRequested;
+  await cleanupAndShutdown(shutdownRequest.source, shutdownRequest.errorMessage);
+ } catch (error) {
+  logger.debug('[RUNNER RUN][FATAL] Failed somewhere unexpectedly - exiting with code 1', error);
+  process.exit(1);
+ }
 }
 
 export function buildCliArgs(
-  agent: string,
-  options: SpawnSessionOptions,
-  yolo?: boolean
+ agent: string,
+ options: SpawnSessionOptions,
+ yolo?: boolean
 ): string[] {
-  if (agent === 'gemini') {
-    throw new Error('Gemini CLI is no longer supported and cannot be launched (Google sunset the consumer Gemini CLI on 2026-06-18).');
+ if (agent === 'gemini') {
+  throw new Error('Gemini CLI is no longer supported and cannot be launched (Google sunset the consumer Gemini CLI on 2026-06-18).');
+ }
+ const agentCommand = agent === 'codex'
+  ? 'codex'
+  : agent === 'cursor'
+   ? 'cursor'
+   : agent === 'grok'
+    ? 'grok'
+    : agent === 'kimi'
+     ? 'kimi'
+     : agent === 'copilot'
+      ? 'copilot'
+      : agent === 'opencode'
+       ? 'opencode'
+       : agent === 'pi'
+        ? 'pi'
+        : agent === 'agy'
+         ? 'agy'
+         : agent === 'omp'
+          ? 'omp'
+          : 'claude';
+ const args = [agentCommand];
+ if (agent === 'claude' && options.claudeLaunch) {
+  if (!options.resumeSessionId) throw new Error('Claude fork launch requires resumeSessionId')
+  if (options.claudeLaunch.type === 'resume-at') {
+   args.push('--resume', options.claudeLaunch.sourceSessionId)
+   args.push('--fork-session', '--resume-session-at', options.claudeLaunch.providerMessageId)
   }
-  const agentCommand = agent === 'codex'
-    ? 'codex'
-    : agent === 'cursor'
-      ? 'cursor'
-      : agent === 'grok'
-        ? 'grok'
-        : agent === 'kimi'
-          ? 'kimi'
-          : agent === 'copilot'
-            ? 'copilot'
-            : agent === 'opencode'
-            ? 'opencode'
-            : agent === 'pi'
-              ? 'pi'
-              : agent === 'agy'
-                ? 'agy'
-                : agent === 'omp'
-                  ? 'omp'
-                : 'claude';
-  const args = [agentCommand];
-  if (agent === 'claude' && options.claudeLaunch) {
-    if (!options.resumeSessionId) throw new Error('Claude fork launch requires resumeSessionId')
-    if (options.claudeLaunch.type === 'resume-at') {
-      args.push('--resume', options.claudeLaunch.sourceSessionId)
-      args.push('--fork-session', '--resume-session-at', options.claudeLaunch.providerMessageId)
-    }
-    args.push('--session-id', options.resumeSessionId)
-  } else if (options.resumeSessionId) {
-    if (agent === 'codex') {
-      args.push('resume', options.resumeSessionId);
-    } else if (agent === 'cursor') {
-      args.push('--resume', options.resumeSessionId);
-    } else if (agent === 'pi') {
-      // Pi uses --session-id for exact session resume (RPC mode)
-      args.push('--session-id', options.resumeSessionId);
-    } else {
-      args.push('--resume', options.resumeSessionId);
-    }
+  args.push('--session-id', options.resumeSessionId)
+ } else if (options.resumeSessionId) {
+  if (agent === 'codex') {
+   args.push('resume', options.resumeSessionId);
+  } else if (agent === 'cursor') {
+   args.push('--resume', options.resumeSessionId);
+  } else if (agent === 'pi') {
+   // Pi uses --session-id for exact session resume (RPC mode)
+   args.push('--session-id', options.resumeSessionId);
+  } else {
+   args.push('--resume', options.resumeSessionId);
   }
-  // agy PTY reuses the existing hub row directly on reopen/resume.
-  if (options.existingSessionId && agent === 'agy') {
-    args.push('--hapi-session-id', options.existingSessionId);
+ }
+ // agy PTY reuses the existing hub row directly on reopen/resume.
+ if (options.existingSessionId && agent === 'agy') {
+  args.push('--hapi-session-id', options.existingSessionId);
+ }
+ // Message-level Fork current for Claude: must follow --resume.
+ if (options.forkSession && agentCommand === 'claude') {
+  args.push('--fork-session');
+ }
+ const startingMode = options.startingMode || 'remote';
+ args.push('--hapi-starting-mode', startingMode, '--started-by', 'runner');
+ // Codex, Cursor ACP, OpenCode, Pi native resume, OMP, and Claude message-level
+ // forks reuse the original HAPI row via --existing-session-id. Without it the
+ // child bootstraps a fresh hub row, so an archived-session reopen lands on a
+ // different session id and the hub has to merge two rows (and the runner
+ // loses same-row spawn dedupe and stop attribution).
+ if (agent === 'codex' || agent === 'cursor' || agent === 'pi'
+  || agent === 'opencode' || agent === 'omp'
+  || (agentCommand === 'claude' && options.forkSession)) {
+  const existingSessionId = options.existingSessionId ?? options.sessionId;
+  if (existingSessionId) {
+   args.push('--existing-session-id', existingSessionId);
   }
-  // Message-level Fork current for Claude: must follow --resume.
-  if (options.forkSession && agentCommand === 'claude') {
-    args.push('--fork-session');
+ }
+ // Grok fork children also bind the pending HAPI session id.
+ if (agent === 'grok') {
+  const existingSessionId = options.existingSessionId ?? options.sessionId;
+  if (existingSessionId && !args.includes('--existing-session-id')) {
+   args.push('--existing-session-id', existingSessionId);
   }
-  const startingMode = options.startingMode || 'remote';
-  args.push('--hapi-starting-mode', startingMode, '--started-by', 'runner');
-  // Codex, Cursor ACP, OpenCode, Pi native resume, OMP, and Claude message-level
-  // forks reuse the original HAPI row via --existing-session-id. Without it the
-  // child bootstraps a fresh hub row, so an archived-session reopen lands on a
-  // different session id and the hub has to merge two rows (and the runner
-  // loses same-row spawn dedupe and stop attribution).
-  if (agent === 'codex' || agent === 'cursor' || agent === 'pi'
-      || agent === 'opencode' || agent === 'omp'
-      || (agentCommand === 'claude' && options.forkSession)) {
-    const existingSessionId = options.existingSessionId ?? options.sessionId;
-    if (existingSessionId) {
-      args.push('--existing-session-id', existingSessionId);
-    }
+ }
+ if (options.model) {
+  args.push('--model', options.model);
+ }
+ if (options.effort && (agent === 'claude' || agent === 'grok' || agent === 'pi' || agent === 'omp')) {
+  args.push('--effort', options.effort);
+ }
+ if (options.modelReasoningEffort && (agent === 'codex' || agent === 'opencode')) {
+  args.push('--model-reasoning-effort', options.modelReasoningEffort);
+ }
+ if (options.serviceTier && agent === 'codex') {
+  args.push('--service-tier', options.serviceTier);
+ }
+ if (options.collaborationMode && options.collaborationMode !== 'default' && agent === 'codex') {
+  args.push('--collaboration-mode', options.collaborationMode);
+ }
+ if (options.copilotAgentMode && options.copilotAgentMode !== 'interactive' && agent === 'copilot') {
+  args.push('--copilot-agent-mode', options.copilotAgentMode);
+ }
+ // Pi RPC mode has no permission switching; never pass these flags to it
+ // (the Pi parser rejects --permission-mode and ignores --yolo).
+ if (agent !== 'pi') {
+  if (options.permissionMode && (PERMISSION_MODES as readonly string[]).includes(options.permissionMode)) {
+   args.push('--permission-mode', options.permissionMode);
+  } else if (yolo) {
+   args.push('--yolo');
   }
-  // Grok fork children also bind the pending HAPI session id.
-  if (agent === 'grok') {
-    const existingSessionId = options.existingSessionId ?? options.sessionId;
-    if (existingSessionId && !args.includes('--existing-session-id')) {
-      args.push('--existing-session-id', existingSessionId);
-    }
+ }
+ if (agent === 'cursor' && options.sessionType === 'worktree') {
+  // Nested Cursor --worktree inside an existing linked git worktree hangs ACP
+  // initialize (banner ignored, but never reaches protocolVersion / cursorSessionId).
+  if (!isLinkedGitWorktree(options.directory)) {
+   args.push('--cursor-worktree');
+   const name = options.worktreeName?.trim();
+   if (name) {
+    args.push(name);
+   }
   }
-  if (options.model) {
-    args.push('--model', options.model);
-  }
-  if (options.effort && (agent === 'claude' || agent === 'grok' || agent === 'pi' || agent === 'omp')) {
-    args.push('--effort', options.effort);
-  }
-  if (options.modelReasoningEffort && (agent === 'codex' || agent === 'opencode')) {
-    args.push('--model-reasoning-effort', options.modelReasoningEffort);
-  }
-  if (options.serviceTier && agent === 'codex') {
-    args.push('--service-tier', options.serviceTier);
-  }
-  if (options.collaborationMode && options.collaborationMode !== 'default' && agent === 'codex') {
-    args.push('--collaboration-mode', options.collaborationMode);
-  }
-  if (options.copilotAgentMode && options.copilotAgentMode !== 'interactive' && agent === 'copilot') {
-    args.push('--copilot-agent-mode', options.copilotAgentMode);
-  }
-  // Pi RPC mode has no permission switching; never pass these flags to it
-  // (the Pi parser rejects --permission-mode and ignores --yolo).
-  if (agent !== 'pi') {
-    if (options.permissionMode && (PERMISSION_MODES as readonly string[]).includes(options.permissionMode)) {
-      args.push('--permission-mode', options.permissionMode);
-    } else if (yolo) {
-      args.push('--yolo');
-    }
-  }
-  if (agent === 'cursor' && options.sessionType === 'worktree') {
-    // Nested Cursor --worktree inside an existing linked git worktree hangs ACP
-    // initialize (banner ignored, but never reaches protocolVersion / cursorSessionId).
-    if (!isLinkedGitWorktree(options.directory)) {
-      args.push('--cursor-worktree');
-      const name = options.worktreeName?.trim();
-      if (name) {
-        args.push(name);
-      }
-    }
-  }
-  return args;
+ }
+ return args;
 }

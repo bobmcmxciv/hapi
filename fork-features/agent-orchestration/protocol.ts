@@ -2,6 +2,7 @@ import { z } from 'zod'
 import { AgentFlavorSchema } from '@hapi/protocol'
 import {
     DecryptedMessageSchema,
+    MessageOrderPositionSchema,
     PermissionModeSchema,
     WorktreeMetadataSchema
 } from '@hapi/protocol/schemas'
@@ -124,6 +125,8 @@ export const AgentProjectedMessageSchema = z.discriminatedUnion('kind', [
 ])
 export type AgentProjectedMessage = z.infer<typeof AgentProjectedMessageSchema>
 
+const AgentMessageCursorSchema = MessageOrderPositionSchema.partial({ order: true, eventOrder: true }).extend({ seq: z.number() })
+
 export const AgentMessagesPageSchema = z.object({
     direction: z.enum(['latest', 'before', 'after']),
     limit: z.number(),
@@ -131,11 +134,29 @@ export const AgentMessagesPageSchema = z.object({
     reset: z.boolean(),
     nextBeforeSeq: z.number().nullable(),
     nextBeforeAt: z.number().nullable(),
+    nextBeforeOrder: z.number().optional(),
+    nextBeforeEventOrder: z.number().optional(),
     nextAfterSeq: z.number().nullable(),
     nextAfterAt: z.number().nullable(),
+    nextAfterOrder: z.number().optional(),
+    nextAfterEventOrder: z.number().optional(),
     snapshotHeadSeq: z.number().nullable(),
     snapshotHeadAt: z.number().nullable(),
-    hasMore: z.boolean()
+    snapshotHeadOrder: z.number().optional(),
+    snapshotHeadEventOrder: z.number().optional(),
+    hasMore: z.boolean(),
+    hasMoreAfter: z.boolean().optional(),
+    turns: z.object({
+        requested: z.number(),
+        rowLimit: z.number(),
+        segments: z.array(z.object({
+            turnId: z.string().nullable(),
+            from: AgentMessageCursorSchema,
+            to: AgentMessageCursorSchema,
+            completeBefore: z.boolean(),
+            completeAfter: z.boolean()
+        }))
+    }).optional()
 })
 
 export const AgentListResponseSchema = z.object({

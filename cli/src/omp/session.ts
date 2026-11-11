@@ -5,6 +5,10 @@ import type { LocalLaunchExitReason } from '@/agent/localLaunchPolicy';
 import type { OmpNativeSession } from '@hapi/protocol/types';
 import type { OmpConfiguredThinkingLevel, OmpThinkingState } from '@hapi/protocol/omp';
 import type { OmpInputQueue } from './OmpInputQueue';
+import { configuration } from '@/configuration';
+import { OmpInputDeliveryStore } from './OmpInputDeliveryStore';
+import type { OmpNativeOrder } from './rpc/OmpRpcEventAdapter';
+import type { ForceQueuedMessageAck } from '@hapi/protocol';
 
 type LocalLaunchFailure = {
     message: string;
@@ -48,6 +52,40 @@ export class OmpSession extends AgentSessionBase<OmpMode, OmpInputQueue> {
     private shutdownPromise: Promise<OmpShutdownReceipt> | null = null;
     private shutdownRequested = false;
     private lastShutdownReceipt: OmpShutdownReceipt = { kind: 'omp-rpc', status: 'not-started' };
+    #inputDeliveryStore: OmpInputDeliveryStore | null = null;
+    private nativeInputCanceller: ((localId: string) => Promise<boolean>) | null = null;
+    private nativeInputForcer: ((localId: string) => Promise<ForceQueuedMessageAck>) | null = null;
+
+    registerNativeInputForcer(handler: (localId: string) => Promise<ForceQueuedMessageAck>): () => void {
+        this.nativeInputForcer = handler;
+        return () => { if (this.nativeInputForcer === handler) this.nativeInputForcer = null; };
+    }
+
+    async forceQueuedInputs(localIds: string[]): Promise<ForceQueuedMessageAck[]> {
+        return await Promise.all(localIds.map(async localId => {
+            if (this.getInputDeliveryStore().hasNativeAttempt(localId) && this.nativeInputForcer) {
+                return await this.nativeInputForcer(localId);
+            }
+            if (this.queue.markForced(localId)) return { localId, status: 'accepted' as const };
+            return { localId, status: 'not-found' as const };
+        }));
+    }
+
+    registerNativeInputCanceller(handler: (localId: string) => Promise<boolean>): () => void {
+        this.nativeInputCanceller = handler;
+        return () => { if (this.nativeInputCanceller === handler) this.nativeInputCanceller = null; };
+    }
+
+    async cancelQueuedInput(localId: string): Promise<boolean> {
+        const hasNativeAttempt = this.getInputDeliveryStore().hasNativeAttempt(localId);
+        const removedLocally = this.queue.cancelByLocalId(localId);
+        if (removedLocally && !hasNativeAttempt) return true;
+        return this.nativeInputCanceller ? await this.nativeInputCanceller(localId) : false;
+    }
+
+    getInputDeliveryStore(): OmpInputDeliveryStore {
+        return this.#inputDeliveryStore ??= new OmpInputDeliveryStore(configuration.runnerStateFile, this.client.sessionId);
+    }
 
     isShutdownRequested = (): boolean => this.shutdownRequested;
 
@@ -71,6 +109,7 @@ export class OmpSession extends AgentSessionBase<OmpMode, OmpInputQueue> {
                 try {
                     await handle.requestExit();
                     const receipt = await handle.waitForExit();
+                    this.recordShutdownReceipt(receipt);
                     if (receipt.status === 'unverified') this.shutdownPromise = null;
                     return receipt;
                 } catch (error) {
@@ -151,6 +190,10 @@ export class OmpSession extends AgentSessionBase<OmpMode, OmpInputQueue> {
         this.effort = effort;
     };
 
+    override getEffort(): OmpConfiguredThinkingLevel | undefined {
+        return this.effort as OmpConfiguredThinkingLevel | undefined;
+    }
+
     setRuntimeConfigApplier = (applier: OmpRuntimeConfigApplier | null): void => {
         this.runtimeConfigApplier = applier;
     };
@@ -165,6 +208,7 @@ export class OmpSession extends AgentSessionBase<OmpMode, OmpInputQueue> {
     };
 
     updateThinkingState = (state: OmpThinkingState): void => {
+        if (state.configured !== null) this.effort = state.configured;
         this.client.updateMetadata((metadata) => ({
             ...metadata,
             ompThinking: state
@@ -183,8 +227,12 @@ export class OmpSession extends AgentSessionBase<OmpMode, OmpInputQueue> {
     };
 
     applyNativeSessionSnapshot = (snapshot: OmpNativeSession): void => {
-        this.nativeSession = snapshot;
-        this.onSessionFound(snapshot.id, { ompSession: snapshot });
+        const next: OmpNativeSession = this.nativeSession?.id === snapshot.id
+            && this.nativeSession.persistence === 'persisted'
+            ? { ...snapshot, persistence: 'persisted' }
+            : snapshot;
+        this.nativeSession = next;
+        this.onSessionFound(next.id, { ompSession: next });
     };
 
     getNativeSession = (): OmpNativeSession | null => this.nativeSession;
@@ -193,8 +241,8 @@ export class OmpSession extends AgentSessionBase<OmpMode, OmpInputQueue> {
         this.localLaunchFailure = { message, exitReason };
     };
 
-    sendAgentMessage = (message: unknown): void => {
-        this.client.sendAgentMessage(message);
+    sendAgentMessage = (message: unknown, options?: { nativeOrder?: OmpNativeOrder }): void => {
+        this.client.sendAgentMessage(message, options);
     };
 
     sendUserMessage = (text: string): void => {

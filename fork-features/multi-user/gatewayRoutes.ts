@@ -8,6 +8,7 @@ import type { MultiUserGatewayStore } from './gatewayStore'
 import { hashPassword, verifyPassword } from './password'
 import { createApiToken, hashApiToken } from './token'
 import { validateGatewayCredential } from './executionMount'
+import { validScopePath } from './machineInheritance'
 
 type GatewayEnv = { Variables: { gatewayAccountId: number; gatewayRole: 'admin' | 'user' } }
 type PublicAccount = Pick<
@@ -58,9 +59,11 @@ const resourceTypeSchema = z.enum(['session', 'machine'])
 const grantSchema = z.object({
     accountId: z.number().int().positive(),
     role: z.enum(['viewer', 'operator']),
-    // 目录限定，只对 machine 授权有意义：被授权者只能碰该机器上这个目录子树内的
-    // 会话与路径。省略或传 null = 不限定（整机），与加此字段之前等价。
-    pathPrefix: z.string().min(1).nullish()
+    // Legacy input is explicitly converted to a singleton. Null/omitted means unrestricted.
+    pathPrefix: z.string().refine(validScopePath).nullish(),
+    pathScopes: z.array(z.string().refine(validScopePath)).min(1).nullable().optional()
+}).refine(body => !(body.pathPrefix !== undefined && body.pathScopes !== undefined), {
+    message: 'Specify pathScopes or pathPrefix, not both'
 })
 
 function publicAccount(account: Account | null): PublicAccount | null {
@@ -271,15 +274,12 @@ export function createMultiUserGatewayRoutes(deps: {
     })
 
     app.use('*', async (c, next) => {
-        const authorization = c.req.header('authorization')
-        const bearerToken = authorization?.startsWith('Bearer ') ? authorization.slice(7) : undefined
-        const queryToken = c.req.path.endsWith('/events') ? c.req.query('token') : undefined
-        if (!bearerToken && !queryToken) return c.json({ error: 'Missing authorization token' }, 401)
         const result = await validateGatewayCredential(c.req.raw, deps.store, deps.jwtSecret, { allowQueryToken: c.req.path.endsWith('/events') })
-        if (!result.ok) return c.json({ error: 'Invalid token' }, 401)
+        if (!result.ok) return c.json({ error: result.reason === 'missing' ? 'Missing authorization token' : 'Invalid token' }, 401)
         c.set('gatewayAccountId', result.accountId)
         c.set('gatewayRole', deps.store.getAccount(result.accountId)!.role)
-        return next()
+        await next()
+        return
     })
 
     app.get('/accounts', (c) => {
@@ -380,7 +380,10 @@ export function createMultiUserGatewayRoutes(deps: {
         const decision = dispatcher.authorize({ accountId: c.get('gatewayAccountId'), capability: 'administer', resource: { type: type.data, id: c.req.param('id') } })
         if (decision.kind === 'deny') return c.json({ error: 'Insufficient permissions' }, 403)
         if (!deps.store.getAccount(body.data.accountId)) return c.json({ error: 'Account not found' }, 404)
-        deps.store.grant(type.data, c.req.param('id'), body.data.accountId, body.data.role, body.data.pathPrefix ?? null)
+        const scope = body.data.pathScopes !== undefined
+            ? body.data.pathScopes
+            : body.data.pathPrefix != null ? [body.data.pathPrefix] : null
+        deps.store.grant(type.data, c.req.param('id'), body.data.accountId, body.data.role, scope)
         return c.json({ ok: true }, 201)
     })
 

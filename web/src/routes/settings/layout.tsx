@@ -3,6 +3,7 @@ import { useTranslation } from '@/lib/use-translation'
 import { useAppGoBack } from '@/hooks/useAppGoBack'
 import { SettingsNav } from '@/components/settings/SettingsNav'
 import { getSettingsCategory } from './categories'
+import { appPathname } from '@/lib/appPath'
 
 function BackIcon() {
     return (
@@ -15,7 +16,7 @@ function BackIcon() {
 export default function SettingsLayout() {
     const { t } = useTranslation()
     const goBack = useAppGoBack()
-    const pathname = useLocation({ select: (location) => location.pathname })
+    const pathname = useLocation({ select: (location) => appPathname(location.pathname) })
     const category = getSettingsCategory(pathname)
     const mobileTitleKey = pathname === '/settings/fork/grants'
         ? 'settings.fork.grants.title'

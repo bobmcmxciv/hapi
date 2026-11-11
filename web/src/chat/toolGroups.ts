@@ -110,13 +110,20 @@ function normalizeCommandInput(input: unknown): string | null {
     return parts.length > 0 ? parts.join(' ') : null
 }
 
+export function extractHashlineEditTarget(input: unknown): string | null {
+    const patch = getInputStringAny(input, ['input'])
+    if (!patch) return null
+    const match = patch.match(/^\[([^\n#]+)#([0-9A-Fa-f]{4})\]/m)
+    return match?.[1]?.trim() || null
+}
+
 export function getToolGroupActionKind(block: ToolCallBlock): ToolGroupActionKind {
     const name = block.tool.name
 
-    if (name === 'Read' || name === 'NotebookRead') return 'read'
-    if (name === 'Grep' || name === 'Glob' || name === 'LS') return 'search'
-    if (name === 'Bash' || name === 'CodexBash' || name === 'shell_command' || name === 'run_shell_command') return 'command'
-    if (name === 'Edit' || name === 'MultiEdit' || name === 'Write' || name === 'NotebookEdit' || name === 'CodexPatch' || name === 'CodexDiff') {
+    if (name === 'Read' || name === 'read' || name === 'NotebookRead') return 'read'
+    if (name === 'Grep' || name === 'grep' || name === 'Glob' || name === 'glob' || name === 'LS' || name === 'skill_lookup') return 'search'
+    if (name === 'Bash' || name === 'bash' || name === 'eval' || name === 'CodexBash' || name === 'shell_command' || name === 'run_shell_command') return 'command'
+    if (name === 'Edit' || name === 'edit' || name === 'MultiEdit' || name === 'Write' || name === 'write' || name === 'delete' || name === 'NotebookEdit' || name === 'CodexPatch' || name === 'CodexDiff') {
         return 'mutation'
     }
     if (name === 'WebFetch' || name === 'WebSearch') return 'web'
@@ -125,6 +132,7 @@ export function getToolGroupActionKind(block: ToolCallBlock): ToolGroupActionKin
 
 function getPrimaryFileTarget(block: ToolCallBlock): string | null {
     return getInputStringAny(block.tool.input, ['file_path', 'path', 'file', 'filePath', 'notebook_path', 'name'])
+        ?? extractHashlineEditTarget(block.tool.input)
 }
 
 function getPrimarySearchTarget(block: ToolCallBlock): string | null {

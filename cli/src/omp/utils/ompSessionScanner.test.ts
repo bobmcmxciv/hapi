@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {
     createOmpLocalSessionScanner,
+    prepareOmpSessionResume,
     resolveOmpSessionPath,
     resolveOmpSessionsDirectory,
     resolveOmpTerminalSessionsDirectory
@@ -222,5 +223,54 @@ describe('OMP local native session scanner', () => {
         await expect(resolveOmpSessionPath('shared-prefix', cwd, options)).resolves.toBe(localFile);
         await expect(resolveOmpSessionPath('shared-prefix-g', cwd, options)).resolves.toBe(globalFile);
         await expect(resolveOmpSessionPath('missing', cwd, options)).resolves.toBeNull();
+    });
+
+    it('refuses prefix matches and missing legacy journals for archived restore', async () => {
+        const root = await testRoot();
+        const cwd = path.join(root, 'work');
+        const options = { env: {}, homeDirectory: root, platform: 'darwin' as const };
+        const file = path.join(resolveOmpSessionsDirectory(options), 'project', 'stamp_native-full.jsonl');
+        await mkdir(path.dirname(file), { recursive: true });
+        await writeFile(file, `${JSON.stringify({ type: 'session', id: 'native-full', cwd })}\n`);
+        await expect(prepareOmpSessionResume('native', undefined, cwd, options)).rejects.toThrow('history is missing');
+        await expect(prepareOmpSessionResume('native-full', undefined, cwd, options)).resolves.toEqual({
+            kind: 'resume', sessionFile: file
+        });
+        await expect(prepareOmpSessionResume('native-full', {
+            id: 'native-full', file: path.join(root, 'missing.jsonl')
+        }, cwd, options)).rejects.toThrow('history is missing');
+    });
+
+    it('authorizes fresh native creation only for explicit never-persisted evidence and ENOENT', async () => {
+        const root = await testRoot();
+        const snapshot = { id: 'empty-id', file: path.join(root, 'empty.jsonl'), persistence: 'never-persisted' as const };
+        await expect(prepareOmpSessionResume('empty-id', snapshot, root)).resolves.toEqual({ kind: 'empty' });
+        await expect(prepareOmpSessionResume('empty-id', { ...snapshot, persistence: 'persisted' }, root))
+            .rejects.toThrow('history is missing');
+        await writeFile(snapshot.file, '');
+        await expect(prepareOmpSessionResume('empty-id', snapshot, root)).rejects.toThrow('identity does not match');
+        await writeFile(snapshot.file, `${JSON.stringify({ type: 'session', id: 'empty-id', cwd: root })}\n`);
+        await expect(prepareOmpSessionResume('empty-id', snapshot, root)).resolves.toEqual({
+            kind: 'resume', sessionFile: snapshot.file
+        });
+    });
+
+    it('rejects a mismatched exact journal instead of finding another prefix-compatible session', async () => {
+        const root = await testRoot();
+        const file = path.join(root, 'wrong.jsonl');
+        await writeFile(file, `${JSON.stringify({ type: 'session', id: 'wrong-id', cwd: root })}\n`);
+        await expect(prepareOmpSessionResume('original-id', { id: 'original-id', file }, root))
+            .rejects.toThrow('identity does not match');
+    });
+
+    it('rejects ambiguous exact identities instead of selecting the most recently modified copy', async () => {
+        const root = await testRoot();
+        const options = { env: {}, homeDirectory: root, platform: 'darwin' as const };
+        const directory = path.join(resolveOmpSessionsDirectory(options), 'project');
+        await mkdir(directory, { recursive: true });
+        for (const name of ['old.jsonl', 'new.jsonl']) {
+            await writeFile(path.join(directory, name), `${JSON.stringify({ type: 'session', id: 'duplicate-id', cwd: root })}\n`);
+        }
+        await expect(prepareOmpSessionResume('duplicate-id', undefined, root, options)).rejects.toThrow('ambiguous');
     });
 });

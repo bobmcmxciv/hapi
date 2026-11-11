@@ -12,12 +12,13 @@ function spaFallback(): Plugin {
         name: 'spa-fallback',
         configureServer(server) {
             server.middlewares.use((req, _res, next) => {
-                const url = (req.url ?? '').split('?')[0]
+                const requestPath = (req.url ?? '').split('?')[0]
+                const url = requestPath.startsWith(base) ? `/${requestPath.slice(base.length)}` : requestPath
                 if (url === '/' || url === '' || url.includes('.') || url.startsWith('/@') || url.startsWith('/api') || url.startsWith('/socket.io') || url.startsWith('/src/')) {
                     next()
                     return
                 }
-                req.url = '/index.html'
+                req.url = `${base.endsWith('/') ? base : `${base}/`}index.html`
                 next()
             })
         }
@@ -81,17 +82,21 @@ function readAppVersion(): string {
     return `${base}-dev`
 }
 
-function changelogJsonPlugin() {
+function changelogJsonPlugin(): Plugin {
+    let outputDirectory = resolve(__dirname, 'dist')
     return {
         name: 'hapi-changelog-json',
         apply: 'build' as const,
+        configResolved(config) {
+            outputDirectory = resolve(__dirname, config.build.outDir)
+        },
         closeBundle() {
             if (appCommit === null) {
                 console.warn('Unable to generate dist/changelog.json outside a git checkout; the update banner will show an unavailable state.')
                 return
             }
             try {
-                writeChangelog(__dirname, appVersion, resolve(__dirname, 'dist'))
+                writeChangelog(__dirname, appVersion, outputDirectory)
             } catch (error) {
                 console.warn('Unable to generate dist/changelog.json; the update banner will show an unavailable state.', error)
             }
@@ -240,7 +245,8 @@ export default defineConfig({
             'workbox-precaching',
             'workbox-routing',
             'workbox-strategies',
-            'workbox-expiration'
+            'workbox-expiration',
+            'workbox-window'
         ]
     },
     resolve: {

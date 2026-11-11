@@ -229,13 +229,16 @@ export async function startHub(options: StartHubOptions = {}): Promise<HubInstan
         onMachineAlive: (payload) => syncEngine?.handleMachineAlive(payload),
         onBackgroundTaskDelta: (sessionId, delta) => syncEngine?.handleBackgroundTaskDelta(sessionId, delta),
         onSessionActivity: (sessionId, updatedAt) => syncEngine?.recordSessionActivity(sessionId, updatedAt),
-        onSweepImmediateQueued: (sessionId, now) => syncEngine?.sweepImmediateQueuedOnSessionEnd(sessionId, now),
         onMessagesConsumed: (sessionId) => syncEngine?.clearQueuedThinkingGrace(sessionId),
-        resolveTerminalNamespace: (accountId, sessionId) => resolveTerminalNamespace({
+        resolveTerminalNamespace: (accountId, sessionId, capability) => resolveTerminalNamespace({
             store: multiUserGatewayStore,
             accountId,
             sessionId,
-            getCoreSession: (id) => syncEngine?.getSession(id) ?? store.sessions.getSession(id)
+            capability,
+            resolveSessionMachineId: createSessionMachineResolver(() => syncEngine),
+            resolveSessionPath: createSessionPathResolver(() => syncEngine),
+            getCoreSession: (id) => syncEngine?.getSession(id) ?? store.sessions.getSession(id),
+            getCoreMachine: (id) => store.machines.getMachine(id),
         }),
         resolveCliNamespace: token => resolveGatewayCliNamespace(multiUserGatewayStore, token),
         sanitizeSessionMetadata: metadata => gatewayMemoryDelivery.sanitizeMetadata(metadata),
@@ -243,7 +246,7 @@ export async function startHub(options: StartHubOptions = {}): Promise<HubInstan
         resolveCliIdentity: token => resolveGatewayCliIdentity(multiUserGatewayStore, token),
         gatewayStore: multiUserGatewayStore,
         resolveSessionMachineId: createSessionMachineResolver(() => syncEngine),
-        resolveSessionPath: createSessionPathResolver(() => syncEngine)
+        resolveSessionPath: createSessionPathResolver(() => syncEngine),
     })
 
     syncEngine = new SyncEngine(store, socketServer.io, socketServer.rpcRegistry, sseManager, gatewayMemoryDelivery.decorateForCli)

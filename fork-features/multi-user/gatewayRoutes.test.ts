@@ -4,6 +4,9 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { z } from 'zod'
 
 import { createMultiUserGatewayRoutes, type TelegramGatewayAdapter } from './gatewayRoutes'
+import { issueBlobDownloadTicket } from '../../hub/src/blobs'
+import { createAuthMiddleware, type WebAppEnv } from '../../hub/src/web/middleware/auth'
+import { createExecutionMiddleware } from './executionMount'
 import { MultiUserGatewayStore } from './gatewayStore'
 import { hashPassword } from './password'
 import { hashApiToken } from './token'
@@ -247,12 +250,34 @@ describe('multi-user gateway routes', () => {
         const scoped = await app.fetch(jsonRequest('/grants/machine/m1',
             { accountId: grantee.id, role: 'operator', pathPrefix: 'C:\\Users\\Administrator\\peter' }, ownerJwt))
         expect(scoped.status).toBe(201)
-        expect(store.machineGrantScope('m1', grantee.id)).toBe('C:\\Users\\Administrator\\peter')
+        expect(store.machineGrantScope('m1', grantee.id)).toEqual(['c:/users/administrator/peter'])
 
         const listed = await app.fetch(new Request('http://gateway/grants/machine/m1', { headers: { authorization: `Bearer ${ownerJwt}` } }))
-        expect((await listed.json() as { grants: Array<{ pathPrefix: string | null }> }).grants[0]?.pathPrefix)
-            .toBe('C:\\Users\\Administrator\\peter')
+        expect((await listed.json() as { grants: Array<{ pathPrefix: string | null; pathScopes: string[] | null }> }).grants[0])
+            .toMatchObject({ pathPrefix: 'c:/users/administrator/peter', pathScopes: ['c:/users/administrator/peter'] })
 
+        const multi = await app.fetch(jsonRequest('/grants/machine/m1',
+            { accountId: grantee.id, role: 'operator', pathScopes: ['C:\\Users\\Tadokoro\\', 'C:/Peter'] }, ownerJwt))
+        expect(multi.status).toBe(201)
+        expect(store.machineGrantScope('m1', grantee.id)).toEqual(['c:/users/tadokoro', 'c:/peter'])
+        const multiListed = await (await app.fetch(new Request('http://gateway/grants/machine/m1', { headers: { authorization: `Bearer ${ownerJwt}` } }))).json() as {
+            grants: Array<{ pathPrefix: string | null; pathScopes: string[] | null }>
+        }
+        expect(multiListed.grants[0]).toMatchObject({ pathScopes: ['c:/users/tadokoro', 'c:/peter'] })
+        expect(multiListed.grants[0]?.pathPrefix).not.toBeNull()
+
+        expect((await app.fetch(jsonRequest('/grants/machine/m1',
+            { accountId: grantee.id, role: 'operator', pathPrefix: multiListed.grants[0]!.pathPrefix }, ownerJwt))).status).toBe(400)
+        expect((await app.fetch(jsonRequest('/grants/machine/m1',
+            { accountId: grantee.id, role: 'operator', pathPrefix: 'C:\\Peter', pathScopes: ['C:\\Peter'] }, ownerJwt))).status).toBe(400)
+        expect((await app.fetch(jsonRequest('/grants/machine/m1',
+            { accountId: grantee.id, role: 'operator', pathScopes: [] }, ownerJwt))).status).toBe(400)
+        expect((await app.fetch(jsonRequest('/grants/machine/m1',
+            { accountId: grantee.id, role: 'operator', pathScopes: ['C:\\Peter\\..\\Windows'] }, ownerJwt))).status).toBe(400)
+        const granteeJwt = (await (await app.fetch(jsonRequest('/auth', { username: 'peter', password: 'password-456' }))).json() as { token: string }).token
+        expect((await app.fetch(jsonRequest('/grants/machine/m1',
+            { accountId: grantee.id, role: 'operator', pathScopes: null }, granteeJwt))).status).toBe(403)
+        expect(store.machineGrantScope('m1', grantee.id)).toEqual(['c:/users/tadokoro', 'c:/peter'])
         expect((await app.fetch(jsonRequest('/grants/machine/m1', { accountId: grantee.id, role: 'operator' }, ownerJwt))).status).toBe(201)
         expect(store.machineGrantScope('m1', grantee.id)).toBeNull()
     })
@@ -268,6 +293,50 @@ describe('multi-user gateway routes', () => {
         const login = await app.fetch(jsonRequest('/api/auth', { username: 'admin', password: 'password-123' }))
         const token = (await login.json() as { token: string }).token
         expect((await app.fetch(new Request(`http://gateway/api/events?token=${encodeURIComponent(token)}`))).status).toBe(200)
+    })
+
+    it('honors path-bound download tickets without granting sibling, write, revoked-grant, or disabled-account access', async () => {
+        const store = new MultiUserGatewayStore(':memory:')
+        stores.push(store)
+        const owner = store.createAccount('owner', 'admin', 'owner-ns', hashPassword('password-123'))
+        const grantee = store.createAccount('grantee', 'user', 'grantee-ns', hashPassword('password-456'))
+        store.bindResource({ resourceType: 'session', resourceId: 's-1', ownerAccountId: owner.id, coreNamespace: 'owner-ns' })
+        store.bindResource({ resourceType: 'session', resourceId: 's-2', ownerAccountId: owner.id, coreNamespace: 'owner-ns' })
+        store.grant('session', 's-1', grantee.id, 'viewer')
+        const jwtSecret = new TextEncoder().encode('x'.repeat(32))
+        const app = new Hono<WebAppEnv>()
+        app.route('/api', createMultiUserGatewayRoutes({ store, jwtSecret, coreUserId: 7 }) as never)
+        app.use('/api/*', createAuthMiddleware(jwtSecret))
+        app.use('/api/*', createExecutionMiddleware({ store, jwtSecret }))
+        app.get('/api/sessions/:id/generated-files/:blobId', async (c) => {
+            const denied = await c.get('reauthorizeResource')?.()
+            if (denied) return denied
+            return c.json({ namespace: c.get('namespace'), deliveryMetadata: c.get('deliveryMetadata') })
+        })
+        app.post('/api/sessions/:id/generated-files/:blobId', c => c.json({ ok: true }))
+        app.get('/api/accounts-probe', c => c.json({ ok: true }))
+
+        const { ticket } = issueBlobDownloadTicket({
+            sessionId: 's-1',
+            kind: 'file',
+            blobId: 'b-1',
+            namespace: 'owner-ns',
+            userId: 7,
+            gatewayAccountId: grantee.id
+        }, jwtSecret)
+        const allowed = await app.fetch(new Request(`http://gateway/api/sessions/s-1/generated-files/b-1?ticket=${encodeURIComponent(ticket)}`))
+        expect(allowed.status).toBe(200)
+        expect(await allowed.json()).toEqual({ namespace: 'owner-ns', deliveryMetadata: { gatewayAccountId: grantee.id } })
+        expect((await app.fetch(new Request(`http://gateway/api/sessions/s-1/generated-files/b-2?ticket=${encodeURIComponent(ticket)}`))).status).toBe(401)
+        expect((await app.fetch(new Request(`http://gateway/api/sessions/s-2/generated-files/b-1?ticket=${encodeURIComponent(ticket)}`))).status).toBe(401)
+        expect((await app.fetch(new Request(`http://gateway/api/sessions/s-1/generated-files/b-1?ticket=${encodeURIComponent(ticket)}`, { method: 'POST' }))).status).toBe(401)
+        expect((await app.fetch(new Request(`http://gateway/api/accounts-probe?ticket=${encodeURIComponent(ticket)}`))).status).toBe(401)
+
+        store.removeGrant('session', 's-1', grantee.id)
+        expect((await app.fetch(new Request(`http://gateway/api/sessions/s-1/generated-files/b-1?ticket=${encodeURIComponent(ticket)}`))).status).toBe(403)
+        store.grant('session', 's-1', grantee.id, 'viewer')
+        store.updateAccount(grantee.id, { disabled: true })
+        expect((await app.fetch(new Request(`http://gateway/api/sessions/s-1/generated-files/b-1?ticket=${encodeURIComponent(ticket)}`))).status).toBe(401)
     })
 
     it('rate limits repeated password failures', async () => {

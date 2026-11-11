@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
     ModelEffortSettingsSection,
     resolveVisibleModelEffortSelectedValue
-} from './HappyComposer';
+} from './ModelEffortSettingsSection';
 
 vi.mock('@/lib/use-translation', () => ({
     useTranslation: () => ({
@@ -49,7 +49,7 @@ describe('ModelEffortSettingsSection', () => {
                 ]}
                 selectedValue="composer-2.5"
                 controlsDisabled={false}
-                onChange={() => {}}
+                onChange={() => { }}
             />
         );
 

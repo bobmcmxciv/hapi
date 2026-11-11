@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import type { ApiClient } from '@/api/client'
 import type { Machine } from '@/types/api'
+import type { OmpModelSummary } from '@hapi/protocol/apiTypes'
 import { saveNewSessionFormDraft } from './newSessionFormDraft'
 import {
     loadPreferredLaunchSettings,
@@ -22,6 +23,12 @@ const mocks = vi.hoisted(() => ({
     copilotModelsLoading: false,
     piDialogSelection: ['pi-native-1'] as string[],
     refetchSessions: vi.fn(),
+    ompModels: [] as OmpModelSummary[],
+    ompModelsLoading: false,
+    ompModelsReady: true,
+    ompModelsError: null as string | null,
+    ompModelsRefetch: vi.fn(),
+    ompModelTarget: vi.fn(),
     addToast: vi.fn(),
     // fork(claude-proxy-models)
     claudeProxyOptions: null as Array<{ value: string; label: string }> | null,
@@ -160,13 +167,18 @@ vi.mock('@/hooks/queries/useGrokModelsForCwd', () => ({
     })
 }))
 vi.mock('@/fork-features/omp-host-integration/useOmpModelsForCwd', () => ({
-    useOmpModelsForCwd: () => ({
-        availableModels: [],
-        currentModel: null,
-        isLoading: false,
-        error: null,
-        refetch: vi.fn()
-    })
+    useOmpModelsForCwd: (args: { machineId: string; cwd: string; enabled: boolean }) => {
+        mocks.ompModelTarget(args)
+        return {
+            availableModels: args.enabled ? mocks.ompModels : [],
+            currentModel: null,
+            isLoading: mocks.ompModelsLoading,
+            isReady: args.enabled && mocks.ompModelsReady,
+            error: mocks.ompModelsError,
+            refetch: mocks.ompModelsRefetch,
+            refreshCatalogs: mocks.ompModelsRefetch
+        }
+    }
 }))
 
 vi.mock('@/hooks/queries/useCopilotModelsForCwd', () => ({
@@ -231,12 +243,14 @@ vi.mock('./ModelSelector', () => ({
         model: string
         options?: Array<{ value: string; label: string }>
         onModelChange: (model: string) => void
+        error?: string | null
     }) => (
         <>
             <button type="button" data-testid="model" onClick={() => props.onModelChange('gpt-5.6-terra')}>
                 {props.model}
             </button>
             <div data-testid="model-options">{props.options?.map((option) => option.label).join(',')}</div>
+            {props.error ? <div role="alert">{props.error}</div> : null}
         </>
     )
 }))
@@ -280,6 +294,12 @@ describe('NewSession launch preferences', () => {
         mocks.refetchSessions.mockReset()
         mocks.refetchSessions.mockResolvedValue(undefined)
         mocks.addToast.mockReset()
+        mocks.ompModels = []
+        mocks.ompModelsLoading = false
+        mocks.ompModelsReady = true
+        mocks.ompModelsError = null
+        mocks.ompModelsRefetch.mockReset()
+        mocks.ompModelTarget.mockReset()
         mocks.claudeProxyOptions = null
         mocks.claudeProxyLoading = false
         mocks.claudeProxyConfigured = false
@@ -306,7 +326,7 @@ describe('NewSession launch preferences', () => {
                     initialMachineId="machine-1"
                     initialDirectory="C:\\repo"
                     onSuccess={mocks.onSuccess}
-                    onCancel={() => {}}
+                    onCancel={() => { }}
                 />
             )
         }
@@ -373,7 +393,7 @@ describe('NewSession launch preferences', () => {
                     initialMachineId="machine-1"
                     initialDirectory="C:\\repo"
                     onSuccess={mocks.onSuccess}
-                    onCancel={() => {}}
+                    onCancel={() => { }}
                 />
             )
         }
@@ -456,7 +476,7 @@ describe('NewSession launch preferences', () => {
                     initialMachineId="machine-1"
                     initialDirectory="C:\repo"
                     onSuccess={mocks.onSuccess}
-                    onCancel={() => {}}
+                    onCancel={() => { }}
                 />
             )
             await waitFor(() => expect(screen.getByTestId('model')).toHaveTextContent('gpt-5.6-sol'))
@@ -473,7 +493,7 @@ describe('NewSession launch preferences', () => {
                     initialMachineId="machine-1"
                     initialDirectory="C:\repo"
                     onSuccess={mocks.onSuccess}
-                    onCancel={() => {}}
+                    onCancel={() => { }}
                 />
             )
             await act(async () => { await new Promise((resolve) => setTimeout(resolve, 50)) })
@@ -487,7 +507,7 @@ describe('NewSession launch preferences', () => {
                     initialMachineId="machine-1"
                     initialDirectory="C:\repo"
                     onSuccess={mocks.onSuccess}
-                    onCancel={() => {}}
+                    onCancel={() => { }}
                 />
             )
             await waitFor(() => expect(screen.getByTestId('model')).toHaveTextContent('gpt-5.6-terra'))
@@ -525,7 +545,7 @@ describe('NewSession launch preferences', () => {
                 initialMachineId="machine-1"
                 initialDirectory="C:\\repo"
                 onSuccess={mocks.onSuccess}
-                onCancel={() => {}}
+                onCancel={() => { }}
             />
         )
 
@@ -548,7 +568,7 @@ describe('NewSession launch preferences', () => {
                 initialMachineId="machine-1"
                 initialDirectory="C:\\repo"
                 onSuccess={mocks.onSuccess}
-                onCancel={() => {}}
+                onCancel={() => { }}
             />
         )
 
@@ -576,7 +596,7 @@ describe('NewSession launch preferences', () => {
                 initialMachineId="machine-1"
                 initialDirectory="C:\\repo"
                 onSuccess={mocks.onSuccess}
-                onCancel={() => {}}
+                onCancel={() => { }}
             />
         )
 
@@ -606,7 +626,7 @@ describe('NewSession launch preferences', () => {
                 initialMachineId="machine-1"
                 initialDirectory="C:\\repo"
                 onSuccess={mocks.onSuccess}
-                onCancel={() => {}}
+                onCancel={() => { }}
             />
         )
 
@@ -641,7 +661,7 @@ describe('NewSession launch preferences', () => {
                 initialMachineId="machine-1"
                 initialDirectory="C:\\repo"
                 onSuccess={mocks.onSuccess}
-                onCancel={() => {}}
+                onCancel={() => { }}
             />
         )
 
@@ -658,7 +678,7 @@ describe('NewSession launch preferences', () => {
                 initialMachineId="machine-1"
                 initialDirectory="C:\\repo"
                 onSuccess={mocks.onSuccess}
-                onCancel={() => {}}
+                onCancel={() => { }}
             />
         )
 
@@ -685,7 +705,7 @@ describe('NewSession launch preferences', () => {
             copilotAgentMode: 'interactive', yoloMode: false, codexFamilyPermissionMode: 'default',
             grokPermissionMode: 'default', sessionType: 'simple', worktreeName: ''
         })
-        render(<NewSession api={api} machines={[machine]} initialMachineId="machine-1" initialDirectory="C:\repo" onSuccess={mocks.onSuccess} onCancel={() => {}} />)
+        render(<NewSession api={api} machines={[machine]} initialMachineId="machine-1" initialDirectory="C:\repo" onSuccess={mocks.onSuccess} onCancel={() => { }} />)
         await waitFor(() => expect(screen.getByTestId('agy-model')).toHaveTextContent('gemini-3.6-flash-low'))
     })
 
@@ -697,14 +717,14 @@ describe('NewSession launch preferences', () => {
             copilotAgentMode: 'interactive', yoloMode: false, codexFamilyPermissionMode: 'default',
             grokPermissionMode: 'default', sessionType: 'simple', worktreeName: ''
         })
-        render(<NewSession api={api} machines={[machine]} initialMachineId="machine-1" initialDirectory="C:\repo" onSuccess={mocks.onSuccess} onCancel={() => {}} />)
+        render(<NewSession api={api} machines={[machine]} initialMachineId="machine-1" initialDirectory="C:\repo" onSuccess={mocks.onSuccess} onCancel={() => { }} />)
         await waitFor(() => expect(screen.getByTestId('agy-model')).toHaveTextContent('auto'))
     })
 
     it('falls back to Default when a preferred AGY model is no longer advertised', async () => {
         savePreferredAgent('agy')
         savePreferredLaunchSettings('machine-1', 'agy', { model: 'removed-model', cursorSelectedBase: 'auto', effort: 'auto', modelReasoningEffort: 'default' })
-        render(<NewSession api={api} machines={[machine]} initialMachineId="machine-1" initialDirectory="C:\repo" onSuccess={mocks.onSuccess} onCancel={() => {}} />)
+        render(<NewSession api={api} machines={[machine]} initialMachineId="machine-1" initialDirectory="C:\repo" onSuccess={mocks.onSuccess} onCancel={() => { }} />)
         await waitFor(() => expect(screen.getByTestId('agy-model')).toHaveTextContent('auto'))
     })
 
@@ -712,14 +732,14 @@ describe('NewSession launch preferences', () => {
         savePreferredAgent('agy')
         savePreferredLaunchSettings('machine-1', 'agy', { model: 'gemini-3.6-flash-low', cursorSelectedBase: 'auto', effort: 'auto', modelReasoningEffort: 'default' })
         mocks.agyModelsLoading = true
-        render(<NewSession api={api} machines={[machine]} initialMachineId="machine-1" initialDirectory="C:\repo" onSuccess={mocks.onSuccess} onCancel={() => {}} />)
+        render(<NewSession api={api} machines={[machine]} initialMachineId="machine-1" initialDirectory="C:\repo" onSuccess={mocks.onSuccess} onCancel={() => { }} />)
         await waitFor(() => expect(screen.getByTestId('create')).toBeDisabled())
     })
 
     it('persists the selected AGY model only after a successful launch', async () => {
         savePreferredAgent('agy')
         mocks.spawnSession.mockResolvedValue({ type: 'success', sessionId: 'agy-session' })
-        render(<NewSession api={api} machines={[machine]} initialMachineId="machine-1" initialDirectory="C:\repo" onSuccess={mocks.onSuccess} onCancel={() => {}} />)
+        render(<NewSession api={api} machines={[machine]} initialMachineId="machine-1" initialDirectory="C:\repo" onSuccess={mocks.onSuccess} onCancel={() => { }} />)
         fireEvent.click(screen.getByTestId('agy-model'))
         fireEvent.click(screen.getByTestId('create'))
         await waitFor(() => expect(mocks.onSuccess).toHaveBeenCalledWith('agy-session'))
@@ -735,7 +755,7 @@ describe('NewSession launch preferences', () => {
             { modelId: 'gemini-3.6-flash-low', name: 'Gemini 3.6 Flash (Low)' }
         ]
         mocks.spawnSession.mockResolvedValue({ type: 'error', message: 'spawn failed' })
-        render(<NewSession api={api} machines={[machine]} initialMachineId="machine-1" initialDirectory="C:\repo" onSuccess={mocks.onSuccess} onCancel={() => {}} />)
+        render(<NewSession api={api} machines={[machine]} initialMachineId="machine-1" initialDirectory="C:\repo" onSuccess={mocks.onSuccess} onCancel={() => { }} />)
         await waitFor(() => expect(screen.getByTestId('agy-model')).toHaveTextContent('gemini-3.5-flash-low'))
         fireEvent.click(screen.getByTestId('agy-model'))
         fireEvent.click(screen.getByTestId('create'))
@@ -757,7 +777,7 @@ describe('NewSession launch preferences', () => {
                 initialMachineId="machine-1"
                 initialDirectory="C:\\repo"
                 onSuccess={mocks.onSuccess}
-                onCancel={() => {}}
+                onCancel={() => { }}
             />
         )
 
@@ -801,7 +821,7 @@ describe('NewSession launch preferences', () => {
                 initialMachineId="machine-1"
                 initialDirectory="C:\\repo"
                 onSuccess={mocks.onSuccess}
-                onCancel={() => {}}
+                onCancel={() => { }}
             />
         )
 
@@ -852,7 +872,7 @@ describe('NewSession launch preferences', () => {
                 initialMachineId={machineA.id}
                 initialDirectory="C:\\repo"
                 onSuccess={mocks.onSuccess}
-                onCancel={() => {}}
+                onCancel={() => { }}
             />
         )
 
@@ -924,7 +944,7 @@ describe('NewSession launch preferences', () => {
                 initialMachineId="machine-1"
                 initialDirectory="C:\\repo"
                 onSuccess={mocks.onSuccess}
-                onCancel={() => {}}
+                onCancel={() => { }}
             />
         )
 
@@ -951,7 +971,7 @@ describe('NewSession launch preferences', () => {
                 initialMachineId="machine-1"
                 initialDirectory="C:\\repo"
                 onSuccess={mocks.onSuccess}
-                onCancel={() => {}}
+                onCancel={() => { }}
             />
         )
 
@@ -996,7 +1016,7 @@ describe('NewSession launch preferences', () => {
                 initialMachineId="machine-1"
                 initialDirectory="C:\\repo"
                 onSuccess={mocks.onSuccess}
-                onCancel={() => {}}
+                onCancel={() => { }}
             />
         )
 
@@ -1027,7 +1047,7 @@ describe('NewSession launch preferences', () => {
                 initialMachineId="without-omp"
                 initialDirectory="C:\\repo"
                 onSuccess={mocks.onSuccess}
-                onCancel={() => {}}
+                onCancel={() => { }}
             />
         )
 
@@ -1035,6 +1055,97 @@ describe('NewSession launch preferences', () => {
         expect(screen.getByTestId('machines')).not.toHaveTextContent('without-omp')
         await waitFor(() => {
             expect(screen.getByTestId('create')).toBeEnabled()
+        })
+    })
+
+    describe('native OMP catalog validation', () => {
+        const nativeMachine = { id: 'machine-1', active: true, metadata: { capabilities: { omp: true } } } as Machine
+        const selector = 'anthropic/claude-sonnet-5-5'
+        const nativeModel: OmpModelSummary = {
+            provider: 'anthropic', modelId: 'claude-sonnet-5-5', name: 'Claude Sonnet',
+            reasoning: true, contextWindow: 200000, maxTokens: 64000, thinkingLevels: ['low', 'high']
+        }
+        function element(directory = 'C:\\repo') {
+            return <NewSession api={api} machines={[nativeMachine]} initialMachineId="machine-1"
+                initialDirectory={directory} onSuccess={mocks.onSuccess} onCancel={() => { }} />
+        }
+        function remember(model = selector) {
+            savePreferredAgent('omp')
+            savePreferredLaunchSettings('machine-1', 'omp', {
+                model, cursorSelectedBase: 'auto', effort: 'auto', modelReasoningEffort: 'default'
+            })
+        }
+
+        it('keeps the Anthropic choice across reopening and launches its exact native selector', async () => {
+            remember()
+            mocks.ompModels = [nativeModel]
+            mocks.spawnSession.mockResolvedValue({ type: 'success', sessionId: 'native-session' })
+            const view = render(element())
+            await waitFor(() => expect(screen.getByTestId('model')).toHaveTextContent(selector))
+            view.unmount()
+            render(element())
+            await waitFor(() => expect(screen.getByTestId('create')).toBeEnabled())
+            expect(screen.getByTestId('model-options')).toHaveTextContent(selector)
+            fireEvent.click(screen.getByTestId('create'))
+            await waitFor(() => expect(mocks.spawnSession).toHaveBeenCalledWith(expect.objectContaining({
+                agent: 'omp', model: selector, ccSwitchProviderId: undefined
+            })))
+        })
+
+        it('never bypasses pending native validation after the ordinary launch timeout', async () => {
+            vi.useFakeTimers({ shouldAdvanceTime: true })
+            try {
+                remember()
+                mocks.ompModelsLoading = true
+                mocks.ompModelsReady = false
+                render(element())
+                await waitFor(() => expect(screen.getByTestId('model')).toHaveTextContent(selector))
+                await act(async () => { vi.advanceTimersByTime(8_000) })
+                expect(screen.getByTestId('create')).toBeDisabled()
+                expect(screen.getByRole('alert')).toHaveTextContent('newSession.model.ompValidationPending')
+                expect(mocks.spawnSession).not.toHaveBeenCalled()
+            } finally { vi.useRealTimers() }
+        })
+
+        it('retains an unavailable explicit choice and offers a retry instead of fallback', async () => {
+            remember()
+            mocks.ompModelsError = 'native discovery failed'
+            mocks.ompModelsReady = false
+            const view = render(element())
+            await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('native discovery failed'))
+            expect(screen.getByTestId('create')).toBeDisabled()
+            fireEvent.click(screen.getByRole('button', { name: 'settings.fork.omp.refresh' }))
+            expect(mocks.ompModelsRefetch).toHaveBeenCalledOnce()
+            mocks.ompModelsError = null
+            mocks.ompModelsReady = true
+            view.rerender(element())
+            await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('newSession.model.ompUnlisted'))
+            expect(screen.getByTestId('model')).toHaveTextContent(selector)
+            expect(screen.getByTestId('create')).toBeDisabled()
+        })
+
+        it('does not validate a changed cwd with the previous native catalog', async () => {
+            remember()
+            mocks.ompModels = [nativeModel]
+            const view = render(element())
+            await waitFor(() => expect(screen.getByTestId('create')).toBeEnabled())
+            view.rerender(element('C:\\other'))
+            await waitFor(() => expect(mocks.ompModelTarget).toHaveBeenLastCalledWith(expect.objectContaining({ cwd: 'C:\\other', enabled: false })))
+            expect(screen.getByTestId('create')).toBeDisabled()
+            expect(screen.getByTestId('model')).toHaveTextContent(selector)
+        })
+
+        it('leaves an unselected model to the native default even if catalog discovery fails', async () => {
+            remember('auto')
+            mocks.ompModelsError = 'native discovery failed'
+            mocks.ompModelsReady = false
+            mocks.spawnSession.mockResolvedValue({ type: 'success', sessionId: 'native-default' })
+            render(element())
+            await waitFor(() => expect(screen.getByTestId('create')).toBeEnabled())
+            fireEvent.click(screen.getByTestId('create'))
+            await waitFor(() => expect(mocks.spawnSession).toHaveBeenCalledWith(expect.objectContaining({
+                agent: 'omp', model: undefined
+            })))
         })
     })
 
@@ -1049,7 +1160,7 @@ describe('NewSession launch preferences', () => {
                     machines={[offline, online]}
                     initialDirectory="C:\repo"
                     onSuccess={mocks.onSuccess}
-                    onCancel={() => {}}
+                    onCancel={() => { }}
                 />
             )
 
@@ -1066,7 +1177,7 @@ describe('NewSession launch preferences', () => {
                     initialMachineId="offline-1"
                     initialDirectory="C:\repo"
                     onSuccess={mocks.onSuccess}
-                    onCancel={() => {}}
+                    onCancel={() => { }}
                 />
             )
 
@@ -1082,7 +1193,7 @@ describe('NewSession launch preferences', () => {
                     machines={[offline]}
                     initialDirectory="C:\repo"
                     onSuccess={mocks.onSuccess}
-                    onCancel={() => {}}
+                    onCancel={() => { }}
                 />
             )
 
@@ -1110,7 +1221,7 @@ describe('NewSession launch preferences', () => {
                         initialMachineId="online-1"
                         initialDirectory="C:\repo"
                         onSuccess={mocks.onSuccess}
-                        onCancel={() => {}}
+                        onCancel={() => { }}
                     />
                 )
 

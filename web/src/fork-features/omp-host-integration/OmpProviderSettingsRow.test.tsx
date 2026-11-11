@@ -4,6 +4,7 @@ import { OmpProviderSettingsRow } from './OmpProviderSettingsRow'
 
 const mocks = vi.hoisted(() => ({
     invalidateQueries: vi.fn(),
+    refetch: vi.fn(),
     queryData: {
         success: true as const,
         providers: [{
@@ -42,7 +43,7 @@ vi.mock('@tanstack/react-query', () => ({
             data: mocks.queryData,
             error: null,
             isLoading: false,
-            refetch: vi.fn()
+            refetch: mocks.refetch
         }
     },
     useQueryClient: () => ({ invalidateQueries: mocks.invalidateQueries })
@@ -57,6 +58,7 @@ vi.mock('@/lib/use-translation', () => ({
 
 beforeEach(() => {
     mocks.invalidateQueries.mockReset()
+    mocks.refetch.mockReset()
     mocks.queryData = {
         ...mocks.queryData,
         providers: mocks.queryData.providers.map((provider) => ({
@@ -73,7 +75,7 @@ beforeEach(() => {
 })
 
 describe('OmpProviderSettingsRow', () => {
-    it('invalidates machine model catalogs when provider authentication changes', async () => {
+    it('invalidates target machine and session model catalogs when provider authentication changes', async () => {
         const view = render(<OmpProviderSettingsRow />)
         await waitFor(() => expect(mocks.invalidateQueries).toHaveBeenCalled())
         mocks.invalidateQueries.mockReset()
@@ -88,8 +90,20 @@ describe('OmpProviderSettingsRow', () => {
         view.rerender(<OmpProviderSettingsRow />)
 
         await waitFor(() => {
-            expect(mocks.invalidateQueries).toHaveBeenCalledWith({ queryKey: ['machine-omp-models'] })
+            expect(mocks.invalidateQueries).toHaveBeenCalledWith({ queryKey: ['machine-omp-models', 'machine-1'] }, { cancelRefetch: false })
+            expect(mocks.invalidateQueries).toHaveBeenCalledWith({ queryKey: ['session-omp-models'] }, { cancelRefetch: false })
         })
+    })
+
+    it('refreshes native catalogs after external login even when provider ids have not changed', async () => {
+        render(<OmpProviderSettingsRow />)
+        fireEvent.click(screen.getByText('settings.fork.omp.title'))
+        await waitFor(() => expect(mocks.invalidateQueries).toHaveBeenCalled())
+        mocks.invalidateQueries.mockReset()
+        fireEvent.click(screen.getByRole('button', { name: 'settings.fork.omp.refresh' }))
+        expect(mocks.refetch).toHaveBeenCalledOnce()
+        expect(mocks.invalidateQueries).toHaveBeenCalledWith({ queryKey: ['machine-omp-models', 'machine-1'] }, { cancelRefetch: false })
+        expect(mocks.invalidateQueries).toHaveBeenCalledWith({ queryKey: ['session-omp-models'] }, { cancelRefetch: false })
     })
 
     it('filters runners without OMP before provider discovery', async () => {

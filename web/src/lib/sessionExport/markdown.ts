@@ -114,7 +114,10 @@ function formatNormalizedMessage(message: NormalizedMessage): string | null {
         const attachments = message.content.attachments?.length
             ? `\n\n${message.content.attachments.map((attachment) => `- Attachment: ${attachment.filename} (${attachment.mimeType}, ${attachment.size} bytes)`).join('\n')}`
             : ''
-        return `## User\n\n_Time: ${timestamp}_\n\n${message.content.text}${attachments}`
+        const resolution = message.resolution
+            ? `\n\n_Status: ${message.resolution.outcome === 'handled' ? 'Handled locally · not executed' : 'Cancelled · not executed'}; resolved at ${formatTimestamp(message.resolution.resolvedAt)}_`
+            : ''
+        return `## User\n\n_Time: ${timestamp}_${resolution}\n\n${message.content.text}${attachments}`
     }
 
     if (message.role === 'event') {

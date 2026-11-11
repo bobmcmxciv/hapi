@@ -1,114 +1,146 @@
+import type { I18nContextValue } from '@/lib/use-translation'
 import type { ClaudeProxyModelsResponse } from '@/fork-features/claude-proxy-models/types'
 import type { MachinePresentationPatch } from '@/fork-features/machine-icons/types'
 import type { VoiceInstructionPrepareResponse, VoiceSessionQaResponse, VoiceSpeakerEnrollResponse, VoiceSpeakerStatus, VoiceTtsStatus, VoiceTurn } from '@/fork-features/voice-assistant/types'
 import type {
-    AttachmentMetadata,
-    AuthResponse,
-    CodexLocalSessionsResponse,
-    CodexDuplicateSessionsResponse,
-    CodexMergeDuplicateSessionsResponse,
-    CodexDesktopScriptResponse,
-    CodexDesktopSyncRequest,
-    CodexDesktopStatusResponse,
-    CodexArchiveSessionResponse,
-    CodexCollaborationMode,
-    CopilotAgentMode,
-    FileSearchResponse,
-    MachinesResponse,
-    MessagesResponse,
-    OmpInputMode,
-    PermissionMode,
-    PiImportSessionsResponse,
-    PiLocalSessionsResponse,
-    PushSubscriptionPayload,
-    PushUnsubscribePayload,
-    PushVapidPublicKeyResponse,
-    SlashCommandsResponse,
-    SkillsResponse,
-    SpawnResponse,
-    VisibilityPayload,
-    HapiSessionExport,
-    SessionResponse,
-    SessionsResponse
+ AttachmentMetadata,
+ AuthResponse,
+ CodexLocalSessionsResponse,
+ CodexDuplicateSessionsResponse,
+ CodexMergeDuplicateSessionsResponse,
+ CodexDesktopScriptResponse,
+ CodexDesktopSyncRequest,
+ CodexDesktopStatusResponse,
+ CodexArchiveSessionResponse,
+ CodexCollaborationMode,
+ CopilotAgentMode,
+ FileSearchResponse,
+ MachinesResponse,
+ MessagesResponse,
+ OmpInputMode,
+ PermissionMode,
+ PiImportSessionsResponse,
+ PiLocalSessionsResponse,
+ PushSubscriptionPayload,
+ PushUnsubscribePayload,
+ PushVapidPublicKeyResponse,
+ SlashCommandsResponse,
+ SkillsResponse,
+ SpawnResponse,
+ VisibilityPayload,
+ HapiSessionExport,
+ SessionResponse,
+ SessionsResponse
 } from '@/types/api'
 import type { ClientErrorReport } from '@/lib/crashGuard'
 import type {
-    AgyModelsResponse,
-    CodexModelsResponse,
-    CursorMigrateOutcome,
-    CursorMigrateToAcpRequest,
-    CursorChatStoreStatus,
-    CursorModelsResponse,
-    CycleOmpModelResponse,
-    DeleteUploadResponse,
-    FileReadResponse,
-    FileWriteResponse,
-    GitCommandResponse,
-    GeneratedBlobDownloadTicketResponse,
-    CreateP2pFileTransferResponse,
-    P2pIceCandidateInit,
-    P2pSessionDescriptionInit,
-    SignalP2pFileTransferRpcResponse,
-    GrokModelsResponse,
-    CopilotModelsResponse,
-    GrokReasoningEffortResponse,
-    ListCcSwitchProvidersResponse,
-    ListDirectoryResponse,
-    MachineListDirectoryResponse,
-    MachinePathsExistsResponse,
-    OpencodeModelsResponse,
-    OpencodeReasoningEffortResponse,
-    QueuedStateResponse,
-    OmpModelsResponse,
-    OmpThinkingOptionsResponse,
-    OmpLoginProvidersResponse,
-    StartOmpLoginResponse,
-    RespondOmpLoginInputResponse,
-    GetOmpExtensionUiResponse,
-    ReopenSessionResponse,
-    SqliteStorageUsageResponse,
-    UsageSummaryResponse,
-    UploadFileResponse
+ AgyModelsResponse,
+ CodexModelsResponse,
+ CursorMigrateOutcome,
+ CursorMigrateToAcpRequest,
+ CursorChatStoreStatus,
+ CursorModelsResponse,
+ CycleOmpModelResponse,
+ DeleteUploadResponse,
+ FileReadResponse,
+ FileWriteResponse,
+ GitCommandResponse,
+ GeneratedBlobDownloadTicketResponse,
+ CreateP2pFileTransferResponse,
+ P2pIceCandidateInit,
+ P2pSessionDescriptionInit,
+ SignalP2pFileTransferRpcResponse,
+ GrokModelsResponse,
+ CopilotModelsResponse,
+ GrokReasoningEffortResponse,
+ ListCcSwitchProvidersResponse,
+ ListDirectoryResponse,
+ MachineListDirectoryResponse,
+ MachinePathsExistsResponse,
+ OpencodeModelsResponse,
+ OpencodeReasoningEffortResponse,
+ QueuedStateResponse,
+ OmpModelsResponse,
+ OmpThinkingOptionsResponse,
+ OmpLoginProvidersResponse,
+ StartOmpLoginResponse,
+ RespondOmpLoginInputResponse,
+ GetOmpExtensionUiResponse,
+ ReopenSessionResponse,
+ SqliteStorageUsageResponse,
+ UsageSummaryResponse,
+ UploadFileResponse
 } from '@hapi/protocol/apiTypes'
 import type { AgentFlavor, MessageDeliveryMode } from '@hapi/protocol'
-import type { CancelMessageResponse } from '@hapi/protocol/schemas'
+import type { CancelMessageResponse, DecryptedMessage } from '@hapi/protocol/schemas'
 import type { TranscriptionMode, TranscriptionProvider, TranscriptionProviderInfo } from '@hapi/protocol/voice'
 import type { ForkRouteResult } from '../../../fork-features/session-fork/rpcPayloads'
+import type { RuntimeSnapshot } from '@hapi/protocol/runtimeTimeline'
+import type { OmpUsageResponse } from '@hapi/protocol/ompUsage'
+
+/** GET /api/sessions/:id/runtime response shape (beta timeline REST snapshot). */
+export type RuntimeSnapshotResponse =
+ | { available: true; snapshot: RuntimeSnapshot; source: 'connected' | 'disconnected' | 'none' }
+ | { available: false; source?: 'connected' | 'disconnected' | 'none' }
+
+/** Per-row force-send outcome. `dispatched` means delivery/promotion was
+ *  requested, NOT that the model consumed the message; `invoked` is only set
+ *  when native transcript delivery actually happened. */
+export type ForceSendQueuedResultStatus =
+ | 'dispatched'
+ | 'invoked'
+ | 'resolved'
+ | 'pending'
+ | 'failed'
+
+export type ForceSendQueuedResult = {
+ localId: string
+ status: ForceSendQueuedResultStatus
+ error?: string
+}
+
+/** Structural copy of the hub's force-send reply (see POST
+ *  /sessions/:id/messages/force-send). `messages` carries the authoritative
+ *  rows including content.meta.forceSendRequestedAt markers. */
+export type ForceSendQueuedResponse = {
+ results: ForceSendQueuedResult[]
+ messages: DecryptedMessage[]
+}
 
 type ApiClientOptions = {
-    baseUrl?: string
-    getToken?: () => string | null
-    onUnauthorized?: () => Promise<string | null>
+ baseUrl?: string
+ getToken?: () => string | null
+ onUnauthorized?: () => Promise<string | null>
 }
 
 type ErrorPayload = {
-    error?: unknown
-    code?: unknown
+ error?: unknown
+ code?: unknown
 }
 
 function parseErrorCode(bodyText: string): string | undefined {
-    try {
-        const parsed = JSON.parse(bodyText) as ErrorPayload
-        if (typeof parsed.code === 'string') return parsed.code
-        if (typeof parsed.error === 'string') return parsed.error
-        return undefined
-    } catch {
-        return undefined
-    }
+ try {
+  const parsed = JSON.parse(bodyText) as ErrorPayload
+  if (typeof parsed.code === 'string') return parsed.code
+  if (typeof parsed.error === 'string') return parsed.error
+  return undefined
+ } catch {
+  return undefined
+ }
 }
 
 export class ApiError extends Error {
-    status: number
-    code?: string
-    body?: string
+ status: number
+ code?: string
+ body?: string
 
-    constructor(message: string, status: number, code?: string, body?: string) {
-        super(message)
-        this.name = 'ApiError'
-        this.status = status
-        this.code = code
-        this.body = body
-    }
+ constructor(message: string, status: number, code?: string, body?: string) {
+  super(message)
+  this.name = 'ApiError'
+  this.status = status
+  this.code = code
+  this.body = body
+ }
 }
 
 // Generated blobs (sent files, inline media) are served by the hub from its
@@ -132,1552 +164,1657 @@ const BLOB_PENDING_TOTAL_MS = 20 * 60_000
 const BLOB_CONCURRENCY = 2
 
 export function isRetryableBlobStatus(status: number): boolean {
-    return status === 502 || status === 503 || status === 504
+ return status === 502 || status === 503 || status === 504
 }
 
 export type GeneratedBlobProgress = {
-    state: 'uploading' | 'fetching' | 'downloading'
-    received: number
-    size: number | null
+ state: 'uploading' | 'fetching' | 'downloading'
+ received: number
+ size: number | null
 }
 
 export type GeneratedBlobFetchOptions = {
-    onProgress?: (progress: GeneratedBlobProgress) => void
-    signal?: AbortSignal
+ onProgress?: (progress: GeneratedBlobProgress) => void
+ signal?: AbortSignal
 }
 
 /** Short human label for a transfer state, with a percentage when the size is known. */
-export function formatGeneratedBlobProgress(progress: GeneratedBlobProgress): string {
-    if (progress.state === 'downloading') {
-        // Byte progress of the final download is the browser's business; we only
-        // know that the hub has started streaming.
-        return 'Downloading…'
-    }
-    const label = progress.state === 'uploading' ? 'Uploading from machine' : 'Fetching from machine'
-    if (progress.size && progress.size > 0) {
-        const percent = Math.min(100, Math.floor((progress.received / progress.size) * 100))
-        return `${label} ${percent}%`
-    }
-    return `${label}…`
+export function formatGeneratedBlobProgress(progress: GeneratedBlobProgress, t: I18nContextValue['t']): string {
+ if (progress.state === 'downloading') return t('generatedFile.downloading')
+ const label = t(progress.state === 'uploading' ? 'generatedFile.uploading' : 'generatedFile.fetching')
+ if (progress.size && progress.size > 0) {
+  const percent = Math.min(100, Math.floor((progress.received / progress.size) * 100))
+  return `${label} ${percent}%`
+ }
+ return `${label}…`
 }
 
 const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
 
 class RequestGate {
-    private active = 0
-    private readonly waiters: (() => void)[] = []
+ private active = 0
+ private readonly waiters: (() => void)[] = []
 
-    constructor(private readonly limit: number) {}
+ constructor(private readonly limit: number) { }
 
-    async acquire(): Promise<void> {
-        if (this.active < this.limit) {
-            this.active += 1
-            return
-        }
-        await new Promise<void>((resolve) => this.waiters.push(resolve))
-        this.active += 1
-    }
+ async acquire(): Promise<void> {
+  if (this.active < this.limit) {
+   this.active += 1
+   return
+  }
+  await new Promise<void>((resolve) => this.waiters.push(resolve))
+  this.active += 1
+ }
 
-    release(): void {
-        this.active -= 1
-        const next = this.waiters.shift()
-        if (next) next()
-    }
+ release(): void {
+  this.active -= 1
+  const next = this.waiters.shift()
+  if (next) next()
+ }
 
-    inFlight(): number {
-        return this.active
-    }
+ inFlight(): number {
+  return this.active
+ }
 }
 
 const blobGate = new RequestGate(BLOB_CONCURRENCY)
 
 /** Test-only: how many blob requests are in flight right now. */
 export function generatedBlobRequestsInFlight(): number {
-    return blobGate.inFlight()
+ return blobGate.inFlight()
 }
 
 /** Upper bound for POST /machines/:id/spawn (hub RPC timeout is 30 s). */
 const SPAWN_REQUEST_TIMEOUT_MS = 60_000
 
 export class ApiClient {
-    private token: string
-    private readonly baseUrl: string | null
-    private readonly getToken: (() => string | null) | null
-    private readonly onUnauthorized: (() => Promise<string | null>) | null
-
-    constructor(token: string, options?: ApiClientOptions) {
-        this.token = token
-        this.baseUrl = options?.baseUrl ?? null
-        this.getToken = options?.getToken ?? null
-        this.onUnauthorized = options?.onUnauthorized ?? null
-    }
-
-    private buildUrl(path: string): string {
-        if (!this.baseUrl) {
-            return path
-        }
-        try {
-            return new URL(path, this.baseUrl).toString()
-        } catch {
-            return path
-        }
-    }
-
-    private async request<T>(
-        path: string,
-        init?: RequestInit,
-        attempt: number = 0,
-        overrideToken?: string | null
-    ): Promise<T> {
-        const headers = new Headers(init?.headers)
-        const liveToken = this.getToken ? this.getToken() : null
-        const authToken = overrideToken !== undefined
-            ? (overrideToken ?? (liveToken ?? this.token))
-            : (liveToken ?? this.token)
-        if (authToken) {
-            headers.set('authorization', `Bearer ${authToken}`)
-        }
-        if (init?.body !== undefined && !(init.body instanceof FormData) && !headers.has('content-type')) {
-            headers.set('content-type', 'application/json')
-        }
-
-        const res = await fetch(this.buildUrl(path), {
-            ...init,
-            headers
-        })
-
-        if (res.status === 401) {
-            if (attempt === 0 && this.onUnauthorized) {
-                const refreshed = await this.onUnauthorized()
-                if (refreshed) {
-                    this.token = refreshed
-                    return await this.request<T>(path, init, attempt + 1, refreshed)
-                }
-            }
-            throw new Error('Session expired. Please sign in again.')
-        }
-
-        if (!res.ok) {
-            const body = await res.text().catch(() => '')
-            const code = parseErrorCode(body)
-            throw new ApiError(
-                `HTTP ${res.status} ${res.statusText}: ${body}`,
-                res.status,
-                code,
-                body || undefined
-            )
-        }
-
-        return await res.json() as T
-    }
-
-    async authenticate(auth: { initData: string } | { accessToken: string } | { username: string; password: string }): Promise<AuthResponse> {
-        const res = await fetch(this.buildUrl('/api/auth'), {
-            method: 'POST',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify(auth)
-        })
-
-        if (!res.ok) {
-            const body = await res.text().catch(() => '')
-            const code = parseErrorCode(body)
-            const detail = body ? `: ${body}` : ''
-            throw new ApiError(`Auth failed: HTTP ${res.status} ${res.statusText}${detail}`, res.status, code, body || undefined)
-        }
-
-        return await res.json() as AuthResponse
-    }
-
-    async refreshAuth(): Promise<AuthResponse> {
-        return await this.request<AuthResponse>('/api/auth/refresh', { method: 'POST' })
-    }
-
-    async bind(auth: { initData: string; accessToken: string }): Promise<AuthResponse> {
-        const res = await fetch(this.buildUrl('/api/bind'), {
-            method: 'POST',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify(auth)
-        })
-
-        if (!res.ok) {
-            const body = await res.text().catch(() => '')
-            const code = parseErrorCode(body)
-            const detail = body ? `: ${body}` : ''
-            throw new ApiError(`Bind failed: HTTP ${res.status} ${res.statusText}${detail}`, res.status, code, body || undefined)
-        }
-
-        return await res.json() as AuthResponse
-    }
-
-    async getSessions(): Promise<SessionsResponse> {
-        return await this.request<SessionsResponse>('/api/sessions')
-    }
-
-    async getPushVapidPublicKey(): Promise<PushVapidPublicKeyResponse> {
-        return await this.request<PushVapidPublicKeyResponse>('/api/push/vapid-public-key')
-    }
-
-    async subscribePushNotifications(payload: PushSubscriptionPayload): Promise<void> {
-        await this.request('/api/push/subscribe', {
-            method: 'POST',
-            body: JSON.stringify(payload)
-        })
-    }
-
-    async syncCodexSession(payload?: CodexDesktopSyncRequest): Promise<CodexDesktopScriptResponse> {
-        // 中文注释：当前按钮语义已改为“从 Codex 导入到 Hapi”；这里提交的是本地 transcript 对应的 Codex thread ID 列表。
-        return await this.request<CodexDesktopScriptResponse>('/api/codex/sync-session', {
-            method: 'POST',
-            ...(payload ? { body: JSON.stringify(payload) } : {})
-        })
-    }
-
-    async getCodexSessions(cwd?: string | null, machineId?: string | null): Promise<CodexLocalSessionsResponse> {
-        const params = new URLSearchParams()
-        if (cwd?.trim()) params.set('cwd', cwd.trim())
-        if (machineId?.trim()) params.set('machineId', machineId.trim())
-        const query = params.size ? `?${params.toString()}` : ''
-        return await this.request<CodexLocalSessionsResponse>(`/api/codex/sessions${query}`)
-    }
-
-    async getPiSessions(cwd?: string | null, machineId?: string | null): Promise<PiLocalSessionsResponse> {
-        const params = new URLSearchParams()
-        if (cwd?.trim()) params.set('cwd', cwd.trim())
-        if (machineId?.trim()) params.set('machineId', machineId.trim())
-        const query = params.size ? `?${params.toString()}` : ''
-        return await this.request<PiLocalSessionsResponse>(`/api/pi/sessions${query}`)
-    }
-
-    async importPiSessions(payload: { sessionIds: string[]; cwd?: string | null; machineId?: string | null }): Promise<PiImportSessionsResponse> {
-        return await this.request<PiImportSessionsResponse>('/api/pi/import-sessions', {
-            method: 'POST',
-            body: JSON.stringify(payload)
-        })
-    }
-
-    async archiveCodexSession(sessionId: string, machineId?: string | null): Promise<CodexArchiveSessionResponse> {
-        return await this.request<CodexArchiveSessionResponse>('/api/codex/archive-session', {
-            method: 'POST',
-            body: JSON.stringify({ sessionId, machineId: machineId ?? undefined })
-        })
-    }
-
-    async getCodexDesktopStatus(): Promise<CodexDesktopStatusResponse> {
-        return await this.request<CodexDesktopStatusResponse>('/api/codex/status')
-    }
-
-    async getCodexDuplicateSessions(payload: CodexDesktopSyncRequest): Promise<CodexDuplicateSessionsResponse> {
-        // 中文注释：重复会话检测只传本次用户勾选导入的 codexSessionId，避免把未选中的历史会话也纳入提示。
-        return await this.request<CodexDuplicateSessionsResponse>('/api/codex/duplicate-sessions', {
-            method: 'POST',
-            body: JSON.stringify(payload)
-        })
-    }
-
-    async mergeCodexDuplicateSessions(payload: CodexDesktopSyncRequest): Promise<CodexMergeDuplicateSessionsResponse> {
-        // 中文注释：真正执行合并时沿用同一批选中 codexSessionId，保证检测范围与执行范围一致。
-        return await this.request<CodexMergeDuplicateSessionsResponse>('/api/codex/merge-duplicate-sessions', {
-            method: 'POST',
-            body: JSON.stringify(payload)
-        })
-    }
-
-    async restartCodexDesktop(): Promise<CodexDesktopScriptResponse> {
-        return await this.request<CodexDesktopScriptResponse>('/api/codex/restart-desktop', {
-            method: 'POST'
-        })
-    }
-
-    async unsubscribePushNotifications(payload: PushUnsubscribePayload): Promise<void> {
-        await this.request('/api/push/subscribe', {
-            method: 'DELETE',
-            body: JSON.stringify(payload)
-        })
-    }
-
-    async setVisibility(payload: VisibilityPayload): Promise<void> {
-        await this.request('/api/visibility', {
-            method: 'POST',
-            body: JSON.stringify(payload)
-        })
-    }
-
-    async reportClientError(report: ClientErrorReport): Promise<void> {
-        await this.request('/api/client-errors', {
-            method: 'POST',
-            body: JSON.stringify(report)
-        })
-    }
-
-    async getSession(sessionId: string): Promise<SessionResponse> {
-        return await this.request<SessionResponse>(`/api/sessions/${encodeURIComponent(sessionId)}`)
-    }
-
-    async getSessionExport(sessionId: string, options?: { signal?: AbortSignal }): Promise<HapiSessionExport> {
-        return await this.request<HapiSessionExport>(
-            `/api/sessions/${encodeURIComponent(sessionId)}/export`,
-            { signal: options?.signal }
-        )
-    }
-
-    async getMessages(
-        sessionId: string,
-        options: {
-            beforeSeq?: number | null
-            beforeAt?: number | null
-            afterSeq?: number | null
-            afterAt?: number | null
-            untilSeq?: number | null
-            untilAt?: number | null
-            epoch?: number | null
-            limit?: number
-        }
-    ): Promise<MessagesResponse> {
-        const params = new URLSearchParams()
-        if (options.beforeAt !== undefined && options.beforeAt !== null) {
-            params.set('beforeAt', `${options.beforeAt}`)
-        }
-        if (options.beforeSeq !== undefined && options.beforeSeq !== null) {
-            params.set('beforeSeq', `${options.beforeSeq}`)
-        }
-        if (options.afterAt !== undefined && options.afterAt !== null) {
-            params.set('afterAt', `${options.afterAt}`)
-        }
-        if (options.afterSeq !== undefined && options.afterSeq !== null) {
-            params.set('afterSeq', `${options.afterSeq}`)
-        }
-        if (options.untilAt !== undefined && options.untilAt !== null) {
-            params.set('untilAt', `${options.untilAt}`)
-        }
-        if (options.untilSeq !== undefined && options.untilSeq !== null) {
-            params.set('untilSeq', `${options.untilSeq}`)
-        }
-        if (options.epoch !== undefined && options.epoch !== null) {
-            params.set('epoch', `${options.epoch}`)
-        }
-        if (options.limit !== undefined && options.limit !== null) {
-            params.set('limit', `${options.limit}`)
-        }
-
-        const qs = params.toString()
-        const url = `/api/sessions/${encodeURIComponent(sessionId)}/messages${qs ? `?${qs}` : ''}`
-        return await this.request<MessagesResponse>(url)
-    }
-
-    async getGitStatus(sessionId: string): Promise<GitCommandResponse> {
-        return await this.request<GitCommandResponse>(`/api/sessions/${encodeURIComponent(sessionId)}/git-status`)
-    }
-
-    async getGitDiffNumstat(sessionId: string, staged: boolean): Promise<GitCommandResponse> {
-        const params = new URLSearchParams()
-        params.set('staged', staged ? 'true' : 'false')
-        return await this.request<GitCommandResponse>(`/api/sessions/${encodeURIComponent(sessionId)}/git-diff-numstat?${params.toString()}`)
-    }
-
-    async getGitDiffFile(sessionId: string, path: string, staged?: boolean): Promise<GitCommandResponse> {
-        const params = new URLSearchParams()
-        params.set('path', path)
-        if (staged !== undefined) {
-            params.set('staged', staged ? 'true' : 'false')
-        }
-        return await this.request<GitCommandResponse>(`/api/sessions/${encodeURIComponent(sessionId)}/git-diff-file?${params.toString()}`)
-    }
-
-    async searchSessionFiles(sessionId: string, query: string, limit?: number): Promise<FileSearchResponse> {
-        const params = new URLSearchParams()
-        if (query) {
-            params.set('query', query)
-        }
-        if (limit !== undefined) {
-            params.set('limit', `${limit}`)
-        }
-        const qs = params.toString()
-        return await this.request<FileSearchResponse>(`/api/sessions/${encodeURIComponent(sessionId)}/files${qs ? `?${qs}` : ''}`)
-    }
-
-    async getGeneratedImageBlob(sessionId: string, imageId: string, options: GeneratedBlobFetchOptions = {}): Promise<Blob> {
-        const url = this.buildUrl(`/api/sessions/${encodeURIComponent(sessionId)}/generated-images/${encodeURIComponent(imageId)}`)
-        return await this.fetchGeneratedBlob(url, options)
-    }
-
-    async getGeneratedFileBlob(sessionId: string, fileId: string, options: GeneratedBlobFetchOptions = {}): Promise<Blob> {
-        const url = this.buildUrl(`/api/sessions/${encodeURIComponent(sessionId)}/generated-files/${encodeURIComponent(fileId)}`)
-        return await this.fetchGeneratedBlob(url, options)
-    }
-
-    /**
-     * Request a short-lived, single-file download ticket for native browser
-     * downloading (`<a href download>`), riding out `202` upload/pull progress
-     * states until the hub holds the ready file on disk. Returns `null` when
-     * the hub runs without a blob store (`501`) so callers can fall back to
-     * `getGeneratedFileBlob`.
-     */
-    async acquireGeneratedFileDownloadTicket(
-        sessionId: string,
-        fileId: string,
-        options: GeneratedBlobFetchOptions = {}
-    ): Promise<{ url: string; fileName: string; mimeType: string; size: number; expiresAt: number } | null> {
-        const url = this.buildUrl(
-            `/api/sessions/${encodeURIComponent(sessionId)}/generated-files/${encodeURIComponent(fileId)}/download-ticket`
-        )
-        const startedAt = Date.now()
-        let lastProgressAt = startedAt
-        let lastReceived = -1
-        let attempt = 0
-        let refreshed = false
-        let overrideToken: string | null | undefined = undefined
-
-        for (;;) {
-            if (options.signal?.aborted) {
-                throw new DOMException('Aborted', 'AbortError')
-            }
-            const headers = new Headers()
-            const liveToken = this.getToken ? this.getToken() : null
-            const authToken = overrideToken !== undefined
-                ? (overrideToken ?? (liveToken ?? this.token))
-                : (liveToken ?? this.token)
-            if (authToken) {
-                headers.set('authorization', `Bearer ${authToken}`)
-            }
-
-            let res: Response
-            try {
-                res = await fetch(url, { method: 'POST', headers, signal: options.signal })
-            } catch (error) {
-                if (options.signal?.aborted || (error instanceof DOMException && error.name === 'AbortError')) {
-                    throw error
-                }
-                if (attempt < BLOB_FETCH_RETRIES) {
-                    attempt += 1
-                    await delay(BLOB_FETCH_RETRY_DELAY_MS * attempt)
-                    continue
-                }
-                throw error
-            }
-
-            if (res.status === 501) {
-                return null
-            }
-            if (res.ok && res.status !== 202) {
-                const body = await res.json() as GeneratedBlobDownloadTicketResponse
-                return {
-                    url: this.buildUrl(body.downloadPath),
-                    fileName: body.fileName,
-                    mimeType: body.mimeType,
-                    size: body.size,
-                    expiresAt: body.expiresAt
-                }
-            }
-            if (res.status === 202) {
-                let pending: { state?: string; received?: number; size?: number | null; retryAfterMs?: number } = {}
-                try {
-                    pending = await res.json() as typeof pending
-                } catch {
-                    // keep defaults
-                }
-                const received = typeof pending.received === 'number' ? pending.received : 0
-                const size = typeof pending.size === 'number' ? pending.size : null
-                options.onProgress?.({ state: pending.state === 'uploading' ? 'uploading' : 'fetching', received, size })
-                const now = Date.now()
-                if (received !== lastReceived) {
-                    lastReceived = received
-                    lastProgressAt = now
-                }
-                if (now - lastProgressAt > BLOB_PENDING_STALL_MS || now - startedAt > BLOB_PENDING_TOTAL_MS) {
-                    throw new ApiError('Transfer stalled', 202, 'blob_stalled', 'The file is still being transferred from the machine that sent it. Try again later.')
-                }
-                const poll = typeof pending.retryAfterMs === 'number' ? pending.retryAfterMs : BLOB_PENDING_DEFAULT_POLL_MS
-                await delay(Math.min(BLOB_PENDING_MAX_POLL_MS, Math.max(BLOB_PENDING_MIN_POLL_MS, poll)))
-                attempt = 0
-                continue
-            }
-            if (res.status === 401 && !refreshed && this.onUnauthorized) {
-                refreshed = true
-                const next = await this.onUnauthorized()
-                if (next) {
-                    this.token = next
-                    overrideToken = next
-                    continue
-                }
-            }
-            if (isRetryableBlobStatus(res.status) && attempt < BLOB_FETCH_RETRIES) {
-                attempt += 1
-                await delay(BLOB_FETCH_RETRY_DELAY_MS * attempt)
-                continue
-            }
-            throw new ApiError(`HTTP ${res.status}`, res.status, undefined, await res.text().catch(() => undefined))
-        }
-    }
-
-    async createP2pFileTransfer(
-        sessionId: string,
-        fileId: string,
-        signal?: AbortSignal
-    ): Promise<CreateP2pFileTransferResponse> {
-        return await this.request<CreateP2pFileTransferResponse>(
-            `/api/sessions/${encodeURIComponent(sessionId)}/generated-files/${encodeURIComponent(fileId)}/p2p`,
-            { method: 'POST', signal }
-        )
-    }
-
-    async signalP2pFileTransfer(
-        sessionId: string,
-        fileId: string,
-        transferId: string,
-        body: {
-            action?: 'signal' | 'cancel' | 'complete' | 'renew'
-            answer?: P2pSessionDescriptionInit
-            candidates?: P2pIceCandidateInit[]
-            reason?: string
-        },
-        signal?: AbortSignal
-    ): Promise<SignalP2pFileTransferRpcResponse> {
-        return await this.request<SignalP2pFileTransferRpcResponse>(
-            `/api/sessions/${encodeURIComponent(sessionId)}/generated-files/${encodeURIComponent(fileId)}/p2p/${encodeURIComponent(transferId)}/signal`,
-            {
-                method: 'POST',
-                body: JSON.stringify(body),
-                signal
-            }
-        )
-    }
-
-    /**
-     * Download a generated blob, riding out the states the hub can answer with:
-     * `202` while the bytes are still arriving (poll, report progress), a
-     * transient edge failure (retry with backoff), an expired token (refresh
-     * once), a `304` revalidation (re-read from the HTTP cache).
-     */
-    private async fetchGeneratedBlob(url: string, options: GeneratedBlobFetchOptions): Promise<Blob> {
-        const startedAt = Date.now()
-        let lastProgressAt = startedAt
-        let lastReceived = -1
-        let attempt = 0
-        let refreshed = false
-        let overrideToken: string | null | undefined = undefined
-
-        for (;;) {
-            if (options.signal?.aborted) {
-                throw new DOMException('Aborted', 'AbortError')
-            }
-            const headers = new Headers()
-            const liveToken = this.getToken ? this.getToken() : null
-            const authToken = overrideToken !== undefined
-                ? (overrideToken ?? (liveToken ?? this.token))
-                : (liveToken ?? this.token)
-            if (authToken) {
-                headers.set('authorization', `Bearer ${authToken}`)
-            }
-
-            let res: Response
-            await blobGate.acquire()
-            try {
-                try {
-                    res = await fetch(url, { headers, signal: options.signal })
-                    if (res.status === 304) {
-                        res = await fetch(url, { headers, cache: 'force-cache', signal: options.signal })
-                    }
-                } catch (error) {
-                    if (options.signal?.aborted || (error instanceof DOMException && error.name === 'AbortError')) {
-                        throw error
-                    }
-                    // Network failure: same treatment as a bad gateway.
-                    if (attempt < BLOB_FETCH_RETRIES) {
-                        attempt += 1
-                        await delay(BLOB_FETCH_RETRY_DELAY_MS * attempt)
-                        continue
-                    }
-                    throw error
-                }
-                if (res.ok && res.status !== 202) {
-                    const declared = Number(res.headers.get('content-length'))
-                    options.onProgress?.({ state: 'downloading', received: 0, size: Number.isFinite(declared) && declared > 0 ? declared : null })
-                    return await res.blob()
-                }
-            } finally {
-                blobGate.release()
-            }
-
-            if (res.status === 202) {
-                let pending: { state?: string; received?: number; size?: number | null; retryAfterMs?: number } = {}
-                try {
-                    pending = await res.json() as typeof pending
-                } catch {
-                    // keep defaults
-                }
-                const received = typeof pending.received === 'number' ? pending.received : 0
-                const size = typeof pending.size === 'number' ? pending.size : null
-                options.onProgress?.({ state: pending.state === 'uploading' ? 'uploading' : 'fetching', received, size })
-                const now = Date.now()
-                if (received !== lastReceived) {
-                    lastReceived = received
-                    lastProgressAt = now
-                }
-                if (now - lastProgressAt > BLOB_PENDING_STALL_MS || now - startedAt > BLOB_PENDING_TOTAL_MS) {
-                    throw new ApiError('Transfer stalled', 202, 'blob_stalled', 'The file is still being transferred from the machine that sent it. Try again later.')
-                }
-                const poll = typeof pending.retryAfterMs === 'number' ? pending.retryAfterMs : BLOB_PENDING_DEFAULT_POLL_MS
-                await delay(Math.min(BLOB_PENDING_MAX_POLL_MS, Math.max(BLOB_PENDING_MIN_POLL_MS, poll)))
-                attempt = 0
-                continue
-            }
-            if (res.status === 401 && !refreshed && this.onUnauthorized) {
-                refreshed = true
-                const next = await this.onUnauthorized()
-                if (next) {
-                    this.token = next
-                    overrideToken = next
-                    continue
-                }
-            }
-            if (isRetryableBlobStatus(res.status) && attempt < BLOB_FETCH_RETRIES) {
-                attempt += 1
-                await delay(BLOB_FETCH_RETRY_DELAY_MS * attempt)
-                continue
-            }
-            throw new ApiError(`HTTP ${res.status}`, res.status, undefined, await res.text().catch(() => undefined))
-        }
-    }
-
-    async readSessionFile(sessionId: string, path: string): Promise<FileReadResponse> {
-        const params = new URLSearchParams()
-        params.set('path', path)
-        return await this.request<FileReadResponse>(`/api/sessions/${encodeURIComponent(sessionId)}/file?${params.toString()}`)
-    }
-
-    async writeSessionFile(sessionId: string, path: string, content: string, expectedHash: string): Promise<FileWriteResponse> {
-        return await this.request<FileWriteResponse>(`/api/sessions/${encodeURIComponent(sessionId)}/file`, {
-            method: 'PUT',
-            body: JSON.stringify({ path, content, expectedHash })
-        })
-    }
-
-    async listSessionDirectory(sessionId: string, path?: string): Promise<ListDirectoryResponse> {
-        const params = new URLSearchParams()
-        if (path) {
-            params.set('path', path)
-        }
-
-        const qs = params.toString()
-        return await this.request<ListDirectoryResponse>(
-            `/api/sessions/${encodeURIComponent(sessionId)}/directory${qs ? `?${qs}` : ''}`
-        )
-    }
-
-    async uploadFile(sessionId: string, filename: string, content: string, mimeType: string): Promise<UploadFileResponse> {
-        return await this.request<UploadFileResponse>(`/api/sessions/${encodeURIComponent(sessionId)}/upload`, {
-            method: 'POST',
-            body: JSON.stringify({ filename, content, mimeType })
-        })
-    }
-
-    async deleteUploadFile(sessionId: string, path: string): Promise<DeleteUploadResponse> {
-        return await this.request<DeleteUploadResponse>(`/api/sessions/${encodeURIComponent(sessionId)}/upload/delete`, {
-            method: 'POST',
-            body: JSON.stringify({ path })
-        })
-    }
-
-    async resumeSession(sessionId: string, opts?: { permissionMode?: string }): Promise<string> {
-        const response = await this.request<{ sessionId: string }>(
-            `/api/sessions/${encodeURIComponent(sessionId)}/resume`,
-            {
-                method: 'POST',
-                ...(opts?.permissionMode !== undefined && {
-                    body: JSON.stringify({ permissionMode: opts.permissionMode })
-                })
-            }
-        )
-        return response.sessionId
-    }
-
-    async restartSession(sessionId: string, ccSwitchProviderId?: string): Promise<string> {
-        const response = await this.request<{ sessionId: string }>(
-            `/api/sessions/${encodeURIComponent(sessionId)}/restart`,
-            { method: 'POST', body: JSON.stringify({ ccSwitchProviderId }) }
-        )
-        return response.sessionId
-    }
-
-    async getCursorChatStoreStatus(sessionId: string): Promise<CursorChatStoreStatus> {
-        return await this.request<CursorChatStoreStatus>(
-            `/api/sessions/${encodeURIComponent(sessionId)}/cursor-chat-store`
-        )
-    }
-
-    async sendMessage(
-        sessionId: string,
-        text: string,
-        localId?: string | null,
-        attachments?: AttachmentMetadata[],
-        scheduledAt?: number | null,
-        ompInputMode?: OmpInputMode,
-        deliveryMode?: MessageDeliveryMode,
-    ): Promise<void> {
-        await this.request(`/api/sessions/${encodeURIComponent(sessionId)}/messages`, {
-            method: 'POST',
-            body: JSON.stringify({
-                text,
-                localId: localId ?? undefined,
-                attachments: attachments ?? undefined,
-                scheduledAt: scheduledAt ?? undefined,
-                ompInputMode: ompInputMode ?? undefined,
-                deliveryMode: deliveryMode ?? undefined,
-            })
-        })
-    }
-
-    async getQueuedState(sessionId: string, localIds: string[]): Promise<QueuedStateResponse> {
-        return await this.request<QueuedStateResponse>(
-            `/api/sessions/${encodeURIComponent(sessionId)}/messages/queued-state`,
-            {
-                method: 'POST',
-                body: JSON.stringify({ localIds })
-            }
-        )
-    }
-
-    async cancelMessage(sessionId: string, messageId: string): Promise<CancelMessageResponse> {
-        const response = await this.request(
-            `/api/sessions/${encodeURIComponent(sessionId)}/messages/${encodeURIComponent(messageId)}`,
-            { method: 'DELETE' }
-        )
-        return response as CancelMessageResponse
-    }
-
-    async abortSession(sessionId: string): Promise<void> {
-        await this.request(`/api/sessions/${encodeURIComponent(sessionId)}/abort`, {
-            method: 'POST',
-            body: JSON.stringify({})
-        })
-    }
-
-    async forkConversation(sessionId: string, messageLocalId?: string): Promise<{ sessionId: string }> {
-        return await this.request<{ sessionId: string }>(
-            `/api/sessions/${encodeURIComponent(sessionId)}/fork`,
-            {
-                method: 'POST',
-                body: JSON.stringify(messageLocalId ? { messageLocalId } : {})
-            }
-        )
-    }
-
-    async rewindConversation(sessionId: string, messageLocalId: string): Promise<{ success: true }> {
-        return await this.request<{ success: true }>(
-            `/api/sessions/${encodeURIComponent(sessionId)}/rewind`,
-            {
-                method: 'POST',
-                body: JSON.stringify({ messageLocalId })
-            }
-        )
-    }
-
-    async archiveSession(sessionId: string): Promise<void> {
-        await this.request(`/api/sessions/${encodeURIComponent(sessionId)}/archive`, {
-            method: 'POST',
-            body: JSON.stringify({})
-        })
-    }
-
-    async reopenSession(sessionId: string): Promise<ReopenSessionResponse> {
-        return await this.request<ReopenSessionResponse>(
-            `/api/sessions/${encodeURIComponent(sessionId)}/reopen`,
-            { method: 'POST', body: JSON.stringify({}) }
-        )
-    }
-
-    /**
-     * Session fork (fork-features/session-fork). Returns the new hapi session
-     * id for the forked copy.
-     */
-    /**
-     * Fork a session. Absent `forkPoint` = HEAD fork (session-level menu
-     * entry). With `forkPoint.messageId` = per-message fork (UserMessage
-     * trailing-row rewind button, capability-gated to at-message flavors).
-     * Hub computes `tailOffset` from the source session's messages table;
-     * clients don't send it.
-     */
-    async forkSession(
-        sessionId: string,
-        opts?: { forkPoint?: { messageId: string } }
-    ): Promise<ForkRouteResult> {
-        const body: Record<string, unknown> = {}
-        if (opts?.forkPoint) body.forkPoint = opts.forkPoint
-        return await this.request<ForkRouteResult>(
-            `/api/sessions/${encodeURIComponent(sessionId)}/fork`,
-            { method: 'POST', body: JSON.stringify(body) }
-        )
-    }
-
-    /**
-     * Returns per-flavor fork capability shape (see
-     * `useFlavorCapabilities`). Web uses it to capability-gate the
-     * session-level Fork menu and the per-message rewind button.
-     */
-    async getFlavorCapabilities(): Promise<{
-        capabilities: Record<string, { fork: 'none' | 'head-only' | 'at-message'; files: 'none' }>
-    }> {
-        return await this.request('/api/flavors/capabilities')
-    }
-
-    /**
-     * Migrate a legacy stream-json Cursor session to ACP. See tiann/hapi#824.
-     *
-     * Refusals (e.g. running session, missing on-disk store, target collision)
-     * are returned as structured `{ok: false, reason, message}` outcomes
-     * rather than thrown - the UI surfaces the reason to the operator and the
-     * underlying state on disk is unchanged.
-     *
-     * 401s trigger the same onUnauthorized refresh path as the shared
-     * `request()` helper so an expired JWT silently re-auths instead of
-     * hard-failing the migration dialog (Codex review #34 P2).
-     */
-    async migrateCursorSessionToAcp(sessionId: string, body: CursorMigrateToAcpRequest = {}): Promise<CursorMigrateOutcome> {
-        const path = `/api/sessions/${encodeURIComponent(sessionId)}/migrate-to-acp`
-        const tryOnce = async (overrideToken: string | null): Promise<Response> => {
-            const headers = new Headers({ 'content-type': 'application/json' })
-            const liveToken = this.getToken ? this.getToken() : null
-            const authToken = overrideToken ?? liveToken ?? this.token
-            if (authToken) {
-                headers.set('authorization', `Bearer ${authToken}`)
-            }
-            return fetch(this.buildUrl(path), { method: 'POST', headers, body: JSON.stringify(body) })
-        }
-
-        let res = await tryOnce(null)
-        if (res.status === 401 && this.onUnauthorized) {
-            const refreshed = await this.onUnauthorized()
-            if (refreshed) {
-                this.token = refreshed
-                res = await tryOnce(refreshed)
-            }
-        }
-        if (res.status === 401) {
-            throw new Error('Session expired. Please sign in again.')
-        }
-        const text = await res.text()
-        let parsed: CursorMigrateOutcome | null = null
-        try {
-            parsed = text ? JSON.parse(text) as CursorMigrateOutcome : null
-        } catch {
-            parsed = null
-        }
-        if (parsed && typeof parsed === 'object' && 'ok' in parsed) {
-            return parsed
-        }
-        throw new Error(`HTTP ${res.status} ${res.statusText}: ${text}`)
-    }
-
-    async switchSession(sessionId: string): Promise<void> {
-        await this.request(`/api/sessions/${encodeURIComponent(sessionId)}/switch`, {
-            method: 'POST',
-            body: JSON.stringify({})
-        })
-    }
-
-    async setPermissionMode(sessionId: string, mode: PermissionMode): Promise<void> {
-        await this.request(`/api/sessions/${encodeURIComponent(sessionId)}/permission-mode`, {
-            method: 'POST',
-            body: JSON.stringify({ mode })
-        })
-    }
-
-    async setCollaborationMode(sessionId: string, mode: CodexCollaborationMode): Promise<void> {
-        await this.request(`/api/sessions/${encodeURIComponent(sessionId)}/collaboration-mode`, {
-            method: 'POST',
-            body: JSON.stringify({ mode })
-        })
-    }
-
-    async setModel(sessionId: string, model: { provider: string; modelId: string } | string | null): Promise<void> {
-        await this.request(`/api/sessions/${encodeURIComponent(sessionId)}/model`, {
-            method: 'POST',
-            body: JSON.stringify({ model })
-        })
-    }
-
-    async setResumeWithSessionModel(sessionId: string, resumeWithSessionModel: boolean): Promise<void> {
-        await this.request(`/api/sessions/${encodeURIComponent(sessionId)}/resume-model`, {
-            method: 'POST',
-            body: JSON.stringify({ resumeWithSessionModel })
-        })
-    }
-
-    async setModelReasoningEffort(sessionId: string, modelReasoningEffort: string | null): Promise<void> {
-        await this.request(`/api/sessions/${encodeURIComponent(sessionId)}/model-reasoning-effort`, {
-            method: 'POST',
-            body: JSON.stringify({ modelReasoningEffort })
-        })
-    }
-
-    async setEffort(sessionId: string, effort: string | null): Promise<void> {
-        await this.request(`/api/sessions/${encodeURIComponent(sessionId)}/effort`, {
-            method: 'POST',
-            body: JSON.stringify({ effort })
-        })
-    }
-
-    async setServiceTier(sessionId: string, serviceTier: string | null): Promise<void> {
-        await this.request(`/api/sessions/${encodeURIComponent(sessionId)}/service-tier`, {
-            method: 'POST',
-            body: JSON.stringify({ serviceTier })
-        })
-    }
-
-    async approvePermission(
-        sessionId: string,
-        requestId: string,
-        modeOrOptions?: 'default' | 'acceptEdits' | 'auto' | 'bypassPermissions' | 'plan' | {
-            mode?: 'default' | 'acceptEdits' | 'auto' | 'bypassPermissions' | 'plan'
-            allowTools?: string[]
-            decision?: 'approved' | 'approved_for_session' | 'denied' | 'abort'
-            answers?: Record<string, string[]> | Record<string, { answers: string[] }>
-        }
-    ): Promise<void> {
-        const body = typeof modeOrOptions === 'string' || modeOrOptions === undefined
-            ? { mode: modeOrOptions }
-            : modeOrOptions
-        await this.request(`/api/sessions/${encodeURIComponent(sessionId)}/permissions/${encodeURIComponent(requestId)}/approve`, {
-            method: 'POST',
-            body: JSON.stringify(body)
-        })
-    }
-
-    async denyPermission(
-        sessionId: string,
-        requestId: string,
-        options?: {
-            decision?: 'approved' | 'approved_for_session' | 'denied' | 'abort'
-        }
-    ): Promise<void> {
-        await this.request(`/api/sessions/${encodeURIComponent(sessionId)}/permissions/${encodeURIComponent(requestId)}/deny`, {
-            method: 'POST',
-            body: JSON.stringify(options ?? {})
-        })
-    }
-
-    async getMachines(): Promise<MachinesResponse> {
-        return await this.request<MachinesResponse>('/api/machines')
-    }
-
-    /** Pass an empty string to clear the custom name and fall back to the hostname. */
-    async renameMachine(machineId: string, displayName: string): Promise<void> {
-        await this.request(`/api/machines/${encodeURIComponent(machineId)}`, {
-            method: 'PATCH',
-            body: JSON.stringify({ displayName })
-        })
-    }
-
-    /** fork(machine-icons)：名字与设备图标一次提交；省略的字段不动，null 清掉图标。 */
-    async updateMachine(machineId: string, patch: MachinePresentationPatch): Promise<void> {
-        await this.request(`/api/machines/${encodeURIComponent(machineId)}`, {
-            method: 'PATCH',
-            body: JSON.stringify(patch)
-        })
-    }
-
-    async getSqliteStorageUsage(): Promise<SqliteStorageUsageResponse> {
-        return await this.request<SqliteStorageUsageResponse>('/api/storage/sqlite')
-    }
-
-    async listImportableSessions(
-        machineId: string,
-        provider: import('@hapi/protocol/apiTypes').ImportableSessionProvider,
-        options?: { cursor?: string; cwd?: string; query?: string }
-    ): Promise<import('@hapi/protocol/apiTypes').ImportableSessionsPage> {
-        const query = new URLSearchParams({ provider })
-        if (options?.cursor) query.set('cursor', options.cursor)
-        if (options?.cwd) query.set('cwd', options.cwd)
-        if (options?.query) query.set('query', options.query)
-        return await this.request(`/api/machines/${encodeURIComponent(machineId)}/importable-sessions?${query}`)
-    }
-
-    async importExistingSession(
-        machineId: string,
-        provider: import('@hapi/protocol/apiTypes').ImportableSessionProvider,
-        externalSessionId: string
-    ): Promise<import('@hapi/protocol/apiTypes').ImportExistingSessionResponse> {
-        return await this.request(`/api/machines/${encodeURIComponent(machineId)}/importable-sessions/${provider}/${encodeURIComponent(externalSessionId)}`, { method: 'POST' })
-    }
-
-    async getUsageSummary(
-        range: '7d' | '30d' | 'all' = '7d',
-        timeZone: string = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
-    ): Promise<UsageSummaryResponse> {
-        const params = new URLSearchParams({
-            range,
-            timeZone
-        })
-        return await this.request<UsageSummaryResponse>(`/api/usage/summary?${params.toString()}`)
-    }
-
-    async listMachineDirectory(
-        machineId: string,
-        path: string,
-        options?: { includeHidden?: boolean }
-    ): Promise<MachineListDirectoryResponse> {
-        return await this.request<MachineListDirectoryResponse>(
-            `/api/machines/${encodeURIComponent(machineId)}/list-directory`,
-            {
-                method: 'POST',
-                body: JSON.stringify({ path, includeHidden: options?.includeHidden === true })
-            }
-        )
-    }
-
-    async createMachineDirectory(
-        machineId: string,
-        parentPath: string,
-        name: string
-    ): Promise<import('@hapi/protocol/apiTypes').MachineCreateDirectoryResponse> {
-        return await this.request(
-            `/api/machines/${encodeURIComponent(machineId)}/create-directory`,
-            {
-                method: 'POST',
-                body: JSON.stringify({ parentPath, name })
-            }
-        )
-    }
-
-    async checkMachinePathsExists(
-        machineId: string,
-        paths: string[]
-    ): Promise<MachinePathsExistsResponse> {
-        return await this.request<MachinePathsExistsResponse>(
-            `/api/machines/${encodeURIComponent(machineId)}/paths/exists`,
-            {
-                method: 'POST',
-                body: JSON.stringify({ paths })
-            }
-        )
-    }
-
-    async spawnSession(
-        machineId: string,
-        directory: string,
-        agent?: AgentFlavor,
-        model?: string,
-        modelReasoningEffort?: string,
-        yolo?: boolean,
-        sessionType?: 'simple' | 'worktree',
-        worktreeName?: string,
-        effort?: string,
-        permissionMode?: PermissionMode,
-        serviceTier?: 'fast' | 'standard',
-        collaborationMode?: CodexCollaborationMode,
-        copilotAgentMode?: CopilotAgentMode,
-        startingMode?: 'remote' | 'pty',
-        // fork(claude-proxy-models)：为这一个 Claude 会话指定 cc-switch 供应商。
-        ccSwitchProviderId?: string
-    ): Promise<SpawnResponse> {
-        // The hub gives the runner 30 s to answer a spawn. Without a client-side
-        // limit a stalled hub left the form on "Creating…" forever.
-        const signal = AbortSignal.timeout(SPAWN_REQUEST_TIMEOUT_MS)
-        try {
-            return await this.request<SpawnResponse>(`/api/machines/${encodeURIComponent(machineId)}/spawn`, {
-                method: 'POST',
-                body: JSON.stringify({
-                    directory,
-                    agent,
-                    model,
-                    modelReasoningEffort,
-                    yolo,
-                    sessionType,
-                    worktreeName,
-                    effort,
-                    permissionMode,
-                    serviceTier,
-                    collaborationMode,
-                    copilotAgentMode,
-                    startingMode,
-                    ccSwitchProviderId
-                }),
-                signal
-            })
-        } catch (error) {
-            if (signal.aborted) {
-                throw new Error(`No response from the hub after ${SPAWN_REQUEST_TIMEOUT_MS / 1000} s. The session may still start; check the session list before trying again.`)
-            }
-            throw error
-        }
-    }
-
-    async getMachineAgyModels(machineId: string): Promise<AgyModelsResponse> {
-        return await this.request<AgyModelsResponse>(
-            `/api/machines/${encodeURIComponent(machineId)}/agy-models`
-        )
-    }
-
-    async getMachineCodexModels(machineId: string): Promise<CodexModelsResponse> {
-        return await this.request<CodexModelsResponse>(
-            `/api/machines/${encodeURIComponent(machineId)}/codex-models`
-        )
-    }
-
-    async getMachineCcSwitchProviders(machineId: string): Promise<ListCcSwitchProvidersResponse> {
-        return await this.request<ListCcSwitchProvidersResponse>(
-            `/api/machines/${encodeURIComponent(machineId)}/cc-switch/providers`
-        )
-    }
-
-    // fork(claude-proxy-models)：Claude 会话经代理时的动态模型目录（hub 全局一份）。
-    async getClaudeProxyModels(refresh: boolean = false): Promise<ClaudeProxyModelsResponse> {
-        return await this.request<ClaudeProxyModelsResponse>(
-            refresh ? '/api/claude-proxy-models?refresh=1' : '/api/claude-proxy-models'
-        )
-    }
-
-    async getSessionCodexModels(sessionId: string): Promise<CodexModelsResponse> {
-        return await this.request<CodexModelsResponse>(
-            `/api/sessions/${encodeURIComponent(sessionId)}/codex-models`
-        )
-    }
-
-    async getSessionOpencodeModels(sessionId: string): Promise<OpencodeModelsResponse> {
-        return await this.request<OpencodeModelsResponse>(
-            `/api/sessions/${encodeURIComponent(sessionId)}/opencode-models`
-        )
-    }
-
-    async getSessionOmpModels(sessionId: string): Promise<OmpModelsResponse> {
-        return await this.request<OmpModelsResponse>(
-            `/api/sessions/${encodeURIComponent(sessionId)}/omp-models`
-        )
-    }
-
-    async getSessionOmpThinkingOptions(sessionId: string): Promise<OmpThinkingOptionsResponse> {
-        return await this.request<OmpThinkingOptionsResponse>(
-            `/api/sessions/${encodeURIComponent(sessionId)}/omp-thinking-options`
-        )
-    }
-
-    async cycleSessionOmpModel(sessionId: string): Promise<CycleOmpModelResponse> {
-        return await this.request<CycleOmpModelResponse>(
-            `/api/sessions/${encodeURIComponent(sessionId)}/omp-model-cycle`,
-            { method: 'POST' }
-        )
-    }
-
-    async getMachineOmpLoginProviders(machineId: string): Promise<OmpLoginProvidersResponse> {
-        return await this.request<OmpLoginProvidersResponse>(
-            `/api/machines/${encodeURIComponent(machineId)}/omp-login-providers`
-        )
-    }
-
-    async startMachineOmpLogin(machineId: string, providerId: string): Promise<StartOmpLoginResponse> {
-        return await this.request<StartOmpLoginResponse>(
-            `/api/machines/${encodeURIComponent(machineId)}/omp-login`,
-            {
-                method: 'POST',
-                body: JSON.stringify({ providerId })
-            }
-        )
-    }
-
-    async respondMachineOmpLoginInput(
-        machineId: string,
-        flowId: string,
-        value: string
-    ): Promise<RespondOmpLoginInputResponse> {
-        return await this.request<RespondOmpLoginInputResponse>(
-            `/api/machines/${encodeURIComponent(machineId)}/omp-login-input`,
-            {
-                method: 'POST',
-                body: JSON.stringify({ flowId, value })
-            }
-        )
-    }
-
-    async getSessionOmpExtensionUiRequest(
-        sessionId: string,
-        requestId: string
-    ): Promise<GetOmpExtensionUiResponse> {
-        return await this.request<GetOmpExtensionUiResponse>(
-            `/api/sessions/${encodeURIComponent(sessionId)}/omp-extension-ui/${encodeURIComponent(requestId)}`,
-            { cache: 'no-store' }
-        )
-    }
-
-    async getSessionOpencodeReasoningEffortOptions(sessionId: string): Promise<OpencodeReasoningEffortResponse> {
-        return await this.request<OpencodeReasoningEffortResponse>(
-            `/api/sessions/${encodeURIComponent(sessionId)}/opencode-reasoning-effort-options`
-        )
-    }
-
-    async getSessionCursorModels(sessionId: string): Promise<CursorModelsResponse> {
-        return await this.request<CursorModelsResponse>(
-            `/api/sessions/${encodeURIComponent(sessionId)}/cursor-models`
-        )
-    }
-
-    /** Generic Pi session endpoint — replaces per-method wrappers. */
-    async callPiEndpoint<T = unknown>(sessionId: string, path: string, init?: RequestInit): Promise<T> {
-        return await this.request<T>(
-            `/api/sessions/${encodeURIComponent(sessionId)}/pi-${path}`,
-            init
-        )
-    }
-
-    async getMachineCursorModels(machineId: string): Promise<CursorModelsResponse> {
-        return await this.request<CursorModelsResponse>(
-            `/api/machines/${encodeURIComponent(machineId)}/cursor-models`
-        )
-    }
-
-    async getMachineOpencodeModelsForCwd(machineId: string, cwd: string): Promise<OpencodeModelsResponse> {
-        return await this.request<OpencodeModelsResponse>(
-            `/api/machines/${encodeURIComponent(machineId)}/opencode-models?cwd=${encodeURIComponent(cwd)}`
-        )
-    }
-
-    async getMachineGrokModelsForCwd(machineId: string, cwd: string): Promise<GrokModelsResponse> {
-        return await this.request<GrokModelsResponse>(
-            `/api/machines/${encodeURIComponent(machineId)}/grok-models?cwd=${encodeURIComponent(cwd)}`
-        )
-    }
-
-    async getMachineOmpModelsForCwd(machineId: string, cwd: string): Promise<OmpModelsResponse> {
-        return await this.request<OmpModelsResponse>(
-            `/api/machines/${encodeURIComponent(machineId)}/omp-models?cwd=${encodeURIComponent(cwd)}`
-        )
-    }
-
-    async getMachineCopilotModelsForCwd(machineId: string, cwd: string): Promise<CopilotModelsResponse> {
-        return await this.request<CopilotModelsResponse>(
-            `/api/machines/${encodeURIComponent(machineId)}/copilot-models?cwd=${encodeURIComponent(cwd)}`
-        )
-    }
-
-    async getSessionGrokModels(sessionId: string): Promise<GrokModelsResponse> {
-        return await this.request<GrokModelsResponse>(
-            `/api/sessions/${encodeURIComponent(sessionId)}/grok-models`
-        )
-    }
-
-    async getSessionCopilotModels(sessionId: string): Promise<CopilotModelsResponse> {
-        return await this.request<CopilotModelsResponse>(
-            `/api/sessions/${encodeURIComponent(sessionId)}/copilot-models`
-        )
-    }
-
-    async setCopilotAgentMode(sessionId: string, mode: CopilotAgentMode): Promise<void> {
-        await this.request(`/api/sessions/${encodeURIComponent(sessionId)}/copilot-agent-mode`, {
-            method: 'POST',
-            body: JSON.stringify({ mode })
-        })
-    }
-
-    async getSessionGrokReasoningEffortOptions(sessionId: string): Promise<GrokReasoningEffortResponse> {
-        return await this.request<GrokReasoningEffortResponse>(
-            `/api/sessions/${encodeURIComponent(sessionId)}/grok-reasoning-effort-options`
-        )
-    }
-
-    async getSlashCommands(sessionId: string): Promise<SlashCommandsResponse> {
-        return await this.request<SlashCommandsResponse>(
-            `/api/sessions/${encodeURIComponent(sessionId)}/slash-commands`
-        )
-    }
-
-    async getSkills(sessionId: string): Promise<SkillsResponse> {
-        return await this.request<SkillsResponse>(
-            `/api/sessions/${encodeURIComponent(sessionId)}/skills`
-        )
-    }
-
-    async renameSession(sessionId: string, name: string): Promise<void> {
-        await this.request(`/api/sessions/${encodeURIComponent(sessionId)}`, {
-            method: 'PATCH',
-            body: JSON.stringify({ name })
-        })
-    }
-
-    async deleteSession(sessionId: string): Promise<void> {
-        await this.request(`/api/sessions/${encodeURIComponent(sessionId)}`, {
-            method: 'DELETE'
-        })
-    }
-
-    /*
-     * Scratchlist v2 (tiann/hapi#893).
-     *
-     * The hub is the durable store; localStorage is demoted to an
-     * offline cache. Mutations return the canonical entry so optimistic
-     * updates can reconcile with the hub-stamped `updatedAt`.
-     */
-
-    async getScratchlist(sessionId: string): Promise<{
-        entries: Array<{
-            entryId: string
-            text: string
-            createdAt: number
-            updatedAt: number
-            attachments: import('@hapi/protocol').ScratchlistAttachmentMetadata[]
-        }>
-    }> {
-        return await this.request(
-            `/api/sessions/${encodeURIComponent(sessionId)}/scratchlist`
-        )
-    }
-
-    async uploadScratchlistAttachment(
-        sessionId: string,
-        filename: string,
-        content: string,
-        mimeType: string
-    ): Promise<{
-        success: boolean
-        attachment?: import('@hapi/protocol').ScratchlistAttachmentMetadata
-        error?: string
-        code?: string
-    }> {
-        return await this.request(
-            `/api/sessions/${encodeURIComponent(sessionId)}/scratchlist/upload`,
-            {
-                method: 'POST',
-                body: JSON.stringify({ filename, content, mimeType })
-            }
-        )
-    }
-
-    async fetchScratchlistAttachmentBlob(sessionId: string, attachmentId: string): Promise<Blob> {
-        const headers = new Headers()
-        const liveToken = this.getToken ? this.getToken() : null
-        const authToken = liveToken ?? this.token
-        if (authToken) {
-            headers.set('authorization', `Bearer ${authToken}`)
-        }
-        const response = await fetch(
-            this.buildUrl(
-                `/api/sessions/${encodeURIComponent(sessionId)}/scratchlist/attachments/${encodeURIComponent(attachmentId)}`
-            ),
-            { headers }
-        )
-        if (!response.ok) {
-            throw new ApiError(`Failed to fetch scratchlist attachment (${response.status})`, response.status)
-        }
-        return await response.blob()
-    }
-
-    async deleteScratchlistAttachment(sessionId: string, attachmentId: string): Promise<void> {
-        await this.request(
-            `/api/sessions/${encodeURIComponent(sessionId)}/scratchlist/attachments/${encodeURIComponent(attachmentId)}`,
-            { method: 'DELETE' }
-        )
-    }
-
-    async createScratchlistEntry(
-        sessionId: string,
-        body: {
-            text: string
-            entryId?: string
-            createdAt?: number
-            attachments?: import('@hapi/protocol').ScratchlistAttachmentMetadata[]
-        }
-    ): Promise<{
-        entry: {
-            entryId: string
-            text: string
-            createdAt: number
-            updatedAt: number
-            attachments: import('@hapi/protocol').ScratchlistAttachmentMetadata[]
-        }
-    }> {
-        return await this.request(
-            `/api/sessions/${encodeURIComponent(sessionId)}/scratchlist`,
-            {
-                method: 'POST',
-                body: JSON.stringify(body)
-            }
-        )
-    }
-
-    async updateScratchlistEntry(
-        sessionId: string,
-        entryId: string,
-        text: string
-    ): Promise<{
-        entry: {
-            entryId: string
-            text: string
-            createdAt: number
-            updatedAt: number
-            attachments: import('@hapi/protocol').ScratchlistAttachmentMetadata[]
-        }
-    }> {
-        return await this.request(
-            `/api/sessions/${encodeURIComponent(sessionId)}/scratchlist/${encodeURIComponent(entryId)}`,
-            {
-                method: 'PUT',
-                body: JSON.stringify({ text })
-            }
-        )
-    }
-
-    async deleteScratchlistEntry(sessionId: string, entryId: string): Promise<void> {
-        await this.request(
-            `/api/sessions/${encodeURIComponent(sessionId)}/scratchlist/${encodeURIComponent(entryId)}`,
-            { method: 'DELETE' }
-        )
-    }
-
-    async fetchVoiceToken(options?: { customAgentId?: string; customApiKey?: string; voiceId?: string }): Promise<{
-        allowed: boolean
-        token?: string
-        agentId?: string
-        error?: string
-    }> {
-        return await this.request('/api/voice/token', {
-            method: 'POST',
-            body: JSON.stringify(options || {})
-        })
-    }
-
-    async fetchVoices(): Promise<{ voices: Array<{ id: string; name: string; previewUrl: string; category: string }> }> {
-        return await this.request('/api/voice/voices')
-    }
-
-    async sendVoiceTelemetry(event: {
-        stage: string
-        message: string
-        sessionId?: string
-        voiceId?: string
-        language?: string
-        details?: Record<string, unknown>
-    }): Promise<void> {
-        await this.request('/api/voice/telemetry', {
-            method: 'POST',
-            body: JSON.stringify(event)
-        })
-    }
-
-    /** Return the current auth token (for WebSocket query-param auth). */
-    getAuthToken(): string | null {
-        return this.getToken ? this.getToken() : this.token
-    }
-
-    async fetchVoiceBackend(): Promise<{ backend: string | null; backends: string[] }> {
-        return await this.request('/api/voice/backend')
-    }
-
-    async fetchTranscriptionProviders(): Promise<{ providers: TranscriptionProviderInfo[] }> {
-        return await this.request('/api/voice/transcription/providers')
-    }
-
-    async transcribeVoice(options: {
-        file: File
-        provider: TranscriptionProvider
-        mode: TranscriptionMode
-        language?: string
-    }): Promise<{ text: string; language?: string }> {
-        const form = new FormData()
-        form.set('file', options.file)
-        form.set('provider', options.provider)
-        form.set('mode', options.mode)
-        if (options.language) form.set('language', options.language)
-        return await this.request('/api/voice/transcription', { method: 'POST', body: form })
-    }
-
-    async fetchRealtimeTranscriptionToken(
-        provider: 'openai' | 'elevenlabs' | 'deepgram',
-        language?: string,
-        signal?: AbortSignal
-    ): Promise<{ token: string }> {
-        return await this.request('/api/voice/transcription/realtime-token', {
-            method: 'POST',
-            signal,
-            body: JSON.stringify({ provider, language })
-        })
-    }
-
-    async fetchQwenToken(): Promise<{
-        allowed: boolean
-        wsUrl?: string
-        error?: string
-    }> {
-        return await this.request('/api/voice/qwen-token', {
-            method: 'POST',
-            body: JSON.stringify({})
-        })
-    }
-
-    // fork(voice-assistant): look up a session / draft an instruction; neither writes to the session.
-    async askVoiceSessionStatus(body: { sessionId: string; question: string; history?: VoiceTurn[] }): Promise<VoiceSessionQaResponse> {
-        return await this.request('/api/voice/session-qa', {
-            method: 'POST',
-            body: JSON.stringify(body)
-        })
-    }
-
-    async getVoiceTtsStatus(): Promise<VoiceTtsStatus> {
-        return await this.request('/api/voice/tts/status')
-    }
-
-    /** Streamed PCM (s16le mono, rate in `x-sample-rate`) for one piece of text, spoken by the hub's own voice. */
-    async openVoiceTtsStream(text: string, signal?: AbortSignal, voice?: string | null): Promise<Response> {
-        const trimmedVoice = voice?.trim() || undefined
-        const send = (token: string | null) => fetch(this.buildUrl('/api/voice/tts'), {
-            method: 'POST',
-            headers: {
-                'content-type': 'application/json',
-                ...(token ? { authorization: `Bearer ${token}` } : {})
-            },
-            body: JSON.stringify(trimmedVoice ? { text, voice: trimmedVoice } : { text }),
-            signal
-        })
-        let res = await send((this.getToken ? this.getToken() : null) ?? this.token)
-        if (res.status === 401 && this.onUnauthorized) {
-            const refreshed = await this.onUnauthorized()
-            if (refreshed) {
-                this.token = refreshed
-                res = await send(refreshed)
-            }
-        }
-        if (!res.ok || !res.body) {
-            throw new ApiError(`HTTP ${res.status} ${res.statusText}`, res.status)
-        }
-        return res
-    }
-
-    async getVoiceSpeakerStatus(): Promise<VoiceSpeakerStatus> {
-        return await this.request('/api/voice/speaker/status')
-    }
-
-    /** Raw 16 kHz s16le mono PCM of the user reading a passage; the hub keeps only the voiceprint. */
-    async enrollVoiceSpeaker(pcm: Uint8Array): Promise<VoiceSpeakerEnrollResponse> {
-        return await this.request('/api/voice/speaker/enroll', {
-            method: 'POST',
-            headers: { 'content-type': 'application/octet-stream' },
-            body: pcm.slice().buffer
-        })
-    }
-
-    async clearVoiceSpeaker(): Promise<void> {
-        await this.request('/api/voice/speaker', { method: 'DELETE' })
-    }
-
-    async prepareVoiceInstruction(body: {
-        currentSessionId: string
-        utterance: string
-        targetHint?: string
-        history?: VoiceTurn[]
-    }): Promise<VoiceInstructionPrepareResponse> {
-        return await this.request('/api/voice/instruction/prepare', {
-            method: 'POST',
-            body: JSON.stringify(body)
-        })
-    }
-
-    async fetchGeminiToken(): Promise<{
-        allowed: boolean
-        apiKey?: string
-        wsUrl?: string
-        baseUrl?: string
-        error?: string
-    }> {
-        return await this.request('/api/voice/gemini-token', {
-            method: 'POST',
-            body: JSON.stringify({})
-        })
-    }
+ private token: string
+ private readonly baseUrl: string | null
+ private readonly getToken: (() => string | null) | null
+ private readonly onUnauthorized: (() => Promise<string | null>) | null
+
+ constructor(token: string, options?: ApiClientOptions) {
+  this.token = token
+  this.baseUrl = options?.baseUrl ?? null
+  this.getToken = options?.getToken ?? null
+  this.onUnauthorized = options?.onUnauthorized ?? null
+ }
+
+ private buildUrl(path: string): string {
+  if (!this.baseUrl) {
+   return path
+  }
+  try {
+   return new URL(path, this.baseUrl).toString()
+  } catch {
+   return path
+  }
+ }
+
+ private async request<T>(
+  path: string,
+  init?: RequestInit,
+  attempt: number = 0,
+  overrideToken?: string | null
+ ): Promise<T> {
+  const headers = new Headers(init?.headers)
+  const liveToken = this.getToken ? this.getToken() : null
+  const authToken = overrideToken !== undefined
+   ? (overrideToken ?? (liveToken ?? this.token))
+   : (liveToken ?? this.token)
+  if (authToken) {
+   headers.set('authorization', `Bearer ${authToken}`)
+  }
+  if (init?.body !== undefined && !(init.body instanceof FormData) && !headers.has('content-type')) {
+   headers.set('content-type', 'application/json')
+  }
+
+  const res = await fetch(this.buildUrl(path), {
+   ...init,
+   headers
+  })
+
+  if (res.status === 401) {
+   if (attempt === 0 && this.onUnauthorized) {
+    const refreshed = await this.onUnauthorized()
+    if (refreshed) {
+     this.token = refreshed
+     return await this.request<T>(path, init, attempt + 1, refreshed)
+    }
+   }
+   throw new Error('Session expired. Please sign in again.')
+  }
+
+  if (!res.ok) {
+   const body = await res.text().catch(() => '')
+   const code = parseErrorCode(body)
+   throw new ApiError(
+    `HTTP ${res.status} ${res.statusText}: ${body}`,
+    res.status,
+    code,
+    body || undefined
+   )
+  }
+
+  return await res.json() as T
+ }
+
+ async authenticate(auth: { initData: string } | { accessToken: string } | { username: string; password: string }): Promise<AuthResponse> {
+  const res = await fetch(this.buildUrl('/api/auth'), {
+   method: 'POST',
+   headers: { 'content-type': 'application/json' },
+   body: JSON.stringify(auth)
+  })
+
+  if (!res.ok) {
+   const body = await res.text().catch(() => '')
+   const code = parseErrorCode(body)
+   const detail = body ? `: ${body}` : ''
+   throw new ApiError(`Auth failed: HTTP ${res.status} ${res.statusText}${detail}`, res.status, code, body || undefined)
+  }
+
+  return await res.json() as AuthResponse
+ }
+
+ async refreshAuth(): Promise<AuthResponse> {
+  return await this.request<AuthResponse>('/api/auth/refresh', { method: 'POST' })
+ }
+
+ async bind(auth: { initData: string; accessToken: string }): Promise<AuthResponse> {
+  const res = await fetch(this.buildUrl('/api/bind'), {
+   method: 'POST',
+   headers: { 'content-type': 'application/json' },
+   body: JSON.stringify(auth)
+  })
+
+  if (!res.ok) {
+   const body = await res.text().catch(() => '')
+   const code = parseErrorCode(body)
+   const detail = body ? `: ${body}` : ''
+   throw new ApiError(`Bind failed: HTTP ${res.status} ${res.statusText}${detail}`, res.status, code, body || undefined)
+  }
+
+  return await res.json() as AuthResponse
+ }
+
+ async getSessions(): Promise<SessionsResponse> {
+  return await this.request<SessionsResponse>('/api/sessions')
+ }
+
+ async getPushVapidPublicKey(): Promise<PushVapidPublicKeyResponse> {
+  return await this.request<PushVapidPublicKeyResponse>('/api/push/vapid-public-key')
+ }
+
+ async subscribePushNotifications(payload: PushSubscriptionPayload): Promise<void> {
+  await this.request('/api/push/subscribe', {
+   method: 'POST',
+   body: JSON.stringify(payload)
+  })
+ }
+
+ async syncCodexSession(payload?: CodexDesktopSyncRequest): Promise<CodexDesktopScriptResponse> {
+  // 中文注释：当前按钮语义已改为“从 Codex 导入到 Hapi”；这里提交的是本地 transcript 对应的 Codex thread ID 列表。
+  return await this.request<CodexDesktopScriptResponse>('/api/codex/sync-session', {
+   method: 'POST',
+   ...(payload ? { body: JSON.stringify(payload) } : {})
+  })
+ }
+
+ async getCodexSessions(cwd?: string | null, machineId?: string | null): Promise<CodexLocalSessionsResponse> {
+  const params = new URLSearchParams()
+  if (cwd?.trim()) params.set('cwd', cwd.trim())
+  if (machineId?.trim()) params.set('machineId', machineId.trim())
+  const query = params.size ? `?${params.toString()}` : ''
+  return await this.request<CodexLocalSessionsResponse>(`/api/codex/sessions${query}`)
+ }
+
+ async getPiSessions(cwd?: string | null, machineId?: string | null): Promise<PiLocalSessionsResponse> {
+  const params = new URLSearchParams()
+  if (cwd?.trim()) params.set('cwd', cwd.trim())
+  if (machineId?.trim()) params.set('machineId', machineId.trim())
+  const query = params.size ? `?${params.toString()}` : ''
+  return await this.request<PiLocalSessionsResponse>(`/api/pi/sessions${query}`)
+ }
+
+ async importPiSessions(payload: { sessionIds: string[]; cwd?: string | null; machineId?: string | null }): Promise<PiImportSessionsResponse> {
+  return await this.request<PiImportSessionsResponse>('/api/pi/import-sessions', {
+   method: 'POST',
+   body: JSON.stringify(payload)
+  })
+ }
+
+ async archiveCodexSession(sessionId: string, machineId?: string | null): Promise<CodexArchiveSessionResponse> {
+  return await this.request<CodexArchiveSessionResponse>('/api/codex/archive-session', {
+   method: 'POST',
+   body: JSON.stringify({ sessionId, machineId: machineId ?? undefined })
+  })
+ }
+
+ async getCodexDesktopStatus(): Promise<CodexDesktopStatusResponse> {
+  return await this.request<CodexDesktopStatusResponse>('/api/codex/status')
+ }
+
+ async getCodexDuplicateSessions(payload: CodexDesktopSyncRequest): Promise<CodexDuplicateSessionsResponse> {
+  // 中文注释：重复会话检测只传本次用户勾选导入的 codexSessionId，避免把未选中的历史会话也纳入提示。
+  return await this.request<CodexDuplicateSessionsResponse>('/api/codex/duplicate-sessions', {
+   method: 'POST',
+   body: JSON.stringify(payload)
+  })
+ }
+
+ async mergeCodexDuplicateSessions(payload: CodexDesktopSyncRequest): Promise<CodexMergeDuplicateSessionsResponse> {
+  // 中文注释：真正执行合并时沿用同一批选中 codexSessionId，保证检测范围与执行范围一致。
+  return await this.request<CodexMergeDuplicateSessionsResponse>('/api/codex/merge-duplicate-sessions', {
+   method: 'POST',
+   body: JSON.stringify(payload)
+  })
+ }
+
+ async restartCodexDesktop(): Promise<CodexDesktopScriptResponse> {
+  return await this.request<CodexDesktopScriptResponse>('/api/codex/restart-desktop', {
+   method: 'POST'
+  })
+ }
+
+ async unsubscribePushNotifications(payload: PushUnsubscribePayload): Promise<void> {
+  await this.request('/api/push/subscribe', {
+   method: 'DELETE',
+   body: JSON.stringify(payload)
+  })
+ }
+
+ async setVisibility(payload: VisibilityPayload): Promise<void> {
+  await this.request('/api/visibility', {
+   method: 'POST',
+   body: JSON.stringify(payload)
+  })
+ }
+
+ async reportClientError(report: ClientErrorReport): Promise<void> {
+  await this.request('/api/client-errors', {
+   method: 'POST',
+   body: JSON.stringify(report)
+  })
+ }
+
+ async getSession(sessionId: string): Promise<SessionResponse> {
+  return await this.request<SessionResponse>(`/api/sessions/${encodeURIComponent(sessionId)}`)
+ }
+
+ async getSessionExport(sessionId: string, options?: { signal?: AbortSignal }): Promise<HapiSessionExport> {
+  return await this.request<HapiSessionExport>(
+   `/api/sessions/${encodeURIComponent(sessionId)}/export`,
+   { signal: options?.signal }
+  )
+ }
+
+ async getMessages(
+  sessionId: string,
+  options: {
+   orderVersion?: 1
+   beforeSeq?: number | null
+   beforeAt?: number | null
+   beforeOrder?: number | null
+   beforeEventOrder?: number | null
+   afterSeq?: number | null
+   afterAt?: number | null
+   afterOrder?: number | null
+   afterEventOrder?: number | null
+   untilSeq?: number | null
+   untilAt?: number | null
+   untilOrder?: number | null
+   untilEventOrder?: number | null
+   epoch?: number | null
+   limit?: number
+   turns?: number
+   turnId?: string
+   signal?: AbortSignal
+  }
+ ): Promise<MessagesResponse> {
+  const params = new URLSearchParams()
+  params.set('orderVersion', `${options.orderVersion ?? 1}`)
+  if (options.turnId !== undefined) {
+   params.set('turnId', options.turnId)
+  }
+  if (options.turns !== undefined) {
+   params.set('turns', `${options.turns}`)
+  }
+  if (options.beforeAt !== undefined && options.beforeAt !== null) {
+   params.set('beforeAt', `${options.beforeAt}`)
+  }
+  if (options.beforeOrder !== undefined && options.beforeOrder !== null) {
+   params.set('beforeOrder', `${options.beforeOrder}`)
+  }
+  if (options.beforeEventOrder !== undefined && options.beforeEventOrder !== null) {
+   params.set('beforeEventOrder', `${options.beforeEventOrder}`)
+  }
+  if (options.beforeSeq !== undefined && options.beforeSeq !== null) {
+   params.set('beforeSeq', `${options.beforeSeq}`)
+  }
+  if (options.afterAt !== undefined && options.afterAt !== null) {
+   params.set('afterAt', `${options.afterAt}`)
+  }
+  if (options.afterOrder !== undefined && options.afterOrder !== null) {
+   params.set('afterOrder', `${options.afterOrder}`)
+  }
+  if (options.afterEventOrder !== undefined && options.afterEventOrder !== null) {
+   params.set('afterEventOrder', `${options.afterEventOrder}`)
+  }
+  if (options.afterSeq !== undefined && options.afterSeq !== null) {
+   params.set('afterSeq', `${options.afterSeq}`)
+  }
+  if (options.untilAt !== undefined && options.untilAt !== null) {
+   params.set('untilAt', `${options.untilAt}`)
+  }
+  if (options.untilOrder !== undefined && options.untilOrder !== null) {
+   params.set('untilOrder', `${options.untilOrder}`)
+  }
+  if (options.untilEventOrder !== undefined && options.untilEventOrder !== null) {
+   params.set('untilEventOrder', `${options.untilEventOrder}`)
+  }
+  if (options.untilSeq !== undefined && options.untilSeq !== null) {
+   params.set('untilSeq', `${options.untilSeq}`)
+  }
+  if (options.epoch !== undefined && options.epoch !== null) {
+   params.set('epoch', `${options.epoch}`)
+  }
+  if (options.limit !== undefined && options.limit !== null) {
+   params.set('limit', `${options.limit}`)
+  }
+  const qs = params.toString()
+  const url = `/api/sessions/${encodeURIComponent(sessionId)}/messages${qs ? `?${qs}` : ''}`
+  return await this.request<MessagesResponse>(url, { signal: options.signal })
+ }
+
+ async getGitStatus(sessionId: string): Promise<GitCommandResponse> {
+  return await this.request<GitCommandResponse>(`/api/sessions/${encodeURIComponent(sessionId)}/git-status`)
+ }
+
+ async getGitDiffNumstat(sessionId: string, staged: boolean): Promise<GitCommandResponse> {
+  const params = new URLSearchParams()
+  params.set('staged', staged ? 'true' : 'false')
+  return await this.request<GitCommandResponse>(`/api/sessions/${encodeURIComponent(sessionId)}/git-diff-numstat?${params.toString()}`)
+ }
+
+ async getGitDiffFile(sessionId: string, path: string, staged?: boolean): Promise<GitCommandResponse> {
+  const params = new URLSearchParams()
+  params.set('path', path)
+  if (staged !== undefined) {
+   params.set('staged', staged ? 'true' : 'false')
+  }
+  return await this.request<GitCommandResponse>(`/api/sessions/${encodeURIComponent(sessionId)}/git-diff-file?${params.toString()}`)
+ }
+
+ async searchSessionFiles(sessionId: string, query: string, limit?: number): Promise<FileSearchResponse> {
+  const params = new URLSearchParams()
+  if (query) {
+   params.set('query', query)
+  }
+  if (limit !== undefined) {
+   params.set('limit', `${limit}`)
+  }
+  const qs = params.toString()
+  return await this.request<FileSearchResponse>(`/api/sessions/${encodeURIComponent(sessionId)}/files${qs ? `?${qs}` : ''}`)
+ }
+
+ async getGeneratedImageBlob(sessionId: string, imageId: string, options: GeneratedBlobFetchOptions = {}): Promise<Blob> {
+  const url = this.buildUrl(`/api/sessions/${encodeURIComponent(sessionId)}/generated-images/${encodeURIComponent(imageId)}`)
+  return await this.fetchGeneratedBlob(url, options)
+ }
+
+ async getGeneratedFileBlob(sessionId: string, fileId: string, options: GeneratedBlobFetchOptions = {}): Promise<Blob> {
+  const url = this.buildUrl(`/api/sessions/${encodeURIComponent(sessionId)}/generated-files/${encodeURIComponent(fileId)}`)
+  return await this.fetchGeneratedBlob(url, options)
+ }
+
+ /**
+  * Request a short-lived, single-file download ticket for native browser
+  * downloading (`<a href download>`), riding out `202` upload/pull progress
+  * states until the hub holds the ready file on disk. Returns `null` when
+  * the hub runs without a blob store (`501`) so callers can fall back to
+  * `getGeneratedFileBlob`.
+  */
+ async acquireGeneratedFileDownloadTicket(
+  sessionId: string,
+  fileId: string,
+  options: GeneratedBlobFetchOptions = {}
+ ): Promise<{ url: string; fileName: string; mimeType: string; size: number; expiresAt: number } | null> {
+  const url = this.buildUrl(
+   `/api/sessions/${encodeURIComponent(sessionId)}/generated-files/${encodeURIComponent(fileId)}/download-ticket`
+  )
+  const startedAt = Date.now()
+  let lastProgressAt = startedAt
+  let lastReceived = -1
+  let attempt = 0
+  let refreshed = false
+  let overrideToken: string | null | undefined = undefined
+
+  for (; ;) {
+   if (options.signal?.aborted) {
+    throw new DOMException('Aborted', 'AbortError')
+   }
+   const headers = new Headers()
+   const liveToken = this.getToken ? this.getToken() : null
+   const authToken = overrideToken !== undefined
+    ? (overrideToken ?? (liveToken ?? this.token))
+    : (liveToken ?? this.token)
+   if (authToken) {
+    headers.set('authorization', `Bearer ${authToken}`)
+   }
+
+   let res: Response
+   try {
+    res = await fetch(url, { method: 'POST', headers, signal: options.signal })
+   } catch (error) {
+    if (options.signal?.aborted || (error instanceof DOMException && error.name === 'AbortError')) {
+     throw error
+    }
+    if (attempt < BLOB_FETCH_RETRIES) {
+     attempt += 1
+     await delay(BLOB_FETCH_RETRY_DELAY_MS * attempt)
+     continue
+    }
+    throw error
+   }
+
+   if (res.status === 501) {
+    return null
+   }
+   if (res.ok && res.status !== 202) {
+    const body = await res.json() as GeneratedBlobDownloadTicketResponse
+    return {
+     url: this.buildUrl(body.downloadPath),
+     fileName: body.fileName,
+     mimeType: body.mimeType,
+     size: body.size,
+     expiresAt: body.expiresAt
+    }
+   }
+   if (res.status === 202) {
+    let pending: { state?: string; received?: number; size?: number | null; retryAfterMs?: number } = {}
+    try {
+     pending = await res.json() as typeof pending
+    } catch {
+     // keep defaults
+    }
+    const received = typeof pending.received === 'number' ? pending.received : 0
+    const size = typeof pending.size === 'number' ? pending.size : null
+    options.onProgress?.({ state: pending.state === 'uploading' ? 'uploading' : 'fetching', received, size })
+    const now = Date.now()
+    if (received !== lastReceived) {
+     lastReceived = received
+     lastProgressAt = now
+    }
+    if (now - lastProgressAt > BLOB_PENDING_STALL_MS || now - startedAt > BLOB_PENDING_TOTAL_MS) {
+     throw new ApiError('Transfer stalled', 202, 'blob_stalled', 'The file is still being transferred from the machine that sent it. Try again later.')
+    }
+    const poll = typeof pending.retryAfterMs === 'number' ? pending.retryAfterMs : BLOB_PENDING_DEFAULT_POLL_MS
+    await delay(Math.min(BLOB_PENDING_MAX_POLL_MS, Math.max(BLOB_PENDING_MIN_POLL_MS, poll)))
+    attempt = 0
+    continue
+   }
+   if (res.status === 401 && !refreshed && this.onUnauthorized) {
+    refreshed = true
+    const next = await this.onUnauthorized()
+    if (next) {
+     this.token = next
+     overrideToken = next
+     continue
+    }
+   }
+   if (isRetryableBlobStatus(res.status) && attempt < BLOB_FETCH_RETRIES) {
+    attempt += 1
+    await delay(BLOB_FETCH_RETRY_DELAY_MS * attempt)
+    continue
+   }
+   throw new ApiError(`HTTP ${res.status}`, res.status, undefined, await res.text().catch(() => undefined))
+  }
+ }
+
+ async createP2pFileTransfer(
+  sessionId: string,
+  fileId: string,
+  signal?: AbortSignal
+ ): Promise<CreateP2pFileTransferResponse> {
+  return await this.request<CreateP2pFileTransferResponse>(
+   `/api/sessions/${encodeURIComponent(sessionId)}/generated-files/${encodeURIComponent(fileId)}/p2p`,
+   { method: 'POST', signal }
+  )
+ }
+
+ async signalP2pFileTransfer(
+  sessionId: string,
+  fileId: string,
+  transferId: string,
+  body: {
+   action?: 'signal' | 'cancel' | 'complete' | 'renew'
+   answer?: P2pSessionDescriptionInit
+   candidates?: P2pIceCandidateInit[]
+   reason?: string
+  },
+  signal?: AbortSignal
+ ): Promise<SignalP2pFileTransferRpcResponse> {
+  return await this.request<SignalP2pFileTransferRpcResponse>(
+   `/api/sessions/${encodeURIComponent(sessionId)}/generated-files/${encodeURIComponent(fileId)}/p2p/${encodeURIComponent(transferId)}/signal`,
+   {
+    method: 'POST',
+    body: JSON.stringify(body),
+    signal
+   }
+  )
+ }
+
+ /**
+  * Download a generated blob, riding out the states the hub can answer with:
+  * `202` while the bytes are still arriving (poll, report progress), a
+  * transient edge failure (retry with backoff), an expired token (refresh
+  * once), a `304` revalidation (re-read from the HTTP cache).
+  */
+ private async fetchGeneratedBlob(url: string, options: GeneratedBlobFetchOptions): Promise<Blob> {
+  const startedAt = Date.now()
+  let lastProgressAt = startedAt
+  let lastReceived = -1
+  let attempt = 0
+  let refreshed = false
+  let overrideToken: string | null | undefined = undefined
+
+  for (; ;) {
+   if (options.signal?.aborted) {
+    throw new DOMException('Aborted', 'AbortError')
+   }
+   const headers = new Headers()
+   const liveToken = this.getToken ? this.getToken() : null
+   const authToken = overrideToken !== undefined
+    ? (overrideToken ?? (liveToken ?? this.token))
+    : (liveToken ?? this.token)
+   if (authToken) {
+    headers.set('authorization', `Bearer ${authToken}`)
+   }
+
+   let res: Response
+   await blobGate.acquire()
+   try {
+    try {
+     res = await fetch(url, { headers, signal: options.signal })
+     if (res.status === 304) {
+      res = await fetch(url, { headers, cache: 'force-cache', signal: options.signal })
+     }
+    } catch (error) {
+     if (options.signal?.aborted || (error instanceof DOMException && error.name === 'AbortError')) {
+      throw error
+     }
+     // Network failure: same treatment as a bad gateway.
+     if (attempt < BLOB_FETCH_RETRIES) {
+      attempt += 1
+      await delay(BLOB_FETCH_RETRY_DELAY_MS * attempt)
+      continue
+     }
+     throw error
+    }
+    if (res.ok && res.status !== 202) {
+     const declared = Number(res.headers.get('content-length'))
+     options.onProgress?.({ state: 'downloading', received: 0, size: Number.isFinite(declared) && declared > 0 ? declared : null })
+     return await res.blob()
+    }
+   } finally {
+    blobGate.release()
+   }
+
+   if (res.status === 202) {
+    let pending: { state?: string; received?: number; size?: number | null; retryAfterMs?: number } = {}
+    try {
+     pending = await res.json() as typeof pending
+    } catch {
+     // keep defaults
+    }
+    const received = typeof pending.received === 'number' ? pending.received : 0
+    const size = typeof pending.size === 'number' ? pending.size : null
+    options.onProgress?.({ state: pending.state === 'uploading' ? 'uploading' : 'fetching', received, size })
+    const now = Date.now()
+    if (received !== lastReceived) {
+     lastReceived = received
+     lastProgressAt = now
+    }
+    if (now - lastProgressAt > BLOB_PENDING_STALL_MS || now - startedAt > BLOB_PENDING_TOTAL_MS) {
+     throw new ApiError('Transfer stalled', 202, 'blob_stalled', 'The file is still being transferred from the machine that sent it. Try again later.')
+    }
+    const poll = typeof pending.retryAfterMs === 'number' ? pending.retryAfterMs : BLOB_PENDING_DEFAULT_POLL_MS
+    await delay(Math.min(BLOB_PENDING_MAX_POLL_MS, Math.max(BLOB_PENDING_MIN_POLL_MS, poll)))
+    attempt = 0
+    continue
+   }
+   if (res.status === 401 && !refreshed && this.onUnauthorized) {
+    refreshed = true
+    const next = await this.onUnauthorized()
+    if (next) {
+     this.token = next
+     overrideToken = next
+     continue
+    }
+   }
+   if (isRetryableBlobStatus(res.status) && attempt < BLOB_FETCH_RETRIES) {
+    attempt += 1
+    await delay(BLOB_FETCH_RETRY_DELAY_MS * attempt)
+    continue
+   }
+   throw new ApiError(`HTTP ${res.status}`, res.status, undefined, await res.text().catch(() => undefined))
+  }
+ }
+
+ async readSessionFile(sessionId: string, path: string): Promise<FileReadResponse> {
+  const params = new URLSearchParams()
+  params.set('path', path)
+  return await this.request<FileReadResponse>(`/api/sessions/${encodeURIComponent(sessionId)}/file?${params.toString()}`)
+ }
+
+ async writeSessionFile(sessionId: string, path: string, content: string, expectedHash: string): Promise<FileWriteResponse> {
+  return await this.request<FileWriteResponse>(`/api/sessions/${encodeURIComponent(sessionId)}/file`, {
+   method: 'PUT',
+   body: JSON.stringify({ path, content, expectedHash })
+  })
+ }
+
+ async listSessionDirectory(sessionId: string, path?: string): Promise<ListDirectoryResponse> {
+  const params = new URLSearchParams()
+  if (path) {
+   params.set('path', path)
+  }
+
+  const qs = params.toString()
+  return await this.request<ListDirectoryResponse>(
+   `/api/sessions/${encodeURIComponent(sessionId)}/directory${qs ? `?${qs}` : ''}`
+  )
+ }
+
+ async uploadFile(sessionId: string, filename: string, content: string, mimeType: string): Promise<UploadFileResponse> {
+  return await this.request<UploadFileResponse>(`/api/sessions/${encodeURIComponent(sessionId)}/upload`, {
+   method: 'POST',
+   body: JSON.stringify({ filename, content, mimeType })
+  })
+ }
+
+ async deleteUploadFile(sessionId: string, path: string): Promise<DeleteUploadResponse> {
+  return await this.request<DeleteUploadResponse>(`/api/sessions/${encodeURIComponent(sessionId)}/upload/delete`, {
+   method: 'POST',
+   body: JSON.stringify({ path })
+  })
+ }
+
+ async resumeSession(sessionId: string, opts?: { permissionMode?: string }): Promise<string> {
+  const response = await this.request<{ sessionId: string }>(
+   `/api/sessions/${encodeURIComponent(sessionId)}/resume`,
+   {
+    method: 'POST',
+    ...(opts?.permissionMode !== undefined && {
+     body: JSON.stringify({ permissionMode: opts.permissionMode })
+    })
+   }
+  )
+  return response.sessionId
+ }
+
+ async restartSession(sessionId: string, ccSwitchProviderId?: string): Promise<string> {
+  const response = await this.request<{ sessionId: string }>(
+   `/api/sessions/${encodeURIComponent(sessionId)}/restart`,
+   { method: 'POST', body: JSON.stringify({ ccSwitchProviderId }) }
+  )
+  return response.sessionId
+ }
+
+ async getCursorChatStoreStatus(sessionId: string): Promise<CursorChatStoreStatus> {
+  return await this.request<CursorChatStoreStatus>(
+   `/api/sessions/${encodeURIComponent(sessionId)}/cursor-chat-store`
+  )
+ }
+
+ async sendMessage(
+  sessionId: string,
+  text: string,
+  localId?: string | null,
+  attachments?: AttachmentMetadata[],
+  scheduledAt?: number | null,
+  ompInputMode?: OmpInputMode,
+  deliveryMode?: MessageDeliveryMode,
+ ): Promise<void> {
+  await this.request(`/api/sessions/${encodeURIComponent(sessionId)}/messages`, {
+   method: 'POST',
+   body: JSON.stringify({
+    text,
+    localId: localId ?? undefined,
+    attachments: attachments ?? undefined,
+    scheduledAt: scheduledAt ?? undefined,
+    ompInputMode: ompInputMode ?? undefined,
+    deliveryMode: deliveryMode ?? undefined,
+   })
+  })
+ }
+
+ async getQueuedState(sessionId: string, localIds: string[]): Promise<QueuedStateResponse> {
+  return await this.request<QueuedStateResponse>(
+   `/api/sessions/${encodeURIComponent(sessionId)}/messages/queued-state`,
+   {
+    method: 'POST',
+    body: JSON.stringify({ localIds })
+   }
+  )
+ }
+
+ /**
+  * POST /sessions/:id/messages/force-send — ask the hub to dispatch every
+  * queued (not-yet-invoked) message now. `localIds` is optional; omitting it
+  * snapshots ALL hub-pending rows (the browser sends none after durably
+  * uploading its own outbox first). `includeScheduled` defaults to false and
+  * must only be set after explicit user confirmation since it fires
+  * future-scheduled messages early.
+  *
+  * The response shape is kept structural (not imported from shared protocol)
+  * so the web build compiles against hubs that do not implement the endpoint
+  * yet — those return 404/501 which the caller surfaces as an error.
+  */
+ async forceSendQueuedMessages(
+  sessionId: string,
+  options?: { localIds?: string[]; includeScheduled?: boolean }
+ ): Promise<ForceSendQueuedResponse> {
+  return await this.request<ForceSendQueuedResponse>(
+   `/api/sessions/${encodeURIComponent(sessionId)}/messages/force-send`,
+   {
+    method: 'POST',
+    body: JSON.stringify({
+     ...(options?.localIds ? { localIds: options.localIds } : {}),
+     includeScheduled: options?.includeScheduled === true,
+    })
+   }
+  )
+ }
+
+ async cancelMessage(sessionId: string, messageId: string): Promise<CancelMessageResponse> {
+  const response = await this.request(
+   `/api/sessions/${encodeURIComponent(sessionId)}/messages/${encodeURIComponent(messageId)}`,
+   { method: 'DELETE' }
+  )
+  return response as CancelMessageResponse
+ }
+
+ async abortSession(sessionId: string): Promise<void> {
+  await this.request(`/api/sessions/${encodeURIComponent(sessionId)}/abort`, {
+   method: 'POST',
+   body: JSON.stringify({})
+  })
+ }
+
+ async forkConversation(sessionId: string, messageLocalId?: string): Promise<{ sessionId: string }> {
+  return await this.request<{ sessionId: string }>(
+   `/api/sessions/${encodeURIComponent(sessionId)}/fork`,
+   {
+    method: 'POST',
+    body: JSON.stringify(messageLocalId ? { messageLocalId } : {})
+   }
+  )
+ }
+
+ async rewindConversation(sessionId: string, messageLocalId: string): Promise<{ success: true }> {
+  return await this.request<{ success: true }>(
+   `/api/sessions/${encodeURIComponent(sessionId)}/rewind`,
+   {
+    method: 'POST',
+    body: JSON.stringify({ messageLocalId })
+   }
+  )
+ }
+
+ async archiveSession(sessionId: string): Promise<void> {
+  await this.request(`/api/sessions/${encodeURIComponent(sessionId)}/archive`, {
+   method: 'POST',
+   body: JSON.stringify({})
+  })
+ }
+
+ async reopenSession(sessionId: string): Promise<ReopenSessionResponse> {
+  return await this.request<ReopenSessionResponse>(
+   `/api/sessions/${encodeURIComponent(sessionId)}/reopen`,
+   { method: 'POST', body: JSON.stringify({}) }
+  )
+ }
+
+ /**
+  * Session fork (fork-features/session-fork). Returns the new hapi session
+  * id for the forked copy.
+  */
+ /**
+  * Fork a session. Absent `forkPoint` = HEAD fork (session-level menu
+  * entry). With `forkPoint.messageId` = per-message fork (UserMessage
+  * trailing-row rewind button, capability-gated to at-message flavors).
+  * Hub computes `tailOffset` from the source session's messages table;
+  * clients don't send it.
+  */
+ async forkSession(
+  sessionId: string,
+  opts?: { forkPoint?: { messageId: string } }
+ ): Promise<ForkRouteResult> {
+  const body: Record<string, unknown> = {}
+  if (opts?.forkPoint) body.forkPoint = opts.forkPoint
+  return await this.request<ForkRouteResult>(
+   `/api/sessions/${encodeURIComponent(sessionId)}/fork`,
+   { method: 'POST', body: JSON.stringify(body) }
+  )
+ }
+
+ /**
+  * Returns per-flavor fork capability shape (see
+  * `useFlavorCapabilities`). Web uses it to capability-gate the
+  * session-level Fork menu and the per-message rewind button.
+  */
+ async getFlavorCapabilities(): Promise<{
+  capabilities: Record<string, { fork: 'none' | 'head-only' | 'at-message'; files: 'none' }>
+ }> {
+  return await this.request('/api/flavors/capabilities')
+ }
+
+ /**
+  * Migrate a legacy stream-json Cursor session to ACP. See tiann/hapi#824.
+  *
+  * Refusals (e.g. running session, missing on-disk store, target collision)
+  * are returned as structured `{ok: false, reason, message}` outcomes
+  * rather than thrown - the UI surfaces the reason to the operator and the
+  * underlying state on disk is unchanged.
+  *
+  * 401s trigger the same onUnauthorized refresh path as the shared
+  * `request()` helper so an expired JWT silently re-auths instead of
+  * hard-failing the migration dialog (Codex review #34 P2).
+  */
+ async migrateCursorSessionToAcp(sessionId: string, body: CursorMigrateToAcpRequest = {}): Promise<CursorMigrateOutcome> {
+  const path = `/api/sessions/${encodeURIComponent(sessionId)}/migrate-to-acp`
+  const tryOnce = async (overrideToken: string | null): Promise<Response> => {
+   const headers = new Headers({ 'content-type': 'application/json' })
+   const liveToken = this.getToken ? this.getToken() : null
+   const authToken = overrideToken ?? liveToken ?? this.token
+   if (authToken) {
+    headers.set('authorization', `Bearer ${authToken}`)
+   }
+   return fetch(this.buildUrl(path), { method: 'POST', headers, body: JSON.stringify(body) })
+  }
+
+  let res = await tryOnce(null)
+  if (res.status === 401 && this.onUnauthorized) {
+   const refreshed = await this.onUnauthorized()
+   if (refreshed) {
+    this.token = refreshed
+    res = await tryOnce(refreshed)
+   }
+  }
+  if (res.status === 401) {
+   throw new Error('Session expired. Please sign in again.')
+  }
+  const text = await res.text()
+  let parsed: CursorMigrateOutcome | null = null
+  try {
+   parsed = text ? JSON.parse(text) as CursorMigrateOutcome : null
+  } catch {
+   parsed = null
+  }
+  if (parsed && typeof parsed === 'object' && 'ok' in parsed) {
+   return parsed
+  }
+  throw new Error(`HTTP ${res.status} ${res.statusText}: ${text}`)
+ }
+
+ async switchSession(sessionId: string): Promise<void> {
+  await this.request(`/api/sessions/${encodeURIComponent(sessionId)}/switch`, {
+   method: 'POST',
+   body: JSON.stringify({})
+  })
+ }
+
+ async setPermissionMode(sessionId: string, mode: PermissionMode): Promise<void> {
+  await this.request(`/api/sessions/${encodeURIComponent(sessionId)}/permission-mode`, {
+   method: 'POST',
+   body: JSON.stringify({ mode })
+  })
+ }
+
+ async setCollaborationMode(sessionId: string, mode: CodexCollaborationMode): Promise<void> {
+  await this.request(`/api/sessions/${encodeURIComponent(sessionId)}/collaboration-mode`, {
+   method: 'POST',
+   body: JSON.stringify({ mode })
+  })
+ }
+
+ async setModel(sessionId: string, model: { provider: string; modelId: string } | string | null): Promise<void> {
+  await this.request(`/api/sessions/${encodeURIComponent(sessionId)}/model`, {
+   method: 'POST',
+   body: JSON.stringify({ model })
+  })
+ }
+
+ async setResumeWithSessionModel(sessionId: string, resumeWithSessionModel: boolean): Promise<void> {
+  await this.request(`/api/sessions/${encodeURIComponent(sessionId)}/resume-model`, {
+   method: 'POST',
+   body: JSON.stringify({ resumeWithSessionModel })
+  })
+ }
+
+ async setModelReasoningEffort(sessionId: string, modelReasoningEffort: string | null): Promise<void> {
+  await this.request(`/api/sessions/${encodeURIComponent(sessionId)}/model-reasoning-effort`, {
+   method: 'POST',
+   body: JSON.stringify({ modelReasoningEffort })
+  })
+ }
+
+ async setEffort(sessionId: string, effort: string | null): Promise<void> {
+  await this.request(`/api/sessions/${encodeURIComponent(sessionId)}/effort`, {
+   method: 'POST',
+   body: JSON.stringify({ effort })
+  })
+ }
+
+ async setServiceTier(sessionId: string, serviceTier: string | null): Promise<void> {
+  await this.request(`/api/sessions/${encodeURIComponent(sessionId)}/service-tier`, {
+   method: 'POST',
+   body: JSON.stringify({ serviceTier })
+  })
+ }
+
+ async approvePermission(
+  sessionId: string,
+  requestId: string,
+  modeOrOptions?: 'default' | 'acceptEdits' | 'auto' | 'bypassPermissions' | 'plan' | {
+   mode?: 'default' | 'acceptEdits' | 'auto' | 'bypassPermissions' | 'plan'
+   allowTools?: string[]
+   decision?: 'approved' | 'approved_for_session' | 'denied' | 'abort'
+   answers?: Record<string, string[]> | Record<string, { answers: string[] }>
+  }
+ ): Promise<void> {
+  const body = typeof modeOrOptions === 'string' || modeOrOptions === undefined
+   ? { mode: modeOrOptions }
+   : modeOrOptions
+  await this.request(`/api/sessions/${encodeURIComponent(sessionId)}/permissions/${encodeURIComponent(requestId)}/approve`, {
+   method: 'POST',
+   body: JSON.stringify(body)
+  })
+ }
+
+ async denyPermission(
+  sessionId: string,
+  requestId: string,
+  options?: {
+   decision?: 'approved' | 'approved_for_session' | 'denied' | 'abort'
+  }
+ ): Promise<void> {
+  await this.request(`/api/sessions/${encodeURIComponent(sessionId)}/permissions/${encodeURIComponent(requestId)}/deny`, {
+   method: 'POST',
+   body: JSON.stringify(options ?? {})
+  })
+ }
+
+ async getMachines(): Promise<MachinesResponse> {
+  return await this.request<MachinesResponse>('/api/machines')
+ }
+
+ /** Pass an empty string to clear the custom name and fall back to the hostname. */
+ async renameMachine(machineId: string, displayName: string): Promise<void> {
+  await this.request(`/api/machines/${encodeURIComponent(machineId)}`, {
+   method: 'PATCH',
+   body: JSON.stringify({ displayName })
+  })
+ }
+
+ /** fork(machine-icons)：名字与设备图标一次提交；省略的字段不动，null 清掉图标。 */
+ async updateMachine(machineId: string, patch: MachinePresentationPatch): Promise<void> {
+  await this.request(`/api/machines/${encodeURIComponent(machineId)}`, {
+   method: 'PATCH',
+   body: JSON.stringify(patch)
+  })
+ }
+
+ async getSqliteStorageUsage(): Promise<SqliteStorageUsageResponse> {
+  return await this.request<SqliteStorageUsageResponse>('/api/storage/sqlite')
+ }
+
+ async listImportableSessions(
+  machineId: string,
+  provider: import('@hapi/protocol/apiTypes').ImportableSessionProvider,
+  options?: { cursor?: string; cwd?: string; query?: string }
+ ): Promise<import('@hapi/protocol/apiTypes').ImportableSessionsPage> {
+  const query = new URLSearchParams({ provider })
+  if (options?.cursor) query.set('cursor', options.cursor)
+  if (options?.cwd) query.set('cwd', options.cwd)
+  if (options?.query) query.set('query', options.query)
+  return await this.request(`/api/machines/${encodeURIComponent(machineId)}/importable-sessions?${query}`)
+ }
+
+ async importExistingSession(
+  machineId: string,
+  provider: import('@hapi/protocol/apiTypes').ImportableSessionProvider,
+  externalSessionId: string
+ ): Promise<import('@hapi/protocol/apiTypes').ImportExistingSessionResponse> {
+  return await this.request(`/api/machines/${encodeURIComponent(machineId)}/importable-sessions/${provider}/${encodeURIComponent(externalSessionId)}`, { method: 'POST' })
+ }
+
+ async getOmpUsage(machineId: string): Promise<OmpUsageResponse> {
+  return await this.request<OmpUsageResponse>(`/api/subscription/omp/${encodeURIComponent(machineId)}`)
+ }
+
+ async getUsageSummary(
+  range: '7d' | '30d' | 'all' = '7d',
+  timeZone: string = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
+ ): Promise<UsageSummaryResponse> {
+  const params = new URLSearchParams({
+   range,
+   timeZone
+  })
+  return await this.request<UsageSummaryResponse>(`/api/usage/summary?${params.toString()}`)
+ }
+
+ async listMachineDirectory(
+  machineId: string,
+  path: string,
+  options?: { includeHidden?: boolean }
+ ): Promise<MachineListDirectoryResponse> {
+  return await this.request<MachineListDirectoryResponse>(
+   `/api/machines/${encodeURIComponent(machineId)}/list-directory`,
+   {
+    method: 'POST',
+    body: JSON.stringify({ path, includeHidden: options?.includeHidden === true })
+   }
+  )
+ }
+
+ async createMachineDirectory(
+  machineId: string,
+  parentPath: string,
+  name: string
+ ): Promise<import('@hapi/protocol/apiTypes').MachineCreateDirectoryResponse> {
+  return await this.request(
+   `/api/machines/${encodeURIComponent(machineId)}/create-directory`,
+   {
+    method: 'POST',
+    body: JSON.stringify({ parentPath, name })
+   }
+  )
+ }
+
+ async checkMachinePathsExists(
+  machineId: string,
+  paths: string[]
+ ): Promise<MachinePathsExistsResponse> {
+  return await this.request<MachinePathsExistsResponse>(
+   `/api/machines/${encodeURIComponent(machineId)}/paths/exists`,
+   {
+    method: 'POST',
+    body: JSON.stringify({ paths })
+   }
+  )
+ }
+
+ async spawnSession(
+  machineId: string,
+  directory: string,
+  agent?: AgentFlavor,
+  model?: string,
+  modelReasoningEffort?: string,
+  yolo?: boolean,
+  sessionType?: 'simple' | 'worktree',
+  worktreeName?: string,
+  effort?: string,
+  permissionMode?: PermissionMode,
+  serviceTier?: 'fast' | 'standard',
+  collaborationMode?: CodexCollaborationMode,
+  copilotAgentMode?: CopilotAgentMode,
+  startingMode?: 'remote' | 'pty',
+  // fork(claude-proxy-models)：为这一个 Claude 会话指定 cc-switch 供应商。
+  ccSwitchProviderId?: string
+ ): Promise<SpawnResponse> {
+  // The hub gives the runner 30 s to answer a spawn. Without a client-side
+  // limit a stalled hub left the form on "Creating…" forever.
+  const signal = AbortSignal.timeout(SPAWN_REQUEST_TIMEOUT_MS)
+  try {
+   return await this.request<SpawnResponse>(`/api/machines/${encodeURIComponent(machineId)}/spawn`, {
+    method: 'POST',
+    body: JSON.stringify({
+     directory,
+     agent,
+     model,
+     modelReasoningEffort,
+     yolo,
+     sessionType,
+     worktreeName,
+     effort,
+     permissionMode,
+     serviceTier,
+     collaborationMode,
+     copilotAgentMode,
+     startingMode,
+     ccSwitchProviderId
+    }),
+    signal
+   })
+  } catch (error) {
+   if (signal.aborted) {
+    throw new Error(`No response from the hub after ${SPAWN_REQUEST_TIMEOUT_MS / 1000} s. The session may still start; check the session list before trying again.`)
+   }
+   throw error
+  }
+ }
+
+ async getMachineAgyModels(machineId: string): Promise<AgyModelsResponse> {
+  return await this.request<AgyModelsResponse>(
+   `/api/machines/${encodeURIComponent(machineId)}/agy-models`
+  )
+ }
+
+ async getMachineCodexModels(machineId: string): Promise<CodexModelsResponse> {
+  return await this.request<CodexModelsResponse>(
+   `/api/machines/${encodeURIComponent(machineId)}/codex-models`
+  )
+ }
+
+ async getMachineCcSwitchProviders(machineId: string): Promise<ListCcSwitchProvidersResponse> {
+  return await this.request<ListCcSwitchProvidersResponse>(
+   `/api/machines/${encodeURIComponent(machineId)}/cc-switch/providers`
+  )
+ }
+
+ // fork(claude-proxy-models)：Claude 会话经代理时的动态模型目录（hub 全局一份）。
+ async getClaudeProxyModels(refresh: boolean = false): Promise<ClaudeProxyModelsResponse> {
+  return await this.request<ClaudeProxyModelsResponse>(
+   refresh ? '/api/claude-proxy-models?refresh=1' : '/api/claude-proxy-models'
+  )
+ }
+
+ async getSessionCodexModels(sessionId: string): Promise<CodexModelsResponse> {
+  return await this.request<CodexModelsResponse>(
+   `/api/sessions/${encodeURIComponent(sessionId)}/codex-models`
+  )
+ }
+
+ async getSessionOpencodeModels(sessionId: string): Promise<OpencodeModelsResponse> {
+  return await this.request<OpencodeModelsResponse>(
+   `/api/sessions/${encodeURIComponent(sessionId)}/opencode-models`
+  )
+ }
+
+ async getSessionOmpModels(sessionId: string): Promise<OmpModelsResponse> {
+  return await this.request<OmpModelsResponse>(
+   `/api/sessions/${encodeURIComponent(sessionId)}/omp-models`
+  )
+ }
+
+ async getSessionOmpThinkingOptions(sessionId: string): Promise<OmpThinkingOptionsResponse> {
+  return await this.request<OmpThinkingOptionsResponse>(
+   `/api/sessions/${encodeURIComponent(sessionId)}/omp-thinking-options`
+  )
+ }
+
+ async cycleSessionOmpModel(sessionId: string): Promise<CycleOmpModelResponse> {
+  return await this.request<CycleOmpModelResponse>(
+   `/api/sessions/${encodeURIComponent(sessionId)}/omp-model-cycle`,
+   { method: 'POST' }
+  )
+ }
+
+ async getMachineOmpLoginProviders(machineId: string): Promise<OmpLoginProvidersResponse> {
+  return await this.request<OmpLoginProvidersResponse>(
+   `/api/machines/${encodeURIComponent(machineId)}/omp-login-providers`
+  )
+ }
+
+ async startMachineOmpLogin(machineId: string, providerId: string): Promise<StartOmpLoginResponse> {
+  return await this.request<StartOmpLoginResponse>(
+   `/api/machines/${encodeURIComponent(machineId)}/omp-login`,
+   {
+    method: 'POST',
+    body: JSON.stringify({ providerId })
+   }
+  )
+ }
+
+ async respondMachineOmpLoginInput(
+  machineId: string,
+  flowId: string,
+  value: string
+ ): Promise<RespondOmpLoginInputResponse> {
+  return await this.request<RespondOmpLoginInputResponse>(
+   `/api/machines/${encodeURIComponent(machineId)}/omp-login-input`,
+   {
+    method: 'POST',
+    body: JSON.stringify({ flowId, value })
+   }
+  )
+ }
+
+ async getSessionOmpExtensionUiRequest(
+  sessionId: string,
+  requestId: string
+ ): Promise<GetOmpExtensionUiResponse> {
+  return await this.request<GetOmpExtensionUiResponse>(
+   `/api/sessions/${encodeURIComponent(sessionId)}/omp-extension-ui/${encodeURIComponent(requestId)}`,
+   { cache: 'no-store' }
+  )
+ }
+
+ async getSessionOpencodeReasoningEffortOptions(sessionId: string): Promise<OpencodeReasoningEffortResponse> {
+  return await this.request<OpencodeReasoningEffortResponse>(
+   `/api/sessions/${encodeURIComponent(sessionId)}/opencode-reasoning-effort-options`
+  )
+ }
+
+ async getSessionCursorModels(sessionId: string): Promise<CursorModelsResponse> {
+  return await this.request<CursorModelsResponse>(
+   `/api/sessions/${encodeURIComponent(sessionId)}/cursor-models`
+  )
+ }
+
+ /** Generic Pi session endpoint — replaces per-method wrappers. */
+ async callPiEndpoint<T = unknown>(sessionId: string, path: string, init?: RequestInit): Promise<T> {
+  return await this.request<T>(
+   `/api/sessions/${encodeURIComponent(sessionId)}/pi-${path}`,
+   init
+  )
+ }
+
+ async getMachineCursorModels(machineId: string): Promise<CursorModelsResponse> {
+  return await this.request<CursorModelsResponse>(
+   `/api/machines/${encodeURIComponent(machineId)}/cursor-models`
+  )
+ }
+
+ async getMachineOpencodeModelsForCwd(machineId: string, cwd: string): Promise<OpencodeModelsResponse> {
+  return await this.request<OpencodeModelsResponse>(
+   `/api/machines/${encodeURIComponent(machineId)}/opencode-models?cwd=${encodeURIComponent(cwd)}`
+  )
+ }
+
+ async getMachineGrokModelsForCwd(machineId: string, cwd: string): Promise<GrokModelsResponse> {
+  return await this.request<GrokModelsResponse>(
+   `/api/machines/${encodeURIComponent(machineId)}/grok-models?cwd=${encodeURIComponent(cwd)}`
+  )
+ }
+
+ async getMachineOmpModelsForCwd(machineId: string, cwd: string): Promise<OmpModelsResponse> {
+  return await this.request<OmpModelsResponse>(
+   `/api/machines/${encodeURIComponent(machineId)}/omp-models?cwd=${encodeURIComponent(cwd)}`
+  )
+ }
+
+ async getMachineCopilotModelsForCwd(machineId: string, cwd: string): Promise<CopilotModelsResponse> {
+  return await this.request<CopilotModelsResponse>(
+   `/api/machines/${encodeURIComponent(machineId)}/copilot-models?cwd=${encodeURIComponent(cwd)}`
+  )
+ }
+
+ async getSessionGrokModels(sessionId: string): Promise<GrokModelsResponse> {
+  return await this.request<GrokModelsResponse>(
+   `/api/sessions/${encodeURIComponent(sessionId)}/grok-models`
+  )
+ }
+
+ async getSessionCopilotModels(sessionId: string): Promise<CopilotModelsResponse> {
+  return await this.request<CopilotModelsResponse>(
+   `/api/sessions/${encodeURIComponent(sessionId)}/copilot-models`
+  )
+ }
+
+ async setCopilotAgentMode(sessionId: string, mode: CopilotAgentMode): Promise<void> {
+  await this.request(`/api/sessions/${encodeURIComponent(sessionId)}/copilot-agent-mode`, {
+   method: 'POST',
+   body: JSON.stringify({ mode })
+  })
+ }
+
+ async getSessionGrokReasoningEffortOptions(sessionId: string): Promise<GrokReasoningEffortResponse> {
+  return await this.request<GrokReasoningEffortResponse>(
+   `/api/sessions/${encodeURIComponent(sessionId)}/grok-reasoning-effort-options`
+  )
+ }
+
+ async getSlashCommands(sessionId: string): Promise<SlashCommandsResponse> {
+  return await this.request<SlashCommandsResponse>(
+   `/api/sessions/${encodeURIComponent(sessionId)}/slash-commands`
+  )
+ }
+
+ async getSkills(sessionId: string): Promise<SkillsResponse> {
+  return await this.request<SkillsResponse>(
+   `/api/sessions/${encodeURIComponent(sessionId)}/skills`
+  )
+ }
+
+ async renameSession(sessionId: string, name: string): Promise<void> {
+  await this.request(`/api/sessions/${encodeURIComponent(sessionId)}`, {
+   method: 'PATCH',
+   body: JSON.stringify({ name })
+  })
+ }
+
+ async deleteSession(sessionId: string): Promise<void> {
+  await this.request(`/api/sessions/${encodeURIComponent(sessionId)}`, {
+   method: 'DELETE'
+  })
+ }
+
+ /*
+  * Scratchlist v2 (tiann/hapi#893).
+  *
+  * The hub is the durable store; localStorage is demoted to an
+  * offline cache. Mutations return the canonical entry so optimistic
+  * updates can reconcile with the hub-stamped `updatedAt`.
+  */
+
+ async getScratchlist(sessionId: string): Promise<{
+  entries: Array<{
+   entryId: string
+   text: string
+   createdAt: number
+   updatedAt: number
+   attachments: import('@hapi/protocol').ScratchlistAttachmentMetadata[]
+  }>
+ }> {
+  return await this.request(
+   `/api/sessions/${encodeURIComponent(sessionId)}/scratchlist`
+  )
+ }
+
+ async uploadScratchlistAttachment(
+  sessionId: string,
+  filename: string,
+  content: string,
+  mimeType: string
+ ): Promise<{
+  success: boolean
+  attachment?: import('@hapi/protocol').ScratchlistAttachmentMetadata
+  error?: string
+  code?: string
+ }> {
+  return await this.request(
+   `/api/sessions/${encodeURIComponent(sessionId)}/scratchlist/upload`,
+   {
+    method: 'POST',
+    body: JSON.stringify({ filename, content, mimeType })
+   }
+  )
+ }
+
+ async fetchScratchlistAttachmentBlob(sessionId: string, attachmentId: string): Promise<Blob> {
+  const headers = new Headers()
+  const liveToken = this.getToken ? this.getToken() : null
+  const authToken = liveToken ?? this.token
+  if (authToken) {
+   headers.set('authorization', `Bearer ${authToken}`)
+  }
+  const response = await fetch(
+   this.buildUrl(
+    `/api/sessions/${encodeURIComponent(sessionId)}/scratchlist/attachments/${encodeURIComponent(attachmentId)}`
+   ),
+   { headers }
+  )
+  if (!response.ok) {
+   throw new ApiError(`Failed to fetch scratchlist attachment (${response.status})`, response.status)
+  }
+  return await response.blob()
+ }
+
+ async deleteScratchlistAttachment(sessionId: string, attachmentId: string): Promise<void> {
+  await this.request(
+   `/api/sessions/${encodeURIComponent(sessionId)}/scratchlist/attachments/${encodeURIComponent(attachmentId)}`,
+   { method: 'DELETE' }
+  )
+ }
+
+ async createScratchlistEntry(
+  sessionId: string,
+  body: {
+   text: string
+   entryId?: string
+   createdAt?: number
+   attachments?: import('@hapi/protocol').ScratchlistAttachmentMetadata[]
+  }
+ ): Promise<{
+  entry: {
+   entryId: string
+   text: string
+   createdAt: number
+   updatedAt: number
+   attachments: import('@hapi/protocol').ScratchlistAttachmentMetadata[]
+  }
+ }> {
+  return await this.request(
+   `/api/sessions/${encodeURIComponent(sessionId)}/scratchlist`,
+   {
+    method: 'POST',
+    body: JSON.stringify(body)
+   }
+  )
+ }
+
+ async updateScratchlistEntry(
+  sessionId: string,
+  entryId: string,
+  text: string
+ ): Promise<{
+  entry: {
+   entryId: string
+   text: string
+   createdAt: number
+   updatedAt: number
+   attachments: import('@hapi/protocol').ScratchlistAttachmentMetadata[]
+  }
+ }> {
+  return await this.request(
+   `/api/sessions/${encodeURIComponent(sessionId)}/scratchlist/${encodeURIComponent(entryId)}`,
+   {
+    method: 'PUT',
+    body: JSON.stringify({ text })
+   }
+  )
+ }
+
+ async deleteScratchlistEntry(sessionId: string, entryId: string): Promise<void> {
+  await this.request(
+   `/api/sessions/${encodeURIComponent(sessionId)}/scratchlist/${encodeURIComponent(entryId)}`,
+   { method: 'DELETE' }
+  )
+ }
+
+ async fetchVoiceToken(options?: { customAgentId?: string; customApiKey?: string; voiceId?: string }): Promise<{
+  allowed: boolean
+  token?: string
+  agentId?: string
+  error?: string
+ }> {
+  return await this.request('/api/voice/token', {
+   method: 'POST',
+   body: JSON.stringify(options || {})
+  })
+ }
+
+ async fetchVoices(): Promise<{ voices: Array<{ id: string; name: string; previewUrl: string; category: string }> }> {
+  return await this.request('/api/voice/voices')
+ }
+
+ async sendVoiceTelemetry(event: {
+  stage: string
+  message: string
+  sessionId?: string
+  voiceId?: string
+  language?: string
+  details?: Record<string, unknown>
+ }): Promise<void> {
+  await this.request('/api/voice/telemetry', {
+   method: 'POST',
+   body: JSON.stringify(event)
+  })
+ }
+
+ /** Return the current auth token (for WebSocket query-param auth). */
+ getAuthToken(): string | null {
+  return this.getToken ? this.getToken() : this.token
+ }
+
+ async fetchVoiceBackend(): Promise<{ backend: string | null; backends: string[] }> {
+  return await this.request('/api/voice/backend')
+ }
+
+ async fetchTranscriptionProviders(): Promise<{ providers: TranscriptionProviderInfo[] }> {
+  return await this.request('/api/voice/transcription/providers')
+ }
+
+ async transcribeVoice(options: {
+  file: File
+  provider: TranscriptionProvider
+  mode: TranscriptionMode
+  language?: string
+ }): Promise<{ text: string; language?: string }> {
+  const form = new FormData()
+  form.set('file', options.file)
+  form.set('provider', options.provider)
+  form.set('mode', options.mode)
+  if (options.language) form.set('language', options.language)
+  return await this.request('/api/voice/transcription', { method: 'POST', body: form })
+ }
+
+ async fetchRealtimeTranscriptionToken(
+  provider: 'openai' | 'elevenlabs' | 'deepgram',
+  language?: string,
+  signal?: AbortSignal
+ ): Promise<{ token: string }> {
+  return await this.request('/api/voice/transcription/realtime-token', {
+   method: 'POST',
+   signal,
+   body: JSON.stringify({ provider, language })
+  })
+ }
+
+ async fetchQwenToken(): Promise<{
+  allowed: boolean
+  wsUrl?: string
+  error?: string
+ }> {
+  return await this.request('/api/voice/qwen-token', {
+   method: 'POST',
+   body: JSON.stringify({})
+  })
+ }
+
+ // fork(voice-assistant): look up a session / draft an instruction; neither writes to the session.
+ async askVoiceSessionStatus(body: { sessionId: string; question: string; history?: VoiceTurn[] }): Promise<VoiceSessionQaResponse> {
+  return await this.request('/api/voice/session-qa', {
+   method: 'POST',
+   body: JSON.stringify(body)
+  })
+ }
+
+ async getVoiceTtsStatus(): Promise<VoiceTtsStatus> {
+  return await this.request('/api/voice/tts/status')
+ }
+
+ /** Streamed PCM (s16le mono, rate in `x-sample-rate`) for one piece of text, spoken by the hub's own voice. */
+ async openVoiceTtsStream(text: string, signal?: AbortSignal, voice?: string | null): Promise<Response> {
+  const trimmedVoice = voice?.trim() || undefined
+  const send = (token: string | null) => fetch(this.buildUrl('/api/voice/tts'), {
+   method: 'POST',
+   headers: {
+    'content-type': 'application/json',
+    ...(token ? { authorization: `Bearer ${token}` } : {})
+   },
+   body: JSON.stringify(trimmedVoice ? { text, voice: trimmedVoice } : { text }),
+   signal
+  })
+  let res = await send((this.getToken ? this.getToken() : null) ?? this.token)
+  if (res.status === 401 && this.onUnauthorized) {
+   const refreshed = await this.onUnauthorized()
+   if (refreshed) {
+    this.token = refreshed
+    res = await send(refreshed)
+   }
+  }
+  if (!res.ok || !res.body) {
+   throw new ApiError(`HTTP ${res.status} ${res.statusText}`, res.status)
+  }
+  return res
+ }
+
+ /** REST snapshot for the per-session live runtime feed (beta timeline). */
+ async getRuntimeSnapshot(sessionId: string): Promise<RuntimeSnapshotResponse> {
+  return await this.request(`/api/sessions/${encodeURIComponent(sessionId)}/runtime`)
+ }
+
+ /**
+  * Bearer-authenticated SSE stream of runtime publications for the beta
+  * timeline. Returns the raw Response; the caller decodes `data:` frames.
+  * 401 is retried once through onUnauthorized like request(); other error
+  * statuses surface as ApiError.
+  */
+ async openRuntimeEventsStream(sessionId: string, signal?: AbortSignal): Promise<Response> {
+  const send = (token: string | null) => fetch(this.buildUrl(`/api/sessions/${encodeURIComponent(sessionId)}/runtime/events`), {
+   headers: {
+    accept: 'text/event-stream',
+    ...(token ? { authorization: `Bearer ${token}` } : {})
+   },
+   signal
+  })
+  let res = await send((this.getToken ? this.getToken() : null) ?? this.token)
+  if (res.status === 401 && this.onUnauthorized) {
+   const refreshed = await this.onUnauthorized()
+   if (refreshed) {
+    this.token = refreshed
+    res = await send(refreshed)
+   }
+  }
+  if (res.status === 401) {
+   throw new ApiError('Session expired. Please sign in again.', 401)
+  }
+  if (!res.ok || !res.body) {
+   const body = await res.text().catch(() => '')
+   const code = parseErrorCode(body)
+   throw new ApiError(
+    `HTTP ${res.status} ${res.statusText}: ${body}`,
+    res.status,
+    code,
+    body || undefined
+   )
+  }
+  return res
+ }
+
+ async getVoiceSpeakerStatus(): Promise<VoiceSpeakerStatus> {
+  return await this.request('/api/voice/speaker/status')
+ }
+
+ /** Raw 16 kHz s16le mono PCM of the user reading a passage; the hub keeps only the voiceprint. */
+ async enrollVoiceSpeaker(pcm: Uint8Array): Promise<VoiceSpeakerEnrollResponse> {
+  return await this.request('/api/voice/speaker/enroll', {
+   method: 'POST',
+   headers: { 'content-type': 'application/octet-stream' },
+   body: pcm.slice().buffer
+  })
+ }
+
+ async clearVoiceSpeaker(): Promise<void> {
+  await this.request('/api/voice/speaker', { method: 'DELETE' })
+ }
+
+ async prepareVoiceInstruction(body: {
+  currentSessionId: string
+  utterance: string
+  targetHint?: string
+  history?: VoiceTurn[]
+ }): Promise<VoiceInstructionPrepareResponse> {
+  return await this.request('/api/voice/instruction/prepare', {
+   method: 'POST',
+   body: JSON.stringify(body)
+  })
+ }
+
+ async fetchGeminiToken(): Promise<{
+  allowed: boolean
+  apiKey?: string
+  wsUrl?: string
+  baseUrl?: string
+  error?: string
+ }> {
+  return await this.request('/api/voice/gemini-token', {
+   method: 'POST',
+   body: JSON.stringify({})
+  })
+ }
 }

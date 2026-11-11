@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { describeIgnoredOmpAttachments, prepareOmpInput } from './ompInputContent';
+import { prepareOmpInput } from './ompInputContent';
 
 const createdDirectories: string[] = [];
 
@@ -34,25 +34,8 @@ describe('OMP native input content', () => {
                 type: 'image',
                 data: bytes.toString('base64'),
                 mimeType: 'image/png'
-            }],
-            ignoredAttachments: []
+            }]
         });
         expect(result.message).not.toContain(path);
-    });
-
-    it('reports non-image attachments instead of converting them to @path text', async () => {
-        const attachment = {
-            id: 'document',
-            filename: 'notes.txt',
-            mimeType: 'text/plain',
-            size: 5,
-            path: '/uploads/notes.txt'
-        };
-        const result = await prepareOmpInput('use the text', [attachment]);
-
-        expect(result.images).toBeUndefined();
-        expect(result.message).toBe('use the text');
-        expect(result.message).not.toContain('@');
-        expect(describeIgnoredOmpAttachments(result.ignoredAttachments)).toContain('notes.txt (text/plain)');
     });
 });

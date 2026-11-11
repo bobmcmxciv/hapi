@@ -1,3 +1,6 @@
+import type { InputResolution } from '@hapi/protocol/types'
+import type { DisplayPosition } from './messageOrdering'
+
 export type StoredSession = {
     id: string
     tag: string | null
@@ -46,6 +49,8 @@ export type StoredMessage = {
     localId: string | null
     invokedAt: number | null
     scheduledAt: number | null
+    resolution?: InputResolution
+    position?: DisplayPosition
 }
 
 export type StoredUser = {

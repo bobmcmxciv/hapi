@@ -15,6 +15,27 @@ function getMetadata(store: Store, id: string): Record<string, unknown> | null {
     return (row?.metadata ?? null) as Record<string, unknown> | null
 }
 
+describe('OMP generation metadata persistence', () => {
+    it('preserves ownership across bootstrap snapshots and supports explicit verified clearing', () => {
+        const store = makeStore()
+        try {
+            const attempt = { attemptId: 'attempt', state: 'resuming', machineId: 'machine', startedAt: 1 }
+            const session = store.sessions.getOrCreateSession('omp-generation', {
+                path: '/tmp', host: 'h', flavor: 'omp', ompResumeAttempt: attempt, ompRuntimeAttemptId: 'previous'
+            }, null, 'default')
+            const bootstrap = store.sessions.updateSessionMetadata(session.id, { path: '/tmp', host: 'h', flavor: 'omp' }, session.metadataVersion, 'default')
+            expect(bootstrap.result).toBe('success')
+            expect(getMetadata(store, session.id)).toMatchObject({ ompResumeAttempt: attempt, ompRuntimeAttemptId: 'previous' })
+            const current = store.sessions.getSession(session.id)!
+            expect(store.sessions.updateSessionMetadata(session.id, {
+                path: '/tmp', host: 'h', flavor: 'omp', ompResumeAttempt: null, ompRuntimeAttemptId: 'attempt'
+            }, current.metadataVersion, 'default').result).toBe('success')
+            expect(getMetadata(store, session.id)?.ompResumeAttempt).toBeUndefined()
+            expect(getMetadata(store, session.id)?.ompRuntimeAttemptId).toBe('attempt')
+        } finally { store.close() }
+    })
+})
+
 describe('getOrCreateSession: active_at', () => {
     it('persists a non-null active_at on insert (never NULL)', () => {
         const store = makeStore()

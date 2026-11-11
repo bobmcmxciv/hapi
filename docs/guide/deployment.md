@@ -420,3 +420,73 @@ configured DeepSeek/GLM keys. This migration does not supply absent Anthropic or
 Kimi credentials, nor does it require restarting the Hub or Runner. Historical
 `vircs` snapshots are retained rather than overwritten by T14s, but no longer
 appear as current quota after the 15-minute freshness window.
+## Isolated event-driven Beta UI
+
+The Hub serves an optional second SPA at `/beta/` from
+`HAPI_BETA_WEB_DIR` (default: `<HAPI_HOME>/web-beta`). It uses the existing
+same-origin authenticated API, databases, machine identities and runners.
+Do not start a second Hub against the same SQLite files, and do not start
+another OMP process against a running session's journal.
+
+Build the Beta web app with `VITE_HAPI_BETA=1`, `VITE_BASE_URL=/beta/`, and a
+separate Vite `--outDir`. Retain the original production `web/dist` as a backup.
+For a frontend-only event trial, keep embedding those unchanged production assets.
+For the full-input cutover, also stage a companion build with `VITE_HAPI_BETA=0`
+and `VITE_BASE_URL=/`: it retains the traditional layout while understanding
+terminal input resolutions and cancellation responses. Pass its absolute directory
+as the optional positional argument to `hub/scripts/generate-embedded-web-assets.ts`
+before compiling the Hub. The old JavaScript cannot safely interpret every new
+receipt state merely because the wire schema is additive.
+
+Changelog metadata follows the selected output directory. The Beta service worker
+is scoped to `/beta/` and does not cache authenticated API responses in origin-wide
+CacheStorage. Coordinate the companion asset change with the backend cutover;
+preserving the `/` entry does not mean keeping an incompatible client bundle.
+
+Roll out the additive Hub/CLI runtime protocol before opening the Beta UI.
+New or deliberately resumed OMP sessions on upgraded runners publish native
+events. Already-running sessions are not restarted by this deployment and
+remain usable in history-compatible mode. Ordinary session controls, file
+services and business pages keep the same authorization and backend owners.
+
+The full-turn and durable-input Beta additionally needs the turn-page Hub API,
+generation-aware Runner cleanup, and both native OMP `capabilities.inputReceipts`
+and `capabilities.nativeOrder`.
+Stage the capable native executable before the dependent HAPI CLI; version text
+alone is insufficient. The Hub must understand the generation and terminal-input
+protocol before trial sessions use them. Keep the production entry and active
+session processes intact; coordinate Hub restarts and Runner handoffs explicitly.
+
+Turn boundaries and terminal input resolutions use sparse auxiliary tables.
+Native ordering adds nullable message-position columns and one global metadata
+index, without decoding or rewriting transcript payloads or changing core schema
+version 20. That index is built at first startup and can dominate downtime on a
+large database; measure its construction on a consistent isolated backup before
+scheduling the cutover. Do not run a second Hub on the production database to
+prewarm it. Turn-boundary indexes are separate and remain lazy per authorized
+session, so the first turn-based read may cost more than subsequent reads.
+
+If the running Hub already exposes `/api/sessions/:id/runtime` and reports
+missing Beta assets at `/beta/`, install a verified web bundle in a versioned
+directory and atomically create or replace only the `web-beta` link. Assets
+are resolved per request; neither the Hub nor a production runner needs a
+restart. Check that `/` still serves the same production assets.
+
+During recovery, a staged CLI can run one separate verification session with
+`hapi omp --hapi-starting-mode remote`; it must use a new session identity or
+an inactive session owned by that verification. This does not upgrade the
+production runner. Require `available: true` and `source: connected` from
+that session's runtime endpoint before calling it a native-event trial.
+Other sessions can legitimately remain history-compatible. Coordinate any
+subsequent runner upgrade; do not replace its watched executable during
+recovery merely to change the Beta label.
+
+For frontend-only rollback, return to `/` and move the Beta asset link out of
+the mounted path; leave all running services alone. Binary rollback after the
+full-input cutover requires a resolution-aware build: an arbitrary older Hub
+does not understand handled/cancelled sidecar records and can replay terminal
+inputs incorrectly. Do not downgrade native receipt handling while journal-owned
+inputs remain unresolved. Retain database, native journals and blob files;
+restoring an old database would discard intervening messages, grants and token
+revocations. Never terminate every process named `hapi` or kill unrelated
+session-owned OMP processes.

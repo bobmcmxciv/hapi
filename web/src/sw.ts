@@ -50,47 +50,51 @@ if (precachedIndexUrl) {
     }))
 }
 
-registerRoute(
-    ({ url }) => url.pathname === '/api/sessions',
-    new NetworkFirst({
-        cacheName: 'api-sessions',
-        networkTimeoutSeconds: 10,
-        plugins: [
-            new ExpirationPlugin({
-                maxEntries: 10,
-                maxAgeSeconds: 60 * 5
-            })
-        ]
-    })
-)
+// Beta keeps authenticated API responses out of origin-wide service-worker caches.
+// Session data is owned by the authenticated application state, not URL-only CacheStorage.
+if (import.meta.env.VITE_HAPI_BETA !== '1') {
+    registerRoute(
+        ({ url }) => url.pathname === '/api/sessions',
+        new NetworkFirst({
+            cacheName: 'api-sessions',
+            networkTimeoutSeconds: 10,
+            plugins: [
+                new ExpirationPlugin({
+                    maxEntries: 10,
+                    maxAgeSeconds: 60 * 5
+                })
+            ]
+        })
+    )
 
-registerRoute(
-    ({ url }) => /^\/api\/sessions\/[^/]+$/.test(url.pathname),
-    new NetworkFirst({
-        cacheName: 'api-session-detail',
-        networkTimeoutSeconds: 10,
-        plugins: [
-            new ExpirationPlugin({
-                maxEntries: 20,
-                maxAgeSeconds: 60 * 5
-            })
-        ]
-    })
-)
+    registerRoute(
+        ({ url }) => /^\/api\/sessions\/[^/]+$/.test(url.pathname),
+        new NetworkFirst({
+            cacheName: 'api-session-detail',
+            networkTimeoutSeconds: 10,
+            plugins: [
+                new ExpirationPlugin({
+                    maxEntries: 20,
+                    maxAgeSeconds: 60 * 5
+                })
+            ]
+        })
+    )
 
-registerRoute(
-    ({ url }) => url.pathname === '/api/machines',
-    new NetworkFirst({
-        cacheName: 'api-machines',
-        networkTimeoutSeconds: 10,
-        plugins: [
-            new ExpirationPlugin({
-                maxEntries: 5,
-                maxAgeSeconds: 60 * 10
-            })
-        ]
-    })
-)
+    registerRoute(
+        ({ url }) => url.pathname === '/api/machines',
+        new NetworkFirst({
+            cacheName: 'api-machines',
+            networkTimeoutSeconds: 10,
+            plugins: [
+                new ExpirationPlugin({
+                    maxEntries: 5,
+                    maxAgeSeconds: 60 * 10
+                })
+            ]
+        })
+    )
+}
 
 registerRoute(
     /^https:\/\/cdn\.socket\.io\/.*/,

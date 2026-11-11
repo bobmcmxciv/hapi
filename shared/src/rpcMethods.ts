@@ -47,6 +47,7 @@ export const RPC_METHODS = {
     StartOmpLogin: 'startOmpLogin',
     RespondOmpLoginInput: 'respondOmpLoginInput',
     GetOmpExtensionUiRequest: 'getOmpExtensionUiRequest',
+    GetOmpUsage: 'getOmpUsage',
     ListPiSessions: 'listPiSessions',
     ListOpencodeModels: 'listOpencodeModels',
     ListOpencodeModelsForCwd: 'listOpencodeModelsForCwd',

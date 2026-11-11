@@ -2,6 +2,7 @@ import { describe, expect, it } from 'bun:test'
 import type { Server } from 'socket.io'
 import type { RpcRegistry } from '../socket/rpcRegistry'
 import { RpcGateway, RpcTargetMissingError } from './rpcGateway'
+import { OMP_USAGE_RPC_TIMEOUT_MS } from '@hapi/protocol/ompUsage'
 
 function createGateway(options?: { reply: unknown }) {
     const timeouts: number[] = []
@@ -52,6 +53,16 @@ function createGateway(options?: { reply: unknown }) {
 }
 
 describe('RpcGateway RPC timeouts', () => {
+    it('refuses a cleanup acknowledgement from a superseded socket', async () => {
+        let owner = 'old-socket'
+        const socket = { timeout: () => ({ emitWithAck: async () => { owner = 'replacement-socket'; return { success: true } } }) }
+        // Typed transport seams model replacement while the real gateway awaits its acknowledgement.
+        const io = { of: () => ({ sockets: { get: () => socket } }) } as unknown as Server
+        const registry = { getSocketIdForMethod: () => owner } as unknown as RpcRegistry
+        const gateway = new RpcGateway(io, registry)
+        await expect(gateway.killSession('session-1')).rejects.toThrow('RPC source changed before acknowledgement')
+    })
+
     it('uses the default RPC timeout for regular machine RPCs', async () => {
         const { gateway, timeouts } = createGateway()
 
@@ -169,5 +180,49 @@ describe('RpcGateway no-target diagnostics (tiann/hapi#916)', () => {
         const error = await gateway.killSession('session-1').catch((e: unknown) => e)
         expect(error).toBeInstanceOf(RpcTargetMissingError)
         expect((error as RpcTargetMissingError).code).toBe('socket-disconnected')
+    })
+})
+
+describe('OMP native usage gateway', () => {
+    it('uses the bounded machine budget and strips non-protocol payload fields', async () => {
+        const { gateway, timeouts, calls } = createGateway({
+            reply: JSON.stringify({
+                success: true, source: 'omp-native', generatedAt: 123,
+                reports: [], accountsWithoutUsage: [], disabledCredentialCount: 0,
+                raw: { token: 'secret' }, metadata: { email: 'private@example.com' }
+            })
+        })
+        const result = await gateway.getOmpUsageForMachine('machine-usage')
+        expect(result.success).toBe(true)
+        expect(timeouts).toEqual([OMP_USAGE_RPC_TIMEOUT_MS])
+        expect(calls).toEqual([{ method: 'machine-usage:getOmpUsage', params: '{}' }])
+        expect(JSON.stringify(result)).not.toContain('secret')
+        expect(JSON.stringify(result)).not.toContain('private@example.com')
+    })
+
+    it('reports an old Runner without attempting another provider or external source', async () => {
+        const registry = { getSocketIdForMethod: () => undefined } as unknown as RpcRegistry
+        const result = await new RpcGateway({} as Server, registry).getOmpUsageForMachine('old-runner')
+        expect(result).toMatchObject({ success: false, errorCode: 'unsupported' })
+    })
+
+    it('never forwards malformed replies or raw Runner failure text', async () => {
+        const invalid = createGateway({ reply: JSON.stringify({ token: 'private-token' }) }).gateway
+        expect(await invalid.getOmpUsageForMachine('machine-1')).toMatchObject({ success: false, errorCode: 'invalid_output' })
+        const failed = createGateway({
+            reply: JSON.stringify({
+                success: false, source: 'omp-native', errorCode: 'command_failed', error: 'private-token'
+            })
+        }).gateway
+        const response = await failed.getOmpUsageForMachine('machine-1')
+        expect(response).toMatchObject({ success: false, errorCode: 'command_failed' })
+        expect(JSON.stringify(response)).not.toContain('private-token')
+    })
+
+    it('returns a sanitized transport failure when the machine socket is gone', async () => {
+        const io = { of: () => ({ sockets: { get: () => undefined } }) } as unknown as Server
+        const registry = { getSocketIdForMethod: () => 'disconnected' } as unknown as RpcRegistry
+        expect(await new RpcGateway(io, registry).getOmpUsageForMachine('machine-1'))
+            .toMatchObject({ success: false, errorCode: 'unavailable' })
     })
 })

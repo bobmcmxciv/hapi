@@ -14,6 +14,7 @@ import { useAppContext } from '@/lib/app-context';
 import { queryKeys } from '@/lib/query-keys';
 import { useTranslation } from '@/lib/use-translation';
 
+import { refreshOmpModelCatalogs } from './refreshOmpModelCatalogs';
 function isActiveFlow(flow: OmpLoginFlow | null | undefined): boolean {
     return flow?.status === 'waiting_for_callback'
         || flow?.status === 'waiting_for_input'
@@ -62,7 +63,7 @@ export function OmpProviderSettingsRow() {
     const authenticatedProviderSignature = `${machineId}:${providers
         .filter((provider) => provider.authenticated)
         .map((provider) => provider.id)
-        .join(',')}`;
+        .join(',')}:${flow?.status === 'authenticated' ? flow.flowId : ''}`;
     const previousAuthenticatedProviderSignature = useRef<string | null>(null);
     const queryError = query.data?.success === false
         ? query.data.error
@@ -79,8 +80,8 @@ export function OmpProviderSettingsRow() {
         if (query.data?.success !== true) return;
         if (previousAuthenticatedProviderSignature.current === authenticatedProviderSignature) return;
         previousAuthenticatedProviderSignature.current = authenticatedProviderSignature;
-        void queryClient.invalidateQueries({ queryKey: ['machine-omp-models'] });
-    }, [authenticatedProviderSignature, query.data?.success, queryClient]);
+        void refreshOmpModelCatalogs(queryClient, machineId);
+    }, [authenticatedProviderSignature, machineId, query.data?.success, queryClient]);
 
     const startLogin = async (providerId: string) => {
         setLoginError(null);
@@ -152,6 +153,20 @@ export function OmpProviderSettingsRow() {
                                 ))}
                             </select>
                         </label>
+                        <div className="flex items-center justify-between gap-3 text-xs text-[var(--app-hint)]">
+                            <p>{t('settings.fork.omp.nativeScope')}</p>
+                            <Button
+                                type="button"
+                                variant="secondary"
+                                disabled={!machineId || query.isFetching}
+                                onClick={() => {
+                                    void query.refetch();
+                                    void refreshOmpModelCatalogs(queryClient, machineId);
+                                }}
+                            >
+                                {t('settings.fork.omp.refresh')}
+                            </Button>
+                        </div>
 
                         {flow?.status === 'waiting_for_callback' ? (
                             <div className="rounded-lg border border-[var(--app-border)] bg-[var(--app-subtle-bg)] p-3 text-sm">

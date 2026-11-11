@@ -4,6 +4,7 @@ import { logger } from '@/ui/logger';
 import { killProcessByChildProcess } from '@/utils/process';
 import { parseOmpInboundLine } from './schemas';
 import { resolveOmpLaunchCommand } from '../utils/config';
+import type { OmpShutdownReceipt } from '../session';
 import type {
     OmpCommand,
     OmpCommandType,
@@ -72,11 +73,25 @@ export class OmpRpcStateError extends Error {
 
 export class OmpRpcRequestError extends Error {
     readonly command: OmpCommandType;
+    readonly code?: string;
 
-    constructor(command: OmpCommandType, message: string, options?: ErrorOptions) {
+    constructor(command: OmpCommandType, message: string, options?: ErrorOptions & { code?: string }) {
         super(message, options);
         this.name = 'OmpRpcRequestError';
         this.command = command;
+        this.code = options?.code;
+    }
+}
+
+/** Startup failed; the receipt describes native ownership, not wrapper liveness. */
+export class OmpRpcConnectionError extends Error {
+    constructor(
+        cause: Error,
+        readonly shutdownReceipt: OmpShutdownReceipt,
+        readonly cleanupError?: Error
+    ) {
+        super(cause.message, { cause });
+        this.name = 'OmpRpcConnectionError';
     }
 }
 
@@ -138,6 +153,18 @@ export class OmpRpcTransport {
     private writeTail: Promise<void> = Promise.resolve();
     private closeReason: Error | null = null;
     private processExit: { pid?: number; code: number | null; signal: string | null } | null = null;
+    #spawnFailed = false;
+
+    get shutdownReceipt(): OmpShutdownReceipt {
+        if (this.#spawnFailed) return { kind: 'omp-rpc', status: 'not-started' };
+        const exit = this.processExit;
+        return {
+            kind: 'omp-rpc',
+            status: exit?.code === 0 && exit.signal === null ? 'disposed' : 'unverified',
+            pid: this.child.pid,
+            ...(exit ? { exitCode: exit.code, signal: exit.signal } : {})
+        };
+    }
 
     get exitInfo(): { pid?: number; code: number | null; signal: string | null } | null {
         return this.processExit;
@@ -159,11 +186,18 @@ export class OmpRpcTransport {
         const command = config.command ?? 'omp';
         const args = buildOmpRpcArgs(config);
         logger.debug(`[omp-rpc] spawning ${command} ${args.join(' ')}`);
-        this.child = dependencies.spawnProcess(
-            command,
-            args,
-            buildOmpRpcSpawnOptions(config)
-        ) as ChildProcessWithoutNullStreams;
+        try {
+            this.child = dependencies.spawnProcess(
+                command,
+                args,
+                buildOmpRpcSpawnOptions(config)
+            ) as ChildProcessWithoutNullStreams;
+        } catch (error) {
+            throw new OmpRpcConnectionError(
+                error instanceof Error ? error : new Error(String(error)),
+                { kind: 'omp-rpc', status: 'not-started' }
+            );
+        }
         this.attachProcessListeners(command);
     }
 
@@ -174,19 +208,34 @@ export class OmpRpcTransport {
             dependencies?: Partial<OmpRpcTransportDependencies>;
         } = {}
     ): Promise<OmpRpcTransport> {
-        const transport = new OmpRpcTransport(config, {
-            spawnProcess: options.dependencies?.spawnProcess ?? ((command, args, spawnOptions) => {
-                const resolved = resolveOmpLaunchCommand(command);
-                return spawn(resolved.command, [...resolved.args, ...args], spawnOptions) as ChildProcessWithoutNullStreams;
-            }),
-            killProcess: options.dependencies?.killProcess ?? killProcessByChildProcess
-        });
+        let transport: OmpRpcTransport;
+        try {
+            transport = new OmpRpcTransport(config, {
+                spawnProcess: options.dependencies?.spawnProcess ?? ((command, args, spawnOptions) => {
+                    const resolved = resolveOmpLaunchCommand(command);
+                    return spawn(resolved.command, [...resolved.args, ...args], spawnOptions) as ChildProcessWithoutNullStreams;
+                }),
+                killProcess: options.dependencies?.killProcess ?? killProcessByChildProcess
+            });
+        } catch (error) {
+            if (error instanceof OmpRpcConnectionError) throw error;
+            throw new OmpRpcConnectionError(
+                error instanceof Error ? error : new Error(String(error)),
+                { kind: 'omp-rpc', status: 'unverified' }
+            );
+        }
         try {
             await transport.waitUntilDiscovering(options.readyTimeoutMs ?? DEFAULT_READY_TIMEOUT_MS);
             return transport;
         } catch (error) {
-            await transport.close(error instanceof Error ? error : new Error(String(error)), 0);
-            throw error;
+            const cause = error instanceof Error ? error : new Error(String(error));
+            let cleanupError: Error | undefined;
+            try {
+                await transport.close(cause);
+            } catch (failure) {
+                cleanupError = failure instanceof Error ? failure : new Error(String(failure));
+            }
+            throw new OmpRpcConnectionError(cause, transport.shutdownReceipt, cleanupError);
         }
     }
 
@@ -216,7 +265,7 @@ export class OmpRpcTransport {
     onClosed(listener: (reason: Error) => void): () => void {
         if (this.stateValue === 'closed' && this.closeReason) {
             listener(this.closeReason);
-            return () => {};
+            return () => { };
         }
         this.closeListeners.add(listener);
         return () => this.closeListeners.delete(listener);
@@ -322,6 +371,8 @@ export class OmpRpcTransport {
         });
 
         this.child.on('error', (error: Error) => {
+            // Node reports spawn failures asynchronously with no assigned PID.
+            this.#spawnFailed = this.child.pid === undefined;
             const message = (error as NodeJS.ErrnoException).code === 'ENOENT'
                 ? `${command} was not found on PATH`
                 : `Failed to start ${command}: ${error.message}`;
@@ -589,6 +640,7 @@ export class OmpRpcTransport {
         this.settleReady(reason);
         this.rejectAll(reason);
 
+        if (this.#spawnFailed) return;
         try {
             this.child.stdin.end();
         } catch {

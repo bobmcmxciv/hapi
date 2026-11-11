@@ -36,4 +36,35 @@ describe('AdminPage account memory ownership', () => {
             method: 'PATCH', body: JSON.stringify({ memory: 'BOB-NEW' })
         })))
     })
+
+    it('submits multi-directory machine grant scopes atomically without collapsing to drive root', async () => {
+        const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+            if (url.endsWith('/api/tokens')) return new Response(JSON.stringify({ tokens: [] }))
+            if (url.endsWith('/api/machines')) return new Response(JSON.stringify({ machines: [{ id: 't14s', metadata: { displayName: 'T14s' } }] }))
+            if (url.endsWith('/api/memory')) return new Response(JSON.stringify({ memory: null }))
+            if (url.endsWith('/api/accounts') && !init?.method) return new Response(JSON.stringify({ accounts: [
+                { id: 1, username: 'admin', role: 'admin', defaultNamespace: 'admin-ns', disabledAt: null, memory: null },
+                { id: 2, username: 'peter', role: 'user', defaultNamespace: 'peter-ns', disabledAt: null, memory: null }
+            ] }))
+            if (url.endsWith('/api/grants/machine/t14s') && !init?.method) return new Response(JSON.stringify({
+                grants: [{ accountId: 2, role: 'operator', pathScopes: null, pathPrefix: null }]
+            }))
+            return new Response(JSON.stringify({ ok: true }), { status: 201 })
+        })
+        vi.stubGlobal('fetch', fetchMock)
+        render(<I18nProvider><AdminPage /></I18nProvider>)
+
+        await screen.findByText('peter · operator')
+        fireEvent.click(screen.getByRole('button', { name: '编辑授权' }))
+        fireEvent.click(screen.getByRole('checkbox', { name: /整机授权/ }))
+        fireEvent.change(screen.getByRole('textbox', { name: '允许的目录' }), {
+            target: { value: 'C:\\Users\\Tadokoro\nC:\\Peter' }
+        })
+        fireEvent.click(screen.getByRole('button', { name: '保存授权' }))
+
+        await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('http://hub/api/grants/machine/t14s', expect.objectContaining({
+            method: 'POST',
+            body: JSON.stringify({ accountId: 2, role: 'operator', pathScopes: ['C:\\Users\\Tadokoro', 'C:\\Peter'] })
+        })))
+    })
 })

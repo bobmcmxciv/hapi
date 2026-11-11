@@ -51,6 +51,27 @@ describe('AttachmentItem', () => {
         expect(screen.getByRole('button', { name: 'Remove attachment' })).not.toHaveClass('opacity-0')
     })
 
+    it.each([undefined, 'data:image/png;base64,cGhvdG8='])(
+        'localizes the remove action for both file and image drafts (%s)',
+        (previewUrl) => {
+            const previousLocale = localStorage.getItem('hapi-lang')
+            localStorage.setItem('hapi-lang', 'zh-CN')
+            mocks.attachment = {
+                name: 'draft.txt',
+                status: { type: 'requires-action', reason: 'composer-send' },
+                previewUrl
+            }
+            try {
+                renderAttachment()
+                expect(screen.getByRole('button', { name: '移除附件' })).toHaveAttribute('title', '移除附件')
+                expect(screen.queryByRole('button', { name: 'Remove attachment' })).not.toBeInTheDocument()
+            } finally {
+                if (previousLocale === null) localStorage.removeItem('hapi-lang')
+                else localStorage.setItem('hapi-lang', previousLocale)
+            }
+        }
+    )
+
     it('keeps the upload indicator on top of an image preview while uploading', () => {
         mocks.attachment = {
             name: 'uploading.png',

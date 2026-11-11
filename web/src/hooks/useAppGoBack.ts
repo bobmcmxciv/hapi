@@ -1,5 +1,6 @@
 import { useCallback } from 'react'
 import { useLocation, useNavigate, useRouter } from '@tanstack/react-router'
+import { appPathname } from '@/lib/appPath'
 
 export function getSettingsBackTarget(pathname: string): string | null {
     if (pathname === '/settings') return '/sessions'
@@ -27,7 +28,7 @@ export function getSessionFilesBackSearch(search: unknown): {
 export function useAppGoBack(): () => void {
     const navigate = useNavigate()
     const router = useRouter()
-    const pathname = useLocation({ select: (location) => location.pathname })
+    const pathname = useLocation({ select: (location) => appPathname(location.pathname) })
     const search = useLocation({ select: (location) => location.search })
 
     return useCallback(() => {

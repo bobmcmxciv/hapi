@@ -248,6 +248,7 @@ function createWebApp(options: {
     multiUser: { store: MultiUserGatewayStore; coreUserId: number; subscriptionStore: SubscriptionStore }
     blobs?: GeneratedBlobServices
     getEventLoopLag?: () => EventLoopLagSnapshot
+    /** Live runtime timeline registry (beta); created in startHub and shared with the CLI socket server. */
     runtimeRegistry: RuntimeTimelineRegistry
 }): Hono<WebAppEnv> {
     const app = new Hono<WebAppEnv>()
@@ -310,7 +311,7 @@ function createWebApp(options: {
     app.route('/cli', createCliRoutes(
         options.getSyncEngine,
         token => resolveGatewayCliNamespace(multiUserStore, token),
-        { blobStore: options.blobs?.store }
+        { blobStore: options.blobs?.store, gatewayStore: multiUserStore }
     ))
 
     app.route('/api', createAuthRoutes(options.jwtSecret, options.store))
@@ -334,7 +335,8 @@ function createWebApp(options: {
     app.route('/api', createSubscriptionRoutes({
         gatewayStore: multiUserStore,
         subscriptionStore: options.multiUser.subscriptionStore,
-        jwtSecret: options.jwtSecret
+        jwtSecret: options.jwtSecret,
+        getSyncEngine: options.getSyncEngine
     }))
     app.use('/api/*', createExecutionMiddleware({
         store: multiUserStore,
@@ -355,6 +357,9 @@ function createWebApp(options: {
             createSessionPathResolver(options.getSyncEngine)
         )
     ))
+    // beta(runtime): dedicated live-timeline read surface. Mounted after the
+    // execution middleware so every request already carries a verified account
+    // context; per-frame reauthorization happens inside the route itself.
     app.route('/api', createRuntimeTimelineRoutes(
         () => options.runtimeRegistry,
         options.getSyncEngine,
@@ -568,6 +573,7 @@ export async function startWebServer(options: {
     multiUser: { store: MultiUserGatewayStore; coreUserId: number; subscriptionStore: SubscriptionStore }
     blobs?: GeneratedBlobServices
     getEventLoopLag?: () => EventLoopLagSnapshot
+    /** Live runtime timeline registry (beta); shared with the CLI socket server. */
     runtimeRegistry: RuntimeTimelineRegistry
 }): Promise<BunServer<WebSocketData>> {
     const isCompiled = isBunCompiled()

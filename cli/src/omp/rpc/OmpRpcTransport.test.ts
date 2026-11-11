@@ -120,6 +120,59 @@ describe('buildOmpRpcArgs', () => {
 });
 
 describe('OmpRpcTransport', () => {
+    it('reports not-started for a synchronous native spawn rejection', async () => {
+        const cause = new Error('spawn denied');
+        await expect(OmpRpcTransport.connect({ cwd: '/workspace' }, {
+            dependencies: { spawnProcess: () => { throw cause; } }
+        })).rejects.toMatchObject({
+            cause, shutdownReceipt: { kind: 'omp-rpc', status: 'not-started' }
+        });
+    });
+
+    it('reports not-started for an asynchronous spawn error without a native PID', async () => {
+        const { child } = createFakeProcess();
+        const noPidChild = Object.create(child) as FakeProcess;
+        Object.defineProperty(noPidChild, 'pid', { value: undefined });
+        const connecting = OmpRpcTransport.connect({ cwd: '/workspace' }, {
+            dependencies: { spawnProcess: () => noPidChild }
+        });
+        noPidChild.emit('error', Object.assign(new Error('missing binary'), { code: 'ENOENT' }));
+        await expect(connecting).rejects.toMatchObject({
+            message: 'omp was not found on PATH',
+            shutdownReceipt: { status: 'not-started' }
+        });
+    });
+
+    it('propagates clean disposal after a ready timeout without confusing it with no launch', async () => {
+        const { child } = createFakeProcess();
+        const { dependencies } = createDependencies(child);
+        await expect(OmpRpcTransport.connect({ cwd: '/workspace' }, { readyTimeoutMs: 5, dependencies }))
+            .rejects.toMatchObject({
+                message: 'Timed out waiting 5ms for OMP RPC ready frame',
+                shutdownReceipt: { status: 'disposed', pid: 4242, exitCode: 0 }
+            });
+    });
+
+    it('retains startup error and unverified ownership when disposal also times out', async () => {
+        vi.useFakeTimers();
+        try {
+            const { child } = createFakeProcess();
+            child.stdin.removeAllListeners('finish');
+            const { dependencies, killProcess } = createDependencies(child);
+            const result = OmpRpcTransport.connect({ cwd: '/workspace' }, { readyTimeoutMs: 5, dependencies })
+                .catch((error: unknown) => error);
+            await vi.advanceTimersByTimeAsync(30_006);
+            expect(await result).toMatchObject({
+                message: expect.stringContaining('Timed out waiting 5ms'),
+                cleanupError: expect.objectContaining({ message: expect.stringContaining('native disposal') }),
+                shutdownReceipt: { status: 'unverified', pid: 4242 }
+            });
+            expect(killProcess).not.toHaveBeenCalled();
+            child.emit('close', 0, null);
+        } finally {
+            vi.useRealTimers();
+        }
+    });
     it('delivers startup logical events once after discovery without replaying control frames', async () => {
         const { child } = createFakeProcess();
         const { dependencies } = createDependencies(child);

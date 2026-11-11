@@ -40,10 +40,11 @@ readiness failure all require runner-side cleanup verification before archive
 metadata can be restored. Unknown cleanup remains a visible error, not a
 successful reopen or a confirmed exit. Runner-owned PID/start-marker tracking
 and spawn deduplication prevent retries from launching over an unconfirmed child.
-If another native process owns the journal, OMP safely
-continues the history in a new sibling journal; HAPI immediately updates the
-native ID/file from OMP's authoritative RPC state. It does not take over the
-other process's lease or modify its session header.
+HAPI verifies the discovered native ID against the original journal before
+publishing readiness. A missing persisted journal, conflicting live writer or
+unexpected sibling identity is an explicit error, not permission to silently
+replace the history. Only a proven never-persisted empty session may receive a
+new native ID while keeping the original HAPI row.
 
 OMP and PTY archived resumes also persist a Hub-owned archive checkpoint before
 spawn. CLI bootstrap cannot erase it, including when an older CLI omits the field.
@@ -81,6 +82,15 @@ and is never killed by this path. Unverified cleanup (including an offline
 runner) is a visible error, never silent success. Repeated or concurrent
 archive/reopen/restart clicks are serialized per session server-side.
 
+A failed starter can remain quarantined without losing its history. Quarantine
+blocks message, metadata and readiness publication, but an authenticated cleanup
+route may still request native disposal. The Runner must verify the wrapper's
+own generation-bound cleanup receipt before terminating it. A rejected shutdown
+metadata acknowledgment is not itself proof that disposal failed or succeeded:
+only a positive verified Runner stop can complete that recovery. Verified cleanup
+retires old publication identities before clearing the attempt, so a delayed old
+connection cannot overwrite the archive or become the next session's publisher.
+
 With native OMP 18.16.0, remote exit aborts the active turn and closes RPC input;
 OMP disposes its session-owned resources and flushes its journal before HAPI
 accepts an observed native exit code of zero. Local terminal shutdown uses a
@@ -92,10 +102,101 @@ flushes are visible failures; they never authorize a blanket broker/subtree kill
 The kill RPC acknowledges only after native disposal and hub metadata flushing,
 then schedules wrapper/socket exit so the acknowledgment can reach its caller.
 
+Archiving an idle-hibernated remote session reuses its already-confirmed native
+disposal receipt rather than treating the absent subprocess as unknown cleanup.
+Shutdown waits for an in-flight hibernation or wake-up before collecting that
+receipt. An EOF disposal timeout keeps the native client available for a retry;
+a failed shutdown preparation keeps the wrapper available until cleanup can be
+confirmed and the successful kill-RPC acknowledgement can reach its caller.
+These retries do not relax cleanup verification: abnormal exits and unconfirmed
+resources still block a successful archive.
+
 Closing a session tab, backgrounding the browser, or temporary network/SSE
 disconnection only changes navigation/connectivity; none exits the native runtime.
 The composer's Stop button aborts the current turn, not the session. Use Archive
 for an explicit exit; use Reopen in the session list to resume its history.
+
+## Native provider and model authority
+
+For an OMP session, HAPI uses the selected Runner's native OMP login state,
+workspace-specific model catalog, provider-qualified model IDs and thinking
+capabilities. Selecting `anthropic/<model>` still starts OMP; it does not switch
+the session to the separate Claude Code agent or its cc-switch configuration.
+Choosing Default leaves model resolution to OMP. An explicit selection is kept
+while discovery is loading and must be confirmed by the target workspace's
+catalog before launch; an unavailable selection is not silently changed to auto.
+
+Signing in and enabling a model are separate native operations. If Claude Pro
+is authenticated but absent from the HAPI picker, compare the native catalog and
+enabled scope on the same machine, OS account, profile and working directory:
+
+```bash
+omp models ls anthropic --json
+omp config get enabledModels --json
+omp config get enabledProviders --json
+```
+
+Use OMP's own model/config controls to include the intended provider, preserving
+existing selections and defaults. Do not replace the entire enabled-model list
+with a single provider or copy OAuth credentials into HAPI. Refresh the native
+models in HAPI after signing in outside the web app or changing the native scope.
+The refresh covers both machine discovery and current-session model queries.
+
+## Native subscription usage
+
+OMP already exposes machine-readable subscription reports:
+
+```bash
+omp usage --json --redact
+```
+
+The HAPI usage page defaults to OMP-native reports from one selected online
+Runner. It calls the installed native CLI on page access or explicit refresh,
+with single-flight requests and a short cache, not a second provider polling
+service. The Hub endpoint `/api/subscription/omp/:machineId` remains admin-only
+and rechecks credentials after the Runner responds. Credentials, raw provider
+payloads, metadata and stderr are not sent to the browser; account references
+are opaque. Report `fetchedAt`, not envelope generation time, controls freshness.
+Expired reports/windows are hidden, real zero remains zero, and routing copies
+of the same account's shared quota pool are not summed.
+
+Built-in coverage includes Anthropic Claude Pro/Max, ChatGPT through
+`openai-codex` OAuth, Google Antigravity, Devin and `zai` Coding Plan. Coverage
+depends on the installed OMP and its extensions and credentials. No returned
+report means no report for this query, not zero quota or proof of no subscription.
+The current built-ins do not supply DeepSeek balance, arbitrary GPT proxy-pool
+balances or every GLM billing product. The explicit External monitors source
+retains those integrations and the formal stale-snapshot rules. Selecting native
+reports does not stop or reconfigure an existing collector. Session token/cost
+accounting below the quota panel is separate and remains unchanged.
+
+### cx2cc proxy quotas
+
+HAPI maintains a separate `hapi-cx2cc-usage.ts` OMP extension for configured cx2cc
+providers. It registers only a native usage fetcher; existing model definitions,
+API routing, credential references and other extensions remain unchanged.
+The adapter reads the same configured origin's `/api/usage` with the resolved
+provider key. It does not request `/api/accounts` or require account-pool access.
+
+Native reports include the returned quota windows, reset times and credit
+balance. Credits stay in credit units, not USD; missing values are not invented,
+real zero remains zero and shared quotas are not summed. HAPI applies the same
+freshness and identity-redaction boundary as for other OMP-native reports.
+The external monitor source remains available for pool-wide views and providers
+without native reports.
+
+Updated Runners install the managed extension before on-demand quota queries and
+session startup. Installing the extension alone also enables the next standalone
+`omp usage --json --provider cx2cc-ecs` or HAPI native-usage query without restarting
+existing Runner/Agent processes. A foreign file at the reserved extension path is
+never overwritten.
+
+From a HAPI source checkout, install it on the Runner's OMP profile with:
+
+```bash
+bun -e "import { ensureCx2ccUsageExtension } from './fork-features/omp-host-integration/cx2ccUsageExtension'; console.log(await ensureCx2ccUsageExtension())"
+```
+
 
 ## Native remote protocol
 
@@ -109,6 +210,55 @@ The native RPC path provides:
 - tool, thinking, usage, retry, subagent, media, file, and extension UI events;
 - host tools for `display_image`, `display_video`, and `send_file`;
 - runner-scoped provider sign-in under **Settings → HAPI Extensions → Oh My Pi providers**, without copying credentials into chat.
+
+### Durable input delivery and compatibility
+
+Token-aware remote input requires native OMP advertising both
+`get_state.capabilities.inputReceipts` and `capabilities.nativeOrder`; the version
+string alone is not proof. Deploy this native build on each Runner host before
+deploying the dependent HAPI CLI. HAPI forwards the original Hub message `localId`
+as the generic native `clientToken`, and validates committed delivery identity,
+timestamp and journal order before consumed acknowledgment.
+Old native builds fail this input path explicitly instead of silently accepting
+an ignored idempotency field.
+
+On reconnect, HAPI resumes the original journal and initializes host tools and
+subscriptions before invoking native `recover_inputs`. Recovery readiness does
+not wait for a model generation. Journal admission keeps payload ownership in
+native OMP but leaves the Hub message queued: only a committed native delivery
+receipt with the original `sessionId`, conversation `entryId`, delivery timestamp
+and journal ordinal emits a consumed acknowledgement. Display order follows the
+native journal, not an acknowledgment's arrival time or a Runner's wall clock.
+A previous assistant finishing, enqueue success, or equal text is never evidence
+of delivery.
+
+Native local/builtin handling and cancellation are durable non-invocation
+outcomes. HAPI persists their complete receipts and sends separate terminal
+resolutions, including on wrapper reconnect, without marking the message consumed.
+Wrapper-owned session commands such as `/rename` persist their acknowledged
+host handling separately; they resolve as handled, never as native user turns.
+Cancelling an admitted native input uses exact `clientToken`, not a text match;
+the asynchronous cancellation acknowledgement waits for native journal proof.
+Not-found or unavailable cancellation remains unconfirmed, not executed.
+
+HAPI does not replay admitted payloads. Legacy dispatched **or accepted** sidecars
+without native proof remain quarantined rather than guessed or blindly retried.
+Native journal payload ownership and receipt identity survive wrapper restart;
+HAPI sidecars preserve identity and native evidence, not a replacement transcript.
+This prevents duplicate native user invocation, not exactly-once tool effects.
+
+
+### Attachments
+
+Images are sent as native OMP image content. Other attachments, including PDFs,
+text files, Office documents, and archives, are passed as local `@path` file
+references so OMP can read them with its tools. Files are not discarded based on
+their MIME type. Messages containing only file attachments are supported.
+
+Files remain on the runner machine; their contents are read on demand rather
+than embedded as binary prompt text. Extraction depends on OMP's support for the
+file format. After upgrading HAPI, reopen an existing remote session to load the
+updated attachment handling.
 
 ## Message formatting
 
@@ -277,7 +427,7 @@ Provider sign-in is a runner setting, not a session action. Session chats never 
 
 In a remote OMP session, the composer exposes the native model and thinking selectors plus the OMP permission label. The chat and session menus also provide queued-message cancellation, current-turn abort, per-message rewind/fork, archive/kill, media and file cards, subagent timelines, and local/remote switching.
 
-The model and thinking values shown after reconnect come from the resumed native session. OMP 17.0.4 does not report quota utilization or reset timestamps, so HAPI shows native retry/fallback events instead of Claude-style usage-limit cards.
+The model and thinking values shown after reconnect come from the resumed native session. Subscription quotas are queried independently through the native usage command described above; they are not inferred from retry/fallback events in the chat timeline.
 
 ## Claude-only configuration
 
@@ -289,3 +439,49 @@ OMP 17.0.4 RPC has no equivalent mutation for these Claude configuration fields:
 - allowed/disallowed built-in tool filters.
 
 HAPI identifies these fields as Claude-only instead of converting them into prompt text or host-tool registration.
+
+## Event-driven Beta timeline
+
+The optional `/beta/` UI reads a separate authenticated runtime stream from
+`GET /api/sessions/:id/runtime/events`; `GET /api/sessions/:id/runtime`
+returns the current snapshot and producer connectivity. These routes use
+the same account, machine, directory and session grants as the existing API,
+and revalidate credentials and grants during streaming. They do not send
+high-frequency runtime frames to the legacy `/api/events` stream.
+
+An upgraded CLI publishes one launch epoch with monotonically sequenced
+entity changes. Reconnect starts with an authoritative snapshot. Text,
+thinking and tool progress update only the corresponding Beta row; native
+run completion flushes the pending tail before publishing terminal state.
+`stop`, `length`, `toolUse`, `error` and `aborted` are preserved on durable
+assistant envelopes. `toolUse` ends a message, not an agent run. Network
+disconnection is not treated as successful completion or cancellation.
+
+Canonical message UUIDs connect live rows to their durable history records;
+the UI does not match responses by text or wall-clock proximity. Beta history
+requests complete invoked-user turns, rather than fixed message-row pages.
+An ordinary page returns fewer complete turns when their aggregate size reaches
+the safety limit. A single turn exceeding 2,000 raw records is explicitly split
+into continuations carrying the original user-turn ID and missing-side flags.
+Queued and terminal non-invoked inputs do not create execution boundaries.
+
+The viewport retains at most 8,000 execution rows and mounts only visible rows
+and interaction pins. Whole-turn sharing independently collects the selected
+turn through the authenticated API, including segments outside this viewport
+window. Its cursor is fenced to a captured snapshot; cancellation or an incomplete
+collection is an explicit failure, never a silently truncated image. These
+coverage flags do not assert that a still-running model has finished its turn.
+
+Runtime recovery state is bounded to 2,000 items and 3 MiB, with a 4 MiB
+publication limit. Whole older entities are evicted with explicit changes;
+canonical history is not removed. An individual oversized live preview is
+explicitly marked deferred, and its complete canonical result is still
+stored and rendered through history. The Hub also bounds aggregate runtime
+state and subscriber queues; a slow or interrupted stream reconnects through
+a fresh snapshot rather than accumulating an unbounded backlog.
+
+The Beta keeps the existing composer, scheduling, queue controls, models,
+thinking selectors, provider setup, attachments, file/media services, voice
+controls and business pages. Its live runtime channel is independent of the
+legacy timeline presentation allowlist. A pre-upgrade CLI is labeled
+history-compatible instead of displaying a fabricated live connection.

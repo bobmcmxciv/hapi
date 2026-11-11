@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import { resolveOmpLaunchCommand } from '../utils/config';
 import { parseOmpResponseData } from './schemas';
 import {
+    OmpRpcConnectionError,
     OmpRpcRequestError,
     OmpRpcTransport,
     type OmpRpcRequestOptions
@@ -18,6 +19,7 @@ import type {
     OmpRpcTransportState
 } from './types';
 import type { OmpRpcTransportDependencies } from './OmpRpcTransport';
+export { OmpRpcConnectionError } from './OmpRpcTransport';
 
 const MINIMUM_OMP_RPC_VERSION = [17, 0, 4] as const;
 const VERSION_PROBE_TIMEOUT_MS = 5_000;
@@ -109,9 +111,11 @@ export async function probeOmpVersion(
         });
         child.on('close', (code) => {
             if (code !== 0) {
-                finish({ error: new Error(
-                    `${command} --version exited with ${code ?? 'null'}${stderr ? `: ${stderr.trim()}` : ''}`
-                ) });
+                finish({
+                    error: new Error(
+                        `${command} --version exited with ${code ?? 'null'}${stderr ? `: ${stderr.trim()}` : ''}`
+                    )
+                });
                 return;
             }
             try {
@@ -127,7 +131,7 @@ export class OmpRpcClient {
     private constructor(
         private readonly transport: OmpRpcTransport,
         readonly discovery: OmpRpcDiscovery
-    ) {}
+    ) { }
 
     static async connect(
         config: OmpRpcSpawnConfig,
@@ -138,8 +142,16 @@ export class OmpRpcClient {
         } = {}
     ): Promise<OmpRpcClient> {
         const command = config.command ?? 'omp';
-        const version = await (options.probeVersion ?? probeOmpVersion)(command, config.env);
-        assertSupportedOmpVersion(version);
+        let version: OmpVersion;
+        try {
+            version = await (options.probeVersion ?? probeOmpVersion)(command, config.env);
+            assertSupportedOmpVersion(version);
+        } catch (error) {
+            throw new OmpRpcConnectionError(
+                error instanceof Error ? error : new Error(String(error)),
+                { kind: 'omp-rpc', status: 'not-started' }
+            );
+        }
 
         const transport = await OmpRpcTransport.connect(config, {
             readyTimeoutMs: options.readyTimeoutMs,
@@ -159,8 +171,14 @@ export class OmpRpcClient {
                 models: models.models
             });
         } catch (error) {
-            await transport.close(error instanceof Error ? error : new Error(String(error)), 0);
-            throw error;
+            const cause = error instanceof Error ? error : new Error(String(error));
+            let cleanupError: Error | undefined;
+            try {
+                await transport.close(cause);
+            } catch (failure) {
+                cleanupError = failure instanceof Error ? failure : new Error(String(failure));
+            }
+            throw new OmpRpcConnectionError(cause, transport.shutdownReceipt, cleanupError);
         }
     }
 
@@ -210,7 +228,7 @@ export class OmpRpcClient {
     ): Promise<OmpResponseData<C>> {
         const response = await transport.request(command, options);
         if (!response.success) {
-            throw new OmpRpcRequestError(command.type, response.error);
+            throw new OmpRpcRequestError(command.type, response.error, { code: response.code });
         }
         return parseOmpResponseData(command.type, response.data);
     }

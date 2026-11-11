@@ -44,6 +44,64 @@ iOS requires Safari for PWA installation. Chrome/Firefox on iOS don't support th
 
 ## PWA Features
 
+### Compact desktop session list
+
+The Beta sidebar keeps desktop toolbar actions in one wrapping row rather than
+separate button groups. Its dense machine grid fits three columns at the default
+420px sidebar width and two at 280px; hover shows truncated machine names.
+Coarse-pointer devices retain larger touch targets.
+Click the machine-list summary to collapse or expand the grid. The choice persists
+in this browser across reloads; the selected machine and session count remain
+visible while collapsed. Expanding restores the existing filters, owner groups,
+health details and machine actions.
+
+### Reading execution details
+
+While an expanded execution process scrolls past its original header, its
+collapse control stays at the top of the conversation viewport, including when
+the original header has been virtualized away. Collapse returns to that process
+summary without discarding the answer or artifacts; scrolling beyond the process
+removes the pinned control. The conversation-wide error-count banner is removed.
+Inline tool errors, per-process error counts, approvals and questions remain.
+
+Complete assistant messages stay in the conversation, outside execution details.
+Tool sequences before and after each message have independent collapse controls;
+expanding one sequence does not expand the rest of the turn. The collapsed handle
+shows running tools, the current action and target, and any error count. Error
+details remain inside their tool cards rather than in a separate top error list.
+The live footer follows changes to the active tool without waiting for a new
+message. Late-arriving assistant text becomes visible immediately, including
+after reconnecting to the runtime stream.
+
+### Message send feedback
+
+Immediate input appears as a full conversation bubble as soon as it is submitted.
+Its status distinguishes sending from waiting for the model. The queue keeps
+compact message references with edit/cancel controls instead of repeating full
+messages. HTTP success or a force-send acknowledgement does not mean the model
+has consumed the input: only a native invocation or terminal resolution removes
+the pending entry. A native invocation takes precedence over a late send-status
+update, and failed sends retain their retry action.
+
+
+### Mobile layout in Beta
+
+The `/beta/` session list keeps machine filters in a compact summary on phones.
+Tap the summary to expand the machine grid; the current selection and counts stay
+visible when it is collapsed. Toolbar actions wrap instead of scrolling sideways.
+
+When the on-screen keyboard opens in a conversation, session tabs, header metadata,
+task details, context/model status and attachment previews temporarily collapse.
+Task and attachment summaries remain available to open on demand; approval/error
+entries and send/stop controls stay reachable. The normal editor shows at most
+three lines while typing, with internal scrolling for longer drafts. Explicit
+full-screen editor expansion remains available.
+
+Closing the keyboard restores the previous panel preferences. Draft text, selected
+attachments and queued messages are retained; the temporary layout does not change
+the saved task-panel preference. Desktop window resizing and pinch zoom do not
+activate keyboard compact mode.
+
 ### Offline Mode
 
 When offline, HAPI can:

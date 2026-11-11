@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import type { CSSProperties, MouseEvent as ReactMouseEvent, ReactNode } from 'react'
 import { MACHINE_DISPLAY_NAME_MAX_LENGTH, type MachineIconId } from '@hapi/protocol'
 import type { MachineHealthPresentation } from '@/lib/machineHealth'
@@ -9,14 +9,14 @@ import { CheckIcon } from '@/components/icons'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Button } from '@/components/ui/button'
 import {
-    MachineOsIcon,
-    MachineOwnerHeading,
-    groupMachinesByOwner,
-    machineChipContentClass,
-    machineChipGridClass,
-    machineChipIdleClass,
-    machineChipSelectedClass,
-    machineChipShellClass
+ MachineOsIcon,
+ MachineOwnerHeading,
+ groupMachinesByOwner,
+ machineChipIdleClass,
+ machineChipSelectedClass,
+ machineFilterChipContentClass,
+ machineFilterChipShellClass,
+ machineFilterGridClass
 } from '@/components/machinePresentation'
 import { cn } from '@/lib/utils'
 import { useTranslation } from '@/lib/use-translation'
@@ -28,382 +28,445 @@ import { machineIconLabelKey } from '@/fork-features/machine-icons/MachineDevice
 import type { MachinePresentationPatch } from '@/fork-features/machine-icons/types'
 
 export type MachineFilterItem = {
-    id: string
-    label: string
-    sessionCount: number
-    healthPresentation: MachineHealthPresentation | null
-    /** node 平台词表（win32 / darwin / linux）。机器对象缺失时由会话 metadata.os 兜底；未知为 null。 */
-    platform: string | null
-    /** fork(machine-icons)：设备图标；未设为 null，chip 回落到系统图标。 */
-    icon: MachineIconId | null
-    /** 多用户 gateway 标注的归属账号用户名；单用户 hub 或未知为 null。 */
-    owner: string | null
-    /** 当前自定义别名原值（区别于 label 的 displayName→host→id 回退链），改名对话框回填用。 */
-    displayName: string | null
-    /** 主机名，改名对话框的占位与「清空后恢复成什么」提示。 */
-    host: string | null
-    /** 只有出现在 /api/machines 里的机器才能 PATCH 改名。 */
-    canRename: boolean
+ id: string
+ label: string
+ sessionCount: number
+ healthPresentation: MachineHealthPresentation | null
+ /** node 平台词表（win32 / darwin / linux）。机器对象缺失时由会话 metadata.os 兜底；未知为 null。 */
+ platform: string | null
+ /** fork(machine-icons)：设备图标；未设为 null，chip 回落到系统图标。 */
+ icon: MachineIconId | null
+ /** 多用户 gateway 标注的归属账号用户名；单用户 hub 或未知为 null。 */
+ owner: string | null
+ /** 当前自定义别名原值（区别于 label 的 displayName→host→id 回退链），改名对话框回填用。 */
+ displayName: string | null
+ /** 主机名，改名对话框的占位与「清空后恢复成什么」提示。 */
+ host: string | null
+ /** 只有出现在 /api/machines 里的机器才能 PATCH 改名。 */
+ canRename: boolean
 }
 
 // 图标 / 分组 / 网格类名已抽到 machinePresentation，供本条筛选条、用量页机器榜、
 // 新建会话机器选择器共用——同一批机器在三处曾长得完全不一样。
 const chipSelectedClass = machineChipSelectedClass
 const chipIdleClass = machineChipIdleClass
-const chipGridClass = machineChipGridClass
-const chipShellClass = machineChipShellClass
-const chipContentClass = machineChipContentClass
+// The sidebar filter uses the compact variants; the shared chip classes stay
+// for the new-session selector and usage board.
+const chipGridClass = machineFilterGridClass
+const chipShellClass = machineFilterChipShellClass
+const chipContentClass = machineFilterChipContentClass
 
 export { groupMachinesByOwner }
 
 function FilterIcon(props: { className?: string }) {
-    return (
-        <svg
-            xmlns="http://www.w3.org/2000/svg"
-            width="20"
-            height="20"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            className={props.className}
-        >
-            <polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3" />
-        </svg>
-    )
+ return (
+  <svg
+   xmlns="http://www.w3.org/2000/svg"
+   width="20"
+   height="20"
+   viewBox="0 0 24 24"
+   fill="none"
+   stroke="currentColor"
+   strokeWidth="2"
+   strokeLinecap="round"
+   strokeLinejoin="round"
+   className={props.className}
+  >
+   <polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3" />
+  </svg>
+ )
 }
 
 function MachineFilterChip(props: {
-    machine: MachineFilterItem
-    selected: boolean
-    onSelect: (id: string) => void
-    onRenameRequest?: (machine: MachineFilterItem) => void
-    layout: MachineLayout
-    healthPopupOpen: boolean
-    onHealthPopupOpenChange: (open: boolean) => void
+ machine: MachineFilterItem
+ selected: boolean
+ onSelect: (id: string) => void
+ onRenameRequest?: (machine: MachineFilterItem) => void
+ layout: MachineLayout
+ healthPopupOpen: boolean
+ onHealthPopupOpenChange: (open: boolean) => void
 }) {
-    const { t } = useTranslation()
-    const { machine, selected, onSelect, onRenameRequest, healthPopupOpen, onHealthPopupOpenChange } = props
-    const tooltipId = useId()
-    const containerRef = useRef<HTMLSpanElement>(null)
-    const touchActiveRef = useRef(false)
-    const touchClearTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-    const [tooltipAlign, setTooltipAlign] = useState<'start' | 'end'>('start')
-    const hasHealth = Boolean(machine.healthPresentation && machine.healthPresentation.metrics.length > 0)
+ const { t } = useTranslation()
+ const { machine, selected, onSelect, onRenameRequest, healthPopupOpen, onHealthPopupOpenChange } = props
+ const tooltipId = useId()
+ const containerRef = useRef<HTMLSpanElement>(null)
+ const touchActiveRef = useRef(false)
+ const touchClearTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+ const [tooltipAlign, setTooltipAlign] = useState<'start' | 'end'>('start')
+ const hasHealth = Boolean(machine.healthPresentation && machine.healthPresentation.metrics.length > 0)
 
-    const osLabel = resolveMachineOsLabel(machine.platform)
-    const osText = osLabel.kind === 'i18n' ? t(osLabel.key) : osLabel.value
-    const iconText = machine.icon ? t(machineIconLabelKey(machine.icon)) : null
-    const titleLine = [machine.label, iconText, osText, machine.owner].filter(Boolean).join(' · ')
-    const canRename = Boolean(machine.canRename && onRenameRequest)
-    const title = canRename ? `${titleLine}\n${t('sessions.machineFilter.renameTooltip')}` : titleLine
+ const osLabel = resolveMachineOsLabel(machine.platform)
+ const osText = osLabel.kind === 'i18n' ? t(osLabel.key) : osLabel.value
+ const iconText = machine.icon ? t(machineIconLabelKey(machine.icon)) : null
+ const titleLine = [machine.label, iconText, osText, machine.owner].filter(Boolean).join(' · ')
+ const canRename = Boolean(machine.canRename && onRenameRequest)
+ const title = canRename ? `${titleLine}\n${t('sessions.machineFilter.renameTooltip')}` : titleLine
 
-    const updateTooltipAlign = useCallback(() => {
-        const el = containerRef.current
-        if (!el || typeof window === 'undefined') return
-        const rect = el.getBoundingClientRect()
-        const groupRect = el.closest('[role="group"]')?.getBoundingClientRect()
-        const rightLimit = groupRect && groupRect.width > 0 ? groupRect.right : window.innerWidth - 8
-        const leftLimit = groupRect && groupRect.width > 0 ? groupRect.left : 8
-        if (rect.left + 256 > rightLimit && rect.right - 256 >= leftLimit - 8) {
-            setTooltipAlign('end')
-        } else {
-            setTooltipAlign('start')
-        }
-    }, [])
+ const updateTooltipAlign = useCallback(() => {
+  const el = containerRef.current
+  if (!el || typeof window === 'undefined') return
+  const rect = el.getBoundingClientRect()
+  const groupRect = el.closest('[role="group"]')?.getBoundingClientRect()
+  const rightLimit = groupRect && groupRect.width > 0 ? groupRect.right : window.innerWidth - 8
+  const leftLimit = groupRect && groupRect.width > 0 ? groupRect.left : 8
+  if (rect.left + 256 > rightLimit && rect.right - 256 >= leftLimit - 8) {
+   setTooltipAlign('end')
+  } else {
+   setTooltipAlign('start')
+  }
+ }, [])
 
-    useEffect(() => {
-        return () => {
-            if (touchClearTimerRef.current) {
-                clearTimeout(touchClearTimerRef.current)
-            }
-        }
-    }, [])
+ useEffect(() => {
+  return () => {
+   if (touchClearTimerRef.current) {
+    clearTimeout(touchClearTimerRef.current)
+   }
+  }
+ }, [])
 
-    useEffect(() => {
-        if (!healthPopupOpen) return
-        updateTooltipAlign()
-        const closeOnOutsidePointer = (event: PointerEvent) => {
-            if (!containerRef.current?.contains(event.target as Node)) {
-                onHealthPopupOpenChange(false)
-            }
-        }
-        const closeOnEscape = (event: KeyboardEvent) => {
-            if (event.key === 'Escape') {
-                onHealthPopupOpenChange(false)
-            }
-        }
-        document.addEventListener('pointerdown', closeOnOutsidePointer)
-        document.addEventListener('keydown', closeOnEscape)
-        return () => {
-            document.removeEventListener('pointerdown', closeOnOutsidePointer)
-            document.removeEventListener('keydown', closeOnEscape)
-        }
-    }, [healthPopupOpen, onHealthPopupOpenChange, updateTooltipAlign])
+ useEffect(() => {
+  if (!healthPopupOpen) return
+  updateTooltipAlign()
+  const closeOnOutsidePointer = (event: PointerEvent) => {
+   if (!containerRef.current?.contains(event.target as Node)) {
+    onHealthPopupOpenChange(false)
+   }
+  }
+  const closeOnEscape = (event: KeyboardEvent) => {
+   if (event.key === 'Escape') {
+    onHealthPopupOpenChange(false)
+   }
+  }
+  document.addEventListener('pointerdown', closeOnOutsidePointer)
+  document.addEventListener('keydown', closeOnEscape)
+  return () => {
+   document.removeEventListener('pointerdown', closeOnOutsidePointer)
+   document.removeEventListener('keydown', closeOnEscape)
+  }
+ }, [healthPopupOpen, onHealthPopupOpenChange, updateTooltipAlign])
 
-    const longPress = useLongPress({
-        interaction: 'touch-only-native-click',
-        threshold: 450,
-        longPressEnabled: hasHealth || canRename,
-        onLongPress: () => {
-            if (hasHealth) {
-                updateTooltipAlign()
-                onHealthPopupOpenChange(true)
-            } else if (canRename) {
-                onRenameRequest!(machine)
-            }
-        },
-        onClick: () => {
-            if (selected && hasHealth) {
-                updateTooltipAlign()
-                onHealthPopupOpenChange(!healthPopupOpen)
-            } else if (healthPopupOpen) {
-                onHealthPopupOpenChange(false)
-            }
-            onSelect(machine.id)
-        }
-    })
+ const longPress = useLongPress({
+  interaction: 'touch-only-native-click',
+  threshold: 450,
+  longPressEnabled: hasHealth || canRename,
+  onLongPress: () => {
+   if (hasHealth) {
+    updateTooltipAlign()
+    onHealthPopupOpenChange(true)
+   } else if (canRename) {
+    onRenameRequest!(machine)
+   }
+  },
+  onClick: () => {
+   if (selected && hasHealth) {
+    updateTooltipAlign()
+    onHealthPopupOpenChange(!healthPopupOpen)
+   } else if (healthPopupOpen) {
+    onHealthPopupOpenChange(false)
+   }
+   onSelect(machine.id)
+  }
+ })
 
-    const markTouchActive = () => {
-        if (touchClearTimerRef.current) {
-            clearTimeout(touchClearTimerRef.current)
-            touchClearTimerRef.current = null
-        }
-        touchActiveRef.current = true
-    }
+ const markTouchActive = () => {
+  if (touchClearTimerRef.current) {
+   clearTimeout(touchClearTimerRef.current)
+   touchClearTimerRef.current = null
+  }
+  touchActiveRef.current = true
+ }
 
-    const scheduleTouchClear = () => {
-        if (touchClearTimerRef.current) {
-            clearTimeout(touchClearTimerRef.current)
-        }
-        touchClearTimerRef.current = setTimeout(() => {
-            touchActiveRef.current = false
-            touchClearTimerRef.current = null
-        }, 700)
-    }
+ const scheduleTouchClear = () => {
+  if (touchClearTimerRef.current) {
+   clearTimeout(touchClearTimerRef.current)
+  }
+  touchClearTimerRef.current = setTimeout(() => {
+   touchActiveRef.current = false
+   touchClearTimerRef.current = null
+  }, 700)
+ }
 
-    const handleContextMenu = (event: ReactMouseEvent<HTMLButtonElement>) => {
-        longPress.onContextMenu(event)
-        if (event.defaultPrevented || touchActiveRef.current) {
-            event.preventDefault()
-            if (hasHealth) {
-                updateTooltipAlign()
-                onHealthPopupOpenChange(true)
-            } else if (canRename) {
-                onRenameRequest!(machine)
-            }
-            return
-        }
-        if (canRename) {
-            event.preventDefault()
-            onHealthPopupOpenChange(false)
-            onRenameRequest!(machine)
-        }
-    }
+ const handleContextMenu = (event: ReactMouseEvent<HTMLButtonElement>) => {
+  longPress.onContextMenu(event)
+  if (event.defaultPrevented || touchActiveRef.current) {
+   event.preventDefault()
+   if (hasHealth) {
+    updateTooltipAlign()
+    onHealthPopupOpenChange(true)
+   } else if (canRename) {
+    onRenameRequest!(machine)
+   }
+   return
+  }
+  if (canRename) {
+   event.preventDefault()
+   onHealthPopupOpenChange(false)
+   onRenameRequest!(machine)
+  }
+ }
 
-    const content = (
-        <>
-            <MachineOsIcon platform={machine.platform} icon={machine.icon} />
-            {props.layout !== 'icons' ? <span className="min-w-0 flex-1 truncate text-left">{machine.label}</span> : null}
-            <span className="shrink-0 tabular-nums opacity-70">{machine.sessionCount}</span>
-        </>
-    )
+ const content = (
+  <>
+   <MachineOsIcon platform={machine.platform} icon={machine.icon} />
+   {props.layout !== 'icons' ? <span className="min-w-0 flex-1 truncate text-left">{machine.label}</span> : null}
+   <span className="shrink-0 tabular-nums opacity-70">{machine.sessionCount}</span>
+  </>
+ )
 
-    if (!hasHealth) {
-        return (
-            <button
-                type="button"
-                onClick={longPress.onClick}
-                onTouchStart={(event) => {
-                    markTouchActive()
-                    longPress.onTouchStart(event)
-                }}
-                onTouchEnd={(event) => {
-                    scheduleTouchClear()
-                    longPress.onTouchEnd(event)
-                }}
-                onTouchMove={longPress.onTouchMove}
-                onTouchCancel={(event) => {
-                    scheduleTouchClear()
-                    longPress.onTouchCancel(event)
-                }}
-                onContextMenu={handleContextMenu}
-                aria-pressed={selected}
-                title={title}
-                style={{ WebkitTouchCallout: 'none' }}
-                className={cn(chipShellClass, chipContentClass, props.layout !== 'grid' && 'w-auto px-2', selected ? chipSelectedClass : chipIdleClass)}
-            >
-                {content}
-            </button>
-        )
-    }
+ if (!hasHealth) {
+  return (
+   <button
+    type="button"
+    onClick={longPress.onClick}
+    onTouchStart={(event) => {
+     markTouchActive()
+     longPress.onTouchStart(event)
+    }}
+    onTouchEnd={(event) => {
+     scheduleTouchClear()
+     longPress.onTouchEnd(event)
+    }}
+    onTouchMove={longPress.onTouchMove}
+    onTouchCancel={(event) => {
+     scheduleTouchClear()
+     longPress.onTouchCancel(event)
+    }}
+    onContextMenu={handleContextMenu}
+    aria-pressed={selected}
+    title={title}
+    style={{ WebkitTouchCallout: 'none' }}
+    className={cn(chipShellClass, chipContentClass, props.layout !== 'grid' && 'w-auto px-2', selected ? chipSelectedClass : chipIdleClass)}
+   >
+    {content}
+   </button>
+  )
+ }
 
-    // The button carries the chip's padding so the entire visible chip is
-    // clickable; the health-popup wrapper only draws the border.
-    const button = (
-        <button
-            type="button"
-            onClick={longPress.onClick}
-            onPointerEnter={updateTooltipAlign}
-            onTouchStart={(event) => {
-                markTouchActive()
-                longPress.onTouchStart(event)
-            }}
-            onTouchEnd={(event) => {
-                scheduleTouchClear()
-                longPress.onTouchEnd(event)
-            }}
-            onTouchMove={longPress.onTouchMove}
-            onTouchCancel={(event) => {
-                scheduleTouchClear()
-                longPress.onTouchCancel(event)
-            }}
-            onContextMenu={handleContextMenu}
-            aria-pressed={selected}
-            aria-expanded={healthPopupOpen}
-            aria-describedby={tooltipId}
-            title={title}
-            style={{ WebkitTouchCallout: 'none' }}
-            className={cn(chipContentClass, props.layout !== 'grid' && 'w-auto', 'rounded-lg px-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--app-link)]')}
-        >
-            {content}
-        </button>
-    )
+ // The button carries the chip's padding so the entire visible chip is
+ // clickable; the health-popup wrapper only draws the border.
+ const button = (
+  <button
+   type="button"
+   onClick={longPress.onClick}
+   onPointerEnter={updateTooltipAlign}
+   onTouchStart={(event) => {
+    markTouchActive()
+    longPress.onTouchStart(event)
+   }}
+   onTouchEnd={(event) => {
+    scheduleTouchClear()
+    longPress.onTouchEnd(event)
+   }}
+   onTouchMove={longPress.onTouchMove}
+   onTouchCancel={(event) => {
+    scheduleTouchClear()
+    longPress.onTouchCancel(event)
+   }}
+   onContextMenu={handleContextMenu}
+   aria-pressed={selected}
+   aria-expanded={healthPopupOpen}
+   aria-describedby={tooltipId}
+   title={title}
+   style={{ WebkitTouchCallout: 'none' }}
+   className={cn(chipContentClass, props.layout !== 'grid' && 'w-auto', 'rounded-lg px-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--app-link)]')}
+  >
+   {content}
+  </button>
+ )
 
-    return (
-        // CPU/RAM details live in a hover popup on desktop and open via touch
-        // long-press (any chip) or tapping the already-selected chip on touch
-        // devices. The `before:` bridge spans the mt-1 gap so the popup stays
-        // open while the pointer enters it.
-        // `[&>span:first-child]` 把 HoverTooltip 的 target 包装 span 撑满网格
-        // 单元，否则 chip 缩成内容宽，计数列对不齐。
-        <HoverTooltip
-            id={tooltipId}
-            target={button}
-            side="bottom"
-            align={tooltipAlign}
-            open={healthPopupOpen}
-            containerRef={containerRef}
-            className={cn(chipShellClass, props.layout !== 'grid' && 'w-auto', '[&>span:first-child]:w-full [&>span:first-child]:min-w-0', selected ? chipSelectedClass : chipIdleClass)}
-            tooltipClassName={cn(
-                "pointer-events-auto before:absolute before:inset-x-0 before:-top-1 before:h-1 before:content-[''] px-3 py-2 min-w-[16rem] max-w-[calc(100vw-1rem)]",
-                !healthPopupOpen && 'max-md:hidden'
-            )}
-        >
-            <MachineHealthTooltipBody presentation={machine.healthPresentation!} />
-            {healthPopupOpen && canRename ? (
-                <div className="mt-2 border-t border-[var(--app-border)] pt-1.5">
-                    <button
-                        type="button"
-                        onClick={(event) => {
-                            event.stopPropagation()
-                            onHealthPopupOpenChange(false)
-                            onRenameRequest!(machine)
-                        }}
-                        className="w-full rounded px-1.5 py-1 text-left text-xs font-medium text-[var(--app-link)] transition-colors hover:bg-[var(--app-subtle-bg)] active:bg-[var(--app-subtle-bg)]"
-                    >
-                        {t('sessions.machineFilter.renameAction')}
-                    </button>
-                </div>
-            ) : null}
-        </HoverTooltip>
-    )
+ return (
+  // CPU/RAM details live in a hover popup on desktop and open via touch
+  // long-press (any chip) or tapping the already-selected chip on touch
+  // devices. The `before:` bridge spans the mt-1 gap so the popup stays
+  // open while the pointer enters it.
+  // `[&>span:first-child]` 把 HoverTooltip 的 target 包装 span 撑满网格
+  // 单元，否则 chip 缩成内容宽，计数列对不齐。
+  <HoverTooltip
+   id={tooltipId}
+   target={button}
+   side="bottom"
+   align={tooltipAlign}
+   open={healthPopupOpen}
+   containerRef={containerRef}
+   className={cn(chipShellClass, 'flex items-center', props.layout !== 'grid' && 'w-auto', '[&>span:first-child]:flex [&>span:first-child]:w-full [&>span:first-child]:min-w-0', selected ? chipSelectedClass : chipIdleClass)}
+   tooltipClassName={cn(
+    "pointer-events-auto before:absolute before:inset-x-0 before:-top-1 before:h-1 before:content-[''] px-3 py-2 min-w-[16rem] max-w-[calc(100vw-1rem)]",
+    !healthPopupOpen && 'max-md:hidden'
+   )}
+  >
+   <MachineHealthTooltipBody presentation={machine.healthPresentation!} />
+   {healthPopupOpen && canRename ? (
+    <div className="mt-2 border-t border-[var(--app-border)] pt-1.5">
+     <button
+      type="button"
+      onClick={(event) => {
+       event.stopPropagation()
+       onHealthPopupOpenChange(false)
+       onRenameRequest!(machine)
+      }}
+      className="w-full rounded px-1.5 py-1 text-left text-xs font-medium text-[var(--app-link)] transition-colors hover:bg-[var(--app-subtle-bg)] active:bg-[var(--app-subtle-bg)]"
+     >
+      {t('sessions.machineFilter.renameAction')}
+     </button>
+    </div>
+   ) : null}
+  </HoverTooltip>
+ )
 }
 
 function MachineRenameDialog(props: {
-    machine: MachineFilterItem
-    onClose: () => void
-    onSubmit: (machineId: string, patch: MachinePresentationPatch) => Promise<void>
+ machine: MachineFilterItem
+ onClose: () => void
+ onSubmit: (machineId: string, patch: MachinePresentationPatch) => Promise<void>
 }) {
-    const { t } = useTranslation()
-    const [draft, setDraft] = useState(props.machine.displayName ?? '')
-    const [iconDraft, setIconDraft] = useState<MachineIconId | null>(props.machine.icon)
-    const [pending, setPending] = useState(false)
-    const [error, setError] = useState<string | null>(null)
-    const inputRef = useRef<HTMLInputElement>(null)
+ const { t } = useTranslation()
+ const [draft, setDraft] = useState(props.machine.displayName ?? '')
+ const [iconDraft, setIconDraft] = useState<MachineIconId | null>(props.machine.icon)
+ const [pending, setPending] = useState(false)
+ const [error, setError] = useState<string | null>(null)
+ const inputRef = useRef<HTMLInputElement>(null)
 
-    useEffect(() => {
-        const timer = setTimeout(() => {
-            inputRef.current?.focus()
-            inputRef.current?.select()
-        }, 100)
-        return () => clearTimeout(timer)
-    }, [])
+ useEffect(() => {
+  const timer = setTimeout(() => {
+   inputRef.current?.focus()
+   inputRef.current?.select()
+  }, 100)
+  return () => clearTimeout(timer)
+ }, [])
 
-    const handleSubmit = async (event: React.FormEvent) => {
-        event.preventDefault()
-        const next = draft.trim()
-        // 与机器改名 API 的语义一致：空串是合法输入，表示清掉别名回落主机名。
-        // 只提交改动过的字段；名字与图标都没变就直接关掉。
-        const patch: MachinePresentationPatch = {}
-        if (next !== (props.machine.displayName ?? '')) patch.displayName = next
-        if (iconDraft !== props.machine.icon) patch.icon = iconDraft
-        if (Object.keys(patch).length === 0) {
-            props.onClose()
-            return
-        }
-        setPending(true)
-        setError(null)
-        try {
-            await props.onSubmit(props.machine.id, patch)
-            props.onClose()
-        } catch {
-            setError(t('settings.machines.error'))
-            setPending(false)
-        }
-    }
+ const handleSubmit = async (event: React.FormEvent) => {
+  event.preventDefault()
+  const next = draft.trim()
+  // 与机器改名 API 的语义一致：空串是合法输入，表示清掉别名回落主机名。
+  // 只提交改动过的字段；名字与图标都没变就直接关掉。
+  const patch: MachinePresentationPatch = {}
+  if (next !== (props.machine.displayName ?? '')) patch.displayName = next
+  if (iconDraft !== props.machine.icon) patch.icon = iconDraft
+  if (Object.keys(patch).length === 0) {
+   props.onClose()
+   return
+  }
+  setPending(true)
+  setError(null)
+  try {
+   await props.onSubmit(props.machine.id, patch)
+   props.onClose()
+  } catch {
+   setError(t('settings.machines.error'))
+   setPending(false)
+  }
+ }
 
-    return (
-        <Dialog open onOpenChange={(open) => { if (!open && !pending) props.onClose() }}>
-            <DialogContent className="max-w-sm">
-                <DialogHeader className="pr-0">
-                    <DialogTitle className="min-h-6 px-10 text-center leading-6">
-                        {t('sessions.machineFilter.renameTitle', { name: props.machine.host ?? props.machine.label })}
-                    </DialogTitle>
-                </DialogHeader>
-                <form onSubmit={handleSubmit} className="mt-4 flex flex-col gap-3">
-                    <input
-                        ref={inputRef}
-                        type="text"
-                        value={draft}
-                        maxLength={MACHINE_DISPLAY_NAME_MAX_LENGTH}
-                        placeholder={props.machine.host ?? t('settings.machines.namePlaceholder')}
-                        disabled={pending}
-                        onChange={(event) => setDraft(event.target.value)}
-                        onKeyDown={(event) => {
-                            if (event.key === 'Escape' && !pending) props.onClose()
-                        }}
-                        className="w-full rounded-lg border border-[var(--app-border)] bg-[var(--app-bg)] px-3 py-2.5 text-[var(--app-fg)] placeholder:text-[var(--app-hint)] focus:border-transparent focus:outline-none focus:ring-2 focus:ring-[var(--app-button)]"
-                    />
-                    <p className="text-xs text-[var(--app-hint)]">{t('sessions.machineFilter.renameHint')}</p>
-                    <div className="flex flex-col gap-1.5">
-                        <div className="text-xs font-medium text-[var(--app-hint)]">{t('machineIcon.label')}</div>
-                        <MachineIconPicker
-                            value={iconDraft}
-                            platform={props.machine.platform}
-                            onChange={setIconDraft}
-                            disabled={pending}
-                        />
-                    </div>
-                    {error ? (
-                        <div role="alert" className="rounded-md bg-red-50 p-3 text-sm text-red-600 dark:bg-red-900/20 dark:text-red-400">
-                            {error}
-                        </div>
-                    ) : null}
-                    <div className="flex justify-end gap-2">
-                        <Button type="button" variant="secondary" onClick={props.onClose} disabled={pending}>
-                            {t('button.cancel')}
-                        </Button>
-                        <Button type="submit" disabled={pending}>
-                            {pending ? t('dialog.rename.saving') : t('button.save')}
-                        </Button>
-                    </div>
-                </form>
-            </DialogContent>
-        </Dialog>
-    )
+ return (
+  <Dialog open onOpenChange={(open) => { if (!open && !pending) props.onClose() }}>
+   <DialogContent className="max-w-sm">
+    <DialogHeader className="pr-0">
+     <DialogTitle className="min-h-6 px-10 text-center leading-6">
+      {t('sessions.machineFilter.renameTitle', { name: props.machine.host ?? props.machine.label })}
+     </DialogTitle>
+    </DialogHeader>
+    <form onSubmit={handleSubmit} className="mt-4 flex flex-col gap-3">
+     <input
+      ref={inputRef}
+      type="text"
+      value={draft}
+      maxLength={MACHINE_DISPLAY_NAME_MAX_LENGTH}
+      placeholder={props.machine.host ?? t('settings.machines.namePlaceholder')}
+      disabled={pending}
+      onChange={(event) => setDraft(event.target.value)}
+      onKeyDown={(event) => {
+       if (event.key === 'Escape' && !pending) props.onClose()
+      }}
+      className="w-full rounded-lg border border-[var(--app-border)] bg-[var(--app-bg)] px-3 py-2.5 text-[var(--app-fg)] placeholder:text-[var(--app-hint)] focus:border-transparent focus:outline-none focus:ring-2 focus:ring-[var(--app-button)]"
+     />
+     <p className="text-xs text-[var(--app-hint)]">{t('sessions.machineFilter.renameHint')}</p>
+     <div className="flex flex-col gap-1.5">
+      <div className="text-xs font-medium text-[var(--app-hint)]">{t('machineIcon.label')}</div>
+      <MachineIconPicker
+       value={iconDraft}
+       platform={props.machine.platform}
+       onChange={setIconDraft}
+       disabled={pending}
+      />
+     </div>
+     {error ? (
+      <div role="alert" className="rounded-md bg-red-50 p-3 text-sm text-red-600 dark:bg-red-900/20 dark:text-red-400">
+       {error}
+      </div>
+     ) : null}
+     <div className="flex justify-end gap-2">
+      <Button type="button" variant="secondary" onClick={props.onClose} disabled={pending}>
+       {t('button.cancel')}
+      </Button>
+      <Button type="submit" disabled={pending}>
+       {pending ? t('dialog.rename.saving') : t('button.save')}
+      </Button>
+     </div>
+    </form>
+   </DialogContent>
+  </Dialog>
+ )
+}
+
+// Collapse: the chip grid used to swallow half the screen, so a summary row —
+// current filter + machine count + chevron — toggles it on every viewport
+// width (previously mobile-only via a (max-width: 919px) branch). The
+// preference persists in the original key, now tri-state: '1' = expanded,
+// '0' = collapsed, absent = default (expanded on desktop, collapsed on
+// mobile). Old values migrate losslessly: '1' stays expanded, and the old
+// remove-on-collapse write maps onto absent → collapsed on mobile, exactly
+// what it used to mean; desktop simply gains a reachable collapsed state.
+const MACHINE_FILTER_EXPANDED_KEY = 'hapi-session-list-machine-filter-expanded'
+const MACHINE_FILTER_MOBILE_QUERY = '(max-width: 919px)'
+
+function readMachineFilterExpanded(): boolean | null {
+ try {
+  const value = localStorage.getItem(MACHINE_FILTER_EXPANDED_KEY)
+  if (value === '1') return true
+  if (value === '0') return false
+  return null
+ } catch {
+  return null
+ }
+}
+
+function writeMachineFilterExpanded(expanded: boolean) {
+ try {
+  localStorage.setItem(MACHINE_FILTER_EXPANDED_KEY, expanded ? '1' : '0')
+ } catch { /* keep the in-memory state */ }
+}
+
+// Stable subscribe: useSyncExternalStore re-subscribes whenever the function
+// identity changes, so keep it hoisted instead of building it per render.
+function subscribeMobileFilterBar(listener: () => void) {
+ const media = window.matchMedia(MACHINE_FILTER_MOBILE_QUERY)
+ media.addEventListener('change', listener)
+ return () => media.removeEventListener('change', listener)
+}
+
+function useIsMobileFilterBar(): boolean {
+ return useSyncExternalStore(
+  subscribeMobileFilterBar,
+  () => window.matchMedia(MACHINE_FILTER_MOBILE_QUERY).matches,
+  () => false
+ )
+}
+
+function MachineFilterChevron(props: { expanded: boolean; className?: string }) {
+ return (
+  <svg
+   aria-hidden="true"
+   viewBox="0 0 24 24"
+   fill="none"
+   stroke="currentColor"
+   strokeWidth="2"
+   strokeLinecap="round"
+   strokeLinejoin="round"
+   className={cn('shrink-0 transition-transform duration-200', props.expanded && 'rotate-90', props.className)}
+  >
+   <polyline points="9 18 15 12 9 6" />
+  </svg>
+ )
 }
 
 /**
@@ -418,126 +481,163 @@ function MachineRenameDialog(props: {
  * 右键任一机器格可设置别名（onRenameMachine 注入时）。
  */
 export function MachineFilterBar(props: {
-    machines: MachineFilterItem[]
-    totalCount: number
-    value: string | null
-    onChange: (id: string | null) => void
-    /** 注入后启用右键「别名 + 图标」设置；SessionList 里包了 updateMachine API + 机器列表刷新。 */
-    onRenameMachine?: (machineId: string, patch: MachinePresentationPatch) => Promise<void>
+ machines: MachineFilterItem[]
+ totalCount: number
+ value: string | null
+ onChange: (id: string | null) => void
+ /** 注入后启用右键「别名 + 图标」设置；SessionList 里包了 updateMachine API + 机器列表刷新。 */
+ onRenameMachine?: (machineId: string, patch: MachinePresentationPatch) => Promise<void>
 }) {
-    const { t } = useTranslation()
-    const [renameTarget, setRenameTarget] = useState<MachineFilterItem | null>(null)
-    const [openHealthMachineId, setOpenHealthMachineId] = useState<string | null>(null)
-    const { grouped, sections } = useMemo(() => groupMachinesByOwner(props.machines), [props.machines])
-    const { machineLayout } = useListPrefs()
-    const onRenameRequest = props.onRenameMachine
-        ? (machine: MachineFilterItem) => setRenameTarget(machine)
-        : undefined
+ const { t } = useTranslation()
+ const [renameTarget, setRenameTarget] = useState<MachineFilterItem | null>(null)
+ const [openHealthMachineId, setOpenHealthMachineId] = useState<string | null>(null)
+ const { grouped, sections } = useMemo(() => groupMachinesByOwner(props.machines), [props.machines])
+ const { machineLayout } = useListPrefs()
+ const isMobile = useIsMobileFilterBar()
+ // Tri-state pref (see readMachineFilterExpanded): null = unset → expanded
+ // on desktop, collapsed on mobile — the old implicit defaults, so existing
+ // users see no surprise on either surface until they toggle once.
+ const [expandedPref, setExpandedPref] = useState(readMachineFilterExpanded)
+ const selectedMachine = useMemo(
+  () => (props.value === null ? null : props.machines.find((machine) => machine.id === props.value) ?? null),
+  [props.machines, props.value]
+ )
+ const onRenameRequest = props.onRenameMachine
+  ? (machine: MachineFilterItem) => setRenameTarget(machine)
+  : undefined
 
-    const allChip = (
-        <button
-            type="button"
-            onClick={() => {
-                setOpenHealthMachineId(null)
-                props.onChange(null)
-            }}
-            aria-pressed={props.value === null}
-            className={cn(chipShellClass, chipContentClass, props.value === null ? chipSelectedClass : chipIdleClass)}
-        >
-            <span className="min-w-0 flex-1 truncate text-left">{t('sessions.machineFilter.all')}</span>
-            <span className="shrink-0 tabular-nums opacity-70">{props.totalCount}</span>
-        </button>
-    )
+ const toggleExpanded = useCallback(() => {
+  setExpandedPref((current) => {
+   const next = !(current ?? !isMobile)
+   writeMachineFilterExpanded(next)
+   return next
+  })
+ }, [isMobile])
 
-    const renderGrid = (machines: MachineFilterItem[], leading?: ReactNode) => (
-        <div className={machineLayout === 'grid' ? chipGridClass : 'flex flex-wrap items-center gap-1.5'}>
-            {leading}
-            {machines.map((machine) => (
-                <MachineFilterChip
-                    key={machine.id}
-                    machine={machine}
-                    layout={machineLayout}
-                    selected={props.value === machine.id}
-                    onSelect={(id) => {
-                        setOpenHealthMachineId((current) => (id === props.value && current === id ? current : null))
-                        props.onChange(id)
-                    }}
-                    onRenameRequest={onRenameRequest}
-                    healthPopupOpen={openHealthMachineId === machine.id}
-                    onHealthPopupOpenChange={(open) => {
-                        setOpenHealthMachineId((current) => {
-                            if (open) return machine.id
-                            return current === machine.id ? null : current
-                        })
-                    }}
-                />
-            ))}
-        </div>
-    )
+ const allChip = (
+  <button
+   type="button"
+   onClick={() => {
+    setOpenHealthMachineId(null)
+    props.onChange(null)
+   }}
+   aria-pressed={props.value === null}
+   className={cn(chipShellClass, chipContentClass, props.value === null ? chipSelectedClass : chipIdleClass)}
+  >
+   <span className="min-w-0 flex-1 truncate text-left">{t('sessions.machineFilter.all')}</span>
+   <span className="shrink-0 tabular-nums opacity-70">{props.totalCount}</span>
+  </button>
+ )
 
-    return (
-        <div
-            role="group"
-            aria-label={t('sessions.machineFilter.label')}
-            className="flex flex-col gap-1 px-2 pb-2"
-        >
-            {grouped ? (
-                <>
-                    {renderGrid([], allChip)}
-                    {sections.map((section) => (
-                        <div key={section.owner ?? '__unknown__'}>
-                            <MachineOwnerHeading
-                                owner={section.owner}
-                                unknownLabel={t('sessions.machineFilter.unknownOwner')}
-                            />
-                            {renderGrid(section.machines)}
-                        </div>
-                    ))}
-                </>
-            ) : renderGrid(sections[0]?.machines ?? [], allChip)}
-            {renameTarget && props.onRenameMachine ? (
-                <MachineRenameDialog
-                    machine={renameTarget}
-                    onClose={() => setRenameTarget(null)}
-                    onSubmit={props.onRenameMachine}
-                />
-            ) : null}
-        </div>
-    )
+ const renderGrid = (machines: MachineFilterItem[], leading?: ReactNode) => (
+  <div className={machineLayout === 'grid' ? chipGridClass : 'flex flex-wrap items-center gap-1'}>
+   {leading}
+   {machines.map((machine) => (
+    <MachineFilterChip
+     key={machine.id}
+     machine={machine}
+     layout={machineLayout}
+     selected={props.value === machine.id}
+     onSelect={(id) => {
+      setOpenHealthMachineId((current) => (id === props.value && current === id ? current : null))
+      props.onChange(id)
+     }}
+     onRenameRequest={onRenameRequest}
+     healthPopupOpen={openHealthMachineId === machine.id}
+     onHealthPopupOpenChange={(open) => {
+      setOpenHealthMachineId((current) => {
+       if (open) return machine.id
+       return current === machine.id ? null : current
+      })
+     }}
+    />
+   ))}
+  </div>
+ )
+
+ const expanded = expandedPref ?? !isMobile
+ const showGrid = expanded
+ const summaryLabel = selectedMachine?.label ?? t('sessions.machineFilter.all')
+ const summaryCount = selectedMachine?.sessionCount ?? props.totalCount
+
+ return (
+  <div
+   role="group"
+   aria-label={t('sessions.machineFilter.label')}
+   className="flex flex-col gap-0.5 px-2 pb-1.5"
+  >
+   <button
+    type="button"
+    onClick={toggleExpanded}
+    aria-expanded={expanded}
+    aria-label={expanded ? t('sessions.machineFilter.collapse') : undefined}
+    title={t(expanded ? 'sessions.machineFilter.collapse' : 'sessions.machineFilter.expand')}
+    className="flex min-h-7 pointer-coarse:min-h-11 w-full items-center gap-1.5 rounded-lg border border-[var(--app-border)] px-2 text-left text-xs text-[var(--app-fg)] transition-colors hover:bg-[var(--app-subtle-bg)]"
+   >
+    {selectedMachine ? <MachineOsIcon platform={selectedMachine.platform} icon={selectedMachine.icon} /> : null}
+    <span className="min-w-0 flex-1 truncate">{summaryLabel}</span>
+    <span className="shrink-0 tabular-nums opacity-70">{summaryCount}</span>
+    <span className="shrink-0 text-[var(--app-hint)]">· {t('sessions.machineFilter.machinesCount', { n: props.machines.length })}</span>
+    <MachineFilterChevron expanded={expanded} className="h-4 w-4 text-[var(--app-hint)]" />
+   </button>
+   {showGrid ? (grouped ? (
+    <>
+     {renderGrid([], allChip)}
+     {sections.map((section) => (
+      <div key={section.owner ?? '__unknown__'}>
+       <MachineOwnerHeading
+        owner={section.owner}
+        unknownLabel={t('sessions.machineFilter.unknownOwner')}
+        className="pb-0.5 pt-0.5"
+       />
+       {renderGrid(section.machines)}
+      </div>
+     ))}
+    </>
+   ) : renderGrid(sections[0]?.machines ?? [], allChip)) : null}
+   {renameTarget && props.onRenameMachine ? (
+    <MachineRenameDialog
+     machine={renameTarget}
+     onClose={() => setRenameTarget(null)}
+     onSubmit={props.onRenameMachine}
+    />
+   ) : null}
+  </div>
+ )
 }
 
 function MachineFilterMenuRow(props: {
-    label: string
-    count: number
-    selected: boolean
-    healthPresentation: MachineHealthPresentation | null
-    onSelect: () => void
+ label: string
+ count: number
+ selected: boolean
+ healthPresentation: MachineHealthPresentation | null
+ onSelect: () => void
 }) {
-    const hasHealth = props.healthPresentation && props.healthPresentation.metrics.length > 0
-    return (
-        <button
-            type="button"
-            role="menuitemradio"
-            aria-checked={props.selected}
-            onClick={props.onSelect}
-            className="flex w-full items-start gap-2 rounded-lg px-2.5 py-2 text-left text-sm transition-colors hover:bg-[var(--app-subtle-bg)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--app-link)]"
-        >
-            <span className="flex h-5 w-4 shrink-0 items-center justify-center text-[var(--app-link)]">
-                {props.selected ? <CheckIcon className="h-4 w-4" /> : null}
-            </span>
-            <span className="min-w-0 flex-1">
-                <span className="flex items-baseline gap-1.5">
-                    <span className="truncate text-[var(--app-fg)]">{props.label}</span>
-                    <span className="shrink-0 tabular-nums text-xs text-[var(--app-hint)]">({props.count})</span>
-                </span>
-                {hasHealth ? (
-                    <span className="mt-0.5 block truncate text-xs tabular-nums text-[var(--app-hint)]">
-                        {props.healthPresentation!.metrics.map((metric) => `${metric.shortLabel} ${metric.percent}%`).join(' · ')}
-                    </span>
-                ) : null}
-            </span>
-        </button>
-    )
+ const hasHealth = props.healthPresentation && props.healthPresentation.metrics.length > 0
+ return (
+  <button
+   type="button"
+   role="menuitemradio"
+   aria-checked={props.selected}
+   onClick={props.onSelect}
+   className="flex w-full items-start gap-2 rounded-lg px-2.5 py-2 text-left text-sm transition-colors hover:bg-[var(--app-subtle-bg)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--app-link)]"
+  >
+   <span className="flex h-5 w-4 shrink-0 items-center justify-center text-[var(--app-link)]">
+    {props.selected ? <CheckIcon className="h-4 w-4" /> : null}
+   </span>
+   <span className="min-w-0 flex-1">
+    <span className="flex items-baseline gap-1.5">
+     <span className="truncate text-[var(--app-fg)]">{props.label}</span>
+     <span className="shrink-0 tabular-nums text-xs text-[var(--app-hint)]">({props.count})</span>
+    </span>
+    {hasHealth ? (
+     <span className="mt-0.5 block truncate text-xs tabular-nums text-[var(--app-hint)]">
+      {props.healthPresentation!.metrics.map((metric) => `${metric.shortLabel} ${metric.percent}%`).join(' · ')}
+     </span>
+    ) : null}
+   </span>
+  </button>
+ )
 }
 
 // Clamp the menu to the space actually remaining left of/below the trigger
@@ -549,10 +649,10 @@ const MENU_VIEWPORT_MARGIN_PX = 8
 const MENU_TOP_GAP_PX = 4 // mt-1
 
 export function getMachineFilterMenuClampStyle(anchor: { right: number; bottom: number }): CSSProperties {
-    return {
-        maxWidth: `min(16rem, calc(${anchor.right}px - ${MENU_VIEWPORT_MARGIN_PX}px - env(safe-area-inset-left)))`,
-        maxHeight: `min(20rem, calc(var(--tg-viewport-stable-height, var(--app-viewport-height, 100dvh)) - ${anchor.bottom + MENU_TOP_GAP_PX}px - ${MENU_VIEWPORT_MARGIN_PX}px - env(safe-area-inset-bottom)))`
-    }
+ return {
+  maxWidth: `min(16rem, calc(${anchor.right}px - ${MENU_VIEWPORT_MARGIN_PX}px - env(safe-area-inset-left)))`,
+  maxHeight: `min(20rem, calc(var(--tg-viewport-stable-height, var(--app-viewport-height, 100dvh)) - ${anchor.bottom + MENU_TOP_GAP_PX}px - ${MENU_VIEWPORT_MARGIN_PX}px - env(safe-area-inset-bottom)))`
+ }
 }
 
 // Mobile (below md) counterpart of MachineFilterBar: collapses the machine
@@ -561,134 +661,134 @@ export function getMachineFilterMenuClampStyle(anchor: { right: number; bottom: 
 // search/date picker's active-filter indicator; health metrics render inline
 // because hover tooltips are unavailable on touch devices.
 export function MachineFilterMenu(props: {
-    machines: MachineFilterItem[]
-    totalCount: number
-    value: string | null
-    onChange: (id: string | null) => void
+ machines: MachineFilterItem[]
+ totalCount: number
+ value: string | null
+ onChange: (id: string | null) => void
 }) {
-    const { t } = useTranslation()
-    const [open, setOpen] = useState(false)
-    const triggerRef = useRef<HTMLButtonElement>(null)
-    const wrapperRef = useRef<HTMLDivElement>(null)
-    const menuRef = useRef<HTMLDivElement>(null)
-    const [anchor, setAnchor] = useState<{ right: number; bottom: number } | null>(null)
+ const { t } = useTranslation()
+ const [open, setOpen] = useState(false)
+ const triggerRef = useRef<HTMLButtonElement>(null)
+ const wrapperRef = useRef<HTMLDivElement>(null)
+ const menuRef = useRef<HTMLDivElement>(null)
+ const [anchor, setAnchor] = useState<{ right: number; bottom: number } | null>(null)
 
-    const close = useCallback(() => {
-        setOpen(false)
-        triggerRef.current?.focus()
-    }, [])
+ const close = useCallback(() => {
+  setOpen(false)
+  triggerRef.current?.focus()
+ }, [])
 
-    const select = (id: string | null) => {
-        props.onChange(id)
-        close()
-    }
+ const select = (id: string | null) => {
+  props.onChange(id)
+  close()
+ }
 
-    useLayoutEffect(() => {
-        if (!open) {
-            setAnchor(null)
-            return
-        }
-        const updateAnchor = () => {
-            const rect = wrapperRef.current?.getBoundingClientRect()
-            if (!rect) return
-            setAnchor({ right: rect.right, bottom: rect.bottom })
-        }
-        updateAnchor()
-        window.addEventListener('resize', updateAnchor)
-        return () => window.removeEventListener('resize', updateAnchor)
-    }, [open])
+ useLayoutEffect(() => {
+  if (!open) {
+   setAnchor(null)
+   return
+  }
+  const updateAnchor = () => {
+   const rect = wrapperRef.current?.getBoundingClientRect()
+   if (!rect) return
+   setAnchor({ right: rect.right, bottom: rect.bottom })
+  }
+  updateAnchor()
+  window.addEventListener('resize', updateAnchor)
+  return () => window.removeEventListener('resize', updateAnchor)
+ }, [open])
 
-    // Focus the selected (or first) row on open; Escape closes and Arrow keys
-    // move between rows, matching SessionActionMenu's keyboard behavior.
-    useEffect(() => {
-        if (!open) return
+ // Focus the selected (or first) row on open; Escape closes and Arrow keys
+ // move between rows, matching SessionActionMenu's keyboard behavior.
+ useEffect(() => {
+  if (!open) return
 
-        const frame = window.requestAnimationFrame(() => {
-            const selected = menuRef.current?.querySelector<HTMLElement>('[role="menuitemradio"][aria-checked="true"]')
-            const first = menuRef.current?.querySelector<HTMLElement>('[role="menuitemradio"]')
-            ;(selected ?? first)?.focus()
-        })
+  const frame = window.requestAnimationFrame(() => {
+   const selected = menuRef.current?.querySelector<HTMLElement>('[role="menuitemradio"][aria-checked="true"]')
+   const first = menuRef.current?.querySelector<HTMLElement>('[role="menuitemradio"]')
+    ; (selected ?? first)?.focus()
+  })
 
-        const handleKeyDown = (event: KeyboardEvent) => {
-            if (event.key === 'Escape') {
-                event.preventDefault()
-                close()
-                return
-            }
-            if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return
-            const items = Array.from(
-                menuRef.current?.querySelectorAll<HTMLElement>('[role="menuitemradio"]') ?? []
-            )
-            if (items.length === 0) return
-            event.preventDefault()
-            const delta = event.key === 'ArrowDown' ? 1 : -1
-            const currentIndex = items.indexOf(document.activeElement as HTMLElement)
-            const nextIndex = currentIndex === -1
-                ? (delta === 1 ? 0 : items.length - 1)
-                : (currentIndex + delta + items.length) % items.length
-            items[nextIndex]?.focus()
-        }
+  const handleKeyDown = (event: KeyboardEvent) => {
+   if (event.key === 'Escape') {
+    event.preventDefault()
+    close()
+    return
+   }
+   if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return
+   const items = Array.from(
+    menuRef.current?.querySelectorAll<HTMLElement>('[role="menuitemradio"]') ?? []
+   )
+   if (items.length === 0) return
+   event.preventDefault()
+   const delta = event.key === 'ArrowDown' ? 1 : -1
+   const currentIndex = items.indexOf(document.activeElement as HTMLElement)
+   const nextIndex = currentIndex === -1
+    ? (delta === 1 ? 0 : items.length - 1)
+    : (currentIndex + delta + items.length) % items.length
+   items[nextIndex]?.focus()
+  }
 
-        document.addEventListener('keydown', handleKeyDown)
-        return () => {
-            window.cancelAnimationFrame(frame)
-            document.removeEventListener('keydown', handleKeyDown)
-        }
-    }, [open, close])
+  document.addEventListener('keydown', handleKeyDown)
+  return () => {
+   window.cancelAnimationFrame(frame)
+   document.removeEventListener('keydown', handleKeyDown)
+  }
+ }, [open, close])
 
-    return (
-        <div ref={wrapperRef} className="relative shrink-0 md:hidden">
-            <button
-                ref={triggerRef}
-                type="button"
-                onClick={() => setOpen(value => !value)}
-                aria-label={t('sessions.machineFilter.label')}
-                title={t('sessions.machineFilter.label')}
-                aria-haspopup="menu"
-                aria-expanded={open}
-                className="relative flex rounded-full p-1.5 text-[var(--app-hint)] transition-colors hover:bg-[var(--app-subtle-bg)] hover:text-[var(--app-fg)]"
-            >
-                <FilterIcon className="h-5 w-5" />
-                {props.value !== null ? (
-                    <span className="absolute right-0.5 top-0.5 h-1.5 w-1.5 rounded-full bg-[var(--app-link)]" />
-                ) : null}
-            </button>
-            {open ? (
-                <>
-                    <button
-                        type="button"
-                        aria-label={t('button.close')}
-                        tabIndex={-1}
-                        className="fixed inset-0 z-20 cursor-default"
-                        onClick={close}
-                    />
-                    <div
-                        ref={menuRef}
-                        role="menu"
-                        aria-label={t('sessions.machineFilter.label')}
-                        style={anchor ? getMachineFilterMenuClampStyle(anchor) : undefined}
-                        className="absolute right-0 top-full z-30 mt-1 max-h-80 w-64 overflow-y-auto rounded-xl border border-[var(--app-border)] bg-[var(--app-bg)] p-1 shadow-xl"
-                    >
-                        <MachineFilterMenuRow
-                            label={t('sessions.machineFilter.all')}
-                            count={props.totalCount}
-                            selected={props.value === null}
-                            healthPresentation={null}
-                            onSelect={() => select(null)}
-                        />
-                        {props.machines.map((machine) => (
-                            <MachineFilterMenuRow
-                                key={machine.id}
-                                label={machine.label}
-                                count={machine.sessionCount}
-                                selected={props.value === machine.id}
-                                healthPresentation={machine.healthPresentation}
-                                onSelect={() => select(machine.id)}
-                            />
-                        ))}
-                    </div>
-                </>
-            ) : null}
-        </div>
-    )
+ return (
+  <div ref={wrapperRef} className="relative shrink-0 md:hidden">
+   <button
+    ref={triggerRef}
+    type="button"
+    onClick={() => setOpen(value => !value)}
+    aria-label={t('sessions.machineFilter.label')}
+    title={t('sessions.machineFilter.label')}
+    aria-haspopup="menu"
+    aria-expanded={open}
+    className="relative flex rounded-full p-1.5 text-[var(--app-hint)] transition-colors hover:bg-[var(--app-subtle-bg)] hover:text-[var(--app-fg)]"
+   >
+    <FilterIcon className="h-5 w-5" />
+    {props.value !== null ? (
+     <span className="absolute right-0.5 top-0.5 h-1.5 w-1.5 rounded-full bg-[var(--app-link)]" />
+    ) : null}
+   </button>
+   {open ? (
+    <>
+     <button
+      type="button"
+      aria-label={t('button.close')}
+      tabIndex={-1}
+      className="fixed inset-0 z-20 cursor-default"
+      onClick={close}
+     />
+     <div
+      ref={menuRef}
+      role="menu"
+      aria-label={t('sessions.machineFilter.label')}
+      style={anchor ? getMachineFilterMenuClampStyle(anchor) : undefined}
+      className="absolute right-0 top-full z-30 mt-1 max-h-80 w-64 overflow-y-auto rounded-xl border border-[var(--app-border)] bg-[var(--app-bg)] p-1 shadow-xl"
+     >
+      <MachineFilterMenuRow
+       label={t('sessions.machineFilter.all')}
+       count={props.totalCount}
+       selected={props.value === null}
+       healthPresentation={null}
+       onSelect={() => select(null)}
+      />
+      {props.machines.map((machine) => (
+       <MachineFilterMenuRow
+        key={machine.id}
+        label={machine.label}
+        count={machine.sessionCount}
+        selected={props.value === machine.id}
+        healthPresentation={machine.healthPresentation}
+        onSelect={() => select(machine.id)}
+       />
+      ))}
+     </div>
+    </>
+   ) : null}
+  </div>
+ )
 }

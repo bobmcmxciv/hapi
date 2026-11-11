@@ -5,6 +5,20 @@ type DraftsMap = Record<string, string>
 
 let cache: DraftsMap | null = null
 
+export type ComposerDraftCheckpoint = Readonly<{ sessionId: string; revision: number }>
+// A delayed acknowledgement can outlive draft-cache eviction. Keep revision
+// tombstones for this page lifetime so deleting/retyping identical text is not ABA.
+const revisions = new Map<string, number>()
+let nextRevision = 0
+
+export function captureComposerDraft(sessionId: string): ComposerDraftCheckpoint {
+    return { sessionId, revision: revisions.get(sessionId) ?? 0 }
+}
+
+export function composerDraftUnchanged(checkpoint: ComposerDraftCheckpoint): boolean {
+    return (revisions.get(checkpoint.sessionId) ?? 0) === checkpoint.revision
+}
+
 function safeParseJson(value: string): unknown {
     try {
         return JSON.parse(value) as unknown
@@ -72,6 +86,7 @@ export function getDraft(sessionId: string): string {
 }
 
 export function saveDraft(sessionId: string, text: string): void {
+    revisions.set(sessionId, ++nextRevision)
     const trimmed = text.trim()
     const drafts = hydrate()
     if (!trimmed) {
@@ -85,6 +100,7 @@ export function saveDraft(sessionId: string, text: string): void {
 }
 
 export function clearDraft(sessionId: string): void {
+    revisions.set(sessionId, ++nextRevision)
     const drafts = hydrate()
     delete drafts[sessionId]
     persist()

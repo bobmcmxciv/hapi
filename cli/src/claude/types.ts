@@ -72,6 +72,9 @@ export const RawJSONLinesSchema = z.discriminatedUnion("type", [
     type: z.literal("assistant"),
     message: RawMessageSchema.optional(),
     requestId: z.string().optional(),
+    stopReason: z.enum(['stop', 'length', 'toolUse', 'error', 'aborted']).optional(),
+    errorMessage: z.string().optional(),
+    runId: z.string().optional(),
   }),
 
   // Summary message - validates summary and leafUuid

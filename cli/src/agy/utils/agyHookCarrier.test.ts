@@ -47,7 +47,9 @@ describe('agy hook carrier', () => {
             expect(JSON.parse(readFileSync(join(pluginDir, 'mcp_config.json'), 'utf8'))).toEqual({
                 mcpServers: { hapi: mcpServer }
             });
-            expect(statSync(join(pluginDir, 'mcp_config.json')).mode & 0o777).toBe(0o600);
+            if (process.platform !== 'win32') {
+                expect(statSync(join(pluginDir, 'mcp_config.json')).mode & 0o777).toBe(0o600);
+            }
         } finally {
             cleanupAgyHookCarrier(result.carrierDir);
         }
@@ -168,7 +170,7 @@ describe('agy hook carrier location (Phase 2.8)', () => {
 
         try {
             const expectedRoot = join(customHapiHome, 'agy-carriers');
-            expect(result.carrierDir.startsWith(expectedRoot + '/')).toBe(true);
+            expect(result.carrierDir.startsWith(join(expectedRoot, ''))).toBe(true);
             // A stale (unmodified) implementation would place it directly
             // under the OS tmp dir instead — assert it did not.
             expect(result.carrierDir.startsWith(join(tmpdir(), 'hapi-agy-carrier-'))).toBe(false);
@@ -476,11 +478,11 @@ describe('sweepAgyHookCarriers', () => {
             const carrierB = prepareAgyHookCarrier('{"b":true}');
             expect(carrierB).toBeDefined();
             if (!carrierB) return;
-            expect(carrierB.carrierDir.startsWith(join(hapiHomeB, 'agy-carriers') + '/')).toBe(true);
+            expect(carrierB.carrierDir.startsWith(join(hapiHomeB, 'agy-carriers', ''))).toBe(true);
 
             // B's root must contain exactly B's own carrier, not A's.
             const bEntries = readdirSync(join(hapiHomeB, 'agy-carriers'));
-            expect(bEntries).toEqual([carrierB.carrierDir.split('/').pop()]);
+            expect(bEntries).toEqual([carrierB.carrierDir.split(/[\\/]/).pop()]);
 
             cleanupAgyHookCarrier(carrierB.carrierDir);
         } finally {

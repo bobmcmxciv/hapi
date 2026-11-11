@@ -17,6 +17,11 @@ const state = vi.hoisted(() => {
         messageId: 'user-text:msg-42' as string,
         hubMessageId: 'msg-42' as string | undefined,
         text: 'source user prompt' as string,
+        resolution: undefined as { outcome: 'handled' | 'cancelled'; resolvedAt: number } | undefined,
+        status: undefined as 'queued' | 'sending' | 'sent' | 'failed' | undefined,
+        invokedAt: undefined as number | null | undefined,
+        localId: 'local-msg-42',
+        retryMessage: vi.fn(),
         flavor: 'codex' as string | null,
         capabilities: {
             capabilities: {
@@ -45,7 +50,7 @@ vi.mock('@assistant-ui/react', () => ({
                 role: 'user',
                 id: state.messageId,
                 content: [{ type: 'text', text: state.text }],
-                metadata: { custom: { hubMessageId: state.hubMessageId } }
+                metadata: { custom: { hubMessageId: state.hubMessageId, localId: state.localId, resolution: state.resolution, status: state.status, invokedAt: state.invokedAt } }
             }
         })
 }))
@@ -95,8 +100,8 @@ vi.mock('@/components/AssistantChat/context', () => ({
         metadata: { flavor: state.flavor },
         terminalToolDisplayMode: 'auto',
         disabled: false,
-        onRefresh: () => {},
-        onRetryMessage: undefined,
+        onRefresh: () => { },
+        onRetryMessage: state.retryMessage,
         hasMoreMessages: false,
         isLoadingMoreMessages: false,
         loadOlderMessagesPreservingScroll: async () => 'terminal-stop'
@@ -110,17 +115,23 @@ vi.mock('@/lib/fork-restore', () => ({
 vi.mock('@/hooks/useCopyToClipboard', () => ({
     useCopyToClipboard: () => ({ copied: false, copy: vi.fn() })
 }))
-
-vi.mock('@/components/AssistantChat/messages/MessageStatusIndicator', () => ({
-    MessageStatusIndicator: () => null
+vi.mock('@/lib/use-translation', () => ({
+    useTranslation: () => ({
+        t: (key: string) => (({
+            'message.resolution.handled': 'Handled locally · not executed',
+            'message.resolution.cancelled': 'Cancelled · not executed',
+            'message.waitingForInvocation': 'Waiting for the model',
+            'queuedMessages.forceSend.sending': 'Sending…',
+            'queuedMessages.forceSend.awaiting': 'Force send requested · waiting for the model',
+        } as Record<string, string>)[key] ?? key)
+    })
 }))
+
 vi.mock('@/components/AssistantChat/messages/MessageAttachments', () => ({
     MessageAttachments: () => null
 }))
-vi.mock('@/components/AssistantChat/messages/user-bubble', () => ({
-    UserBubbleContent: ({ text }: { text: string }) => <span>{text}</span>,
-    getUserBubbleClassName: () => '',
-    shouldShowMessageStatus: () => false
+vi.mock('@/components/LazyRainbowText', () => ({
+    LazyRainbowText: ({ text }: { text: string }) => <span>{text}</span>
 }))
 vi.mock('@/components/CliOutputBlock', () => ({ CliOutputBlock: () => null }))
 vi.mock('@/components/icons', () => ({
@@ -154,12 +165,78 @@ afterEach(() => {
     state.hubMessageId = 'msg-42'
     state.text = 'source user prompt'
     state.flavor = 'codex'
+    state.resolution = undefined
+    state.status = undefined
+    state.invokedAt = undefined
+    state.retryMessage.mockClear()
 })
 
 describe('HappyUserMessage actions', () => {
     it('renders one copy action for a text message', () => {
         render(<HappyUserMessage />)
         expect(screen.getAllByRole('button', { name: 'Copy' })).toHaveLength(1)
+    })
+
+    it('shows an unconsumed authoritative user row without enabling rewind', () => {
+        state.invokedAt = null
+        render(<HappyUserMessage />)
+        expect(screen.getByText('source user prompt')).toBeInTheDocument()
+        expect(screen.getByRole('status', { name: 'Queued' })).toBeInTheDocument()
+        expect(screen.queryByRole('button', { name: /Rewind to this message/i })).toBeNull()
+    })
+
+    it.each(['queued', 'sent', undefined] as const)('keeps %s unconsumed receipts pending, without claiming force-send', (status) => {
+        state.status = status
+        state.invokedAt = null
+        render(<HappyUserMessage />)
+        expect(screen.getAllByText('source user prompt')).toHaveLength(1)
+        expect(screen.getByRole('status', { name: 'Queued' })).toHaveTextContent('Waiting for the model')
+        expect(screen.queryByText(/Force send requested/)).toBeNull()
+        expect(screen.queryByRole('button', { name: /Rewind to this message/i })).toBeNull()
+    })
+
+    it('transitions a preserved failed bubble through retry, HTTP acceptance and native consumption', () => {
+        state.status = 'failed'
+        state.invokedAt = null
+        const view = render(<HappyUserMessage />)
+        fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
+        expect(state.retryMessage).toHaveBeenCalledWith('local-msg-42')
+        expect(screen.queryByRole('button', { name: /Rewind to this message/i })).toBeNull()
+
+        state.status = 'sending'
+        view.rerender(<HappyUserMessage />)
+        expect(screen.getByRole('status', { name: 'Sending' })).toHaveTextContent('Sending…')
+        expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull()
+        expect(screen.queryByRole('button', { name: /Rewind to this message/i })).toBeNull()
+
+        state.status = 'sent'
+        view.rerender(<HappyUserMessage />)
+        expect(screen.getByRole('status', { name: 'Queued' })).toHaveTextContent('Waiting for the model')
+
+        state.invokedAt = 1234
+        view.rerender(<HappyUserMessage />)
+        expect(screen.queryByRole('status')).toBeNull()
+        expect(screen.getAllByText('source user prompt')).toHaveLength(1)
+        expect(screen.getByRole('button', { name: /Rewind to this message/i })).toBeInTheDocument()
+    })
+
+    it.each(['queued', 'sending', 'failed'] as const)('native consumption wins over late %s settlement state', (status) => {
+        state.status = status
+        state.invokedAt = 1234
+        render(<HappyUserMessage />)
+        expect(screen.queryByRole('status')).toBeNull()
+        expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull()
+        expect(screen.getByRole('button', { name: /Rewind to this message/i })).toBeInTheDocument()
+    })
+
+    it.each(['handled', 'cancelled'] as const)('keeps %s prompts visible without queue or rewind actions', (outcome) => {
+        state.resolution = { outcome, resolvedAt: 1234 }
+        state.status = 'queued'
+        render(<HappyUserMessage />)
+        expect(screen.getByText('source user prompt')).toBeInTheDocument()
+        expect(screen.getByRole('status')).toHaveTextContent(outcome === 'handled' ? 'Handled locally · not executed' : 'Cancelled · not executed')
+        expect(screen.queryByRole('button', { name: /Rewind to this message/i })).toBeNull()
+        expect(screen.getByRole('button', { name: 'Copy' })).toBeInTheDocument()
     })
 })
 

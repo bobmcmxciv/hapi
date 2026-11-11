@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
     assertSupportedOmpVersion,
     OmpRpcClient,
+    OmpRpcConnectionError,
     parseOmpVersion
 } from './OmpRpcClient';
 import type { OmpRpcTransportDependencies } from './OmpRpcTransport';
@@ -139,6 +140,70 @@ describe('OMP RPC version gate', () => {
 });
 
 describe('OmpRpcClient discovery', () => {
+    it('reports not-started when the version probe fails before a native process exists', async () => {
+        const fake = createRpcProcess(successfulDiscovery);
+        const cause = new Error('version probe unavailable');
+        await expect(OmpRpcClient.connect({ cwd: '/workspace' }, {
+            probeVersion: async () => { throw cause; },
+            transportDependencies: fake.dependencies
+        })).rejects.toMatchObject({
+            name: 'OmpRpcConnectionError', cause,
+            shutdownReceipt: { kind: 'omp-rpc', status: 'not-started' }
+        });
+        expect(fake.dependencies.spawnProcess).not.toHaveBeenCalled();
+    });
+
+    it('preserves the discovery error and clean disposal evidence in its failure', async () => {
+        const fake = createRpcProcess((frame) => frame.type === 'get_available_models'
+            ? { success: false, error: 'models unavailable' } : successfulDiscovery(frame));
+        const failure = await OmpRpcClient.connect({ cwd: '/workspace' }, {
+            probeVersion: async () => parseOmpVersion('17.0.4'), transportDependencies: fake.dependencies
+        }).catch((error: unknown) => error);
+        expect(failure).toBeInstanceOf(OmpRpcConnectionError);
+        expect(failure).toMatchObject({
+            message: 'models unavailable',
+            cause: { message: 'models unavailable' },
+            shutdownReceipt: { status: 'disposed', pid: 4343, exitCode: 0, signal: null }
+        });
+        expect(fake.killProcess).not.toHaveBeenCalled();
+    });
+
+    it('retains the original discovery error when native cleanup exits nonzero', async () => {
+        const fake = createRpcProcess((frame) => frame.type === 'get_available_models'
+            ? { success: false, error: 'models unavailable' } : successfulDiscovery(frame));
+        fake.child.stdin.removeAllListeners('finish');
+        fake.child.stdin.on('finish', () => queueMicrotask(() => fake.child.emit('close', 7, null)));
+        await expect(OmpRpcClient.connect({ cwd: '/workspace' }, {
+            probeVersion: async () => parseOmpVersion('17.0.4'), transportDependencies: fake.dependencies
+        })).rejects.toMatchObject({
+            message: 'models unavailable',
+            cleanupError: expect.any(Error),
+            shutdownReceipt: { status: 'unverified', pid: 4343, exitCode: 7 }
+        });
+        expect(fake.killProcess).not.toHaveBeenCalled();
+    });
+
+    it('reports unverified ownership if discovery fails and EOF never disposes the native process', async () => {
+        vi.useFakeTimers();
+        try {
+            const fake = createRpcProcess((frame) => frame.type === 'get_available_models'
+                ? { success: false, error: 'models unavailable' } : successfulDiscovery(frame));
+            fake.child.stdin.removeAllListeners('finish');
+            const result = OmpRpcClient.connect({ cwd: '/workspace' }, {
+                probeVersion: async () => parseOmpVersion('17.0.4'), transportDependencies: fake.dependencies
+            }).catch((error: unknown) => error);
+            await vi.advanceTimersByTimeAsync(30_001);
+            expect(await result).toMatchObject({
+                message: 'models unavailable',
+                cleanupError: expect.objectContaining({ message: expect.stringContaining('Timed out') }),
+                shutdownReceipt: { status: 'unverified', pid: 4343 }
+            });
+            expect(fake.killProcess).not.toHaveBeenCalled();
+            fake.child.emit('close', 0, null);
+        } finally {
+            vi.useRealTimers();
+        }
+    });
     it('discovers state, commands, and models before exposing a ready client', async () => {
         const fake = createRpcProcess(successfulDiscovery);
         const client = await OmpRpcClient.connect(

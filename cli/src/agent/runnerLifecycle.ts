@@ -80,7 +80,9 @@ export function createRunnerLifecycle(options: RunnerLifecycleOptions): RunnerLi
                 }
                 confirmedCleanupPrepared = true
             })()
-            preparation.catch(() => { preparation = null })
+            preparation.catch(() => {
+                preparation = null
+            })
         }
         await preparation
     }

@@ -36,6 +36,16 @@ export function requireSession(
     return { sessionId: access.sessionId, session: access.session }
 }
 
+/** A namespace captured before an await is not proof that a gateway grant is still valid. */
+export async function reauthorizeSession(
+    c: Context<WebAppEnv>,
+    engine: SyncEngine,
+    sessionId: string,
+): Promise<{ sessionId: string; session: Session } | Response> {
+    const denied = await c.get('reauthorizeResource')?.()
+    return denied ?? requireSession(c, engine, sessionId)
+}
+
 export function requireSessionFromParam(
     c: Context<WebAppEnv>,
     engine: SyncEngine,

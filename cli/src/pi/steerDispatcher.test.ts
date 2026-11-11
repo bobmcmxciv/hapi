@@ -178,17 +178,14 @@ describe('PiSteerDispatcher', () => {
         expect(h.history.registerUserEntry).not.toHaveBeenCalled();
     });
 
-    it('removes failed native steers from history and clears only their queued thinking grace', async () => {
+    it('retains failed native steers as pending instead of faking consumption', async () => {
         const h = createHarness();
         h.dispatcher.enqueue({ localId: 'failed-steer', message: 'will fail', images: [], outboundSequence: 1, targetStreamingGeneration: h.session.currentStreamingGeneration });
         await vi.waitFor(() => expect(steerCommands(h.transport)).toHaveLength(1));
 
         resolveSteer(h.session, steerCommands(h.transport)[0]!, false, 'steer rejected');
         await vi.waitFor(() => expect(h.history.rejectPendingEntry).toHaveBeenCalledWith('failed-steer'));
-        expect(h.client.emitMessagesConsumed).toHaveBeenCalledWith(
-            ['failed-steer'],
-            { clearQueuedThinkingGrace: true },
-        );
+        expect(h.client.emitMessagesConsumed).not.toHaveBeenCalled();
         expect(h.client.sendSessionEvent).toHaveBeenCalledWith({
             type: 'message', message: 'Pi steer failed: steer rejected',
         });
@@ -228,10 +225,7 @@ describe('PiSteerDispatcher', () => {
 
         await vi.advanceTimersByTimeAsync(10_001);
         await vi.waitFor(() => expect(h.onIndeterminateTimeout).toHaveBeenCalledTimes(1));
-        expect(h.client.emitMessagesConsumed).toHaveBeenCalledWith(
-            ['timeout-steer'],
-            { clearQueuedThinkingGrace: true },
-        );
+        expect(h.client.emitMessagesConsumed).not.toHaveBeenCalled();
         expect(steerCommands(h.transport)).toHaveLength(1);
     });
 

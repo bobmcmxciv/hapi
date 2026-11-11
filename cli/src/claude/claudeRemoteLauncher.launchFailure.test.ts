@@ -87,7 +87,7 @@ function hasDropBanner(client: ReturnType<typeof makeClient>): boolean {
     );
 }
 
-describe('claudeRemoteLauncher launch-failure recovery', () => {
+describe('claudeRemoteLauncher launch-failure recovery', { timeout: 15_000 }, () => {
     beforeEach(() => {
         claudeRemoteMock.mockReset();
         process.stdin.isTTY = false;

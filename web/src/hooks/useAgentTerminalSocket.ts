@@ -30,7 +30,7 @@ export function useAgentTerminalSocket(options: UseAgentTerminalSocketOptions): 
 } {
     const [state, setState] = useState<AgentTerminalConnectionState>({ status: 'idle' })
     const socketRef = useRef<Socket | null>(null)
-    const outputHandlerRef = useRef<(data: string) => void>(() => {})
+    const outputHandlerRef = useRef<(data: string) => void>(() => { })
     const sessionIdRef = useRef(options.sessionId)
     const tokenRef = useRef(options.token)
     const baseUrlRef = useRef(options.baseUrl)
@@ -120,6 +120,13 @@ export function useAgentTerminalSocket(options: UseAgentTerminalSocketOptions): 
                 return
             }
             outputHandlerRef.current(payload.data)
+        })
+
+        socket.on('agent-terminal:error', (payload: { sessionId?: string; message?: string }) => {
+            if (payload.sessionId !== sessionIdRef.current) {
+                return
+            }
+            setState({ status: 'error', error: payload.message ?? 'Terminal access revoked.' })
         })
 
         socket.on('connect_error', (error) => {

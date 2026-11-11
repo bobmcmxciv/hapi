@@ -1,8 +1,9 @@
-import { beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { fireEvent, render, screen } from '@testing-library/react'
 import { I18nProvider } from '@/lib/i18n-context'
 import type { TodoItem } from '@hapi/protocol/types'
 import { TodoPanel } from './TodoPanel'
+import * as viewportState from '@/hooks/useViewportHeight'
 
 function renderPanel(todos: TodoItem[]) {
     return render(
@@ -13,6 +14,7 @@ function renderPanel(todos: TodoItem[]) {
 }
 
 beforeEach(() => localStorage.clear())
+afterEach(() => vi.restoreAllMocks())
 
 describe('TodoPanel', () => {
     it('does not render without tasks', () => {
@@ -41,6 +43,33 @@ describe('TodoPanel', () => {
 
         renderPanel(todos)
         expect(screen.getByRole('button', { name: /Tasks/ })).toHaveAttribute('aria-expanded', 'false')
+    })
+
+    it('allows a keyboard peek without overwriting the saved collapsed preference', () => {
+        let keyboardOpen = false
+        vi.spyOn(viewportState, 'useVirtualKeyboardOpen').mockImplementation(() => keyboardOpen)
+        localStorage.setItem('hapi.todo-panel.collapsed', '1')
+        const todos: TodoItem[] = [{ id: '1', content: 'Review pending work', status: 'in_progress', priority: 'medium' }]
+        const view = renderPanel(todos)
+        const updateKeyboard = (open: boolean) => {
+            keyboardOpen = open
+            view.rerender(<I18nProvider><TodoPanel sessionId="session-117" todos={todos} /></I18nProvider>)
+        }
+        const toggle = screen.getByRole('button', { name: /Tasks/ })
+        updateKeyboard(true)
+        expect(toggle).toHaveAttribute('aria-expanded', 'false')
+        fireEvent.click(toggle)
+        expect(toggle).toHaveAttribute('aria-expanded', 'true')
+        expect(localStorage.getItem('hapi.todo-panel.collapsed')).toBe('1')
+        updateKeyboard(false)
+        expect(toggle).toHaveAttribute('aria-expanded', 'false')
+
+        fireEvent.click(toggle)
+        expect(localStorage.getItem('hapi.todo-panel.collapsed')).toBe('0')
+        updateKeyboard(true)
+        expect(toggle).toHaveAttribute('aria-expanded', 'false')
+        updateKeyboard(false)
+        expect(toggle).toHaveAttribute('aria-expanded', 'true')
     })
 
     it('renders only the currently selected session projection', () => {

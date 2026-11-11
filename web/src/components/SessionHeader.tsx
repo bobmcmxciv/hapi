@@ -32,6 +32,8 @@ import { useSessionHeaderMetadata } from '@/hooks/useSessionHeaderMetadata'
 import { formatSessionHeaderTimestamp } from '@/lib/sessionHeaderTimestamp'
 import { selectMobileSessionHeaderSecondary } from '@/lib/sessionHeaderMobileMetadata'
 import { useMinuteTick } from '@/hooks/useMinuteTick'
+import { useVirtualKeyboardOpen } from '@/hooks/useViewportHeight'
+
 
 /** Same preference order as session-list chips: display label → host → short id. */
 export function resolveSessionHeaderMachineLabel(
@@ -97,11 +99,10 @@ function OutlineIcon(props: { className?: string }) {
 }
 
 function headerToggleClass(active: boolean): string {
-    return `flex h-8 w-8 items-center justify-center rounded-full transition-colors ${
-        active
-            ? 'bg-[var(--app-button)] text-[var(--app-button-text)] hover:opacity-90'
-            : 'text-[var(--app-hint)] hover:bg-[var(--app-secondary-bg)] hover:text-[var(--app-fg)]'
-    }`
+    return `flex h-8 w-8 items-center justify-center rounded-full transition-colors ${active
+        ? 'bg-[var(--app-button)] text-[var(--app-button-text)] hover:opacity-90'
+        : 'text-[var(--app-hint)] hover:bg-[var(--app-secondary-bg)] hover:text-[var(--app-fg)]'
+        }`
 }
 
 function TerminalIcon(props: { className?: string }) {
@@ -158,6 +159,7 @@ export function SessionHeader(props: {
     onSessionForked?: (newSessionId: string) => void
 }) {
     const { t, locale } = useTranslation()
+    const keyboardCompact = useVirtualKeyboardOpen()
     const queryClient = useQueryClient()
     const { addToast } = useToast()
     const { session, api, onSessionDeleted, onSessionReopened, onSessionForked } = props
@@ -394,7 +396,7 @@ export function SessionHeader(props: {
     return (
         <>
             <div data-safe-top className="bg-[var(--app-bg)] pt-[env(safe-area-inset-top)]">
-                <div className="mx-auto w-full max-w-content flex items-center gap-2 p-3">
+                <div className={`mx-auto w-full max-w-content flex items-center gap-2 ${keyboardCompact ? 'px-3 py-1.5' : 'p-3'}`}>
                     {/* Back button */}
                     <button
                         type="button"
@@ -421,69 +423,73 @@ export function SessionHeader(props: {
                         <div className="truncate font-semibold">
                             {title}
                         </div>
-                        {showMobileMetadata ? (
-                            <div className="flex min-w-0 flex-nowrap items-center gap-2 overflow-hidden text-xs text-[var(--app-hint)] sm:hidden">
-                                {headerMetadata.agent && agentLabel ? (
-                                    <span className="inline-flex shrink-0 items-center gap-1">
-                                        <AgentFlavorIcon flavor={session.metadata?.flavor} className="h-3.5 w-3.5 shrink-0 -translate-y-px" />
-                                        {agentLabel}
-                                    </span>
+                        {!keyboardCompact ? (
+                            <>
+                                {showMobileMetadata ? (
+                                    <div className="flex min-w-0 flex-nowrap items-center gap-2 overflow-hidden text-xs text-[var(--app-hint)] sm:hidden">
+                                        {headerMetadata.agent && agentLabel ? (
+                                            <span className="inline-flex shrink-0 items-center gap-1">
+                                                <AgentFlavorIcon flavor={session.metadata?.flavor} className="h-3.5 w-3.5 shrink-0 -translate-y-px" />
+                                                {agentLabel}
+                                            </span>
+                                        ) : null}
+                                        {mobileSecondary === 'model' && modelLabel ? <span className="inline-flex truncate items-center gap-1.5">{headerMetadata.showLabels ? `${t(modelLabel.key)}: ` : ''}{modelLabel.value}{isModelChanging ? <ModelChangingStatus /> : null}</span> : null}
+                                        {mobileSecondary === 'reasoning' && reasoningLabel ? <span className="truncate">{reasoningLabel}</span> : null}
+                                        {mobileSecondary === 'machine' && machineLabel ? <span className="inline-flex min-w-0 items-center gap-1">{machineIcon}<span className="truncate">{headerMetadata.showLabels ? `${t('session.item.machine')}: ` : ''}{machineLabel}</span></span> : null}
+                                        {mobileSecondary === 'lastActive' && ageLabel ? <span className="truncate" title={ageAbsolute ?? undefined}>{ageLabel}</span> : null}
+                                        {mobileSecondary === 'updatedAt' && updatedAtLabel ? <span className="truncate">{headerMetadata.showLabels ? `${t('session.header.updatedAt')}: ` : ''}{updatedAtLabel}</span> : null}
+                                        {mobileSecondary === 'createdAt' && createdAtLabel ? <span className="truncate">{headerMetadata.showLabels ? `${t('session.header.createdAt')}: ` : ''}{createdAtLabel}</span> : null}
+                                        {mobileSecondary === 'worktree' && worktreeBranch ? <span className="truncate">{headerMetadata.showLabels ? `${t('session.item.worktree')}: ` : ''}{worktreeBranch}</span> : null}
+                                        {mobileSecondary === 'fastMode' ? <span className="truncate text-[#34C759]">fast</span> : null}
+                                    </div>
                                 ) : null}
-                                {mobileSecondary === 'model' && modelLabel ? <span className="inline-flex truncate items-center gap-1.5">{headerMetadata.showLabels ? `${t(modelLabel.key)}: ` : ''}{modelLabel.value}{isModelChanging ? <ModelChangingStatus /> : null}</span> : null}
-                                {mobileSecondary === 'reasoning' && reasoningLabel ? <span className="truncate">{reasoningLabel}</span> : null}
-                                {mobileSecondary === 'machine' && machineLabel ? <span className="inline-flex min-w-0 items-center gap-1">{machineIcon}<span className="truncate">{headerMetadata.showLabels ? `${t('session.item.machine')}: ` : ''}{machineLabel}</span></span> : null}
-                                {mobileSecondary === 'lastActive' && ageLabel ? <span className="truncate" title={ageAbsolute ?? undefined}>{ageLabel}</span> : null}
-                                {mobileSecondary === 'updatedAt' && updatedAtLabel ? <span className="truncate">{headerMetadata.showLabels ? `${t('session.header.updatedAt')}: ` : ''}{updatedAtLabel}</span> : null}
-                                {mobileSecondary === 'createdAt' && createdAtLabel ? <span className="truncate">{headerMetadata.showLabels ? `${t('session.header.createdAt')}: ` : ''}{createdAtLabel}</span> : null}
-                                {mobileSecondary === 'worktree' && worktreeBranch ? <span className="truncate">{headerMetadata.showLabels ? `${t('session.item.worktree')}: ` : ''}{worktreeBranch}</span> : null}
-                                {mobileSecondary === 'fastMode' ? <span className="truncate text-[#34C759]">fast</span> : null}
-                            </div>
+                                <div className="hidden flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-[var(--app-hint)] sm:flex">
+                                    {headerMetadata.agent && agentLabel ? (
+                                        <span className="inline-flex items-center gap-1">
+                                            <AgentFlavorIcon flavor={session.metadata?.flavor} className="h-3.5 w-3.5 shrink-0 -translate-y-px" />
+                                            {agentLabel}
+                                        </span>
+                                    ) : null}
+                                    {headerMetadata.machine && machineLabel ? (
+                                        <span data-testid="session-header-machine" className="inline-flex max-w-[12rem] items-center gap-1" title={machineLabel}>
+                                            {machineIcon}
+                                            <span className="truncate">{headerMetadata.showLabels ? `${t('session.item.machine')}: ` : ''}{machineLabel}</span>
+                                        </span>
+                                    ) : null}
+                                    {ageLabel ? (
+                                        <span data-testid="session-header-age" title={ageAbsolute ?? undefined}>
+                                            {ageLabel}
+                                        </span>
+                                    ) : null}
+                                    {headerMetadata.model && usageLabel ? (
+                                        <span>{usageLabel}</span>
+                                    ) : headerMetadata.model && modelLabel ? (
+                                        <span className="inline-flex items-center gap-1.5">
+                                            <span>{headerMetadata.showLabels ? `${t(modelLabel.key)}: ` : ''}{modelLabel.value}</span>
+                                            {isModelChanging ? <ModelChangingStatus /> : null}
+                                        </span>
+                                    ) : null}
+                                    {headerMetadata.reasoning && reasoningLabel ? (
+                                        <span data-testid="session-header-reasoning">
+                                            {reasoningLabel}
+                                        </span>
+                                    ) : null}
+                                    {headerMetadata.fastMode && showFastBadge ? (
+                                        <span data-testid="session-header-fast" className="text-[#34C759]">
+                                            fast
+                                        </span>
+                                    ) : null}
+                                    {createdAtLabel ? <span>{headerMetadata.showLabels ? `${t('session.header.createdAt')}: ` : ''}{createdAtLabel}</span> : null}
+                                    {updatedAtLabel ? <span>{headerMetadata.showLabels ? `${t('session.header.updatedAt')}: ` : ''}{updatedAtLabel}</span> : null}
+                                    {headerMetadata.worktree && worktreeBranch ? (
+                                        <span>{headerMetadata.showLabels ? `${t('session.item.worktree')}: ` : ''}{worktreeBranch}</span>
+                                    ) : null}
+                                </div>
+                            </>
                         ) : null}
-                        <div className="hidden flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-[var(--app-hint)] sm:flex">
-                            {headerMetadata.agent && agentLabel ? (
-                                <span className="inline-flex items-center gap-1">
-                                    <AgentFlavorIcon flavor={session.metadata?.flavor} className="h-3.5 w-3.5 shrink-0 -translate-y-px" />
-                                    {agentLabel}
-                                </span>
-                            ) : null}
-                            {headerMetadata.machine && machineLabel ? (
-                                <span data-testid="session-header-machine" className="inline-flex max-w-[12rem] items-center gap-1" title={machineLabel}>
-                                    {machineIcon}
-                                    <span className="truncate">{headerMetadata.showLabels ? `${t('session.item.machine')}: ` : ''}{machineLabel}</span>
-                                </span>
-                            ) : null}
-                            {ageLabel ? (
-                                <span data-testid="session-header-age" title={ageAbsolute ?? undefined}>
-                                    {ageLabel}
-                                </span>
-                            ) : null}
-                            {headerMetadata.model && usageLabel ? (
-                                <span>{usageLabel}</span>
-                            ) : headerMetadata.model && modelLabel ? (
-                                <span className="inline-flex items-center gap-1.5">
-                                    <span>{headerMetadata.showLabels ? `${t(modelLabel.key)}: ` : ''}{modelLabel.value}</span>
-                                    {isModelChanging ? <ModelChangingStatus /> : null}
-                                </span>
-                            ) : null}
-                            {headerMetadata.reasoning && reasoningLabel ? (
-                                <span data-testid="session-header-reasoning">
-                                    {reasoningLabel}
-                                </span>
-                            ) : null}
-                            {headerMetadata.fastMode && showFastBadge ? (
-                                <span data-testid="session-header-fast" className="text-[#34C759]">
-                                    fast
-                                </span>
-                            ) : null}
-                            {createdAtLabel ? <span>{headerMetadata.showLabels ? `${t('session.header.createdAt')}: ` : ''}{createdAtLabel}</span> : null}
-                            {updatedAtLabel ? <span>{headerMetadata.showLabels ? `${t('session.header.updatedAt')}: ` : ''}{updatedAtLabel}</span> : null}
-                            {headerMetadata.worktree && worktreeBranch ? (
-                                <span>{headerMetadata.showLabels ? `${t('session.item.worktree')}: ` : ''}{worktreeBranch}</span>
-                            ) : null}
-                        </div>
                     </div>
 
-                    {props.onToggleFiles ? (
+                    {!keyboardCompact && props.onToggleFiles ? (
                         <button
                             type="button"
                             onClick={props.onToggleFiles}
@@ -496,7 +502,7 @@ export function SessionHeader(props: {
                         </button>
                     ) : null}
 
-                    {props.onToggleOutline ? (
+                    {!keyboardCompact && props.onToggleOutline ? (
                         <button
                             type="button"
                             onClick={props.onToggleOutline}
@@ -509,7 +515,7 @@ export function SessionHeader(props: {
                         </button>
                     ) : null}
 
-                    {props.onToggleTerminal ? (
+                    {!keyboardCompact && props.onToggleTerminal ? (
                         <button
                             type="button"
                             onClick={props.onToggleTerminal}
@@ -522,10 +528,12 @@ export function SessionHeader(props: {
                         </button>
                     ) : null}
 
-                    <SessionDigestButton
-                        sessionId={session.id}
-                        className="flex h-8 w-8 items-center justify-center rounded-full text-[var(--app-hint)] transition-colors hover:bg-[var(--app-secondary-bg)] hover:text-[var(--app-fg)]"
-                    />
+                    {!keyboardCompact ? (
+                        <SessionDigestButton
+                            sessionId={session.id}
+                            className="flex h-8 w-8 items-center justify-center rounded-full text-[var(--app-hint)] transition-colors hover:bg-[var(--app-secondary-bg)] hover:text-[var(--app-fg)]"
+                        />
+                    ) : null}
 
                     <button
                         type="button"

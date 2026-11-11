@@ -170,6 +170,19 @@ describe('机器授权向下继承：该机器上新建的会话事件必须投�
         expect(predicate(sessionEvent('nobody-bound-me'))).toBe(true)
         store.close()
     })
+
+    it('多目录限定的机器授权：SSE 只投递落在该账号目录并集内的会话事件', () => {
+        const { store, granteeId, resolve } = setupMachineGrant()
+        store.grant('machine', 'fa608', granteeId, 'operator', ['C:\\Users\\Tadokoro', 'C:\\Peter'])
+        const paths: Record<string, string> = {
+            's-new': 'C:\\Peter\\sub',
+            's-unbound': 'C:\\Users\\Other'
+        }
+        const predicate = createSseEventFilterFactory(store, resolve, id => paths[id] ?? null)(granteeId)!
+        expect(predicate(sessionEvent('s-new'))).toBe(true)
+        expect(predicate(sessionEvent('s-unbound'))).toBe(false)
+        store.close()
+    })
 })
 
 describe('toast（提醒弹窗）同样要过谓词', () => {
@@ -265,5 +278,48 @@ describe('owner 自己的资源：谓词必须放行（否则 all 订阅拦下�
         const { store, granteeId } = setupStore()
         const predicate = createSseEventFilterFactory(store)(granteeId)!
         expect(predicate(sessionEvent('session-owned'))).toBe(true)
+    })
+})
+
+describe('global admin SSE subscription', () => {
+    it('receives bound and unbound resources plus toast across new namespaces without widening users', async () => {
+        const { store, adminId, strangerId } = setupStore()
+        const manager = new SSEManager(0, new VisibilityTracker())
+        const factory = createSseEventFilterFactory(store)
+        const received = { admin: [] as SyncEvent[], stranger: [] as SyncEvent[] }
+        try {
+            for (const [name, accountId] of [['admin', adminId], ['stranger', strangerId]] as const) {
+                manager.subscribe({
+                    id: name,
+                    namespace: 'default',
+                    all: true,
+                    allNamespaces: name === 'admin',
+                    visibility: 'visible',
+                    canDeliver: factory(accountId) ?? undefined,
+                    send: event => { received[name].push(event) },
+                    sendHeartbeat: () => undefined
+                })
+            }
+            // All these namespaces appear only after the subscriptions are established.
+            store.bindResource({ resourceType: 'session', resourceId: 'foreign-bound', ownerAccountId: adminId, coreNamespace: 'foreign' })
+            const events: SyncEvent[] = [
+                { type: 'session-updated', namespace: 'foreign', sessionId: 'foreign-bound' },
+                { type: 'session-added', namespace: 'new-unbound', sessionId: 'foreign-unbound' },
+                { type: 'machine-updated', namespace: 'new-machine', machineId: 'foreign-machine' }
+            ]
+            for (const event of events) manager.broadcast(event)
+            const toast: Extract<SyncEvent, { type: 'toast' }> = {
+                type: 'toast', data: { title: 'Done', body: 'Foreign session done', sessionId: 'foreign-unbound', url: '/sessions/foreign-unbound' }
+            }
+            expect(await manager.sendToast('new-unbound', toast)).toBe(1)
+            expect(received.admin).toEqual([...events, toast])
+            expect(received.stranger).toEqual([])
+            expect(factory(strangerId)!(events[1]!)).toBe(false)
+            expect(store.getResource('session', 'foreign-unbound')).toBeNull()
+            expect(store.getResource('machine', 'foreign-machine')).toBeNull()
+        } finally {
+            manager.stop()
+            store.close()
+        }
     })
 })

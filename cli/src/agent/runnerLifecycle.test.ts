@@ -221,3 +221,56 @@ describe('createRunnerLifecycle archiveReason defaults (tiann/hapi#914)', () => 
         })
     })
 })
+
+// A failed archive must retain its wrapper so the native cleanup can be retried.
+describe('createRunnerLifecycle prepareShutdown retry (archive confirmation)', () => {
+    function createFlushedSession() {
+        return {
+            updateMetadata: vi.fn(),
+            sendSessionDeath: vi.fn(),
+            flush: vi.fn(async () => true),
+            close: vi.fn(async () => { }),
+        } as unknown as Parameters<typeof createRunnerLifecycle>[0]['session'];
+    }
+
+    it('keeps the wrapper alive after failed preparation and exits only after a confirmed retry', async () => {
+        const session = createFlushedSession();
+        const onShutdownRequest = vi.fn(async (): Promise<void> => { throw new Error('Native cleanup unverified'); });
+        const exit = vi.spyOn(process, 'exit').mockImplementation(() => undefined as never);
+        try {
+            const lifecycle = createRunnerLifecycle({ session, logTag: 'test', onShutdownRequest });
+            await expect(lifecycle.prepareShutdown()).rejects.toThrow('Native cleanup unverified');
+            await lifecycle.cleanupAndExit();
+            expect(exit).not.toHaveBeenCalled();
+            expect(session.close).not.toHaveBeenCalled();
+
+            onShutdownRequest.mockImplementation(async () => { });
+            await lifecycle.prepareShutdown();
+            const closing = lifecycle.cleanupAndExit();
+            lifecycle.releaseShutdownAck();
+            await closing;
+            expect(session.close).toHaveBeenCalledOnce();
+            expect(exit).toHaveBeenCalledExactlyOnceWith(0);
+        } finally {
+            exit.mockRestore();
+        }
+    });
+
+    it('keeps the socket open for the kill-RPC ack: cleanup waits on releaseShutdownAck after a confirmed prepare', async () => {
+        const session = createFlushedSession();
+        const lifecycle = createRunnerLifecycle({ session, logTag: 'test' });
+
+        await lifecycle.prepareShutdown();
+        let settled = false;
+        const closing = lifecycle.cleanup().then(() => { settled = true; });
+        const tick = Promise.withResolvers<void>();
+        setImmediate(tick.resolve);
+        await tick.promise;
+        expect(settled).toBe(false);
+
+        lifecycle.releaseShutdownAck();
+        await closing;
+        expect(settled).toBe(true);
+        expect(session.close).toHaveBeenCalled();
+    });
+});

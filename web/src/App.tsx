@@ -38,6 +38,8 @@ import { ToastContainer } from '@/components/ToastContainer'
 import { PwaUpdateProvider } from '@/lib/pwa-update-context'
 import { ToastProvider, useToast } from '@/lib/toast-context'
 import type { SyncEvent } from '@/types/api'
+import { BetaIdentityBoundary } from '@/fork-features/beta-timeline/BetaIdentityBoundary'
+import { appPathname } from '@/lib/appPath'
 
 type ToastEvent = Extract<SyncEvent, { type: 'toast' }>
 
@@ -76,7 +78,7 @@ function AppInner() {
         if (authError && authSource?.type === 'password') clearStoredPasswordToken()
     }, [authError, authSource, clearStoredPasswordToken])
     const goBack = useAppGoBack()
-    const pathname = useLocation({ select: (location) => location.pathname })
+    const pathname = useLocation({ select: (location) => appPathname(location.pathname) })
     const matchRoute = useMatchRoute()
     const router = useRouter()
     const { addToast } = useToast()
@@ -387,7 +389,7 @@ function AppInner() {
         scope: 'global',
         onConnect: handleSseConnect,
         onDisconnect: handleSseDisconnect,
-        onEvent: () => {},
+        onEvent: () => { },
         onToast: handleToast
     })
 
@@ -494,28 +496,30 @@ function AppInner() {
     }
 
     return (
-        <AppContextProvider value={{ api, token, baseUrl, user: (user ?? { id: 0 }) as { id: number; username?: string; role?: 'admin' | 'user'; defaultNamespace?: string } }}>
-            <VoiceProvider>
-                <PwaUpdateBannerWithStatusOffset
-                    isSyncing={isSyncing}
-                    isReconnecting={showReconnectingBanner}
-                />
-                <SyncingBanner isSyncing={isSyncing} />
-                <ReconnectingBanner
-                    isReconnecting={showReconnectingBanner}
-                    reason={sseDisconnectReason}
-                />
-                <VoiceErrorBanner />
-                <OfflineBanner
-                    isHubConnected={globalSubscriptionId !== null}
-                    isReconnecting={showReconnectingBanner}
-                />
-                <div className="h-full min-h-0 flex flex-col">
-                    <Outlet />
-                </div>
-                <ToastContainer />
-                <InstallPrompt />
-            </VoiceProvider>
-        </AppContextProvider>
+        <BetaIdentityBoundary scope={JSON.stringify([baseUrl, user?.id, user?.username])}>
+            <AppContextProvider value={{ api, token, baseUrl, user: (user ?? { id: 0 }) as { id: number; username?: string; role?: 'admin' | 'user'; defaultNamespace?: string } }}>
+                <VoiceProvider>
+                    <PwaUpdateBannerWithStatusOffset
+                        isSyncing={isSyncing}
+                        isReconnecting={showReconnectingBanner}
+                    />
+                    <SyncingBanner isSyncing={isSyncing} />
+                    <ReconnectingBanner
+                        isReconnecting={showReconnectingBanner}
+                        reason={sseDisconnectReason}
+                    />
+                    <VoiceErrorBanner />
+                    <OfflineBanner
+                        isHubConnected={globalSubscriptionId !== null}
+                        isReconnecting={showReconnectingBanner}
+                    />
+                    <div className="h-full min-h-0 flex flex-col">
+                        <Outlet />
+                    </div>
+                    <ToastContainer />
+                    <InstallPrompt />
+                </VoiceProvider>
+            </AppContextProvider>
+        </BetaIdentityBoundary>
     )
 }

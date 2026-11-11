@@ -204,6 +204,23 @@ describe('NewSession preferences', () => {
         })
     })
 
+    it('round-trips OMP provider-qualified selectors without a static allowlist', () => {
+        const preferred = {
+            model: 'anthropic/claude-sonnet-5-5',
+            cursorSelectedBase: 'auto',
+            effort: 'auto',
+            modelReasoningEffort: 'default'
+        }
+        savePreferredLaunchSettings('native-runner', 'omp', preferred)
+        expect(resolvePreferredLaunchSettings('omp', loadPreferredLaunchSettings('native-runner', 'omp')))
+            .toEqual(preferred)
+        // An absent model remains explicit so the target native catalog can
+        // reject it visibly; preference restoration must never choose auto.
+        expect(resolvePreferredLaunchSettings('omp', { ...preferred, model: 'anthropic/retired' }).model)
+            .toBe('anthropic/retired')
+        expect(resolvePreferredLaunchSettings('omp', null).model).toBe('auto')
+    })
+
     it('drops an OpenCode reasoning value that is not offered at launch', () => {
         expect(resolvePreferredLaunchSettings('opencode', {
             model: 'provider/model',

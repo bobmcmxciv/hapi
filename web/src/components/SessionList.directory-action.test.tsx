@@ -195,9 +195,9 @@ describe('SessionList time filter', () => {
 
         const searchButton = screen.getByRole('button', { name: 'Search sessions' })
         const filterButton = screen.getByRole('button', { name: 'Filter sessions by last activity' })
-        expect(searchButton.nextElementSibling).toBe(filterButton)
-        expect(searchButton.parentElement).toBe(filterButton.parentElement)
-        expect(searchButton.parentElement).toHaveClass('relative', 'gap-1')
+        expect(searchButton.nextElementSibling).toBe(filterButton.parentElement)
+        expect(searchButton.parentElement).toBe(filterButton.parentElement?.parentElement)
+        expect(searchButton.parentElement).toHaveClass('relative', 'flex', 'items-center', 'gap-1')
         expect(screen.queryByPlaceholderText('Search sessions…')).toBeNull()
 
         fireEvent.click(filterButton)

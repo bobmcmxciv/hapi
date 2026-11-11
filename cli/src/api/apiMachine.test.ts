@@ -35,6 +35,9 @@ vi.mock('@/cursor/cursorChatStoreStatus', () => ({
 
 import { ApiMachineClient, normalizeWindowsDriveRoot } from './apiMachine'
 import type { Machine } from './types'
+import { createSpawnDeduplicator } from '../runner/run'
+import type { RpcHandlerManager } from './rpc/RpcHandlerManager'
+import type { SpawnSessionResult } from '../modules/common/rpcTypes'
 
 async function callListGrokModels(client: ApiMachineClient, machineId: string, cwd: string): Promise<unknown> {
     const manager = (client as unknown as { rpcHandlerManager: { handleRequest: (req: { method: string; params: string }) => Promise<string> } }).rpcHandlerManager
@@ -196,6 +199,38 @@ describe('ApiMachineClient workspace root browsing', () => {
         } finally {
             client.shutdown()
             rmSync(fixture, { recursive: true, force: true })
+        }
+    })
+})
+
+describe('ApiMachineClient OMP resume generations', () => {
+    it('deduplicates only the same live generation and accepts a new generation after verified exit', async () => {
+        const workspace = mkdtempSync(join(tmpdir(), 'hapi-omp-generation-'))
+        const machine = makeMachine('generation-machine')
+        const client = new ApiMachineClient('cli-token', machine, [workspace])
+        let starts = 0
+        const spawnSession = createSpawnDeduplicator(async (): Promise<SpawnSessionResult> => {
+            starts += 1
+            return { type: 'success', sessionId: 'resumed-row' }
+        })
+        client.setRPCHandlers({ spawnSession, stopSession: async () => 'already_gone', requestShutdown() { } })
+        // In-process test seam: dispatch through the real manager owned by this client.
+        const internal = client as unknown as { rpcHandlerManager: RpcHandlerManager }
+        const invoke = async (attempt: string): Promise<unknown> => JSON.parse(await internal.rpcHandlerManager.handleRequest({
+            method: `${machine.id}:spawn-happy-session`,
+            params: JSON.stringify({ directory: workspace, agent: 'omp', existingSessionId: 'resumed-row', ompResumeAttemptId: attempt })
+        }))
+        try {
+            expect(await invoke('first-attempt')).toEqual({ type: 'success', sessionId: 'resumed-row' })
+            expect(await invoke('first-attempt')).toEqual({ type: 'success', sessionId: 'resumed-row' })
+            expect(await invoke('next-attempt')).toMatchObject({ type: 'error' })
+            expect(starts).toBe(1)
+            spawnSession.onChildExited('resumed-row')
+            expect(await invoke('next-attempt')).toEqual({ type: 'success', sessionId: 'resumed-row' })
+            expect(starts).toBe(2)
+        } finally {
+            client.shutdown()
+            rmSync(workspace, { recursive: true, force: true })
         }
     })
 })
@@ -803,10 +838,10 @@ describe('ApiMachineClient keepAlive lifecycle', () => {
         const machine = makeMachine('machine-keepalive')
         const client = new ApiMachineClient('cli-token', machine)
         const emit = vi.fn()
-        ;(client as unknown as { socket: { emit: typeof emit; close: () => void } }).socket = {
-            emit,
-            close: vi.fn(),
-        } as never
+            ; (client as unknown as { socket: { emit: typeof emit; close: () => void } }).socket = {
+                emit,
+                close: vi.fn(),
+            } as never
 
         const priv = client as unknown as {
             startKeepAlive: () => void
@@ -827,10 +862,10 @@ describe('ApiMachineClient keepAlive lifecycle', () => {
         const machine = makeMachine('machine-keepalive-2')
         const client = new ApiMachineClient('cli-token', machine)
         const emit = vi.fn()
-        ;(client as unknown as { socket: { emit: typeof emit; close: () => void } }).socket = {
-            emit,
-            close: vi.fn(),
-        } as never
+            ; (client as unknown as { socket: { emit: typeof emit; close: () => void } }).socket = {
+                emit,
+                close: vi.fn(),
+            } as never
 
         const priv = client as unknown as {
             startKeepAlive: () => void
@@ -917,7 +952,10 @@ describe('ApiMachineClient connect runner-state advertisement', () => {
         const emitWithAck = vi.fn().mockResolvedValue({
             result: 'success',
             version: 2,
-            runnerState: { status: 'running', capabilities: { piExistingSessionResume: true } }
+            runnerState: {
+                status: 'running',
+                capabilities: { piExistingSessionResume: true, ompExistingSessionResumeGeneration: true }
+            }
         })
         const socket = {
             on: vi.fn((event: string, handler: () => void) => {
@@ -939,7 +977,7 @@ describe('ApiMachineClient connect runner-state advertisement', () => {
             expect(emitWithAck).toHaveBeenCalledWith('machine-update-state', expect.objectContaining({
                 runnerState: expect.objectContaining({
                     status: 'running',
-                    capabilities: { piExistingSessionResume: true }
+                    capabilities: expect.objectContaining({ piExistingSessionResume: true })
                 })
             }))
         } finally {
@@ -947,3 +985,4 @@ describe('ApiMachineClient connect runner-state advertisement', () => {
         }
     })
 })
+

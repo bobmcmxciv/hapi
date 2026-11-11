@@ -4,6 +4,8 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { buildCliArgs, classifyRecoveredProcessGeneration, createSpawnDeduplicator, releaseRecoveredSpawnDedupe } from './run'
+import type { SpawnDeduplicator } from './run'
+import type { SpawnSessionResult } from '@/modules/common/rpcTypes'
 
 describe('buildCliArgs', () => {
     it('adds --permission-mode for valid permission mode', () => {
@@ -491,11 +493,49 @@ describe('createSpawnDeduplicator', () => {
         await expect(dedupe(options)).resolves.toEqual({ type: 'success', sessionId: 'fresh-hapi-session' })
         expect(calls).toBe(2)
     })
+
+    it.each(['timeout', 'recovered-starting'])('upgrades %s to late confirmed success without another writer', async mode => {
+        let calls = 0
+        let dedupe: SpawnDeduplicator
+        dedupe = createSpawnDeduplicator(async options => {
+            calls += 1
+            dedupe.markChildAlive(options.existingSessionId!, options.ompResumeAttemptId)
+            return { type: 'error', errorMessage: 'Session webhook timeout' }
+        })
+        const options = { directory: '/tmp', agent: 'omp' as const, existingSessionId: 'hapi-row', ompResumeAttemptId: 'attempt-1' }
+        if (mode === 'timeout') await dedupe(options)
+        else dedupe.recoverChild('hapi-row', { type: 'error', errorMessage: 'Session is still starting' }, 'attempt-1')
+
+        // The accepted webhook uses this same seam after checking PID generation.
+        dedupe.recoverChild('hapi-row', { type: 'success', sessionId: 'hapi-row' }, 'attempt-1')
+        await expect(dedupe(options)).resolves.toEqual({ type: 'success', sessionId: 'hapi-row' })
+        expect(calls).toBe(mode === 'timeout' ? 1 : 0)
+    })
+
+    it('rejects a conflicting native attempt during startup and after runner recovery', async () => {
+        let calls = 0
+        const pending = Promise.withResolvers<SpawnSessionResult>()
+        const dedupe = createSpawnDeduplicator(async () => { calls += 1; return pending.promise })
+        const original = { directory: '/tmp', agent: 'omp' as const, existingSessionId: 'hapi-row', ompResumeAttemptId: 'attempt-1' }
+        const first = dedupe(original)
+        await expect(dedupe({ ...original, ompResumeAttemptId: 'attempt-2' })).resolves.toMatchObject({ type: 'error' })
+        expect(calls).toBe(1)
+        pending.resolve({ type: 'success', sessionId: 'hapi-row' })
+        await first
+        dedupe.recoverChild('hapi-row', { type: 'success', sessionId: 'hapi-row' }, 'attempt-1')
+        await expect(dedupe({ ...original, ompResumeAttemptId: 'attempt-2' })).resolves.toMatchObject({ type: 'error' })
+        expect(calls).toBe(1)
+
+        dedupe.onChildExited('hapi-row')
+        await expect(dedupe({ ...original, ompResumeAttemptId: 'attempt-2' })).resolves.toEqual({ type: 'success', sessionId: 'hapi-row' })
+        expect(calls).toBe(2)
+    })
 })
 
 describe('classifyRecoveredProcessGeneration', () => {
     it('quarantines a live recovered child while its generation marker is unavailable', () => {
         expect(classifyRecoveredProcessGeneration(true, null, 'persisted-marker')).toBe('quarantined')
+        expect(classifyRecoveredProcessGeneration(true, 'current-marker', '')).toBe('quarantined')
     })
 
     it('releases quarantine only after exit or a generation mismatch is proven', () => {

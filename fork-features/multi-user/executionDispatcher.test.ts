@@ -54,6 +54,22 @@ describe('ExecutionDispatcher', () => {
         expect(dispatcher.authorize({ accountId: stranger.id, capability: 'read', resource: { type: 'session', id: 's1' } })).toEqual({ kind: 'deny', reason: 'insufficient-access' })
     })
 
+    it('resolves unbound admin reads from core without granting users or writes the same bypass', () => {
+        const store = new MultiUserGatewayStore(':memory:')
+        stores.push(store)
+        const admin = store.createAccount('admin', 'admin', 'default')
+        const user = store.createAccount('user', 'user', 'default')
+        const dispatcher = new ExecutionDispatcher(store, undefined, undefined, (_type, id) => id === 'unbound' ? 'foreign-namespace' : null)
+        for (const type of ['session', 'machine'] as const) {
+            expect(dispatcher.authorize({ accountId: admin.id, capability: 'read', resource: { type, id: 'unbound' } }))
+                .toMatchObject({ kind: 'allow', context: { namespace: 'foreign-namespace', resource: null } })
+            expect(dispatcher.authorize({ accountId: user.id, capability: 'read', resource: { type, id: 'unbound' } }).kind).toBe('deny')
+            expect(dispatcher.authorize({ accountId: admin.id, capability: 'operate', resource: { type, id: 'unbound' } }).kind).toBe('deny')
+            expect(dispatcher.authorize({ accountId: admin.id, capability: 'read', resource: { type, id: 'missing' } }).kind).toBe('deny')
+            expect(store.getResource(type, 'unbound')).toBeNull()
+        }
+    })
+
     describe('会话继承所在机器的授权', () => {
         /** m1 授权给 grantee，s-on-m1 跑在 m1 上但 owner 是别人、且没有会话级 grant。 */
         function seedMachineGrant(role: 'viewer' | 'operator') {
@@ -93,5 +109,45 @@ describe('ExecutionDispatcher', () => {
             expect(dispatcher.authorize({ accountId: grantee.id, capability: 'administer', resource: { type: 'session', id: 's-on-m1' } }))
                 .toEqual({ kind: 'deny', reason: 'insufficient-access' })
         })
+    })
+    it('authorizes unbound session startup only through proven core machine/path inheritance without claiming it', () => {
+        const store = new MultiUserGatewayStore(':memory:')
+        stores.push(store)
+        const owner = store.createAccount('bootstrap-owner', 'user', 'shared')
+        const operator = store.createAccount('bootstrap-operator', 'user', 'shared')
+        const stranger = store.createAccount('bootstrap-stranger', 'user', 'shared')
+        store.bindResource({ resourceType: 'machine', resourceId: 'machine', ownerAccountId: owner.id, coreNamespace: 'shared' })
+        store.grant('machine', 'machine', operator.id, 'operator', '/allowed')
+        let coreMachineNamespace: string | null = 'shared'
+        let coreSessionNamespace: string | null = 'shared'
+        let machineId: string | null = 'machine'
+        let path: string | null = '/allowed/project'
+        const dispatcher = new ExecutionDispatcher(store, () => machineId, () => path,
+            type => type === 'machine' ? coreMachineNamespace : coreSessionNamespace)
+        const operate = (accountId: number) => dispatcher.authorize({ accountId, capability: 'operate', resource: { type: 'session', id: 'new' } }).kind
+        expect(operate(owner.id)).toBe('allow')
+        expect(operate(operator.id)).toBe('allow')
+        expect(operate(stranger.id)).toBe('deny')
+        expect(store.getResource('session', 'new')).toBeNull()
+        expect(dispatcher.authorize({ accountId: operator.id, capability: 'administer', resource: { type: 'session', id: 'new' } }).kind).toBe('deny')
+        path = '/allowed-other/project'
+        expect(operate(operator.id)).toBe('deny')
+        path = null
+        expect(operate(operator.id)).toBe('deny')
+        path = '/allowed/project'
+        coreMachineNamespace = null
+        expect(operate(owner.id)).toBe('deny')
+        coreMachineNamespace = 'foreign'
+        expect(operate(owner.id)).toBe('deny')
+        coreMachineNamespace = 'shared'
+        coreSessionNamespace = 'foreign'
+        expect(operate(owner.id)).toBe('deny')
+        coreSessionNamespace = 'shared'
+        machineId = 'unbound-machine'
+        expect(operate(owner.id)).toBe('deny')
+        machineId = 'machine'
+        store.removeGrant('machine', 'machine', operator.id)
+        expect(operate(operator.id)).toBe('deny')
+        expect(store.getResource('session', 'new')).toBeNull()
     })
 })

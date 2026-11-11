@@ -1,45 +1,42 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
-
-vi.mock('@/lib/composer-drafts', () => ({
-    clearDraft: vi.fn(),
-}))
-vi.mock('@/lib/composer-attachment-drafts', () => ({
-    clearDraftAttachments: vi.fn(),
-}))
-
-import { clearDraft } from '@/lib/composer-drafts'
-import { clearDraftAttachments } from '@/lib/composer-attachment-drafts'
+import { describe, it, expect } from 'vitest'
+import { captureComposerDraft, getDraft, saveDraft } from '@/lib/composer-drafts'
 import { clearDraftsAfterSend } from './clearDraftsAfterSend'
 
-const mockClearDraft = vi.mocked(clearDraft)
-const mockClearDraftAttachments = vi.mocked(clearDraftAttachments)
-
-describe('clearDraftsAfterSend', () => {
-    beforeEach(() => {
-        vi.clearAllMocks()
+describe('successful-send draft ownership', () => {
+    it('clears the submitted snapshot when no later draft replaced it', () => {
+        const id = 'cleanup-owned'
+        saveDraft(id, 'submitted')
+        const checkpoint = captureComposerDraft(id)
+        clearDraftsAfterSend([checkpoint])
+        expect(getDraft(id)).toBe('')
     })
 
-    it('clears the sent session draft', () => {
-        clearDraftsAfterSend('session-A', 'session-A')
-        expect(mockClearDraft).toHaveBeenCalledWith('session-A')
-        expect(mockClearDraft).toHaveBeenCalledTimes(1)
-        expect(mockClearDraftAttachments).toHaveBeenCalledWith('session-A')
+    it('does not let an old acknowledgement erase a newer unsent draft', () => {
+        const id = 'cleanup-newer'
+        saveDraft(id, 'submitted')
+        const checkpoint = captureComposerDraft(id)
+        saveDraft(id, 'replacement draft')
+        clearDraftsAfterSend([checkpoint])
+        expect(getDraft(id)).toBe('replacement draft')
     })
 
-    it('clears both drafts when session was resolved to a different ID', () => {
-        clearDraftsAfterSend('resolved-B', 'session-A')
-        expect(mockClearDraft).toHaveBeenCalledWith('resolved-B')
-        expect(mockClearDraft).toHaveBeenCalledWith('session-A')
-        expect(mockClearDraft).toHaveBeenCalledTimes(2)
-        expect(mockClearDraftAttachments).toHaveBeenCalledWith('resolved-B')
-        expect(mockClearDraftAttachments).toHaveBeenCalledWith('session-A')
-        expect(mockClearDraftAttachments).toHaveBeenCalledTimes(2)
+    it('preserves identical text that the user deleted and entered again', () => {
+        const id = 'cleanup-aba'
+        saveDraft(id, 'same text')
+        const checkpoint = captureComposerDraft(id)
+        saveDraft(id, '')
+        saveDraft(id, 'same text')
+        clearDraftsAfterSend([checkpoint])
+        expect(getDraft(id)).toBe('same text')
     })
 
-    it('only clears sent session when route session is null', () => {
-        clearDraftsAfterSend('session-A', null)
-        expect(mockClearDraft).toHaveBeenCalledWith('session-A')
-        expect(mockClearDraft).toHaveBeenCalledTimes(1)
-        expect(mockClearDraftAttachments).toHaveBeenCalledWith('session-A')
+    it('clears an owned resumed target without erasing new source-session work', () => {
+        saveDraft('cleanup-source', 'submitted')
+        saveDraft('cleanup-target', 'submitted')
+        const checkpoints = [captureComposerDraft('cleanup-source'), captureComposerDraft('cleanup-target')]
+        saveDraft('cleanup-source', 'another source draft')
+        clearDraftsAfterSend(checkpoints)
+        expect(getDraft('cleanup-source')).toBe('another source draft')
+        expect(getDraft('cleanup-target')).toBe('')
     })
 })

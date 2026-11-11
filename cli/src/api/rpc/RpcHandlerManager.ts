@@ -8,89 +8,106 @@ import type { RpcHandler, RpcHandlerConfig, RpcHandlerMap, RpcRequest } from './
 import type { Socket } from 'socket.io-client'
 
 function safeJsonParse(value: string): unknown {
-    try {
-        return JSON.parse(value) as unknown
-    } catch {
-        return null
-    }
+ try {
+  return JSON.parse(value) as unknown
+ } catch {
+  return null
+ }
 }
 
 export class RpcHandlerManager {
-    private handlers: RpcHandlerMap = new Map()
-    private readonly scopePrefix: string
-    private readonly logger: (message: string, data?: any) => void
-    private socket: Socket | null = null
+ private handlers: RpcHandlerMap = new Map()
+ private readonly scopePrefix: string
+ private readonly logger: (message: string, data?: any) => void
+ private socket: Socket | null = null
+ #initialRegistration: { firstMethod: string | null; onRegistered?: () => void } | null = null
 
-    constructor(config: RpcHandlerConfig) {
-        this.scopePrefix = config.scopePrefix
-        this.logger = config.logger || ((msg, data) => defaultLogger.debug(msg, data))
-    }
+ constructor(config: RpcHandlerConfig) {
+  this.scopePrefix = config.scopePrefix
+  this.logger = config.logger || ((msg, data) => defaultLogger.debug(msg, data))
+ }
 
-    registerHandler<TRequest = any, TResponse = any>(
-        method: string,
-        handler: RpcHandler<TRequest, TResponse>
-    ): void {
-        const prefixedMethod = this.getPrefixedMethod(method)
+ registerHandler<TRequest = any, TResponse = any>(
+  method: string,
+  handler: RpcHandler<TRequest, TResponse>
+ ): void {
+  const prefixedMethod = this.getPrefixedMethod(method)
 
-        this.handlers.set(prefixedMethod, handler)
+  this.handlers.set(prefixedMethod, handler)
 
-        if (this.socket) {
-            this.socket.emit('rpc-register', { method: prefixedMethod })
-        }
-    }
+  if (this.socket) {
+   if (this.#initialRegistration) this.#publishInitialHandlers()
+   else this.socket.emit('rpc-register', { method: prefixedMethod })
+  }
+ }
 
-    async handleRequest(request: RpcRequest): Promise<string> {
-        try {
-            const handler = this.handlers.get(request.method)
-            if (!handler) {
-                this.logger('[RPC] [ERROR] Method not found', { method: request.method })
-                return JSON.stringify({ error: 'Method not found' })
-            }
+ async handleRequest(request: RpcRequest): Promise<string> {
+  try {
+   const handler = this.handlers.get(request.method)
+   if (!handler) {
+    this.logger('[RPC] [ERROR] Method not found', { method: request.method })
+    return JSON.stringify({ error: 'Method not found' })
+   }
 
-            const params = safeJsonParse(request.params)
-            const result = await handler(params as any)
-            return JSON.stringify(result)
-        } catch (error) {
-            const details = error instanceof Error
-                ? { message: error.message, stack: error.stack }
-                : { error: String(error) }
-            this.logger('[RPC] [ERROR] Error handling request', details)
-            return JSON.stringify({
-                error: error instanceof Error ? error.message : 'Unknown error'
-            })
-        }
-    }
+   const params = safeJsonParse(request.params)
+   const result = await handler(params as any)
+   return JSON.stringify(result)
+  } catch (error) {
+   const details = error instanceof Error
+    ? { message: error.message, stack: error.stack }
+    : { error: String(error) }
+   this.logger('[RPC] [ERROR] Error handling request', details)
+   return JSON.stringify({
+    error: error instanceof Error ? error.message : 'Unknown error'
+   })
+  }
+ }
 
-    onSocketConnect(socket: Socket): void {
-        this.socket = socket
-        for (const [prefixedMethod] of this.handlers) {
-            socket.emit('rpc-register', { method: prefixedMethod })
-        }
-    }
+ onSocketConnect(socket: Socket, options?: { firstMethod?: string; onRegistered?: () => void }): void {
+  this.socket = socket
+  this.#initialRegistration = {
+   firstMethod: options?.firstMethod ? this.getPrefixedMethod(options.firstMethod) : null,
+   onRegistered: options?.onRegistered,
+  }
+  this.#publishInitialHandlers()
+ }
 
-    onSocketDisconnect(): void {
-        this.socket = null
-    }
+ #publishInitialHandlers(): void {
+  const registration = this.#initialRegistration
+  if (!this.socket || !registration) return
+  if (registration.firstMethod && !this.handlers.has(registration.firstMethod)) return
+  if (registration.firstMethod) this.socket.emit('rpc-register', { method: registration.firstMethod })
+  for (const [method] of this.handlers) {
+   if (method !== registration.firstMethod) this.socket.emit('rpc-register', { method })
+  }
+  this.#initialRegistration = null
+  registration.onRegistered?.()
+ }
 
-    getHandlerCount(): number {
-        return this.handlers.size
-    }
+ onSocketDisconnect(): void {
+  this.socket = null
+  this.#initialRegistration = null
+ }
 
-    hasHandler(method: string): boolean {
-        const prefixedMethod = this.getPrefixedMethod(method)
-        return this.handlers.has(prefixedMethod)
-    }
+ getHandlerCount(): number {
+  return this.handlers.size
+ }
 
-    clearHandlers(): void {
-        this.handlers.clear()
-        this.logger('Cleared all RPC handlers')
-    }
+ hasHandler(method: string): boolean {
+  const prefixedMethod = this.getPrefixedMethod(method)
+  return this.handlers.has(prefixedMethod)
+ }
 
-    private getPrefixedMethod(method: string): string {
-        return `${this.scopePrefix}:${method}`
-    }
+ clearHandlers(): void {
+  this.handlers.clear()
+  this.logger('Cleared all RPC handlers')
+ }
+
+ private getPrefixedMethod(method: string): string {
+  return `${this.scopePrefix}:${method}`
+ }
 }
 
 export function createRpcHandlerManager(config: RpcHandlerConfig): RpcHandlerManager {
-    return new RpcHandlerManager(config)
+ return new RpcHandlerManager(config)
 }

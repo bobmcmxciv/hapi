@@ -696,7 +696,7 @@ export function reduceTimeline(
         }
 
         if (msg.role === 'user') {
-            if (isCliOutputText(msg.content.text, msg.meta)) {
+            if (!msg.resolution && isCliOutputText(msg.content.text, msg.meta)) {
                 blocks.push(createCliOutputBlock({
                     id: msg.id,
                     localId: msg.localId,
@@ -714,6 +714,7 @@ export function reduceTimeline(
                 localId: msg.localId,
                 createdAt: msg.createdAt,
                 invokedAt: msg.invokedAt,
+                resolution: msg.resolution,
                 text: msg.content.text,
                 attachments: msg.content.attachments,
                 status: msg.status,

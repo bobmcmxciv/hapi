@@ -1,14 +1,21 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ApiClient } from '@/api/client'
+import { clearQueuedOutboxForTests, getQueuedOutboxItem, recordQueuedOutboxItem } from './queued-outbox'
 
 vi.mock('./message-window-store', () => ({
+    appendOptimisticMessage: vi.fn(),
+    getMessageWindowState: vi.fn(() => ({ messages: [] })),
+    updateMessageStatus: vi.fn(),
+    captureMessageWindowScope: vi.fn(() => () => true),
     getQueuedReconcileCandidateLocalIds: vi.fn(),
     markMessagesConsumed: vi.fn(),
+    markMessagesResolved: vi.fn(),
     reconcileQueuedLocalIds: vi.fn(),
     syncTailMessages: vi.fn(),
 }))
 
 import {
+    appendOptimisticMessage,
     getQueuedReconcileCandidateLocalIds,
     markMessagesConsumed,
     reconcileQueuedLocalIds,
@@ -33,8 +40,20 @@ function createMockApi(
 describe('reconcileQueuedStateAfterConnect', () => {
     beforeEach(() => {
         vi.clearAllMocks()
+        clearQueuedOutboxForTests()
         mockSyncTailMessages.mockResolvedValue(undefined)
         mockGetCandidates.mockReturnValue([])
+    })
+
+    it('keeps a landed queued outbox payload visible even outside the fetched tail', async () => {
+        recordQueuedOutboxItem({ localId: 'older-input', sessionId: 'session-A', text: 'still pending', createdAt: 1, scheduledAt: null, deliveryMode: 'queue' })
+        const getQueuedState = vi.fn(async () => ({ queuedLocalIds: ['older-input'], invokedLocalMessages: [] }))
+        await reconcileQueuedStateAfterConnect(createMockApi(getQueuedState), 'session-A')
+        expect(appendOptimisticMessage).toHaveBeenCalledWith('session-A', expect.objectContaining({
+            localId: 'older-input', invokedAt: null, status: 'queued',
+            content: expect.objectContaining({ content: expect.objectContaining({ text: 'still pending' }) }),
+        }))
+        expect(getQueuedOutboxItem('session-A', 'older-input')).toBeNull()
     })
 
     it('waits for the latest messages before snapshotting and querying queued state', async () => {
@@ -89,16 +108,25 @@ describe('reconcileQueuedStateAfterConnect', () => {
         )
     })
 
-    it('applies authoritative invoked timestamps before reconciling absent rows', async () => {
+    it('applies authoritative invoked timestamps and positions before reconciling absent rows', async () => {
         mockGetCandidates.mockReturnValueOnce(['local-1', 'local-2'])
         const getQueuedState = vi.fn(async () => ({
             queuedLocalIds: ['local-2'],
-            invokedLocalMessages: [{ localId: 'local-1', invokedAt: 1_000 }]
+            invokedLocalMessages: [{
+                localId: 'local-1',
+                invokedAt: 1_000,
+                position: { at: 5_000, order: 3, eventOrder: 0 },
+            }]
         }))
 
         await reconcileQueuedStateAfterConnect(createMockApi(getQueuedState), 'session-B')
 
-        expect(mockMarkMessagesConsumed).toHaveBeenCalledWith('session-B', ['local-1'], 1_000)
+        expect(mockMarkMessagesConsumed).toHaveBeenCalledWith(
+            'session-B',
+            ['local-1'],
+            1_000,
+            [{ localId: 'local-1', position: { at: 5_000, order: 3, eventOrder: 0 } }]
+        )
         expect(mockMarkMessagesConsumed.mock.invocationCallOrder[0]).toBeLessThan(
             mockReconcileQueuedLocalIds.mock.invocationCallOrder[0] ?? Number.MAX_SAFE_INTEGER
         )

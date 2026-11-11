@@ -42,6 +42,23 @@ function makeExport(
 }
 
 describe('serializeSessionMarkdown', () => {
+    it.each(['handled', 'cancelled'] as const)('exports %s admission without erasing text, attachments or resolution', (outcome) => {
+        const markdown = serializeSessionMarkdown(makeExport([{
+            id: 'terminal', seq: 1, localId: 'local', createdAt: 1000, invokedAt: null, scheduledAt: null,
+            resolution: { outcome, resolvedAt: 2000 },
+            content: {
+                role: 'user', content: {
+                    type: 'text', text: '/local original', attachments: [
+                        { id: 'a', filename: 'context.txt', mimeType: 'text/plain', size: 4, path: '/context.txt' },
+                    ]
+                }
+            },
+        }]))
+        expect(markdown).toContain('/local original')
+        expect(markdown).toContain('context.txt')
+        expect(markdown).toContain(outcome === 'handled' ? 'Handled locally · not executed' : 'Cancelled · not executed')
+        expect(markdown).toContain('1970-01-01T00:00:02.000Z')
+    })
     it('serializes user and assistant messages from one export payload', () => {
         const markdown = serializeSessionMarkdown(makeExport([
             {

@@ -59,6 +59,10 @@ See `src/router.tsx` for route definitions.
 - Model selection (default/sonnet/sonnet[1m]/opus/opus[1m]).
 - Session abort and mode switch controls.
 - Context size display.
+- Submitted input is saved to an account/hub-scoped browser outbox before the composer draft clears. Storage errors preserve the draft instead of accepting an undurable send.
+- Queue **Send now** uploads local pending/failed input in submission order with stable `localId` values, then requests the Hub's full pending snapshot. It never submits the current composer draft or aborts a model run.
+- Including future-scheduled messages requires explicit confirmation. Force-requested rows remain visible as awaiting the model until authoritative native delivery; unsupported/offline Hub errors retain recoverable input.
+- The queue action remains visible during typing; the expanded queue list collapses while the mobile keyboard is open.
 - Per-session scratchlist (`src/components/AssistantChat/ScratchlistPanel.tsx`)
   - Workbench panel for held notes/drafts; **distinct from the queue**.
   - Add/delete/reorder entries; promote to composer (copy) or queue (send).

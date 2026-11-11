@@ -10,14 +10,21 @@ import { OmpDisplay } from '@/ui/ink/OmpDisplay';
 import type { OmpSession, OmpShutdownReceipt } from './session';
 import type { OmpRuntimeConfigApplied, OmpRuntimeConfigRequest } from './session';
 import type { PermissionMode } from './types';
+import type { OmpNativeSession } from '@hapi/protocol/types';
+import type { ForceQueuedMessageAck } from '@hapi/protocol';
 import { RPC_METHODS } from '@hapi/protocol/rpcMethods';
 import { buildOmpEnv } from './utils/config';
 import { OmpRpcClient } from './rpc/OmpRpcClient';
-import { OmpRpcEventAdapter } from './rpc/OmpRpcEventAdapter';
+import { OmpRpcConnectionError, OmpRpcRequestError } from './rpc/OmpRpcTransport';
+import { OmpRpcEventAdapter, type OmpNativeOrder } from './rpc/OmpRpcEventAdapter';
 import { loadOmpEventAllowlist } from './rpc/eventAllowlist';
+import { parseOmpInputReceipt } from './rpc/schemas';
 import type {
+    OmpCommandByType,
+    OmpResponseData,
     OmpContextUsage,
     OmpInboundEvent,
+    OmpInputReceipt,
     OmpKnownEventType,
     OmpModel,
     OmpRpcSpawnConfig,
@@ -39,15 +46,16 @@ import {
     type OmpThinkingState
 } from '@hapi/protocol/omp';
 import {
-    nativeSessionSnapshotFromState,
+    nativeSessionSnapshotWithPersistence,
     OmpSessionStateReconciler,
     parseOmpSessionMutation,
     runOmpSessionMutation,
     type OmpSessionMutationCommand,
 } from './rpc/sessionLifecycle';
-import { resolveOmpSessionPath } from './utils/ompSessionScanner';
+import { prepareOmpSessionResume, resolveOmpSessionPath } from './utils/ompSessionScanner';
 import type { OmpQueuedInput } from './OmpInputQueue';
-import { describeIgnoredOmpAttachments, prepareOmpInput, type PreparedOmpInput } from './ompInputContent';
+import { OmpInputReceiptsUnsupportedError, OmpInputTokenConflictError, OmpUncertainDeliveryError, recoverOmpInputReceipts } from './OmpInputDeliveryStore';
+import { prepareOmpInput, type PreparedOmpInput } from './ompInputContent';
 import { OmpHostIntegration } from '../../../fork-features/omp-host-integration/cli';
 import { startOmpSessionRelay, type OmpSessionRelay } from '../../../fork-features/session-relay/omp';
 
@@ -71,6 +79,7 @@ function resolveOmpIdleHibernateMs(): number {
 class OmpRemoteLauncher extends RemoteLauncherBase {
     private readonly session: OmpSession;
     private client: OmpRpcClient | null = null;
+    #eventAdapter: OmpRpcEventAdapter | null = null;
     private currentPrompt: PromptLifecycle | null = null;
     private heldInput: OmpQueuedInput | null = null;
     private nativeFollowUpOutstanding = false;
@@ -100,6 +109,10 @@ class OmpRemoteLauncher extends RemoteLauncherBase {
     private readyEmittedForIdleCycle = false;
     private readyCheckedForIdleCycle = false;
     private readonly bufferedInputIds = new Set<number>();
+    private readonly pendingNativeInputs = new Map<string, OmpQueuedInput>();
+    private readonly undeliveredNativeTokens = new Map<string, OmpInputReceipt['channel']>();
+    private preparingInput = false;
+    #failedClient: OmpRpcClient | null = null;
     private readonly eventTasks = new Set<Promise<void>>();
     private hostIntegration: OmpHostIntegration | null = null;
     private registeredHostToolNames: string[] = [];
@@ -114,21 +127,32 @@ class OmpRemoteLauncher extends RemoteLauncherBase {
     private sessionRelay: OmpSessionRelay | null = null;
     private readonly nativeExit = Promise.withResolvers<OmpShutdownReceipt>();
     private unregisterShutdown: (() => void) | null = null;
+    private unregisterInputCancellation: (() => void) | null = null;
+    private unregisterInputForcing: (() => void) | null = null;
     private attemptedNativeLaunch = false;
     private hibernating = false;
     private wakePromise: Promise<OmpRpcClient> | null = null;
+    #hibernatePromise: Promise<void> | null = null;
+    #lastNativeReceipt: OmpShutdownReceipt | null = null;
+    #nativeIdentityVerified = false;
     private eventAllowlist: ReadonlySet<OmpKnownEventType> | null = null;
+    #onUserMessageReplay = (localId: string): void => {
+        try { this.#replayTerminalInput(localId); }
+        catch (error) { this.handleTransportFailure(error instanceof Error ? error : new Error(String(error))); }
+    };
     constructor(session: OmpSession) {
         super(process.env.DEBUG ? session.logPath : undefined);
         this.session = session;
+        this.unregisterInputCancellation = session.registerNativeInputCanceller(async localId => await this.cancelNativeInput(localId));
+        this.unregisterInputForcing = session.registerNativeInputForcer(localId => this.forceNativeInput(localId));
+        session.client.on('user-message-replay', this.#onUserMessageReplay);
         this.unregisterShutdown = session.registerShutdownHandle({
             requestExit: () => this.handleExitFromUi(),
             waitForExit: async () => {
                 const receipt = await this.nativeExit.promise;
-                if (receipt.status !== 'unverified' || !this.client) return receipt;
-                await this.client.close();
-                const exit = this.client.exitInfo;
-                return { kind: 'omp-rpc', status: 'disposed', pid: exit?.pid, exitCode: exit?.code, signal: exit?.signal };
+                const client = this.client ?? this.#failedClient;
+                if (receipt.status !== 'unverified' || !client) return receipt;
+                return await this.closeOwnedNativeClient(client);
             }
         });
     }
@@ -163,186 +187,353 @@ class OmpRemoteLauncher extends RemoteLauncherBase {
             },
             model: typeof requestedSpawnModel === 'string' ? requestedSpawnModel : undefined
         };
-        const spawnConfig: OmpRpcSpawnConfig = session.sessionId
-            ? { ...spawnBase, resumeSessionId: session.sessionId }
-            : spawnBase;
-        this.attemptedNativeLaunch = true;
-        const client = await OmpRpcClient.connect(spawnConfig);
-        this.client = client;
-        this.availableModels = client.discovery.models;
-        this.currentModel = client.discovery.state.model ?? null;
-        if (!this.defaultModel) {
-            this.defaultModel = this.currentModel;
+        let expectedSessionId = session.sessionId;
+        let previousNative = session.getNativeSession();
+        const deliveryStore = session.getInputDeliveryStore();
+        deliveryStore.assertCanStart();
+        if (previousNative?.persistence === 'never-persisted') {
+            const nativeId = previousNative.id;
+            const hasAdmission = deliveryStore.nativeReceiptRecords().some(({ receipt }) => receipt.sessionId === nativeId && receipt.admitted);
+            const hasAttempt = deliveryStore.pendingTokenReceipts().some(receipt => receipt.nativeSessionId === nativeId);
+            if (hasAdmission || hasAttempt) {
+                const { persistence: _persistence, ...identity } = previousNative;
+                previousNative = hasAdmission ? { ...identity, persistence: 'persisted' } : identity;
+                session.applyNativeSessionSnapshot(previousNative);
+            }
         }
-        this.isStreaming = client.discovery.state.isStreaming;
-        this.contextUsage = client.discovery.state.contextUsage ?? null;
-        const persistedConfigured = this.asConfiguredThinking(session.getEffort());
-        this.thinkingState = {
-            thinkingLevel: client.discovery.state.thinkingLevel ?? null,
-            configured: persistedConfigured ?? client.discovery.state.thinkingLevel ?? null,
-            resolved: null
-        };
-        this.confirmedConfiguredThinking = client.discovery.state.thinkingLevel ?? null;
-        this.persistRuntimeState(client.discovery.state);
+        const resume = expectedSessionId
+            ? await prepareOmpSessionResume(expectedSessionId, previousNative ?? undefined, session.path)
+            : null;
+        if (resume?.kind === 'empty') expectedSessionId = null;
+        const startupHistory: OmpNativeSession | null = resume?.kind === 'resume' && expectedSessionId
+            ? { ...previousNative, id: expectedSessionId, file: resume.sessionFile, persistence: 'persisted' }
+            : null;
+        const spawnConfig: OmpRpcSpawnConfig = resume?.kind === 'resume'
+            ? { ...spawnBase, resumeSessionId: resume.sessionFile }
+            : spawnBase;
+        if (this.shouldExit || this.session.isShutdownRequested()) {
+            throw new Error('OMP session is shutting down');
+        }
+        this.attemptedNativeLaunch = true;
+        this.#lastNativeReceipt = null;
+        this.#nativeIdentityVerified = false;
+        let client: OmpRpcClient;
+        try {
+            client = await OmpRpcClient.connect(spawnConfig);
+        } catch (error) {
+            if (error instanceof OmpRpcConnectionError) {
+                this.#lastNativeReceipt = error.shutdownReceipt;
+                this.session.recordShutdownReceipt(error.shutdownReceipt);
+            }
+            throw error;
+        }
+        this.client = client;
+        try {
+            if (this.shouldExit || this.session.isShutdownRequested()) {
+                throw new Error('OMP session is shutting down');
+            }
+            if (expectedSessionId && client.discovery.state.sessionId !== expectedSessionId) {
+                throw new Error(`OMP resumed a different native session: expected ${expectedSessionId}, received ${client.discovery.state.sessionId}`);
+            }
+            this.#nativeIdentityVerified = true;
+            this.availableModels = client.discovery.models;
+            this.currentModel = client.discovery.state.model ?? null;
+            if (!this.defaultModel) {
+                this.defaultModel = this.currentModel;
+            }
+            this.isStreaming = client.discovery.state.isStreaming;
+            this.contextUsage = client.discovery.state.contextUsage ?? null;
+            const persistedConfigured = this.asConfiguredThinking(session.getEffort());
+            this.thinkingState = {
+                thinkingLevel: client.discovery.state.thinkingLevel ?? null,
+                configured: persistedConfigured ?? client.discovery.state.thinkingLevel ?? null,
+                resolved: null
+            };
+            this.confirmedConfiguredThinking = client.discovery.state.thinkingLevel ?? null;
+            this.persistRuntimeState(client.discovery.state);
 
-        logger.debug(
-            `[omp-remote] RPC ${client.discovery.version} ready; `
-            + `session=${client.discovery.state.sessionId} commands=${client.discovery.commands.length} `
-            + `models=${client.discovery.models.length}`
-        );
-        session.applyNativeSessionSnapshot(nativeSessionSnapshotFromState(client.discovery.state));
-        const sessionReconciler = new OmpSessionStateReconciler(
-            client,
-            session.applyNativeSessionSnapshot
-        );
-        this.sessionReconciler = sessionReconciler;
-        const hostIntegration = new OmpHostIntegration({
-            client,
-            eventAllowlist,
-            cwd: session.path,
-            sessionClient: session.client,
-            onFatal: (error) => this.handleTransportFailure(error)
-        });
-        this.hostIntegration = hostIntegration;
+            logger.debug(
+                `[omp-remote] RPC ${client.discovery.version} ready; `
+                + `session=${client.discovery.state.sessionId} commands=${client.discovery.commands.length} `
+                + `models=${client.discovery.models.length}`
+            );
+            const sessionReconciler = new OmpSessionStateReconciler(
+                client,
+                (snapshot) => {
+                    if (this.client === client && !this.hibernating && !this.shouldExit) {
+                        session.applyNativeSessionSnapshot(snapshot);
+                    }
+                },
+                () => session.getNativeSession() ?? startupHistory
+            );
+            this.sessionReconciler = sessionReconciler;
+            const hostIntegration = new OmpHostIntegration({
+                client,
+                eventAllowlist,
+                cwd: session.path,
+                sessionClient: session.client,
+                onFatal: (error) => this.handleTransportFailure(error)
+            });
+            this.hostIntegration = hostIntegration;
 
-        const eventAdapter = new OmpRpcEventAdapter({
-            onAgentMessage: (message) => {
-                this.forwardAgentMessage(message);
-            },
-            onCanonicalMessage: (message) => {
-                session.client.sendClaudeSessionMessage(message);
-            },
-            onAgentRunEvent: (event) => {
-                session.sendAgentMessage(event);
-            },
-            onAgentRunTrace: (scope, message) => {
-                const converted = convertAgentMessage(message);
-                if (!converted) return;
-                session.sendAgentMessage({
-                    type: 'agent-run-trace',
-                    ...scope,
-                    message: converted
-                });
-            },
-            onStructuredEvent: (event) => {
-                session.sendAgentMessage(event);
-                if (event.type === 'omp-compaction' && event.phase === 'finished' && event.outcome === 'completed') {
-                    this.sessionRelay?.controller.onCompactionCompleted();
-                }
-            },
-            onInkMessage: (message, type) => this.messageBuffer.addMessage(message, type),
-            onUserMessageCommitted: (steering) => {
-                if (!steering && this.nativeFollowUpOutstanding) {
-                    this.nativeFollowUpOutstanding = false;
-                    this.signalChange();
-                }
-            },
-            onTurnStarted: () => {
-                this.nativeTurnGeneration += 1;
-                this.isStreaming = true;
-                this.readyEmittedForIdleCycle = false;
-                this.readyCheckedForIdleCycle = false;
-                if (this.currentPrompt) {
-                    this.currentPrompt.phase = 'streaming';
-                }
-                session.onThinkingChange(true);
-                this.signalChange();
-            },
-            onTurnFinished: () => {
-                this.isStreaming = false;
-                this.readyCheckedForIdleCycle = false;
-                if (this.currentPrompt?.ignoreAgentEnds) {
-                    this.currentPrompt.ignoreAgentEnds -= 1;
-                } else {
-                    this.clearCurrentPrompt();
-                }
-                this.signalChange();
-                void sessionReconciler.reconcile().catch((error) => {
-                    this.handleTransportFailure(error);
-                });
-                void this.sendReadyIfIdle();
-                this.sessionRelay?.controller.onTurnFinished();
-            },
-            onPromptResult: (agentInvoked, failure) => {
-                if (failure) {
-                    logger.warn(`[omp-remote] OMP prompt failed before reaching the agent: ${failure}`);
-                    this.reportInputFailure(failure);
-                }
-                if (!agentInvoked) {
+            const eventAdapter = new OmpRpcEventAdapter({
+                onRuntimePublication: (publication) => session.client.publishRuntime(publication),
+                onAgentMessage: (message, nativeOrder) => {
+                    this.forwardAgentMessage(message, nativeOrder);
+                },
+                onCanonicalMessage: (message, nativeOrder) => {
+                    session.client.sendClaudeSessionMessage(message, { nativeOrder });
+                },
+                onAgentRunEvent: (event, nativeOrder) => {
+                    session.sendAgentMessage(event, { nativeOrder });
+                },
+                onAgentRunTrace: (scope, message, nativeOrder) => {
+                    const converted = convertAgentMessage(message);
+                    if (!converted) return;
+                    session.sendAgentMessage({
+                        type: 'agent-run-trace',
+                        ...scope,
+                        message: converted
+                    }, { nativeOrder });
+                },
+                onStructuredEvent: (event, nativeOrder) => {
+                    session.sendAgentMessage(event, { nativeOrder });
+                    if (event.type === 'omp-compaction' && event.phase === 'finished' && event.outcome === 'completed') {
+                        this.sessionRelay?.controller.onCompactionCompleted();
+                    }
+                },
+                onInkMessage: (message, type) => this.messageBuffer.addMessage(message, type),
+                onUserMessageCommitted: (steering) => {
+                    if (!steering) {
+                        this.reconcileNativeFollowUpOutstanding();
+                        this.signalChange();
+                    }
+                },
+                onTurnStarted: () => {
+                    this.nativeTurnGeneration += 1;
+                    this.isStreaming = true;
+                    this.readyEmittedForIdleCycle = false;
                     this.readyCheckedForIdleCycle = false;
-                    this.clearCurrentPrompt();
+                    if (this.currentPrompt) {
+                        this.currentPrompt.phase = 'streaming';
+                    }
+                    session.onThinkingChange(true);
+                    this.signalChange();
+                },
+                onTurnFinished: () => {
+                    this.isStreaming = false;
+                    this.readyCheckedForIdleCycle = false;
+                    if (this.currentPrompt?.ignoreAgentEnds) {
+                        this.currentPrompt.ignoreAgentEnds -= 1;
+                    } else {
+                        this.clearCurrentPrompt();
+                    }
                     this.signalChange();
                     void sessionReconciler.reconcile().catch((error) => {
                         this.handleTransportFailure(error);
                     });
                     void this.sendReadyIfIdle();
+                    this.sessionRelay?.controller.onTurnFinished();
+                },
+                onPromptResult: (agentInvoked, failure) => {
+                    if (failure) {
+                        logger.warn(`[omp-remote] OMP prompt failed before reaching the agent: ${failure}`);
+                        this.reportInputFailure(failure);
+                    }
+                    if (!agentInvoked) {
+                        this.readyCheckedForIdleCycle = false;
+                        this.clearCurrentPrompt();
+                        this.signalChange();
+                        void sessionReconciler.reconcile().catch((error) => {
+                            this.handleTransportFailure(error);
+                        });
+                        void this.sendReadyIfIdle();
+                    }
+                },
+                onSessionInfoUpdate: () => {
+                    void sessionReconciler.reconcile().catch((error) => {
+                        this.handleTransportFailure(error);
+                    });
+                    this.trackEventTask(this.refreshRuntimeState());
+                },
+                onAvailableCommandsChanged: (commands) => {
+                    this.persistDiscoveredCapabilities({
+                        slashCommands: commands.map((command) => command.name)
+                    });
+                },
+                onThinkingStateChanged: (state) => this.handleThinkingStateChanged(state),
+                onDiagnostic: (message) => logger.warn(`[omp-remote] ${message}`),
+                onHostEvent: (event) => hostIntegration.handle(event)
+            }, eventAllowlist);
+            this.#eventAdapter = eventAdapter;
+            const bufferedEvents: OmpInboundEvent[] = [];
+            let subagentSnapshotApplied = false;
+            client.onEvent((event) => {
+                if (this.client !== client || this.hibernating || this.shouldExit) return;
+                if (event.type === 'input_receipt') {
+                    try { this.applyNativeInputReceipt(client, parseOmpInputReceipt(event.raw.receipt)); }
+                    catch (error) { this.handleTransportFailure(error); }
+                    return;
                 }
-            },
-            onSessionInfoUpdate: () => {
-                void sessionReconciler.reconcile().catch((error) => {
-                    this.handleTransportFailure(error);
-                });
-                this.trackEventTask(this.refreshRuntimeState());
-            },
-            onAvailableCommandsChanged: (commands) => {
-                this.persistDiscoveredCapabilities({
-                    slashCommands: commands.map((command) => command.name)
-                });
-            },
-            onThinkingStateChanged: (state) => this.handleThinkingStateChanged(state),
-            onDiagnostic: (message) => logger.warn(`[omp-remote] ${message}`),
-            onHostEvent: (event) => hostIntegration.handle(event)
-        }, eventAllowlist);
-        const bufferedEvents: OmpInboundEvent[] = [];
-        let subagentSnapshotApplied = false;
-        client.onEvent((event) => {
-            if (!subagentSnapshotApplied) {
-                bufferedEvents.push(event);
-                return;
-            }
-            eventAdapter.handle(event);
-        });
-        client.onDiagnostic((message) => logger.warn(`[omp-remote] ${message}`));
-        client.onClosed((reason) => {
-            if (this.shouldExit || this.hibernating || this.client !== client) {
-                return;
-            }
-            this.handleTransportFailure(reason);
-        });
+                if (!subagentSnapshotApplied) {
+                    bufferedEvents.push(event);
+                    return;
+                }
+                eventAdapter.handle(event);
+            });
+            client.onDiagnostic((message) => logger.warn(`[omp-remote] ${message}`));
+            client.onClosed((reason) => {
+                if (this.shouldExit || this.hibernating || this.client !== client) {
+                    return;
+                }
+                this.handleTransportFailure(reason);
+            });
 
-        const { hostToolNames } = await hostIntegration.initialize();
-        this.registeredHostToolNames = hostToolNames;
-        this.persistDiscoveredCapabilities({
-            tools: [
-                ...(client.discovery.state.dumpTools?.map((tool) => tool.name) ?? []),
-                ...hostToolNames
-            ],
-            slashCommands: client.discovery.commands.map((command) => command.name)
-        });
-        await client.request({ type: 'set_subagent_subscription', level: 'events' });
-        const { subagents } = await client.request({ type: 'get_subagents' });
-        eventAdapter.seedSubagents(subagents);
-        for (const event of bufferedEvents.splice(0)) {
-            eventAdapter.handle(event);
+            const { hostToolNames } = await hostIntegration.initialize();
+            this.registeredHostToolNames = hostToolNames;
+            this.persistDiscoveredCapabilities({
+                tools: [
+                    ...(client.discovery.state.dumpTools?.map((tool) => tool.name) ?? []),
+                    ...hostToolNames
+                ],
+                slashCommands: client.discovery.commands.map((command) => command.name)
+            });
+            await client.request({ type: 'set_subagent_subscription', level: 'events' });
+            const { subagents } = await client.request({ type: 'get_subagents' });
+            // Query committed delivery before publishing any buffered historical output.
+            // Recovery itself runs only after host tools, subscriptions and config exist.
+            if (persistedConfigured) {
+                await this.applyRequestedThinking(persistedConfigured, client);
+            }
+            await this.#refreshNativeHistoryEvidence(client, startupHistory, client.discovery.state);
+            if (this.shouldExit || session.isShutdownRequested()) {
+                throw new Error('OMP session is shutting down');
+            }
+            const publishedDeliveries = new Set<string>();
+            const reconcileReceipts = async () => {
+                const store = session.getInputDeliveryStore();
+                const acceptedIds = await recoverOmpInputReceipts(
+                    store, client.discovery.state.sessionId,
+                    client.discovery.state.capabilities?.inputReceipts === true && client.discovery.state.capabilities.nativeOrder === true,
+                    async tokens => (await client.request({ type: 'get_input_receipts', tokens })).receipts
+                );
+                for (const { receipt } of store.nativeReceiptRecords()) this.applyNativeInputReceipt(client, receipt);
+                for (const id of acceptedIds) {
+                    if (publishedDeliveries.has(id)) continue;
+                    this.emitNativeDelivery(id, store.nativeReceipt(id)!);
+                    publishedDeliveries.add(id);
+                }
+                session.client.sendMessagesResolved(store.resolvedInputs());
+                for (const receipt of store.pendingTokenReceipts()) {
+                    this.undeliveredNativeTokens.set(receipt.clientToken, store.nativeReceipt(receipt.localId)?.channel);
+                }
+                this.reconcileNativeFollowUpOutstanding();
+            };
+            await reconcileReceipts();
+            if (client.discovery.state.capabilities?.inputReceipts === true && client.discovery.state.capabilities.nativeOrder === true) {
+                const recovered = await client.request({ type: 'recover_inputs' });
+                for (const receipt of recovered.receipts) this.applyNativeInputReceipt(client, receipt);
+                await reconcileReceipts();
+            }
+            if (this.transportFailure) throw this.transportFailure;
+            eventAdapter.seedSubagents(subagents);
+            for (const event of bufferedEvents.splice(0)) eventAdapter.handle(event);
+            subagentSnapshotApplied = true;
+            await Promise.all(subagents.map(async snapshot => {
+                await this.syncSubagentTranscript(client, eventAdapter, snapshot);
+            }));
+            if (this.sessionRelay) session.client.emitSessionReady({ replayOnReconnect: true });
+            return client;
+        } catch (error) {
+            // Fence callbacks before disposal, even when a nonfatal model RPC woke us.
+            this.client = null;
+            this.#nativeIdentityVerified = false;
+            this.session.client.clearSessionReady();
+            const reconciler = this.sessionReconciler;
+            this.sessionReconciler = null;
+            const host = this.hostIntegration;
+            this.hostIntegration = null;
+            this.#eventAdapter?.closeRuntime();
+            this.#eventAdapter = null;
+            const cleanup = await Promise.allSettled([
+                reconciler?.drain(),
+                host?.close('OMP native initialization failed'),
+                this.closeOwnedNativeClient(client)
+            ]);
+            this.subagentTranscriptCursors.clear();
+            this.registeredHostToolNames = [];
+            this.lastPersistedToolsKey = null;
+            this.lastPersistedCommandsKey = null;
+            const failures = cleanup.filter((result): result is PromiseRejectedResult => result.status === 'rejected');
+            if (failures.length > 0) {
+                const failure = new AggregateError([error, ...failures.map(result => result.reason)], 'OMP initialization failed and cleanup was incomplete');
+                this.handleTransportFailure(failure);
+                throw failure;
+            }
+            throw error;
         }
-        subagentSnapshotApplied = true;
-        await Promise.all(subagents.map(async (snapshot) => {
-            await this.syncSubagentTranscript(client, eventAdapter, snapshot);
-        }));
-        return client;
+    }
+
+    // 'disposed' requires a clean EOF disposal (close() only resolves after a
+    // code-0, signal-free exit). A nonzero/signal exit does not prove the
+    // broker-hosted tools/subagents released their state, so a failed close
+    // keeps 'unverified' and remains retryable through #failedClient.
+    #receiptForExit(exit: OmpRpcClient['exitInfo']): OmpShutdownReceipt {
+        return {
+            kind: 'omp-rpc',
+            status: 'disposed',
+            pid: exit?.pid,
+            exitCode: exit?.code,
+            signal: exit?.signal
+        };
+    }
+
+    private async closeOwnedNativeClient(client: OmpRpcClient): Promise<OmpShutdownReceipt> {
+        try {
+            await client.close();
+        } catch (error) {
+            this.#failedClient = client;
+            this.#lastNativeReceipt = { kind: 'omp-rpc', status: 'unverified' };
+            this.session.recordShutdownReceipt(this.#lastNativeReceipt);
+            throw error;
+        }
+        if (this.#failedClient === client) this.#failedClient = null;
+        this.#lastNativeReceipt = this.#receiptForExit(client.exitInfo);
+        this.session.recordShutdownReceipt(this.#lastNativeReceipt);
+        return this.#lastNativeReceipt;
     }
 
     private async ensureClient(): Promise<OmpRpcClient> {
-        if (this.client) return this.client;
+        // EOF disposal and full native initialization are ownership barriers, not
+        // merely spawn barriers. Never expose a closing or half-initialized writer.
+        if (this.#hibernatePromise) await this.#hibernatePromise;
         if (this.wakePromise) return await this.wakePromise;
+        if (this.shouldExit || this.session.isShutdownRequested()) {
+            throw new Error('OMP session is shutting down');
+        }
+        if (this.transportFailure) throw this.transportFailure;
+        if (this.#lastNativeReceipt?.status === 'unverified') throw new Error('OMP native writer disposal is unverified');
+        if (this.client) return this.client;
         const promise = this.connectNativeClient().finally(() => {
-            if (this.wakePromise === promise) this.wakePromise = null;
+            if (this.wakePromise === promise) {
+                this.wakePromise = null;
+                this.signalChange();
+            }
         });
         this.wakePromise = promise;
         return await promise;
     }
 
     private async tryHibernateIdleClient(): Promise<void> {
+        if (this.#hibernatePromise) return await this.#hibernatePromise;
+        const promise = this.hibernateIdleClient().finally(() => {
+            if (this.#hibernatePromise === promise) this.#hibernatePromise = null;
+        });
+        this.#hibernatePromise = promise;
+        return await promise;
+    }
+
+    private async hibernateIdleClient(): Promise<void> {
         const client = this.client;
         if (!client || client.state !== 'ready' || this.shouldExit || this.hasUnfinishedNativeInput() || this.hasLocalPendingInput()) {
             return;
@@ -357,7 +548,7 @@ class OmpRemoteLauncher extends RemoteLauncherBase {
                 return;
             }
             this.hibernating = true;
-            this.client = null;
+            await this.#refreshNativeHistoryEvidence(client, undefined, state);
             await this.sessionReconciler?.drain();
             this.sessionReconciler = null;
             const hostIntegration = this.hostIntegration;
@@ -365,9 +556,15 @@ class OmpRemoteLauncher extends RemoteLauncherBase {
             if (hostIntegration) {
                 await hostIntegration.close('OMP remote session hibernated while idle');
             }
-            await client.close().catch(() => { });
+            await client.close();
+            this.#lastNativeReceipt = this.#receiptForExit(client.exitInfo);
+            this.session.recordShutdownReceipt(this.#lastNativeReceipt);
+            this.client = null;
+            this.#eventAdapter?.closeRuntime();
+            this.#eventAdapter = null;
             logger.debug('[omp-remote] Hibernated idle OMP RPC subprocess to reclaim memory');
         } catch (error) {
+            if (this.hibernating) this.handleTransportFailure(error);
             logger.debug('[omp-remote] Idle hibernate check skipped', error);
         } finally {
             this.hibernating = false;
@@ -376,6 +573,7 @@ class OmpRemoteLauncher extends RemoteLauncherBase {
 
     protected async runMainLoop(): Promise<void> {
         this.session.client.clearSessionReady();
+        this.session.getInputDeliveryStore().assertCanStart();
         if (this.session.isShutdownRequested()) return;
         const session = this.session;
         await this.ensureClient();
@@ -394,10 +592,7 @@ class OmpRemoteLauncher extends RemoteLauncherBase {
         );
         session.setRuntimeConfigApplier(async (config) => await this.applyRuntimeConfig(config));
 
-        const requestedThinking = this.asConfiguredThinking(session.getEffort());
-        if (requestedThinking) {
-            await this.applyRequestedThinking(requestedThinking);
-        }
+        // connectNativeClient restores configured thinking before exposing readiness.
 
         this.setupAbortHandlers(session.client.rpcHandlerManager, {
             onAbort: () => this.handleAbort(),
@@ -456,6 +651,14 @@ class OmpRemoteLauncher extends RemoteLauncherBase {
                 }
             }
 
+            if (this.heldInput?.localId && session.getInputDeliveryStore().isAdmitted(this.heldInput.localId)) {
+                const input = this.heldInput;
+                if (session.getInputDeliveryStore().isPendingNativeInput(input.localId!)) this.pendingNativeInputs.set(input.localId!, input);
+                if (session.queue.isForced(input)) await this.forceNativeInput(input.localId!);
+                session.queue.releaseInvocation(input);
+                this.heldInput = null;
+                continue;
+            }
             if (this.heldInput && this.canDispatch(this.heldInput)) {
                 const input = this.heldInput;
                 const activeClient = await this.ensureClient();
@@ -500,11 +703,22 @@ class OmpRemoteLauncher extends RemoteLauncherBase {
 
     protected async cleanup(): Promise<void> {
         this.session.client.clearSessionReady();
+        // A concurrent model/readiness RPC can be waking a hibernated session.
+        // Wait for that generation before collecting its disposal receipt.
+        await this.#hibernatePromise;
+        await this.wakePromise?.catch(() => undefined);
+        this.#eventAdapter?.closeRuntime();
+        this.#eventAdapter = null;
         try {
             this.sessionRelay?.stop();
             this.sessionRelay = null;
             this.clearAbortHandlers(this.session.client.rpcHandlerManager);
             this.session.setRuntimeConfigApplier(null);
+            this.unregisterInputCancellation?.();
+            this.unregisterInputCancellation = null;
+            this.unregisterInputForcing?.();
+            this.unregisterInputForcing = null;
+            this.session.client.off('user-message-replay', this.#onUserMessageReplay);
             this.removeQueueChangeListener?.();
             this.removeQueueChangeListener = null;
             this.session.queue.requeueHeld();
@@ -523,11 +737,14 @@ class OmpRemoteLauncher extends RemoteLauncherBase {
                 await hostIntegration.close('OMP remote launcher stopped');
             }
             await Promise.allSettled(this.eventTasks);
-            const client = this.client;
+            const client = this.client ?? this.#failedClient;
             if (client) {
+                await this.#refreshNativeHistoryEvidence(client).catch((error) => {
+                    logger.warn('[omp-remote] Could not refresh native history evidence before shutdown', error);
+                });
                 // Keep the client available for shutdown retries after a timeout.
                 try {
-                    await client.close();
+                    await this.closeOwnedNativeClient(client);
                 } catch (error) {
                     const receipt: OmpShutdownReceipt = { kind: 'omp-rpc', status: 'unverified' };
                     this.session.recordShutdownReceipt(receipt);
@@ -535,10 +752,9 @@ class OmpRemoteLauncher extends RemoteLauncherBase {
                     throw error;
                 }
             }
-            const exit = client?.exitInfo;
             const receipt: OmpShutdownReceipt = client
-                ? { kind: 'omp-rpc', status: 'disposed', pid: exit?.pid, exitCode: exit?.code, signal: exit?.signal }
-                : { kind: 'omp-rpc', status: this.attemptedNativeLaunch ? 'unverified' : 'not-started' };
+                ? this.#receiptForExit(client.exitInfo)
+                : this.#lastNativeReceipt ?? { kind: 'omp-rpc', status: this.attemptedNativeLaunch ? 'unverified' : 'not-started' };
             this.session.recordShutdownReceipt(receipt);
             this.nativeExit.resolve(receipt);
             this.unregisterShutdown?.();
@@ -558,10 +774,14 @@ class OmpRemoteLauncher extends RemoteLauncherBase {
             return !this.hasUnfinishedNativeInput();
         }
 
-        const nativeBusy = this.currentPrompt !== null || this.isStreaming;
+        const nativeBusy = this.currentPrompt !== null || this.isStreaming || this.preparingInput || this.undeliveredNativeTokens.size > 0;
         if (!nativeBusy) {
             return true;
         }
+
+        // Forced rows retain their admission command/hash. Admit through the
+        // original channel then promote by token, never abort the active run.
+        if (this.session.queue.isForced(input)) return true;
 
         switch (input.inputMode) {
             case 'steer':
@@ -576,6 +796,26 @@ class OmpRemoteLauncher extends RemoteLauncherBase {
                 return exhaustive;
             }
         }
+    }
+
+    #invalidateEmptyHistoryEvidence(): void {
+        const native = this.session.getNativeSession();
+        if (native?.persistence === 'never-persisted') {
+            const { persistence: _persistence, ...identity } = native;
+            this.session.applyNativeSessionSnapshot(identity);
+        }
+    }
+
+    async #refreshNativeHistoryEvidence(
+        client: OmpRpcClient,
+        initialSnapshot?: OmpNativeSession | null,
+        knownState?: OmpSessionState
+    ): Promise<void> {
+        if (!this.#nativeIdentityVerified || this.client !== client) return;
+        const previous = initialSnapshot === undefined ? this.session.getNativeSession() : initialSnapshot;
+        const state = knownState ?? await client.request({ type: 'get_state' });
+        const snapshot = await nativeSessionSnapshotWithPersistence(state, previous);
+        if (this.client === client) this.session.applyNativeSessionSnapshot(snapshot);
     }
 
     private async dispatchInput(
@@ -595,6 +835,7 @@ class OmpRemoteLauncher extends RemoteLauncherBase {
         }
 
         let prepared: PreparedOmpInput;
+        this.preparingInput = true;
         try {
             prepared = await prepareOmpInput(input.text, input.attachments);
         } catch (error) {
@@ -603,25 +844,24 @@ class OmpRemoteLauncher extends RemoteLauncherBase {
             }
             const detail = error instanceof Error ? error.message : String(error);
             this.reportInputFailure(detail);
-            this.session.queue.completeInvocation(input);
+            this.preparingInput = false;
+            this.session.queue.releaseInvocation(input);
             await this.sendReadyIfIdle();
             return;
+        } finally {
+            this.preparingInput = false;
+            this.signalChange();
         }
         if (!this.session.queue.isHeld(input)) {
             return;
         }
 
-        const ignored = describeIgnoredOmpAttachments(prepared.ignoredAttachments);
-        if (ignored) {
-            this.session.sendSessionEvent({ type: 'message', message: ignored });
-            this.messageBuffer.addMessage(ignored, 'status');
-        }
         if (!prepared.message.trim() && !prepared.images?.length) {
             if (!this.session.queue.beginInvocation(input)) {
                 return;
             }
-            this.reportInputFailure('OMP RPC received no text or supported image attachment');
-            this.session.queue.completeInvocation(input);
+            this.reportInputFailure('OMP RPC received no text or attachment');
+            this.session.queue.releaseInvocation(input);
             await this.sendReadyIfIdle();
             return;
         }
@@ -631,7 +871,7 @@ class OmpRemoteLauncher extends RemoteLauncherBase {
 
         this.dispatching = true;
         this.readyEmittedForIdleCycle = false;
-        const wasBusy = this.currentPrompt !== null || this.isStreaming;
+        const wasBusy = this.currentPrompt !== null || this.isStreaming || this.undeliveredNativeTokens.size > 0;
         let startedPrompt = false;
         let queuedFollowUp = false;
         try {
@@ -650,15 +890,20 @@ class OmpRemoteLauncher extends RemoteLauncherBase {
                 this.stagePendingRuntimeConfig(input.mode);
             }
             this.applyDisplayMode(input.mode.permissionMode, this.currentModel?.id);
-            this.recordUserMessageOnce(input);
+            if (input.localId) this.pendingNativeInputs.set(input.localId, input);
+            else this.recordUserMessageOnce(input);
             const message = prepared.message;
 
-            switch (input.inputMode) {
+            // Already admitted tokens are promoted separately; fresh forced
+            // interrupt inputs use a noninterrupting admission instead.
+            const inputMode = this.session.queue.isForced(input) && input.inputMode === 'abort_and_prompt'
+                ? 'follow_up' : input.inputMode;
+            switch (inputMode) {
                 case 'prompt': {
                     if (wasBusy) {
                         queuedFollowUp = true;
                         this.nativeFollowUpOutstanding = true;
-                        const response = await client.request({
+                        const response = await this.#invokeNativeInput(client, input, {
                             type: 'prompt',
                             message,
                             images: prepared.images,
@@ -670,7 +915,7 @@ class OmpRemoteLauncher extends RemoteLauncherBase {
                     } else {
                         startedPrompt = true;
                         this.beginPrompt(input.modeHash, 0);
-                        const response = await client.request({
+                        const response = await this.#invokeNativeInput(client, input, {
                             type: 'prompt',
                             message,
                             images: prepared.images
@@ -686,7 +931,7 @@ class OmpRemoteLauncher extends RemoteLauncherBase {
                         startedPrompt = true;
                         this.beginPrompt(input.modeHash, 0);
                     }
-                    await client.request({ type: 'steer', message, images: prepared.images });
+                    await this.#invokeNativeInput(client, input, { type: 'steer', message, images: prepared.images });
                     break;
                 case 'follow_up':
                     if (wasBusy) {
@@ -696,22 +941,29 @@ class OmpRemoteLauncher extends RemoteLauncherBase {
                         startedPrompt = true;
                         this.beginPrompt(input.modeHash, 0);
                     }
-                    await client.request({ type: 'follow_up', message, images: prepared.images });
+                    await this.#invokeNativeInput(client, input, { type: 'follow_up', message, images: prepared.images });
                     break;
                 case 'abort_and_prompt':
                     startedPrompt = true;
                     this.nativeFollowUpOutstanding = false;
                     this.beginPrompt(input.modeHash, wasBusy ? 1 : 0);
-                    await client.request({ type: 'abort_and_prompt', message, images: prepared.images });
+                    await this.#invokeNativeInput(client, input, { type: 'abort_and_prompt', message, images: prepared.images });
                     break;
                 default: {
-                    const exhaustive: never = input.inputMode;
+                    const exhaustive: never = inputMode;
                     return exhaustive;
                 }
             }
-            this.bufferedInputIds.delete(input.id);
-            this.session.queue.completeInvocation(input);
+            if (input.localId && this.session.queue.isForced(input) && wasBusy) {
+                await this.forceNativeInput(input.localId);
+            }
+            if (!input.localId) this.bufferedInputIds.delete(input.id);
+            this.session.queue.releaseInvocation(input);
         } catch (error) {
+            if (error instanceof OmpUncertainDeliveryError) {
+                this.#quarantineUncertainInput(input, error);
+                return;
+            }
             if (this.isAlreadyProcessingError(error)) {
                 await this.recoverFromBusyDispatchRace(input, prepared, client, startedPrompt, queuedFollowUp);
                 return;
@@ -726,12 +978,189 @@ class OmpRemoteLauncher extends RemoteLauncherBase {
             logger.warn(`[omp-remote] RPC ${input.inputMode} failed`, error);
             this.reportInputFailure(detail);
             this.bufferedInputIds.delete(input.id);
-            this.session.queue.completeInvocation(input);
+            this.session.queue.releaseInvocation(input);
         } finally {
             this.dispatching = false;
             this.signalChange();
             await this.sendReadyIfIdle();
         }
+    }
+
+    async #invokeNativeInput<C extends 'prompt' | 'steer' | 'follow_up' | 'abort_and_prompt'>(
+        client: OmpRpcClient,
+        input: OmpQueuedInput,
+        command: OmpCommandByType<C>
+    ): Promise<OmpResponseData<C>> {
+        if (!input.localId) {
+            this.#invalidateEmptyHistoryEvidence();
+            return await client.request<C>(command);
+        }
+        if (client.discovery.state.capabilities?.inputReceipts !== true || client.discovery.state.capabilities.nativeOrder !== true) {
+            throw new OmpInputReceiptsUnsupportedError(input.localId);
+        }
+        const receipts = this.session.getInputDeliveryStore();
+        try {
+            receipts.begin(input.localId, this.session.sessionId!, input.localId);
+        } catch (error) {
+            throw new OmpUncertainDeliveryError(input.localId, { cause: error });
+        }
+        const previousNative = this.session.getNativeSession();
+        this.#invalidateEmptyHistoryEvidence();
+        try {
+            const response = await client.request<C>({ ...command, clientToken: input.localId });
+            if (!response || !('receipt' in response) || response.receipt?.token !== input.localId || !response.receipt.admitted) {
+                throw new OmpUncertainDeliveryError(input.localId);
+            }
+            this.applyNativeInputReceipt(client, response.receipt);
+            return response;
+        } catch (error) {
+            if (error instanceof OmpRpcRequestError && error.code === 'client_token_conflict') {
+                receipts.quarantineConflict(input.localId);
+                throw new OmpInputTokenConflictError(input.localId, { cause: error });
+            }
+            if (error instanceof OmpRpcRequestError && this.isAlreadyProcessingError(error)) {
+                try {
+                    const { receipts: queried } = await client.request({ type: 'get_input_receipts', tokens: [input.localId] });
+                    const proof = queried.find(receipt => receipt.token === input.localId);
+                    if (!proof || proof.sessionId !== this.session.sessionId) throw new OmpUncertainDeliveryError(input.localId);
+                    if (proof.admitted) {
+                        this.applyNativeInputReceipt(client, proof);
+                        return { receipt: proof } as OmpResponseData<C>;
+                    }
+                    // A different queue channel is safe only after the same
+                    // journal explicitly proves this attempt never admitted.
+                    receipts.rejectBeforeAdmission(input.localId);
+                    await this.#refreshNativeHistoryEvidence(client, previousNative);
+                } catch (recoveryError) {
+                    throw new OmpUncertainDeliveryError(input.localId, { cause: recoveryError });
+                }
+                throw error;
+            }
+            throw new OmpUncertainDeliveryError(input.localId, { cause: error });
+        }
+    }
+
+    /** A Hub replay can mean its receipt was lost, not that native input was lost. */
+    #replayTerminalInput(localId: string): boolean {
+        if (!this.client || !this.#nativeIdentityVerified || this.hibernating || this.shouldExit) return false;
+        const store = this.session.getInputDeliveryStore();
+        const receipt = store.nativeReceipt(localId);
+        if (receipt && receipt.sessionId !== this.session.sessionId) return false;
+        if (receipt?.delivered && store.isAccepted(localId)) {
+            this.emitNativeDelivery(localId, receipt);
+            return true;
+        }
+        const resolution = store.resolvedInput(localId);
+        if (!resolution) return false;
+        this.session.client.sendMessagesResolved([resolution]);
+        return true;
+    }
+
+    private async forceNativeInput(localId: string): Promise<ForceQueuedMessageAck> {
+        try {
+            this.#replayTerminalInput(localId);
+            const store = this.session.getInputDeliveryStore();
+            if (store.isAccepted(localId) || store.nativeReceipt(localId)?.outcome !== undefined) {
+                return { localId, status: 'not-found' };
+            }
+            const client = await this.ensureClient();
+            if (client.discovery.state.capabilities?.queuePromotion !== true) {
+                return { localId, status: 'unsupported', error: 'native process does not support token queue promotion' };
+            }
+            // Identity-only operation: legacy text selection is ambiguous in
+            // sessions with extension or other native producers. Never guess.
+            const result = await client.request({ type: 'promote_queued_message', clientToken: localId });
+            const entry = result.results?.find(entry => entry.token === localId);
+            if (!entry) return { localId, status: 'unsupported', error: 'native returned no token promotion result' };
+            if (entry.status !== 'not-found') {
+                if (this.undeliveredNativeTokens.has(localId)) {
+                    this.undeliveredNativeTokens.set(localId, 'steer');
+                    this.reconcileNativeFollowUpOutstanding();
+                    this.signalChange();
+                }
+                return { localId, status: 'promoted' };
+            }
+            return { localId, status: 'not-found', error: 'native input unavailable for token promotion' };
+        } catch (error) {
+            return { localId, status: 'unsupported', error: error instanceof Error ? error.message : String(error) };
+        }
+    }
+
+    private async cancelNativeInput(localId: string): Promise<boolean> {
+        const store = this.session.getInputDeliveryStore();
+        if (!store.isPendingNativeInput(localId) && !this.pendingNativeInputs.has(localId)) return false;
+        const client = await this.ensureClient();
+        if (client.discovery.state.capabilities?.inputReceipts !== true || client.discovery.state.capabilities.nativeOrder !== true) throw new OmpInputReceiptsUnsupportedError(localId);
+        await client.request({ type: 'remove_queued_message', clientToken: localId });
+        const result = await client.request({ type: 'get_input_receipts', tokens: [localId] });
+        const proof = result.receipts.find(receipt => receipt.token === localId);
+        if (!proof || proof.sessionId !== this.session.sessionId) throw new OmpUncertainDeliveryError(localId);
+        if (!proof.admitted) return false;
+        this.applyNativeInputReceipt(client, proof);
+        return !proof.delivered && proof.outcome === 'cancelled';
+    }
+
+    private applyNativeInputReceipt(client: OmpRpcClient, receipt: OmpInputReceipt): void {
+        if (this.client !== client || this.hibernating || this.shouldExit) return;
+        if (receipt.sessionId !== this.session.sessionId) throw new OmpUncertainDeliveryError(receipt.token);
+        const store = this.session.getInputDeliveryStore();
+        const wasDelivered = store.isAccepted(receipt.token);
+        const delivered = store.recordNativeReceipt(receipt);
+        receipt = store.nativeReceipt(receipt.token) ?? receipt;
+        // Native recovery can expose journal-owned tokens absent from this wrapper's
+        // sidecar. They still gate dispatch, but cannot acknowledge a Hub localId.
+        this.markNativeHistoryPersisted(receipt);
+        if (receipt.admitted && !receipt.delivered && receipt.outcome === undefined) this.undeliveredNativeTokens.set(receipt.token, receipt.channel);
+        else this.undeliveredNativeTokens.delete(receipt.token);
+        this.reconcileNativeFollowUpOutstanding();
+        if (delivered === undefined) { this.signalChange(); return; }
+        if (delivered) {
+            const input = this.pendingNativeInputs.get(receipt.token);
+            if (input && !wasDelivered) {
+                this.recordUserMessageOnce(input);
+                this.bufferedInputIds.delete(input.id);
+            }
+            this.pendingNativeInputs.delete(receipt.token);
+            if (!wasDelivered) this.emitNativeDelivery(receipt.token, receipt);
+        } else if (receipt.outcome !== undefined) {
+            this.pendingNativeInputs.delete(receipt.token);
+            this.session.client.sendMessagesResolved([{
+                localId: receipt.token, outcome: receipt.outcome === 'cancelled' ? 'cancelled' : 'handled',
+                ...(receipt.nativeOrder ? { nativeOrder: receipt.nativeOrder } : {})
+            }]);
+            this.session.sendSessionEvent({ type: 'message', message: `OMP input ${receipt.token} resolved as ${receipt.outcome} without entering a native turn; its Hub message was not marked invoked.` });
+        }
+        this.signalChange();
+    }
+
+    private markNativeHistoryPersisted(receipt: OmpInputReceipt): void {
+        const native = this.session.getNativeSession();
+        if (receipt.admitted && native?.id === receipt.sessionId && native.persistence !== 'persisted') {
+            this.session.applyNativeSessionSnapshot({ ...native, persistence: 'persisted' });
+        }
+    }
+
+    private reconcileNativeFollowUpOutstanding(): void {
+        this.nativeFollowUpOutstanding = false;
+        for (const channel of this.undeliveredNativeTokens.values()) {
+            if (channel !== 'steer') { this.nativeFollowUpOutstanding = true; break; }
+        }
+    }
+
+    private emitNativeDelivery(localId: string, receipt: OmpInputReceipt): void {
+        if (!receipt.delivered || !receipt.entryId || !receipt.deliveredAt || !Number.isFinite(Date.parse(receipt.deliveredAt))
+            || !Number.isSafeInteger(receipt.deliveredOrder) || receipt.deliveredOrder! < 1) {
+            throw new OmpUncertainDeliveryError(localId);
+        }
+        this.session.client.emitMessagesConsumed([localId], {
+            nativeDelivery: { sessionId: receipt.sessionId, entryId: receipt.entryId, deliveredAt: receipt.deliveredAt, entryOrder: receipt.deliveredOrder! }
+        });
+    }
+
+    #quarantineUncertainInput(input: OmpQueuedInput, error: OmpUncertainDeliveryError): void {
+        this.session.queue.requeueInvocation(input);
+        this.reportInputFailure(error.message);
+        this.handleTransportFailure(error);
     }
 
     private async dispatchMutation(
@@ -751,6 +1180,8 @@ class OmpRemoteLauncher extends RemoteLauncherBase {
             this.session.sendSessionEvent({ type: 'message', message: warning });
             this.messageBuffer.addMessage(warning, 'status');
         }
+        let dispatched = false;
+        let uncertain = false;
         try {
             await this.applyRequestedModel(input.mode.model);
             await this.applyRequestedThinking(input.mode.effort);
@@ -771,8 +1202,22 @@ class OmpRemoteLauncher extends RemoteLauncherBase {
             } else {
                 rpcMutation = mutation;
             }
-            await runOmpSessionMutation(client, rpcMutation, this.session.applyNativeSessionSnapshot);
+            if (input.localId) {
+                dispatched = true;
+                this.session.getInputDeliveryStore().begin(input.localId, this.session.sessionId!);
+            }
+            this.#invalidateEmptyHistoryEvidence();
+            await runOmpSessionMutation(client, rpcMutation, this.session.applyNativeSessionSnapshot, this.session.getNativeSession());
+            if (input.localId) {
+                this.session.getInputDeliveryStore().resolveHostInput(input.localId);
+                this.session.client.sendMessagesResolved([{ localId: input.localId, outcome: 'handled' }]);
+            }
         } catch (error) {
+            if (dispatched && input.localId) {
+                uncertain = true;
+                this.#quarantineUncertainInput(input, new OmpUncertainDeliveryError(input.localId, { cause: error }));
+                return;
+            }
             const detail = error instanceof Error ? error.message : String(error);
             logger.warn('[omp-remote] RPC session mutation failed', error);
             this.session.sendSessionEvent({
@@ -781,7 +1226,7 @@ class OmpRemoteLauncher extends RemoteLauncherBase {
             });
             this.messageBuffer.addMessage(`Oh My Pi RPC session mutation failed: ${detail}`, 'status');
         } finally {
-            this.session.queue.completeInvocation(input);
+            if (!uncertain) this.session.queue.releaseInvocation(input);
             this.dispatching = false;
             this.session.onThinkingChange(false);
             this.signalChange();
@@ -850,6 +1295,9 @@ class OmpRemoteLauncher extends RemoteLauncherBase {
 
     private persistRuntimeState(state: OmpSessionState): void {
         this.currentModel = state.model ?? null;
+        if (this.currentModel) {
+            this.session.setModel(`${this.currentModel.provider}/${this.currentModel.id}`);
+        }
         this.contextUsage = state.contextUsage ?? null;
         this.isStreaming = state.isStreaming;
         this.thinkingState = {
@@ -918,6 +1366,7 @@ class OmpRemoteLauncher extends RemoteLauncherBase {
             subagentId: snapshot.id,
             fromByte
         });
+        if (this.client !== client || this.hibernating || this.shouldExit) return;
         this.subagentTranscriptCursors.set(snapshot.id, transcript.nextByte);
         eventAdapter.seedSubagentMessages(
             snapshot.id,
@@ -925,17 +1374,19 @@ class OmpRemoteLauncher extends RemoteLauncherBase {
         );
     }
 
-    private forwardAgentMessage(message: AgentMessage): void {
+    private forwardAgentMessage(message: AgentMessage, nativeOrder?: OmpNativeOrder): void {
         if (message.type !== 'usage') {
             const converted = convertAgentMessage(message);
             if (converted) {
-                this.session.sendAgentMessage(converted);
+                this.session.sendAgentMessage(converted, { nativeOrder });
             }
             return;
         }
 
         this.trackEventTask((async () => {
-            const state = await (await this.ensureClient()).request({ type: 'get_state' });
+            const client = await this.ensureClient();
+            const state = await client.request({ type: 'get_state' });
+            if (this.client !== client || this.hibernating || this.shouldExit) return;
             this.persistRuntimeState(state);
             const resolvedModel = state.model ?? this.currentModel;
             const modelId = resolvedModel ? `${resolvedModel.provider}/${resolvedModel.id}` : null;
@@ -945,13 +1396,15 @@ class OmpRemoteLauncher extends RemoteLauncherBase {
                 contextWindow: state.contextUsage?.contextWindow
             }, modelId);
             if (converted) {
-                this.session.sendAgentMessage(converted);
+                this.session.sendAgentMessage(converted, { nativeOrder });
             }
         })());
     }
 
     private async refreshRuntimeState(): Promise<void> {
-        const state = await (await this.ensureClient()).request({ type: 'get_state' });
+        const client = await this.ensureClient();
+        const state = await client.request({ type: 'get_state' });
+        if (this.client !== client || this.hibernating || this.shouldExit) return;
         this.persistRuntimeState(state);
     }
 
@@ -1057,13 +1510,14 @@ class OmpRemoteLauncher extends RemoteLauncherBase {
     }
 
     private async applyRequestedThinking(
-        requested: OmpConfiguredThinkingLevel | undefined
+        requested: OmpConfiguredThinkingLevel | undefined,
+        connectedClient?: OmpRpcClient
     ): Promise<void> {
         if (requested === undefined || requested === this.confirmedConfiguredThinking) {
             return;
         }
 
-        const client = await this.ensureClient();
+        const client = connectedClient ?? await this.ensureClient();
         if (requested === 'auto') {
             let selectedAuto = false;
             for (let attempt = 0; attempt < OMP_THINKING_LEVELS.length + 2; attempt += 1) {
@@ -1188,7 +1642,7 @@ class OmpRemoteLauncher extends RemoteLauncherBase {
         this.session.onThinkingChange(true);
         this.stagePendingRuntimeConfig(input.mode);
         this.applyDisplayMode(input.mode.permissionMode, this.currentModel?.id);
-        this.recordUserMessageOnce(input);
+        if (!input.localId) this.recordUserMessageOnce(input);
 
         if (queuedFollowUp) {
             this.nativeFollowUpOutstanding = false;
@@ -1198,7 +1652,7 @@ class OmpRemoteLauncher extends RemoteLauncherBase {
             if ((input.inputMode === 'prompt' || input.inputMode === 'follow_up') && !this.nativeFollowUpOutstanding) {
                 this.nativeFollowUpOutstanding = true;
                 if (input.inputMode === 'prompt') {
-                    const response = await client.request({
+                    const response = await this.#invokeNativeInput(client, input, {
                         type: 'prompt',
                         message: prepared.message,
                         images: prepared.images,
@@ -1208,27 +1662,31 @@ class OmpRemoteLauncher extends RemoteLauncherBase {
                         this.nativeFollowUpOutstanding = false;
                     }
                 } else {
-                    await client.request({
+                    await this.#invokeNativeInput(client, input, {
                         type: 'follow_up',
                         message: prepared.message,
                         images: prepared.images
                     });
                 }
-                this.bufferedInputIds.delete(input.id);
-                this.session.queue.completeInvocation(input);
+                if (!input.localId) this.bufferedInputIds.delete(input.id);
+                this.session.queue.releaseInvocation(input);
                 return;
             }
             if (input.inputMode === 'steer') {
-                await client.request({
+                await this.#invokeNativeInput(client, input, {
                     type: 'steer',
                     message: prepared.message,
                     images: prepared.images
                 });
-                this.bufferedInputIds.delete(input.id);
-                this.session.queue.completeInvocation(input);
+                if (!input.localId) this.bufferedInputIds.delete(input.id);
+                this.session.queue.releaseInvocation(input);
                 return;
             }
         } catch (fallbackError) {
+            if (fallbackError instanceof OmpUncertainDeliveryError) {
+                this.#quarantineUncertainInput(input, fallbackError);
+                return;
+            }
             this.nativeFollowUpOutstanding = false;
             if (!this.isAlreadyProcessingError(fallbackError)) {
                 if (startedPrompt) {
@@ -1238,7 +1696,7 @@ class OmpRemoteLauncher extends RemoteLauncherBase {
                 logger.warn(`[omp-remote] RPC ${input.inputMode} busy-fallback failed`, fallbackError);
                 this.reportInputFailure(detail);
                 this.bufferedInputIds.delete(input.id);
-                this.session.queue.completeInvocation(input);
+                this.session.queue.releaseInvocation(input);
                 return;
             }
         }
@@ -1302,8 +1760,11 @@ class OmpRemoteLauncher extends RemoteLauncherBase {
     private hasLocalPendingInput(): boolean {
         return (
             this.dispatching
+            || this.preparingInput
+            || this.wakePromise !== null
             || this.currentPrompt !== null
             || this.nativeFollowUpOutstanding
+            || this.undeliveredNativeTokens.size > 0
             || this.session.queue.size() > 0
             || this.session.queue.heldSize() > 0
         );
@@ -1312,9 +1773,12 @@ class OmpRemoteLauncher extends RemoteLauncherBase {
     private hasUnfinishedNativeInput(): boolean {
         return (
             this.dispatching
+            || this.preparingInput
+            || this.wakePromise !== null
             || this.currentPrompt !== null
             || this.nativeFollowUpOutstanding
             || this.isStreaming
+            || this.undeliveredNativeTokens.size > 0
         );
     }
 
@@ -1359,6 +1823,7 @@ class OmpRemoteLauncher extends RemoteLauncherBase {
     private handleTransportFailure(error: unknown): void {
         this.session.client.clearSessionReady();
         const failure = error instanceof Error ? error : new Error(String(error));
+        this.#eventAdapter?.noteRuntimeFailure(failure.message);
         this.transportFailure = failure;
         this.clearCurrentPrompt();
         this.signalChange();
@@ -1394,6 +1859,7 @@ class OmpRemoteLauncher extends RemoteLauncherBase {
     private async handleAbort(): Promise<void> {
         const abortedTurnGeneration = this.nativeTurnGeneration;
         const client = this.client;
+        this.#eventAdapter?.noteExternalAbort();
         if (client?.state === 'ready') {
             await client.request({ type: 'abort' }, { timeoutMs: 5_000 });
         }

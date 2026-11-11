@@ -6,6 +6,7 @@ import type { EventPublisher } from './eventPublisher'
 import { MachineCache } from './machineCache'
 import { SessionCache } from './sessionCache'
 import { SyncEngine } from './syncEngine'
+import type { RpcGateway } from './rpcGateway'
 
 function createPublisher(events: SyncEvent[]): EventPublisher {
     return {
@@ -16,6 +17,70 @@ function createPublisher(events: SyncEvent[]): EventPublisher {
 }
 
 describe('alive incremental events', () => {
+    it('serializes accepted sends before archive without dispatching into native shutdown', async () => {
+        const store = new Store(':memory:')
+        const emitted: unknown[] = []
+        const io = { of: () => ({ to: () => ({ emit: (_event: string, payload: unknown) => { emitted.push(payload) } }) }) }
+        const engine = new SyncEngine(store, io as never, new RpcRegistry(), { broadcast() { } } as never)
+        try {
+            const session = engine.getOrCreateSession('omp-send-archive', { path: '/tmp', host: 'h', flavor: 'omp', machineId: 'machine' }, null, 'default')
+            engine.handleSessionAlive({ sid: session.id, time: Date.now() })
+            engine.handleSessionReady({ sid: session.id, time: Date.now() })
+            // Test-only transport seam retains the real queue and durable message store.
+            const internals = engine as unknown as { rpcGateway: RpcGateway }
+            internals.rpcGateway.killSession = async () => { }
+            internals.rpcGateway.stopRunnerSession = async () => 'already_gone'
+            const send = engine.sendMessage(session.id, { text: 'accepted before archive', localId: 'pending' })
+            const archive = engine.archiveSession(session.id)
+            await send
+            expect(await archive).toMatchObject({ type: 'success' })
+            expect(store.messages.getAllMessages(session.id)).toEqual([expect.objectContaining({ localId: 'pending', invokedAt: null })])
+            // Only the terminal termination event may be emitted; no agent prompt is dispatched.
+            expect(emitted).not.toContainEqual(expect.objectContaining({ body: expect.objectContaining({ t: 'new-message' }) }))
+            await expect(engine.sendMessage(session.id, { text: 'arrived after archive', localId: 'late' })).rejects.toThrow('inactive')
+            expect(store.messages.getAllMessages(session.id)).toHaveLength(1)
+        } finally { engine.stop(); store.close() }
+    })
+
+    it('holds OMP pending work until native readiness and never consumes it on end', () => {
+        const store = new Store(':memory:')
+        const emitted: unknown[] = []
+        const io = { of: () => ({ to: () => ({ emit: (_event: string, payload: unknown) => { emitted.push(payload) } }) }) }
+        const engine = new SyncEngine(store, io as never, new RpcRegistry(), { broadcast() { } } as never)
+        try {
+            const session = engine.getOrCreateSession('omp-queued-ready', { path: '/tmp', host: 'h', flavor: 'omp' }, null, 'default')
+            store.messages.addMessage(session.id, { text: 'pending' }, 'pending')
+            engine.handleSessionReady({ sid: session.id, time: Date.now() })
+            expect(emitted).toHaveLength(0)
+            engine.handleSessionAlive({ sid: session.id, time: Date.now() })
+            expect(emitted).toHaveLength(0)
+            engine.handleSessionReady({ sid: session.id, time: Date.now() })
+            expect(emitted).toHaveLength(1)
+            store.recordMessagesConsumed(session.id, ['pending'], Date.now(), 'default')
+            engine.handleSessionAlive({ sid: session.id, time: Date.now() })
+            expect(emitted).toHaveLength(1)
+            store.messages.addMessage(session.id, { text: 'interrupted' }, 'interrupted')
+            engine.handleSessionEnd({ sid: session.id, time: Date.now(), reason: 'error' })
+            expect(store.messages.getAllMessages(session.id).find((message) => message.localId === 'interrupted')?.invokedAt).toBeNull()
+        } finally { engine.stop(); store.close() }
+    })
+
+    it('does not replay OMP pending prompts for rejected archived heartbeats or stray readiness', () => {
+        const store = new Store(':memory:')
+        const emitted: unknown[] = []
+        const io = { of: () => ({ to: () => ({ emit: (_event: string, payload: unknown) => { emitted.push(payload) } }) }) }
+        const engine = new SyncEngine(store, io as never, new RpcRegistry(), { broadcast() { } } as never)
+        try {
+            const session = engine.getOrCreateSession('omp-archived-queued', { path: '/tmp', host: 'h', flavor: 'omp', archivedAt: 1 }, null, 'default')
+            store.messages.addMessage(session.id, { text: 'preserve me' }, 'pending')
+            engine.handleSessionAlive({ sid: session.id, time: Date.now() })
+            engine.handleSessionReady({ sid: session.id, time: Date.now() })
+            expect(engine.getSession(session.id)?.active).toBe(false)
+            expect(emitted).toEqual([])
+            expect(store.messages.getAllMessages(session.id)[0]?.invokedAt).toBeNull()
+        } finally { engine.stop(); store.close() }
+    })
+
     it('replays durable immediate prompts on every attach until consumed', () => {
         const store = new Store(':memory:')
         const emitted: Array<{ body?: { t?: string; message?: { localId?: string | null } } }> = []
@@ -24,7 +89,7 @@ describe('alive incremental events', () => {
                 to: () => ({ emit: (_event: string, payload: unknown) => emitted.push(payload as typeof emitted[number]) })
             })
         }
-        const engine = new SyncEngine(store, io as never, new RpcRegistry(), { broadcast() {} } as never)
+        const engine = new SyncEngine(store, io as never, new RpcRegistry(), { broadcast() { } } as never)
         try {
             const session = engine.getOrCreateSession('attach-replay', { path: '/tmp/project', host: 'localhost' }, null, 'default')
             store.messages.addMessage(session.id, { text: 'queued before attach' }, 'queued-before-attach')
@@ -226,7 +291,7 @@ describe('alive incremental events', () => {
             store,
             io as never,
             new RpcRegistry(),
-            { broadcast() {} } as never
+            { broadcast() { } } as never
         )
         const events: SyncEvent[] = []
         const unsubscribe = engine.subscribe((event) => {
@@ -287,8 +352,8 @@ describe('alive incremental events', () => {
     it('does not revive inactive sessions or refresh liveness when marking queued thinking', () => {
         const store = new Store(':memory:')
         const events: SyncEvent[] = []
-        const cache = new SessionCache(store, createPublisher(events))
-        const now = Date.now() - 30_000
+        const now = Date.now()
+        const cache = new SessionCache(store, createPublisher(events), () => now)
 
         const session = cache.getOrCreateSession(
             'session-queued-thinking-inactive',
@@ -297,10 +362,12 @@ describe('alive incremental events', () => {
             'default'
         )
 
-        cache.handleSessionAlive({ sid: session.id, time: now, thinking: false })
-        cache.handleSessionEnd({ sid: session.id, time: now + 1_000 })
+        cache.handleSessionAlive({ sid: session.id, time: now - 30_000, thinking: false })
+        expect(cache.getSession(session.id)?.activeAt).toBeGreaterThanOrEqual(now)
+        cache.handleSessionEnd({ sid: session.id, time: now - 29_000 })
         const inactive = cache.getSession(session.id)
         expect(inactive?.active).toBe(false)
+        expect(store.sessions.getSession(session.id)?.active).toBe(false)
         const inactiveActiveAt = inactive?.activeAt
 
         events.length = 0
@@ -313,21 +380,44 @@ describe('alive incremental events', () => {
         expect(events.find((event) => event.type === 'session-updated')).toBeUndefined()
     })
 
+    it('expires liveness on Hub receive time despite a lagging client clock', () => {
+        const store = new Store(':memory:')
+        const now = Date.now() + 1_000
+        let hubNow = now
+        const cache = new SessionCache(store, createPublisher([]), () => hubNow)
+        try {
+            const session = cache.getOrCreateSession('session-lagging-liveness', {
+                path: '/tmp/project', host: 'localhost', flavor: 'codex'
+            }, null, 'default')
+            cache.handleSessionAlive({ sid: session.id, time: now - 60_000, thinking: false })
+            expect(cache.getSession(session.id)?.activeAt).toBe(now)
+
+            hubNow = now + 30_000
+            expect(cache.expireInactive()).toEqual([])
+            expect(cache.getSession(session.id)?.active).toBe(true)
+            hubNow += 1
+            expect(cache.expireInactive()).toEqual([session.id])
+            expect(cache.getSession(session.id)?.active).toBe(false)
+        } finally { store.close() }
+    })
+
     it('starts a fresh grace window when an old local message is retried', async () => {
         const store = new Store(':memory:')
         const io = {
             of: () => ({
-                to: () => ({ emit() {} })
+                to: () => ({ emit() { } })
             })
         }
+        const now = Date.now()
+        let hubNow = now
         const engine = new SyncEngine(
             store,
             io as never,
             new RpcRegistry(),
-            { broadcast() {} } as never
+            { broadcast() { } } as never,
+            undefined,
+            () => hubNow
         )
-        const now = Date.now()
-        const originalNow = Date.now
 
         try {
             const session = engine.getOrCreateSession(
@@ -337,24 +427,23 @@ describe('alive incremental events', () => {
                 'default'
             )
 
-            Date.now = () => now - 20_000
-            engine.handleSessionAlive({ sid: session.id, time: now - 20_000, thinking: false })
+            engine.handleSessionAlive({ sid: session.id, time: now, thinking: false })
             await engine.sendMessage(session.id, { text: 'retry me', localId: 'stable-local-id' })
             const storedTurnStartedAt = engine.getSession(session.id)?.activeTurnStartedAt
 
-            Date.now = () => now
-            engine.handleSessionAlive({ sid: session.id, time: now, thinking: false })
+            hubNow = now + 20_000
+            engine.handleSessionAlive({ sid: session.id, time: hubNow, thinking: false })
             expect(engine.getSession(session.id)?.thinking).toBe(false)
 
             await engine.sendMessage(session.id, { text: 'retry me', localId: 'stable-local-id' })
             expect(engine.getSession(session.id)?.activeTurnStartedAt).toBe(storedTurnStartedAt)
 
-            Date.now = () => now + 1_000
-            engine.handleSessionAlive({ sid: session.id, time: now + 1_000, thinking: false })
+            hubNow = now + 21_000
+            engine.handleSessionAlive({ sid: session.id, time: hubNow, thinking: false })
             expect(engine.getSession(session.id)?.thinking).toBe(true)
         } finally {
-            Date.now = originalNow
             engine.stop()
+            store.close()
         }
     })
 
@@ -362,14 +451,14 @@ describe('alive incremental events', () => {
         const store = new Store(':memory:')
         const io = {
             of: () => ({
-                to: () => ({ emit() {} })
+                to: () => ({ emit() { } })
             })
         }
         const engine = new SyncEngine(
             store,
             io as never,
             new RpcRegistry(),
-            { broadcast() {} } as never
+            { broadcast() { } } as never
         )
         const now = Date.now()
 
@@ -400,8 +489,9 @@ describe('alive incremental events', () => {
     it('advances the queued turn boundary on the hub clock across a lagging false heartbeat', () => {
         const store = new Store(':memory:')
         const events: SyncEvent[] = []
-        const cache = new SessionCache(store, createPublisher(events))
-        const now = Date.now() - 30_000
+        const now = Date.now()
+        let hubNow = now
+        const cache = new SessionCache(store, createPublisher(events), () => hubNow)
 
         const session = cache.getOrCreateSession(
             'session-queued-thinking-grace',
@@ -410,23 +500,18 @@ describe('alive incremental events', () => {
             'default'
         )
 
-        cache.handleSessionAlive({ sid: session.id, time: now, thinking: false })
+        cache.handleSessionAlive({ sid: session.id, time: now - 30_000, thinking: false })
         store.messages.addMessage(
             session.id,
             { role: 'user', content: { type: 'text', text: 'queued next prompt' } },
             'queued-next-local-id'
         )
-        cache.markMessageQueued(session.id, now + 10)
+        cache.markMessageQueued(session.id, now - 30_000)
         const turnStartedAt = cache.getSession(session.id)?.activeTurnStartedAt
         events.length = 0
 
-        const originalNow = Date.now
-        Date.now = () => now + 2_000
-        try {
-            cache.handleSessionAlive({ sid: session.id, time: now - 3_000, thinking: false })
-        } finally {
-            Date.now = originalNow
-        }
+        hubNow = now + 2_000
+        cache.handleSessionAlive({ sid: session.id, time: now - 33_000, thinking: false })
 
         expect(cache.getSession(session.id)?.thinking).toBe(true)
         expect(cache.getSession(session.id)?.activeTurnStartedAt).not.toBe(turnStartedAt)
@@ -443,8 +528,9 @@ describe('alive incremental events', () => {
     it('clears queued thinking after the grace window expires', () => {
         const store = new Store(':memory:')
         const events: SyncEvent[] = []
-        const cache = new SessionCache(store, createPublisher(events))
-        const now = Date.now() - 30_000
+        const now = Date.now()
+        let hubNow = now
+        const cache = new SessionCache(store, createPublisher(events), () => hubNow)
 
         const session = cache.getOrCreateSession(
             'session-queued-thinking-expire',
@@ -457,6 +543,7 @@ describe('alive incremental events', () => {
         cache.markMessageQueued(session.id, now + 10)
         events.length = 0
 
+        hubNow = now + 16_000
         cache.handleSessionAlive({ sid: session.id, time: now + 16_000, thinking: false })
 
         expect(cache.getSession(session.id)?.thinking).toBe(false)
@@ -471,8 +558,9 @@ describe('alive incremental events', () => {
     it('expires queued thinking against hub time instead of client heartbeat time', () => {
         const store = new Store(':memory:')
         const events: SyncEvent[] = []
-        const cache = new SessionCache(store, createPublisher(events))
         const now = Date.now()
+        let hubNow = now
+        const cache = new SessionCache(store, createPublisher(events), () => hubNow)
 
         const session = cache.getOrCreateSession(
             'session-queued-thinking-clock-skew',
@@ -485,13 +573,8 @@ describe('alive incremental events', () => {
         cache.markMessageQueued(session.id, now + 10)
         events.length = 0
 
-        const originalNow = Date.now
-        Date.now = () => now + 16_000
-        try {
-            cache.handleSessionAlive({ sid: session.id, time: now - 60_000, thinking: false })
-        } finally {
-            Date.now = originalNow
-        }
+        hubNow = now + 16_000
+        cache.handleSessionAlive({ sid: session.id, time: now - 60_000, thinking: false })
 
         expect(cache.getSession(session.id)?.thinking).toBe(false)
         const update = events.find((event) => event.type === 'session-updated')

@@ -1,0 +1,174 @@
+.beta-viewport {
+    overflow-anchor: none;
+    overscroll-behavior-y: contain;
+    touch-action: pan-y pinch-zoom;
+    scrollbar-gutter: stable;
+}
+.beta-row-slot {
+    display: flow-root;
+    padding-bottom: 12px;
+}
+.beta-row {
+    overflow-wrap: anywhere;
+}
+.beta-connection-banner {
+    flex-shrink: 0;
+    padding: 4px 12px;
+    border-bottom: 1px solid var(--app-border);
+    color: var(--app-hint);
+    font-size: 11px;
+    line-height: 1.5;
+}
+.beta-attention {
+    flex-shrink: 0;
+    padding: 8px 12px;
+    color: var(--app-fg);
+    background: color-mix(in srgb, orange 14%, var(--app-bg));
+    font-size: 12px;
+    text-align: left;
+}
+.beta-jump-tail {
+    position: absolute;
+    z-index: 10;
+    bottom: 12px;
+    left: 50%;
+    transform: translateX(-50%);
+    border-radius: 999px;
+    padding: 8px 16px;
+    color: var(--app-button-text);
+    background: var(--app-button);
+    box-shadow: 0 2px 10px #0003;
+    font-size: 13px;
+}
+.beta-action {
+    display: inline-flex;
+    min-height: 24px;
+    min-width: 24px;
+    align-items: center;
+    justify-content: center;
+    border-radius: 4px;
+}
+.beta-thread button:focus-visible,
+.beta-thread summary:focus-visible {
+    outline: 2px solid var(--app-link);
+    outline-offset: 2px;
+}
+/* Capture is a full data-selected turn, not the virtual viewport. Keep it in
+   the viewport geometrically so existing lazy media cards can load. */
+.beta-share-capture {
+    position: fixed;
+    top: 0;
+    left: 0;
+    z-index: -1;
+    opacity: 0;
+    pointer-events: none;
+    background: var(--app-bg);
+    color: var(--app-fg);
+}
+.beta-share-capture-row {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+}
+@media (pointer: coarse) {
+    .beta-thread .happy-message-actions {
+        height: auto;
+        min-height: 44px;
+        gap: 4px;
+    }
+    .beta-thread .happy-message-actions button,
+    .beta-thread .beta-action {
+        min-height: 44px;
+        min-width: 44px;
+    }
+    .beta-thread .beta-generated-file button,
+    .beta-thread .beta-orphan-requests button,
+    [data-beta-composer-toolbar] button,
+    [data-beta-composer-attachment-remove] {
+        min-height: 44px;
+        min-width: 44px;
+    }
+}
+@media (prefers-reduced-motion: reduce) {
+    .beta-viewport { scroll-behavior: auto; }
+}
+.beta-process-toggle {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+    width: 100%;
+    min-height: 32px;
+    padding: 6px 10px;
+    border: 1px solid var(--app-border);
+    border-radius: 8px;
+    background: var(--app-bg);
+    color: var(--app-hint);
+    font-size: 12px;
+    text-align: left;
+}
+.beta-sticky-process .beta-process-toggle {
+    box-shadow: 0 2px 8px rgb(0 0 0 / 0.08);
+}
+@media (pointer: coarse) {
+    .beta-process-toggle {
+        min-height: 44px;
+        padding: 8px 12px;
+    }
+}
+.beta-continuation {
+    margin-bottom: 12px;
+    padding: 10px;
+    border-inline-start: 3px solid var(--app-hint);
+    font-size: 12px;
+    color: var(--app-hint);
+}
+.beta-artifact { min-width: 0; max-width: 100%; }
+.beta-thread summary { min-height: 32px; }
+.beta-thread .happy-message-actions { height: auto; flex-wrap: wrap; }
+.beta-jump-tail { max-width: calc(100% - 24px); min-height: 44px; }
+.beta-attention { min-height: 44px; overflow-wrap: anywhere; }
+.beta-row:focus-visible, .beta-viewport:focus-visible { outline: 2px solid var(--app-link); outline-offset: -2px; }
+@media (pointer: coarse) {
+    .beta-thread summary { min-height: 44px; padding-block: 10px; }
+}
+@media (max-width: 480px) {
+    .beta-thread .chat-scroll-content { padding-inline: 8px; }
+    .beta-connection-banner { padding-inline: 8px; }
+}
+.beta-orphan-requests {
+    flex-shrink: 0;
+    max-height: 45vh;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--app-border);
+}
+.beta-turn-start { padding-top: 12px; border-top: 1px solid var(--app-border); }
+
+/* Virtual-keyboard compact (shared `app-kbd-open` flag): the verbose
+   connection/legacy banner is informational only — hide it while the soft
+   keyboard owns the viewport. `.beta-attention` (pending approvals) and
+   `.beta-orphan-requests` stay visible and keep their 44px touch target. */
+html.app-kbd-open .beta-connection-banner,
+html.app-kbd-open [data-beta-run-status] {
+    display: none;
+}
+
+html.app-kbd-open .beta-thread .happy-message-actions {
+    display: none;
+}
+
+html.app-kbd-open .beta-row-slot {
+    padding-bottom: 6px;
+}
+
+html.app-kbd-open .beta-thread .chat-scroll-content {
+    padding-block: 6px;
+}
+
+html.app-kbd-open .beta-attention {
+    min-height: 28px;
+    padding-block: 3px;
+}

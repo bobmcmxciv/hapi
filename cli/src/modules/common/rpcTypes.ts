@@ -10,6 +10,8 @@ export interface SpawnSessionOptions {
     // id) instead of minting a new one. Set only by the hub reopen/resume path.
     existingSessionId?: string
     resumeSessionId?: string
+    /** Server-issued generation for an OMP reopen; never a caller-selected session identity. */
+    ompResumeAttemptId?: string
     approvedNewDirectoryCreation?: boolean
     agent?: AgentFlavor
     model?: string

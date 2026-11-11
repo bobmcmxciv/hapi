@@ -2,413 +2,435 @@ import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import type { AgentMessage, AgentUsage } from '@/agent/types';
 import type { RawJSONLines } from '@/claude/types';
+import { MAX_RUNTIME_ITEMS, type RuntimeChange, type RuntimeItem, type RuntimePublication, type RuntimeStopReason } from '@hapi/protocol/runtimeTimeline';
+import { OmpRuntimeProducer } from './OmpRuntimeProducer';
 import type {
-    JsonObject,
-    JsonValue,
-    OmpInboundEvent,
-    OmpKnownEvent,
-    OmpKnownEventType,
-    OmpHostIntegrationEvent,
-    OmpAvailableCommand,
-    OmpSubagentSnapshot
+ JsonObject,
+ JsonValue,
+ OmpInboundEvent,
+ OmpKnownEvent,
+ OmpKnownEventType,
+ OmpHostIntegrationEvent,
+ OmpAvailableCommand,
+ OmpSubagentSnapshot
 } from './types';
 
 import { defaultOmpEventAllowlist } from './eventAllowlist';
 const JsonValueSchema: z.ZodType<JsonValue> = z.lazy(() => z.union([
-    z.string(),
-    z.number(),
-    z.boolean(),
-    z.null(),
-    z.array(JsonValueSchema),
-    z.record(z.string(), JsonValueSchema)
+ z.string(),
+ z.number(),
+ z.boolean(),
+ z.null(),
+ z.array(JsonValueSchema),
+ z.record(z.string(), JsonValueSchema)
 ]));
 const JsonObjectSchema: z.ZodType<JsonObject> = z.record(z.string(), JsonValueSchema);
 
 const UsageSchema = z.object({
-    input: z.number(),
-    output: z.number(),
-    cacheRead: z.number(),
-    cacheWrite: z.number(),
-    totalTokens: z.number(),
-    reasoningTokens: z.number().optional(),
-    cost: z.object({
-        input: z.number(),
-        output: z.number(),
-        cacheRead: z.number(),
-        cacheWrite: z.number(),
-        total: z.number()
-    })
+ input: z.number(),
+ output: z.number(),
+ cacheRead: z.number(),
+ cacheWrite: z.number(),
+ totalTokens: z.number(),
+ reasoningTokens: z.number().optional(),
+ cost: z.object({
+  input: z.number(),
+  output: z.number(),
+  cacheRead: z.number(),
+  cacheWrite: z.number(),
+  total: z.number()
+ })
 });
 
 const AssistantMessageSchema = z.object({
-    role: z.literal('assistant'),
-    content: z.array(JsonObjectSchema),
-    model: z.string(),
-    provider: z.string(),
-    responseId: z.string().optional(),
-    usage: UsageSchema,
-    stopReason: z.enum(['stop', 'length', 'toolUse', 'error', 'aborted']),
-    errorMessage: z.string().optional(),
-    timestamp: z.number().optional()
+ role: z.literal('assistant'),
+ content: z.array(JsonObjectSchema),
+ model: z.string(),
+ provider: z.string(),
+ responseId: z.string().optional(),
+ usage: UsageSchema,
+ stopReason: z.enum(['stop', 'length', 'toolUse', 'error', 'aborted']),
+ errorMessage: z.string().optional(),
+ timestamp: z.number().optional()
 });
 
 const ToolResultMessageSchema = z.object({
-    role: z.literal('toolResult'),
-    toolCallId: z.string(),
-    toolName: z.string(),
-    content: z.array(JsonObjectSchema),
-    details: JsonValueSchema.optional(),
-    isError: z.boolean(),
-    timestamp: z.number().optional()
+ role: z.literal('toolResult'),
+ toolCallId: z.string(),
+ toolName: z.string(),
+ content: z.array(JsonObjectSchema),
+ details: JsonValueSchema.optional(),
+ isError: z.boolean(),
+ timestamp: z.number().optional()
 });
 
 const UserMessageSchema = z.object({
-    role: z.literal('user'),
-    steering: z.boolean().optional()
+ role: z.literal('user'),
+ steering: z.boolean().optional()
 });
 
 const MessageStartSchema = z.object({
-    type: z.literal('message_start'),
-    message: JsonObjectSchema
+ type: z.literal('message_start'),
+ message: JsonObjectSchema
 });
 
 const MessageUpdateSchema = z.object({
-    type: z.literal('message_update'),
-    message: JsonObjectSchema,
-    assistantMessageEvent: z.object({
-        type: z.string(),
-        delta: z.string().optional()
-    }).passthrough()
+ type: z.literal('message_update'),
+ message: JsonObjectSchema,
+ assistantMessageEvent: z.object({
+  type: z.string(),
+  delta: z.string().optional()
+ }).passthrough()
 });
 
 const MessageEndSchema = z.object({
-    type: z.literal('message_end'),
-    message: JsonObjectSchema
+ type: z.literal('message_end'),
+ message: JsonObjectSchema
 });
 
 const ToolStartSchema = z.object({
-    type: z.literal('tool_execution_start'),
-    toolCallId: z.string(),
-    toolName: z.string(),
-    args: JsonValueSchema
+ type: z.literal('tool_execution_start'),
+ toolCallId: z.string(),
+ toolName: z.string(),
+ args: JsonValueSchema
 });
 
 const ToolUpdateSchema = z.object({
-    type: z.literal('tool_execution_update'),
-    toolCallId: z.string(),
-    toolName: z.string(),
-    args: JsonValueSchema,
-    partialResult: JsonValueSchema
+ type: z.literal('tool_execution_update'),
+ toolCallId: z.string(),
+ toolName: z.string(),
+ args: JsonValueSchema,
+ partialResult: JsonValueSchema
 });
 
 const ToolEndSchema = z.object({
-    type: z.literal('tool_execution_end'),
-    toolCallId: z.string(),
-    toolName: z.string(),
-    result: JsonValueSchema,
-    isError: z.boolean().optional()
+ type: z.literal('tool_execution_end'),
+ toolCallId: z.string(),
+ toolName: z.string(),
+ result: JsonValueSchema,
+ isError: z.boolean().optional()
 });
 
 const SubagentLifecycleSchema = z.object({
-    type: z.literal('subagent_lifecycle'),
-    payload: z.object({
-        id: z.string(),
-        agent: z.string(),
-        agentSource: z.string(),
-        description: z.string().optional(),
-        status: z.enum(['started', 'completed', 'failed', 'aborted']),
-        sessionFile: z.string().optional(),
-        parentToolCallId: z.string().optional(),
-        index: z.number().int(),
-        detached: z.boolean().optional()
-    })
+ type: z.literal('subagent_lifecycle'),
+ payload: z.object({
+  id: z.string(),
+  agent: z.string(),
+  agentSource: z.string(),
+  description: z.string().optional(),
+  status: z.enum(['started', 'completed', 'failed', 'aborted']),
+  sessionFile: z.string().optional(),
+  parentToolCallId: z.string().optional(),
+  index: z.number().int(),
+  detached: z.boolean().optional()
+ })
 });
 
 const SubagentProgressSchema = z.object({
-    type: z.literal('subagent_progress'),
-    payload: z.object({
-        index: z.number().int(),
-        agent: z.string(),
-        agentSource: z.string(),
-        task: z.string(),
-        parentToolCallId: z.string().optional(),
-        assignment: z.string().optional(),
-        progress: JsonObjectSchema,
-        sessionFile: z.string().optional(),
-        detached: z.boolean().optional()
-    })
+ type: z.literal('subagent_progress'),
+ payload: z.object({
+  index: z.number().int(),
+  agent: z.string(),
+  agentSource: z.string(),
+  task: z.string(),
+  parentToolCallId: z.string().optional(),
+  assignment: z.string().optional(),
+  progress: JsonObjectSchema,
+  sessionFile: z.string().optional(),
+  detached: z.boolean().optional()
+ })
 });
 
 const SubagentEventSchema = z.object({
-    type: z.literal('subagent_event'),
-    payload: z.object({
-        id: z.string(),
-        event: JsonObjectSchema
-    })
+ type: z.literal('subagent_event'),
+ payload: z.object({
+  id: z.string(),
+  event: JsonObjectSchema
+ })
 });
 
 const AvailableCommandsUpdateSchema = z.object({
-    type: z.literal('available_commands_update'),
-    commands: z.array(z.object({
-        name: z.string(),
-        aliases: z.array(z.string()).optional(),
-        description: z.string().optional(),
-        input: z.object({ hint: z.string().optional() }).optional(),
-        subcommands: z.array(z.object({
-            name: z.string(),
-            description: z.string().optional(),
-            usage: z.string().optional()
-        })).optional(),
-        source: z.string()
-    }))
+ type: z.literal('available_commands_update'),
+ commands: z.array(z.object({
+  name: z.string(),
+  aliases: z.array(z.string()).optional(),
+  description: z.string().optional(),
+  input: z.object({ hint: z.string().optional() }).optional(),
+  subcommands: z.array(z.object({
+   name: z.string(),
+   description: z.string().optional(),
+   usage: z.string().optional()
+  })).optional(),
+  source: z.string()
+ }))
 });
 
 const RetryStateSchema = z.object({
-    attempt: z.number(),
-    maxAttempts: z.number(),
-    delayMs: z.number(),
-    errorMessage: z.string(),
-    startedAtMs: z.number()
+ attempt: z.number(),
+ maxAttempts: z.number(),
+ delayMs: z.number(),
+ errorMessage: z.string(),
+ startedAtMs: z.number()
 }).passthrough();
 
 const RetryFailureSchema = z.object({
-    attempt: z.number(),
-    errorMessage: z.string()
+ attempt: z.number(),
+ errorMessage: z.string()
 }).passthrough();
 
 const CompactionActionSchema = z.enum(['context-full', 'handoff', 'shake', 'snapcompact']);
 const CompactionStartEventSchema = z.object({
-    type: z.literal('auto_compaction_start'),
-    reason: z.enum(['threshold', 'overflow', 'idle', 'incomplete']),
-    action: CompactionActionSchema
+ type: z.literal('auto_compaction_start'),
+ reason: z.enum(['threshold', 'overflow', 'idle', 'incomplete']),
+ action: CompactionActionSchema
 });
 const SnapcompactArchiveSummarySchema = z.object({
-    frames: z.array(z.unknown()),
-    totalChars: z.number().int().nonnegative(),
-    truncatedChars: z.number().int().nonnegative()
+ frames: z.array(z.unknown()),
+ totalChars: z.number().int().nonnegative(),
+ truncatedChars: z.number().int().nonnegative()
 });
 const CompactionResultSummarySchema = z.object({
-    shortSummary: z.string().optional(),
-    tokensBefore: z.number().int().nonnegative(),
-    preserveData: z.object({
-        snapcompact: SnapcompactArchiveSummarySchema.optional()
-    }).optional()
+ shortSummary: z.string().optional(),
+ tokensBefore: z.number().int().nonnegative(),
+ preserveData: z.object({
+  snapcompact: SnapcompactArchiveSummarySchema.optional()
+ }).optional()
 });
 const CompactionEndEventSchema = z.object({
-    type: z.literal('auto_compaction_end'),
-    action: CompactionActionSchema,
-    result: CompactionResultSummarySchema.nullish(),
-    aborted: z.boolean(),
-    willRetry: z.boolean().optional(),
-    errorMessage: z.string().optional(),
-    skipped: z.boolean().optional()
+ type: z.literal('auto_compaction_end'),
+ action: CompactionActionSchema,
+ result: CompactionResultSummarySchema.nullish(),
+ aborted: z.boolean(),
+ willRetry: z.boolean().optional(),
+ errorMessage: z.string().optional(),
+ skipped: z.boolean().optional()
 });
 
 type OmpAgentRunStartEvent = {
-    type: 'agent-run-start';
-    agentId: string;
-    cardId: string;
-    startedAt: number;
-    status: 'running';
-    statusText: string;
-    activity: string;
-    activityKind: 'starting';
-    summary: string;
-    parentToolCallId?: string;
-    input: {
-        agent: string;
-        agentSource: string;
-        index: number;
-        description?: string;
-        task?: string;
-        assignment?: string;
-        parentToolCallId?: string;
-        sessionFile?: string;
-    };
+ type: 'agent-run-start';
+ agentId: string;
+ cardId: string;
+ startedAt: number;
+ status: 'running';
+ statusText: string;
+ activity: string;
+ activityKind: 'starting';
+ summary: string;
+ parentToolCallId?: string;
+ input: {
+  agent: string;
+  agentSource: string;
+  index: number;
+  description?: string;
+  task?: string;
+  assignment?: string;
+  parentToolCallId?: string;
+  sessionFile?: string;
+ };
 };
 
 type OmpAgentRunUpdateEvent = {
-    type: 'agent-run-update';
-    agentId: string;
-    cardId: string;
-    startedAt: number;
-    completedAt?: number;
-    status: string;
-    statusText: string;
-    activity: string;
-    activityKind: string;
-    summary: string;
-    parentToolCallId?: string;
-    progress?: JsonObject;
-    retryState?: z.infer<typeof RetryStateSchema>;
-    retryFailure?: z.infer<typeof RetryFailureSchema>;
-    result?: string;
+ type: 'agent-run-update';
+ agentId: string;
+ cardId: string;
+ startedAt: number;
+ completedAt?: number;
+ status: string;
+ statusText: string;
+ activity: string;
+ activityKind: string;
+ summary: string;
+ parentToolCallId?: string;
+ progress?: JsonObject;
+ retryState?: z.infer<typeof RetryStateSchema>;
+ retryFailure?: z.infer<typeof RetryFailureSchema>;
+ result?: string;
 };
 
 export type OmpAgentRunEvent = OmpAgentRunStartEvent | OmpAgentRunUpdateEvent;
 
 type OmpCompactionResultSummary = {
-    shortSummary?: string;
-    tokensBefore: number;
-    archive?: {
-        frameCount: number;
-        totalChars: number;
-        truncatedChars: number;
-    };
+ shortSummary?: string;
+ tokensBefore: number;
+ archive?: {
+  frameCount: number;
+  totalChars: number;
+  truncatedChars: number;
+ };
 };
 
 function summarizeCompactionResult(
-    result: z.infer<typeof CompactionResultSummarySchema> | null | undefined
+ result: z.infer<typeof CompactionResultSummarySchema> | null | undefined
 ): OmpCompactionResultSummary | undefined {
-    if (!result) return undefined;
+ if (!result) return undefined;
 
-    const summary: OmpCompactionResultSummary = {
-        tokensBefore: result.tokensBefore
-    };
-    if (result.shortSummary) summary.shortSummary = result.shortSummary;
+ const summary: OmpCompactionResultSummary = {
+  tokensBefore: result.tokensBefore
+ };
+ if (result.shortSummary) summary.shortSummary = result.shortSummary;
 
-    const archive = result.preserveData?.snapcompact;
-    if (archive) {
-        summary.archive = {
-            frameCount: archive.frames.length,
-            totalChars: archive.totalChars,
-            truncatedChars: archive.truncatedChars
-        };
-    }
-    return summary;
+ const archive = result.preserveData?.snapcompact;
+ if (archive) {
+  summary.archive = {
+   frameCount: archive.frames.length,
+   totalChars: archive.totalChars,
+   truncatedChars: archive.truncatedChars
+  };
+ }
+ return summary;
 }
 
 type OmpCompactionFinishedBase = {
-    type: 'omp-compaction';
-    phase: 'finished';
-    action: z.infer<typeof CompactionActionSchema>;
-    willRetry: boolean;
+ type: 'omp-compaction';
+ phase: 'finished';
+ action: z.infer<typeof CompactionActionSchema>;
+ willRetry: boolean;
 };
 
 export type OmpCompactionEvent =
-    | {
-        type: 'omp-compaction';
-        phase: 'started';
-        action: z.infer<typeof CompactionActionSchema>;
-        reason: z.infer<typeof CompactionStartEventSchema>['reason'];
-    }
-    | (OmpCompactionFinishedBase & { outcome: 'completed'; result?: OmpCompactionResultSummary })
-    | (OmpCompactionFinishedBase & { outcome: 'aborted' })
-    | (OmpCompactionFinishedBase & { outcome: 'skipped'; message?: string })
-    | (OmpCompactionFinishedBase & { outcome: 'failed'; errorMessage: string });
+ | {
+  type: 'omp-compaction';
+  phase: 'started';
+  action: z.infer<typeof CompactionActionSchema>;
+  reason: z.infer<typeof CompactionStartEventSchema>['reason'];
+ }
+ | (OmpCompactionFinishedBase & { outcome: 'completed'; result?: OmpCompactionResultSummary })
+ | (OmpCompactionFinishedBase & { outcome: 'aborted' })
+ | (OmpCompactionFinishedBase & { outcome: 'skipped'; message?: string })
+ | (OmpCompactionFinishedBase & { outcome: 'failed'; errorMessage: string });
 
 export type OmpStructuredEvent =
-    | { type: 'omp-rpc-warning'; eventType: string; warning: string; frame: JsonObject }
-    | { type: 'omp-retry'; phase: string; frame: JsonObject }
-    | OmpCompactionEvent
-    | { type: 'omp-notice'; level: string; message: string; source?: string; frame: JsonObject }
-    | { type: 'omp-session-event'; eventType: string; frame: JsonObject }
-    | { type: 'omp-command-output'; text: string; frame: JsonObject }
-    | { type: 'omp-extension-error'; message: string; frame: JsonObject };
+ | { type: 'omp-rpc-warning'; eventType: string; warning: string; frame: JsonObject }
+ | { type: 'omp-retry'; phase: string; frame: JsonObject }
+ | OmpCompactionEvent
+ | { type: 'omp-notice'; level: string; message: string; source?: string; frame: JsonObject }
+ | { type: 'omp-session-event'; eventType: string; frame: JsonObject }
+ | { type: 'omp-command-output'; text: string; frame: JsonObject }
+ | { type: 'omp-extension-error'; message: string; frame: JsonObject };
 
 type MainMessageAccumulator = {
-    displayId: string;
-    role: JsonValue | undefined;
-    snapshot: JsonObject;
+ displayId: string;
+ role: JsonValue | undefined;
+ snapshot: JsonObject;
+ nativeOrder?: OmpNativeOrder;
 };
 
 type ToolLifecycle = {
-    id: string;
-    name: string;
-    args: JsonValue;
-    partialResult?: JsonValue;
-    executionResult?: JsonValue;
-    executionFailed?: boolean;
+ id: string;
+ name: string;
+ args: JsonValue;
+ partialResult?: JsonValue;
+ executionResult?: JsonValue;
+ executionFailed?: boolean;
 };
 
 type SubagentState = {
-    id: string;
-    cardId: string;
-    agent: string;
-    agentSource: string;
-    index: number;
-    startedAt: number;
-    description?: string;
-    task?: string;
-    assignment?: string;
-    sessionFile?: string;
-    parentToolCallId?: string;
-    lastResultText?: string;
-    terminalStatus?: string;
-    startEmitted: boolean;
-    lastProgressSignature?: string;
-    seenMessages: Set<string>;
-    tools: Map<string, ToolLifecycle>;
+ id: string;
+ cardId: string;
+ agent: string;
+ agentSource: string;
+ index: number;
+ startedAt: number;
+ description?: string;
+ task?: string;
+ assignment?: string;
+ sessionFile?: string;
+ parentToolCallId?: string;
+ lastResultText?: string;
+ terminalStatus?: string;
+ startEmitted: boolean;
+ lastProgressSignature?: string;
+ seenMessages: Set<string>;
+ tools: Map<string, ToolLifecycle>;
+ /** Latest parent-session journal anchor seen on this subagent's frames. */
+ parentOrder?: OmpNativeOrder;
 };
+/** Parent-session journal coordinate, never a child transcript clock. */
+export type OmpNativeOrder = { sessionId: string; entryId: string; entryOrder: number; eventOrder: number };
+const NativeOrderSchema = z.object({
+ sessionId: z.string().min(1), entryId: z.string().min(1),
+ entryOrder: z.number().int().safe().positive(), eventOrder: z.number().int().safe().nonnegative()
+});
+function nativeOrderFrom(value: unknown): OmpNativeOrder | undefined {
+ const parsed = NativeOrderSchema.safeParse(value);
+ return parsed.success ? parsed.data : undefined;
+}
+
+function originFromSnapshot(snapshot: OmpSubagentSnapshot): OmpNativeOrder | undefined {
+ return nativeOrderFrom((snapshot as unknown as { nativeOrder?: unknown }).nativeOrder);
+}
 
 export type OmpRpcEventAdapterCallbacks = {
-    onAgentMessage: (message: AgentMessage) => void;
-    onCanonicalMessage: (message: RawJSONLines) => void;
-    onAgentRunEvent: (event: OmpAgentRunEvent) => void;
-    onAgentRunTrace: (scope: {
-        agentId: string;
-        cardId: string;
-        parentToolCallId?: string;
-        startedAt: number;
-    }, message: AgentMessage) => void;
-    onStructuredEvent: (event: OmpStructuredEvent) => void;
-    onInkMessage: (message: string, type: 'assistant' | 'system' | 'tool' | 'result' | 'status') => void;
-    onUserMessageCommitted: (steering: boolean) => void;
-    onTurnStarted: () => void;
-    onTurnFinished: () => void;
-    /**
-     * `failure` is set only when OMP accepted the prompt but it failed before reaching the agent
-     * (`agentInvoked: false`, `status: "error"`): no run, no transcript entry, nothing else surfaces it.
-     */
-    onPromptResult: (agentInvoked: boolean, failure?: string) => void;
-    onSessionInfoUpdate: () => void;
-    onAvailableCommandsChanged: (commands: OmpAvailableCommand[]) => void;
-    onThinkingStateChanged: (state: {
-        thinkingLevel?: import('./types').OmpThinkingLevel;
-        configured?: import('./types').OmpConfiguredThinkingLevel;
-        resolved?: import('./types').OmpEffort;
-    }) => void;
-    onDiagnostic: (message: string) => void;
-    onHostEvent: (event: {
-        type: OmpHostIntegrationEvent['type'];
-        raw: JsonObject;
-    }) => void;
+ onAgentMessage: (message: AgentMessage, nativeOrder?: OmpNativeOrder) => void;
+ onCanonicalMessage: (message: RawJSONLines, nativeOrder?: OmpNativeOrder) => void;
+ onAgentRunEvent: (event: OmpAgentRunEvent, nativeOrder?: OmpNativeOrder) => void;
+ /** Native runtime publications are independent of the legacy presentation allowlist. */
+ onRuntimePublication?: (publication: RuntimePublication) => void;
+ onAgentRunTrace: (scope: {
+  agentId: string;
+  cardId: string;
+  parentToolCallId?: string;
+  startedAt: number;
+ }, message: AgentMessage, nativeOrder?: OmpNativeOrder) => void;
+ onStructuredEvent: (event: OmpStructuredEvent, nativeOrder?: OmpNativeOrder) => void;
+ onInkMessage: (message: string, type: 'assistant' | 'system' | 'tool' | 'result' | 'status') => void;
+ onUserMessageCommitted: (steering: boolean) => void;
+ onTurnStarted: () => void;
+ onTurnFinished: () => void;
+ /**
+  * `failure` is set only when OMP accepted the prompt but it failed before reaching the agent
+  * (`agentInvoked: false`, `status: "error"`): no run, no transcript entry, nothing else surfaces it.
+  */
+ onPromptResult: (agentInvoked: boolean, failure?: string) => void;
+ onSessionInfoUpdate: () => void;
+ onAvailableCommandsChanged: (commands: OmpAvailableCommand[]) => void;
+ onThinkingStateChanged: (state: {
+  thinkingLevel?: import('./types').OmpThinkingLevel;
+  configured?: import('./types').OmpConfiguredThinkingLevel;
+  resolved?: import('./types').OmpEffort;
+ }) => void;
+ onDiagnostic: (message: string) => void;
+ onHostEvent: (event: {
+  type: OmpHostIntegrationEvent['type'];
+  raw: JsonObject;
+ }) => void;
 };
 
 /** One event's presentation scope, never shared with another dispatch or async host work. */
 class OmpEventProjection {
-    constructor(
-        readonly enabled: boolean,
-        private readonly callbacks: OmpRpcEventAdapterCallbacks
-    ) {}
+ constructor(
+  readonly enabled: boolean,
+  private readonly callbacks: OmpRpcEventAdapterCallbacks,
+  readonly nativeOrder?: OmpNativeOrder
+ ) { }
 
-    onAgentMessage(message: AgentMessage): void {
-        if (!this.enabled) return;
-        this.callbacks.onAgentMessage(message);
-    }
+ onAgentMessage(message: AgentMessage): void {
+  if (!this.enabled) return;
+  this.callbacks.onAgentMessage(message, this.nativeOrder);
+ }
 
-    onCanonicalMessage(message: RawJSONLines): void {
-        if (!this.enabled) return;
-        this.callbacks.onCanonicalMessage(message);
-    }
+ onCanonicalMessage(message: RawJSONLines): void {
+  if (!this.enabled) return;
+  this.callbacks.onCanonicalMessage(message, this.nativeOrder);
+ }
 
-    onAgentRunEvent(event: OmpAgentRunEvent): void {
-        if (!this.enabled) return;
-        this.callbacks.onAgentRunEvent(event);
-    }
+ onAgentRunEvent(event: OmpAgentRunEvent): void {
+  if (!this.enabled) return;
+  this.callbacks.onAgentRunEvent(event, this.nativeOrder);
+ }
 
-    onAgentRunTrace(
-        scope: Parameters<OmpRpcEventAdapterCallbacks['onAgentRunTrace']>[0],
-        message: AgentMessage
-    ): void {
-        if (!this.enabled) return;
-        this.callbacks.onAgentRunTrace(scope, message);
-    }
+ onAgentRunTrace(
+  scope: Parameters<OmpRpcEventAdapterCallbacks['onAgentRunTrace']>[0],
+  message: AgentMessage
+ ): void {
+  if (!this.enabled) return;
+  this.callbacks.onAgentRunTrace(scope, message, this.nativeOrder);
+ }
 
-    onStructuredEvent(event: OmpStructuredEvent): void {
-        if (!this.enabled) return;
-        this.callbacks.onStructuredEvent(event);
-    }
+ onStructuredEvent(event: OmpStructuredEvent): void {
+  if (!this.enabled) return;
+  this.callbacks.onStructuredEvent(event, this.nativeOrder);
+ }
 
 }
 
@@ -416,1128 +438,1384 @@ const CUSTOM_MESSAGE_MAX_CHARS = 200;
 
 /** First non-empty line of an OMP custom message with its wrapper tags removed, capped in length. */
 export function summarizeCustomMessage(content: string): string {
-    const line = content
-        .replace(/<\/?[a-z][a-z0-9-]*>/gi, '\n')
-        .split(/\r?\n/)
-        .map(part => part.trim())
-        .find(part => part.length > 0) ?? '';
-    return line.length > CUSTOM_MESSAGE_MAX_CHARS ? `${line.slice(0, CUSTOM_MESSAGE_MAX_CHARS - 1)}…` : line;
+ const line = content
+  .replace(/<\/?[a-z][a-z0-9-]*>/gi, '\n')
+  .split(/\r?\n/)
+  .map(part => part.trim())
+  .find(part => part.length > 0) ?? '';
+ return line.length > CUSTOM_MESSAGE_MAX_CHARS ? `${line.slice(0, CUSTOM_MESSAGE_MAX_CHARS - 1)}…` : line;
 }
 
 export class OmpRpcEventAdapter {
-    private activeMessage: MainMessageAccumulator | null = null;
-    private lastDisplayId: string | null = null;
-    private readonly tools = new Map<string, ToolLifecycle>();
-    /** Tool card keys (tool id, or `subagentId:toolId`) whose in_progress card was emitted. */
-    private readonly inProgressToolCards = new Set<string>();
-    private readonly subagents = new Map<string, SubagentState>();
+ private activeMessage: MainMessageAccumulator | null = null;
+ private lastDisplayId: string | null = null;
+ private readonly tools = new Map<string, ToolLifecycle>();
+ private readonly subagents = new Map<string, SubagentState>();
 
-    constructor(
-        private readonly callbacks: OmpRpcEventAdapterCallbacks,
-        private readonly eventAllowlist: ReadonlySet<OmpKnownEventType> = defaultOmpEventAllowlist
-    ) {}
+ // ---- HAPI beta runtime timeline state -------------------------------------
+ // Independent of the presentation allowlist: these mirror the native run
+ // lifecycle (agent_start/agent_end) so a producer can publish RuntimeChanges
+ // even when the legacy chat projection suppresses an event type.
+ #runtimeRunId: string | null = null;
+ #runtimeRunStartedAt = 0;
+ #runtimeRunTerminal = false;
+ #runtimeLastStopReason: RuntimeStopReason | null = null;
+ #runtimeLastErrorMessage: string | null = null;
+ readonly #runtimeItems = new Map<string, RuntimeItem>();
+ readonly #runtimeProducer: OmpRuntimeProducer | undefined;
+ /** Tool card keys (tool id, or `subagentId:toolId`) whose in_progress card was emitted. */
+ private readonly inProgressToolCards = new Set<string>();
+ /** Main-session id learned from order-bearing frames; distinguishes parent
+  *  history coordinates from child-journal ordinals during transcript replay. */
+ #mainSessionId: string | undefined;
 
-    handle(event: OmpInboundEvent): void {
-        if (event.kind === 'unknown') {
-            // Unknown protocol extensions remain diagnostic, never chat warnings.
-            this.callbacks.onDiagnostic(`OMP event: ${event.type}`);
-            return;
-        }
-        const output = this.projection(event.type);
-        this.handleKnown(output, event);
-        // Generic projection belongs to event kinds without a timeline format,
-        // not to individual occurrences suppressed by role handling or dedupe.
-        switch (event.type) {
-            case 'message_end':
-            case 'tool_execution_start':
-            case 'tool_execution_update':
-            case 'tool_execution_end':
-            case 'auto_compaction_start':
-            case 'auto_compaction_end':
-            case 'auto_retry_start':
-            case 'auto_retry_end':
-            case 'retry_fallback_applied':
-            case 'retry_fallback_succeeded':
-            case 'notice':
-            case 'command_output':
-            case 'extension_error':
-            case 'rpc_frame_error':
-            case 'subagent_lifecycle':
-            case 'subagent_progress':
-            case 'subagent_event':
-            case 'host_tool_call':
-            case 'ttsr_triggered':
-            case 'todo_reminder':
-            case 'todo_auto_clear':
-            case 'irc_message':
-            case 'goal_updated':
-            case 'model_changed':
-                return;
-            case 'extension_ui_request':
-                // Host presentation methods own their output; waited input and
-                // cancellation are represented by independent control state.
-                if (['notify', 'setStatus', 'setWidget', 'setTitle', 'set_editor_text', 'open_url']
-                    .includes(String(event.raw.method))) return;
-                break;
-            case 'agent_start':
-            case 'agent_end':
-            case 'turn_start':
-            case 'turn_end':
-            case 'message_start':
-            case 'message_update':
-            case 'tool_stream_update':
-            case 'config_warnings_changed':
-            case 'advisor_cost_changed':
-            case 'advisor_yielded':
-            case 'prompt_result':
-            case 'thinking_level_changed':
-            case 'available_commands_update':
-            case 'session_info_update':
-            case 'config_update':
-            case 'host_tool_cancel':
-            case 'host_uri_request':
-            case 'host_uri_cancel':
-                break;
-            default: {
-                const exhaustive: never = event;
-                return exhaustive;
-            }
-        }
-        output.onStructuredEvent({ type: 'omp-session-event', eventType: event.type, frame: event.raw });
+ constructor(
+  private readonly callbacks: OmpRpcEventAdapterCallbacks,
+  private readonly eventAllowlist: ReadonlySet<OmpKnownEventType> = defaultOmpEventAllowlist
+ ) {
+  if (callbacks.onRuntimePublication) {
+   this.#runtimeProducer = new OmpRuntimeProducer(callbacks.onRuntimePublication);
+  }
+ }
+
+ handle(event: OmpInboundEvent): void {
+  if (event.kind === 'unknown') {
+   // Unknown protocol extensions remain diagnostic, never chat warnings.
+   this.callbacks.onDiagnostic(`OMP event: ${event.type}`);
+   return;
+  }
+  const output = this.projection(event.type, nativeOrderFrom(event.raw.nativeOrder));
+  if (output.nativeOrder) this.#mainSessionId = output.nativeOrder.sessionId;
+  this.handleKnown(output, event);
+  // Generic projection belongs to event kinds without a timeline format,
+  // not to individual occurrences suppressed by role handling or dedupe.
+  switch (event.type) {
+   case 'message_end':
+   case 'tool_execution_start':
+   case 'tool_execution_update':
+   case 'tool_execution_end':
+   case 'auto_compaction_start':
+   case 'auto_compaction_end':
+   case 'auto_retry_start':
+   case 'auto_retry_end':
+   case 'retry_fallback_applied':
+   case 'retry_fallback_succeeded':
+   case 'notice':
+   case 'command_output':
+   case 'extension_error':
+   case 'rpc_frame_error':
+   case 'subagent_lifecycle':
+   case 'subagent_progress':
+   case 'subagent_event':
+   case 'host_tool_call':
+   case 'ttsr_triggered':
+   case 'todo_reminder':
+   case 'todo_auto_clear':
+   case 'irc_message':
+   case 'goal_updated':
+   case 'model_changed':
+   case 'input_receipt':
+    return;
+   case 'extension_ui_request':
+    // Host presentation methods own their output; waited input and
+    // cancellation are represented by independent control state.
+    if (['notify', 'setStatus', 'setWidget', 'setTitle', 'set_editor_text', 'open_url']
+     .includes(String(event.raw.method))) return;
+    break;
+   case 'agent_start':
+   case 'agent_end':
+   case 'turn_start':
+   case 'turn_end':
+   case 'message_start':
+   case 'message_update':
+   case 'tool_stream_update':
+   case 'config_warnings_changed':
+   case 'advisor_cost_changed':
+   case 'advisor_yielded':
+   case 'prompt_result':
+   case 'thinking_level_changed':
+   case 'available_commands_update':
+   case 'session_info_update':
+   case 'config_update':
+   case 'host_tool_cancel':
+   case 'host_uri_request':
+   case 'host_uri_cancel':
+    break;
+   default: {
+    const exhaustive: never = event;
+    return exhaustive;
+   }
+  }
+  output.onStructuredEvent({ type: 'omp-session-event', eventType: event.type, frame: event.raw });
+ }
+
+ private projection(type: OmpKnownEventType, nativeOrder?: OmpNativeOrder): OmpEventProjection {
+  return new OmpEventProjection(this.eventAllowlist.has(type), this.callbacks, nativeOrder);
+ }
+
+ seedSubagents(snapshots: OmpSubagentSnapshot[]): void {
+  for (const snapshot of snapshots) {
+   const state = this.ensureSubagent({
+    id: snapshot.id,
+    agent: snapshot.agent,
+    agentSource: snapshot.agentSource,
+    index: snapshot.index,
+    description: snapshot.description,
+    task: snapshot.task,
+    assignment: snapshot.assignment,
+    sessionFile: snapshot.sessionFile,
+    parentToolCallId: snapshot.parentToolCallId,
+    startedAt: snapshot.lastUpdate
+   }, originFromSnapshot(snapshot));
+   const origin = originFromSnapshot(snapshot);
+   this.emitSubagentStart(this.projection('subagent_lifecycle', origin), state);
+   if (snapshot.progress) {
+    this.emitSubagentProgress(this.projection('subagent_progress', origin), state, snapshot.progress, snapshot.status);
+   }
+  }
+ }
+
+ seedSubagentMessages(subagentId: string, messages: JsonObject[]): void {
+  const state = this.subagents.get(subagentId);
+  if (!state) {
+   this.callbacks.onDiagnostic(`OMP subagent transcript has no registry entry: ${subagentId}`);
+   return;
+  }
+  for (const message of messages) {
+   const childOrder = nativeOrderFrom(message.nativeOrder);
+   // Child-history ordinals are not comparable to the parent journal. Replayed
+   // transcripts inherit the parent anchor; their own entryOrder becomes the
+   // deterministic within-anchor event sequence.
+   const origin = childOrder && childOrder.sessionId === (state.parentOrder?.sessionId ?? this.#mainSessionId)
+    ? childOrder
+    : state.parentOrder ? { ...state.parentOrder, eventOrder: childOrder?.entryOrder ?? 0 } : undefined;
+   this.emitSubagentMessage(this.projection('subagent_event', origin), state, message);
+  }
+ }
+
+ private handleKnown(output: OmpEventProjection, event: OmpKnownEvent): void {
+  switch (event.type) {
+   case 'agent_start':
+    this.#beginRuntimeRun();
+    this.callbacks.onTurnStarted();
+    return;
+   case 'agent_end':
+    this.reconcileBoundary('agent_end');
+    this.#finishRuntimeRun();
+    this.callbacks.onTurnFinished();
+    return;
+   case 'turn_start':
+   case 'tool_stream_update':
+   case 'config_warnings_changed':
+   case 'advisor_cost_changed':
+   case 'advisor_yielded':
+    return;
+   case 'turn_end':
+    this.reconcileBoundary('turn_end');
+    return;
+   case 'message_start':
+    this.handleMessageStart(event.raw);
+    return;
+   case 'message_update':
+    this.handleMessageUpdate(event.raw);
+    return;
+   case 'message_end':
+    this.handleMessageEnd(output, event.raw);
+    return;
+   case 'tool_execution_start':
+    this.handleToolStart(output, event.raw);
+    return;
+   case 'tool_execution_update':
+    this.handleToolUpdate(output, event.raw);
+    return;
+   case 'tool_execution_end':
+    this.handleToolEnd(output, event.raw);
+    return;
+   case 'prompt_result': {
+    const parsed = z.object({
+     agentInvoked: z.boolean(),
+     status: z.string().optional(),
+     error: z.object({ message: z.string().optional() }).passthrough().optional()
+    }).safeParse(event.raw);
+    if (parsed.success) {
+     const { agentInvoked, status, error } = parsed.data;
+     // Runs that reached the agent report provider errors in their own assistant message.
+     const failure = !agentInvoked && status === 'error'
+      ? (error?.message?.trim() || 'OMP reported an error without a message')
+      : undefined;
+     this.callbacks.onPromptResult(agentInvoked, failure);
+    } else {
+     this.invalidEvent(event.type, parsed.error);
     }
-
-    private projection(type: OmpKnownEventType): OmpEventProjection {
-        return new OmpEventProjection(this.eventAllowlist.has(type), this.callbacks);
+    return;
+   }
+   case 'notice':
+    this.handleNotice(output, event.raw);
+    return;
+   case 'auto_retry_start':
+    this.handleRetryEvent(output, event.raw, 'started');
+    return;
+   case 'auto_retry_end':
+    this.handleRetryEvent(output, event.raw, 'finished');
+    return;
+   case 'retry_fallback_applied':
+    this.handleRetryEvent(output, event.raw, 'fallback-applied');
+    return;
+   case 'retry_fallback_succeeded':
+    this.handleRetryEvent(output, event.raw, 'fallback-succeeded');
+    return;
+   case 'auto_compaction_start':
+    this.handleCompactionStart(output, event.raw);
+    return;
+   case 'auto_compaction_end':
+    this.handleCompactionEnd(output, event.raw);
+    return;
+   case 'thinking_level_changed':
+    this.handleThinkingLevelChanged(event.raw);
+    return;
+   case 'available_commands_update': {
+    const parsed = AvailableCommandsUpdateSchema.safeParse(event.raw);
+    if (!parsed.success) {
+     this.invalidEvent('available_commands_update', parsed.error);
+     return;
     }
+    this.callbacks.onAvailableCommandsChanged(parsed.data.commands);
+    return;
+   }
+   case 'session_info_update':
+   case 'config_update':
+    this.callbacks.onSessionInfoUpdate();
+    return;
+   case 'ttsr_triggered':
+   case 'todo_reminder':
+   case 'todo_auto_clear':
+   case 'irc_message':
+   case 'goal_updated':
+   case 'model_changed':
+    output.onStructuredEvent({
+     type: 'omp-session-event',
+     eventType: event.type,
+     frame: event.raw
+    });
+    this.callbacks.onSessionInfoUpdate();
+    return;
+   case 'command_output':
+    this.handleCommandOutput(output, event.raw);
+    return;
+   case 'extension_error':
+    this.handleExtensionError(output, event.raw);
+    return;
+   case 'rpc_frame_error':
+    this.handleRpcFrameError(output, event.raw);
+    return;
+   case 'subagent_lifecycle':
+    this.handleSubagentLifecycle(output, event.raw);
+    return;
+   case 'subagent_progress':
+    this.handleSubagentProgress(output, event.raw);
+    return;
+   case 'subagent_event':
+    this.handleSubagentEvent(output, event.raw);
+    return;
+   case 'input_receipt':
+    // Durable delivery is consumed by the launcher, never projected as chat.
+    return;
+   case 'extension_ui_request':
+   case 'host_tool_call':
+   case 'host_tool_cancel':
+   case 'host_uri_request':
+   case 'host_uri_cancel':
+    this.callbacks.onHostEvent({ type: event.type, raw: event.raw });
+    return;
+  }
+  const exhaustive: never = event.type;
+  return exhaustive;
+ }
 
-    seedSubagents(snapshots: OmpSubagentSnapshot[]): void {
-        for (const snapshot of snapshots) {
-            const state = this.ensureSubagent({
-                id: snapshot.id,
-                agent: snapshot.agent,
-                agentSource: snapshot.agentSource,
-                index: snapshot.index,
-                description: snapshot.description,
-                task: snapshot.task,
-                assignment: snapshot.assignment,
-                sessionFile: snapshot.sessionFile,
-                parentToolCallId: snapshot.parentToolCallId,
-                startedAt: snapshot.lastUpdate
-            });
-            this.emitSubagentStart(this.projection('subagent_lifecycle'), state);
-            if (snapshot.progress) {
-                this.emitSubagentProgress(this.projection('subagent_progress'), state, snapshot.progress, snapshot.status);
-            }
-        }
+ private handleMessageStart(raw: JsonObject): void {
+  const parsed = MessageStartSchema.safeParse(raw);
+  if (!parsed.success) {
+   this.invalidEvent('message_start', parsed.error);
+   return;
+  }
+  if (parsed.data.message.role !== 'assistant' || this.#runtimeRunTerminal) return;
+  if (this.activeMessage) {
+   // The replaced message never reached message_end: close its runtime row so
+   // it cannot stay 'running' forever.
+   this.#abortRuntimeItem(this.activeMessage.displayId);
+   this.callbacks.onDiagnostic(
+    `OMP message_start replaced unfinished ${String(this.activeMessage.role ?? 'unknown')} message`
+   );
+  }
+  this.activeMessage = {
+   displayId: randomUUID(),
+   role: parsed.data.message.role,
+   snapshot: parsed.data.message,
+   nativeOrder: nativeOrderFrom(raw.nativeOrder)
+  };
+  if (parsed.data.message.role === 'assistant') {
+   this.#emitRuntimeAssistantItem(this.activeMessage.displayId, parsed.data.message, 'running');
+  }
+ }
+
+ private handleMessageUpdate(raw: JsonObject): void {
+  const parsed = MessageUpdateSchema.safeParse(raw);
+  if (!parsed.success) {
+   this.invalidEvent('message_update', parsed.error);
+   return;
+  }
+  if (parsed.data.message.role !== 'assistant' || this.#runtimeRunTerminal) return;
+  if (!this.activeMessage) {
+   this.callbacks.onDiagnostic('OMP message_update arrived without message_start; allocated a display UUID');
+   this.activeMessage = {
+    displayId: randomUUID(),
+    role: parsed.data.message.role,
+    snapshot: parsed.data.message,
+    nativeOrder: nativeOrderFrom(raw.nativeOrder)
+   };
+  } else {
+   this.activeMessage = {
+    ...this.activeMessage,
+    role: parsed.data.message.role,
+    snapshot: parsed.data.message,
+    nativeOrder: nativeOrderFrom(raw.nativeOrder) ?? this.activeMessage.nativeOrder
+   };
+  }
+
+  const { type, delta } = parsed.data.assistantMessageEvent;
+  if (this.activeMessage?.role === 'assistant') {
+   this.#emitRuntimeAssistantItem(this.activeMessage.displayId, parsed.data.message, 'running');
+  }
+  if (!delta) return;
+  if (type === 'text_delta') {
+   this.callbacks.onInkMessage(delta, 'assistant');
+  } else if (type === 'thinking_delta') {
+   this.callbacks.onInkMessage(`[Thinking] ${delta}`, 'system');
+  }
+ }
+
+ private handleMessageEnd(output: OmpEventProjection, raw: JsonObject): void {
+  const event = MessageEndSchema.safeParse(raw);
+  if (!event.success) {
+   this.invalidEvent('message_end', event.error);
+   return;
+  }
+
+  const assistant = AssistantMessageSchema.safeParse(event.data.message);
+  if (assistant.success) {
+   // Custom notices, tool results and steering echoes must never consume the
+   // identity of the assistant currently streaming alongside them.
+   if (this.#runtimeRunTerminal && !this.activeMessage) return;
+   const displayId = this.activeMessage?.displayId ?? randomUUID();
+   this.activeMessage = null;
+   this.commitAssistant(output, displayId, assistant.data);
+   return;
+  }
+
+  const toolResult = ToolResultMessageSchema.safeParse(event.data.message);
+  if (toolResult.success) {
+   this.commitToolResult(output, randomUUID(), toolResult.data);
+   return;
+  }
+
+  const user = UserMessageSchema.safeParse(event.data.message);
+  if (user.success) {
+   this.callbacks.onUserMessageCommitted(user.data.steering === true);
+   const origin = nativeOrderFrom(raw.nativeOrder);
+   // Remote token-bearing users already exist in Hub; only local/tokenless
+   // users need a canonical row. Never identify a remote user by text/time.
+   if (origin && typeof event.data.message.clientToken !== 'string') {
+    const content = event.data.message.content;
+    output.onCanonicalMessage({
+     type: 'user', uuid: `omp-user:${origin.sessionId}:${origin.entryId}`,
+     parentUuid: this.lastDisplayId, isSidechain: false,
+     timestamp: new Date(typeof event.data.message.timestamp === 'number' ? event.data.message.timestamp : Date.now()).toISOString(),
+     message: { role: 'user', content: typeof content === 'string' ? content : this.textFromContent(Array.isArray(content) ? content as JsonObject[] : []) }
+    });
+   }
+   return;
+  }
+
+  const role = event.data.message.role;
+  if (role === 'custom') {
+   this.handleCustomMessage(output, event.data.message, raw);
+   return;
+  }
+  if (role !== 'developer') {
+   this.callbacks.onDiagnostic(`Unsupported OMP message_end role: ${String(role)}`);
+  }
+ }
+
+ /**
+  * OMP injects its own messages with role "custom": background job results (async-result),
+  * todo nudges, resolve reminders. Only the ones OMP marks display:true are meant for the user;
+  * show their first sentence as a notice (the body can be a whole command output) and keep the
+  * rest out of the chat.
+  */
+ private handleCustomMessage(output: OmpEventProjection, message: JsonObject, raw: JsonObject): void {
+  if (message.display !== true) return;
+  const text = typeof message.content === 'string' ? summarizeCustomMessage(message.content) : '';
+  if (!text) return;
+  output.onStructuredEvent({
+   type: 'omp-notice',
+   level: 'info',
+   message: text,
+   source: typeof message.customType === 'string' ? message.customType : undefined,
+   frame: raw
+  });
+ }
+
+ private commitAssistant(output: OmpEventProjection,
+  displayId: string,
+  assistant: z.infer<typeof AssistantMessageSchema>
+ ): void {
+  if (this.#runtimeRunTerminal && (this.#runtimeLastStopReason === 'aborted' || this.#runtimeLastStopReason === 'error')) {
+   assistant = {
+    ...assistant, stopReason: this.#runtimeLastStopReason,
+    errorMessage: this.#runtimeLastErrorMessage ?? assistant.errorMessage
+   };
+  }
+  const runId = this.#ensureRuntimeRun();
+  this.#runtimeLastStopReason = assistant.stopReason;
+  this.#runtimeLastErrorMessage = assistant.errorMessage ?? null;
+  // The durable row and the runtime row share the same id (displayId) so the
+  // hub/frontend can reconcile live rows with the committed record later.
+  this.#emitRuntimeAssistantItem(displayId, assistant as unknown as JsonObject,
+   assistant.stopReason === 'error' ? 'error' : assistant.stopReason === 'aborted' ? 'aborted' : 'completed');
+  const modelLabel = `${assistant.provider}/${assistant.model}`;
+  const usage = this.toAgentUsage(assistant.usage);
+  const content = assistant.content.flatMap((block): JsonObject[] => {
+   if (block.type === 'text' && typeof block.text === 'string' && block.text.length > 0) {
+    return [{ type: 'text', text: block.text }];
+   }
+   if (block.type === 'thinking' && typeof block.thinking === 'string' && block.thinking.length > 0) {
+    return [{ type: 'thinking', thinking: block.thinking }];
+   }
+   if (
+    block.type === 'toolCall'
+    && typeof block.id === 'string'
+    && typeof block.name === 'string'
+    && block.arguments !== null
+    && typeof block.arguments === 'object'
+    && !Array.isArray(block.arguments)
+   ) {
+    return [{
+     type: 'tool_use',
+     id: block.id,
+     name: block.name,
+     input: block.arguments
+    }];
+   }
+   // Empty thinking blocks (encrypted provider reasoning) carry nothing to show.
+   if (!['image', 'redactedThinking', 'fallback', 'thinking'].includes(String(block.type))) {
+    this.callbacks.onDiagnostic(`Unknown OMP assistant content block: ${String(block.type)}`);
+   }
+   return [];
+  });
+
+  const parentUuid = this.lastDisplayId;
+  // Journal coordinates carry causal order when the capability exists, so
+  // source time is safe for display. Legacy frames keep commit time to avoid
+  // turn-start drift sorting replies above their own prompt.
+  const timestamp = new Date(output.nativeOrder && assistant.timestamp != null ? assistant.timestamp : Date.now()).toISOString();
+  output.onCanonicalMessage({
+   type: 'assistant',
+   uuid: displayId,
+   parentUuid,
+   isSidechain: false,
+   providerMessageId: assistant.responseId,
+   // Additive native semantics: the durable row carries the same stop reason /
+   // run id the runtime stream reported, so consumers never infer terminal
+   // state from text endings (toolUse ends the message, not the run).
+   stopReason: assistant.stopReason,
+   runId,
+   ...(assistant.errorMessage ? { errorMessage: assistant.errorMessage } : {}),
+   timestamp,
+   message: {
+    role: 'assistant',
+    content,
+    model: modelLabel,
+    usage: {
+     input_tokens: assistant.usage.input,
+     output_tokens: assistant.usage.output,
+     cache_creation_input_tokens: assistant.usage.cacheWrite,
+     cache_read_input_tokens: assistant.usage.cacheRead,
+     reasoning_output_tokens: assistant.usage.reasoningTokens,
+     cost_usd: assistant.usage.cost.total
     }
+   }
+  });
+  if (output.enabled) this.lastDisplayId = displayId;
+  output.onAgentMessage({ type: 'usage', ...usage });
+  if (assistant.errorMessage) {
+   output.onAgentMessage({ type: 'error', message: assistant.errorMessage });
+  }
+ }
 
-    seedSubagentMessages(subagentId: string, messages: JsonObject[]): void {
-        const state = this.subagents.get(subagentId);
-        if (!state) {
-            this.callbacks.onDiagnostic(`OMP subagent transcript has no registry entry: ${subagentId}`);
-            return;
-        }
-        const output = this.projection('subagent_event');
-        for (const message of messages) {
-            this.emitSubagentMessage(output, state, message);
-        }
+ private commitToolResult(output: OmpEventProjection,
+  displayId: string,
+  toolResult: z.infer<typeof ToolResultMessageSchema>
+ ): void {
+  const parentUuid = this.lastDisplayId;
+  const timestamp = new Date(toolResult.timestamp ?? Date.now()).toISOString();
+  const toolOutput = {
+   toolName: toolResult.toolName,
+   content: toolResult.content,
+   details: toolResult.details
+  };
+  this.#emitRuntimeToolItem(toolResult.toolCallId, toolResult.isError ? 'error' : 'completed', {
+   canonicalId: displayId, name: toolResult.toolName, isError: toolResult.isError,
+   output: toolOutput
+  });
+  output.onCanonicalMessage({
+   type: 'user',
+   uuid: displayId,
+   parentUuid,
+   isSidechain: false,
+   timestamp,
+   message: {
+    role: 'user',
+    content: [{
+     type: 'tool_result',
+     tool_use_id: toolResult.toolCallId,
+     content: toolOutput,
+     is_error: toolResult.isError
+    }]
+   },
+   toolUseResult: toolOutput
+  });
+  if (output.enabled) this.lastDisplayId = displayId;
+  this.tools.delete(toolResult.toolCallId);
+  this.callbacks.onInkMessage(
+   this.textFromContent(toolResult.content) || `Tool ${toolResult.toolName} finished`,
+   'result'
+  );
+ }
+
+ private handleToolStart(output: OmpEventProjection, raw: JsonObject): void {
+  const parsed = ToolStartSchema.safeParse(raw);
+  if (!parsed.success) {
+   this.invalidEvent('tool_execution_start', parsed.error);
+   return;
+  }
+  const tool: ToolLifecycle = {
+   id: parsed.data.toolCallId,
+   name: parsed.data.toolName,
+   args: parsed.data.args
+  };
+  this.tools.set(tool.id, tool);
+  this.#emitRuntimeToolItem(tool.id, 'running', { name: tool.name, input: tool.args });
+  if (!this.inProgressToolCards.has(tool.id)) {
+   this.emitToolLifecycle(output, tool, 'in_progress');
+  }
+  this.callbacks.onInkMessage(`Tool call: ${tool.name}`, 'tool');
+ }
+
+ private handleToolUpdate(output: OmpEventProjection, raw: JsonObject): void {
+  const parsed = ToolUpdateSchema.safeParse(raw);
+  if (!parsed.success) {
+   this.invalidEvent('tool_execution_update', parsed.error);
+   return;
+  }
+  const existing = this.tools.get(parsed.data.toolCallId);
+  const tool: ToolLifecycle = {
+   id: parsed.data.toolCallId,
+   name: existing?.name ?? parsed.data.toolName,
+   args: existing?.args ?? parsed.data.args,
+   partialResult: parsed.data.partialResult,
+   executionResult: existing?.executionResult,
+   executionFailed: existing?.executionFailed
+  };
+  this.tools.set(tool.id, tool);
+  this.#emitRuntimeToolItem(tool.id, 'running', { name: tool.name, input: tool.args, output: tool.partialResult });
+  // The card carries no partial output, so each update used to store a row
+  // identical to the start one: a 15-minute `wait` wrote ~900 copies, and
+  // one maa-agent session held 173k such rows out of 180k.
+  if (this.inProgressToolCards.has(tool.id)) return;
+  this.emitToolLifecycle(output, tool, 'in_progress');
+ }
+
+ private handleToolEnd(output: OmpEventProjection, raw: JsonObject): void {
+  const parsed = ToolEndSchema.safeParse(raw);
+  if (!parsed.success) {
+   this.invalidEvent('tool_execution_end', parsed.error);
+   return;
+  }
+  const existing = this.tools.get(parsed.data.toolCallId);
+  const tool: ToolLifecycle = {
+   id: parsed.data.toolCallId,
+   name: parsed.data.toolName,
+   args: existing?.args ?? {},
+   partialResult: existing?.partialResult,
+   executionResult: parsed.data.result,
+   executionFailed: parsed.data.isError === true
+  };
+  this.tools.set(tool.id, tool);
+  this.#emitRuntimeToolItem(tool.id, tool.executionFailed ? 'error' : 'completed', {
+   name: tool.name,
+   input: tool.args,
+   output: tool.executionResult,
+   isError: tool.executionFailed
+  });
+  if (this.inProgressToolCards.delete(tool.id)) {
+   return;
+  }
+  this.emitToolLifecycle(output, tool, tool.executionFailed ? 'failed' : 'completed');
+ }
+
+ private emitToolLifecycle(output: OmpEventProjection, tool: ToolLifecycle, status: Extract<AgentMessage, { type: 'tool_call' }>['status']): void {
+  this.trackInProgressCard(output, tool.id, status);
+  output.onAgentMessage({
+   type: 'tool_call',
+   id: tool.id,
+   name: tool.name,
+   input: tool.args,
+   status
+  });
+ }
+
+ private handleRetryEvent(output: OmpEventProjection, raw: JsonObject, phase: string): void {
+  output.onStructuredEvent({ type: 'omp-retry', phase, frame: raw });
+  this.callbacks.onInkMessage(`OMP retry ${phase}`, 'status');
+ }
+
+ private handleCompactionStart(output: OmpEventProjection, raw: JsonObject): void {
+  const parsed = CompactionStartEventSchema.safeParse(raw);
+  if (!parsed.success) {
+   this.invalidEvent('auto_compaction_start', parsed.error);
+   return;
+  }
+  output.onStructuredEvent({
+   type: 'omp-compaction',
+   phase: 'started',
+   action: parsed.data.action,
+   reason: parsed.data.reason
+  });
+  this.callbacks.onInkMessage('OMP compaction started', 'status');
+ }
+
+ private handleCompactionEnd(output: OmpEventProjection, raw: JsonObject): void {
+  const parsed = CompactionEndEventSchema.safeParse(raw);
+  if (!parsed.success) {
+   this.invalidEvent('auto_compaction_end', parsed.error);
+   return;
+  }
+
+  const { action, aborted, errorMessage, skipped } = parsed.data;
+  const base: OmpCompactionFinishedBase = {
+   type: 'omp-compaction',
+   phase: 'finished',
+   action,
+   willRetry: parsed.data.willRetry ?? false
+  };
+
+  if (aborted) {
+   output.onStructuredEvent({ ...base, outcome: 'aborted' });
+  } else if (skipped) {
+   output.onStructuredEvent({
+    ...base,
+    outcome: 'skipped',
+    ...(errorMessage ? { message: errorMessage } : {})
+   });
+  } else if (errorMessage) {
+   output.onStructuredEvent({ ...base, outcome: 'failed', errorMessage });
+  } else {
+   const result = summarizeCompactionResult(parsed.data.result);
+   output.onStructuredEvent({
+    ...base,
+    outcome: 'completed',
+    ...(result ? { result } : {})
+   });
+  }
+  this.callbacks.onInkMessage('OMP compaction finished', 'status');
+ }
+
+ private handleNotice(output: OmpEventProjection, raw: JsonObject): void {
+  const parsed = z.object({
+   level: z.string(),
+   message: z.string(),
+   source: z.string().optional()
+  }).safeParse(raw);
+  if (!parsed.success) {
+   this.invalidEvent('notice', parsed.error);
+   return;
+  }
+  // Persistence relocation changes the native ID/file during a live turn.
+  // Query OMP's authoritative state now, even if notice display is filtered.
+  if (parsed.data.source === 'session-persistence'
+   && (raw.reason === 'open-elsewhere' || raw.reason === 'replaced' || raw.reason === 'contested')
+   && typeof raw.from === 'string' && typeof raw.to === 'string') {
+   this.callbacks.onSessionInfoUpdate();
+  }
+  output.onStructuredEvent({
+   type: 'omp-notice',
+   level: parsed.data.level,
+   message: parsed.data.message,
+   source: parsed.data.source,
+   frame: raw
+  });
+  this.callbacks.onInkMessage(`[${parsed.data.level}] ${parsed.data.message}`, 'status');
+ }
+
+ private handleCommandOutput(output: OmpEventProjection, raw: JsonObject): void {
+  const parsed = z.object({ text: z.string() }).safeParse(raw);
+  if (!parsed.success) {
+   this.invalidEvent('command_output', parsed.error);
+   return;
+  }
+  output.onStructuredEvent({ type: 'omp-command-output', text: parsed.data.text, frame: raw });
+  this.callbacks.onInkMessage(parsed.data.text, 'status');
+ }
+
+ private handleExtensionError(output: OmpEventProjection, raw: JsonObject): void {
+  const error = typeof raw.error === 'string' ? raw.error : JSON.stringify(raw.error ?? raw);
+  output.onStructuredEvent({ type: 'omp-extension-error', message: error, frame: raw });
+  this.callbacks.onDiagnostic(`OMP extension error: ${error}`);
+ }
+
+ private handleRpcFrameError(output: OmpEventProjection, raw: JsonObject): void {
+  const error = typeof raw.error === 'string' ? raw.error : 'RPC frame exceeded the transport limit';
+  const originalType = typeof raw.originalType === 'string' ? raw.originalType : undefined;
+  output.onStructuredEvent({
+   type: 'omp-rpc-warning',
+   eventType: originalType ?? 'rpc_frame_error',
+   warning: originalType ? `OMP frame too large: ${originalType.replaceAll('_', ' ')}` : error,
+   frame: raw
+  });
+  this.callbacks.onDiagnostic(`OMP rpc_frame_error: ${error}`);
+ }
+
+ private handleThinkingLevelChanged(raw: JsonObject): void {
+  const parsed = z.object({
+   thinkingLevel: z.enum([
+    'inherit',
+    'off',
+    'minimal',
+    'low',
+    'medium',
+    'high',
+    'xhigh',
+    'max'
+   ]).optional(),
+   configured: z.union([
+    z.enum([
+     'inherit',
+     'off',
+     'minimal',
+     'low',
+     'medium',
+     'high',
+     'xhigh',
+     'max'
+    ]),
+    z.literal('auto')
+   ]).optional(),
+   resolved: z.enum(['minimal', 'low', 'medium', 'high', 'xhigh', 'max']).optional()
+  }).safeParse(raw);
+  if (!parsed.success) {
+   this.invalidEvent('thinking_level_changed', parsed.error);
+   return;
+  }
+  this.callbacks.onThinkingStateChanged(parsed.data);
+ }
+
+ private handleSubagentLifecycle(output: OmpEventProjection, raw: JsonObject): void {
+  const parsed = SubagentLifecycleSchema.safeParse(raw);
+  if (!parsed.success) {
+   this.invalidEvent('subagent_lifecycle', parsed.error);
+   return;
+  }
+  const payload = parsed.data.payload;
+  const state = this.ensureSubagent({
+   ...payload,
+   startedAt: Date.now()
+  }, output.nativeOrder);
+  if (payload.status === 'started') {
+   this.emitSubagentStart(output, state);
+   return;
+  }
+  state.terminalStatus = payload.status;
+  this.emitSubagentTerminal(output, state, payload.status);
+ }
+
+ private handleSubagentProgress(output: OmpEventProjection, raw: JsonObject): void {
+  const parsed = SubagentProgressSchema.safeParse(raw);
+  if (!parsed.success) {
+   this.invalidEvent('subagent_progress', parsed.error);
+   return;
+  }
+  const payload = parsed.data.payload;
+  const progressId = typeof payload.progress.id === 'string' ? payload.progress.id : null;
+  if (!progressId) {
+   this.callbacks.onDiagnostic('Invalid OMP subagent_progress: progress.id is missing');
+   return;
+  }
+  const state = this.ensureSubagent({
+   id: progressId,
+   agent: payload.agent,
+   agentSource: payload.agentSource,
+   index: payload.index,
+   task: payload.task,
+   assignment: payload.assignment,
+   sessionFile: payload.sessionFile,
+   parentToolCallId: payload.parentToolCallId,
+   startedAt: Date.now()
+  }, output.nativeOrder);
+  this.emitSubagentStart(output, state);
+  const status = typeof payload.progress.status === 'string' ? payload.progress.status : 'running';
+  this.emitSubagentProgress(output, state, payload.progress, status);
+ }
+
+ private handleSubagentEvent(output: OmpEventProjection, raw: JsonObject): void {
+  const parsed = SubagentEventSchema.safeParse(raw);
+  if (!parsed.success) {
+   this.invalidEvent('subagent_event', parsed.error);
+   return;
+  }
+  const state = this.subagents.get(parsed.data.payload.id);
+  if (!state) {
+   this.callbacks.onDiagnostic(`OMP subagent_event has no registry entry: ${parsed.data.payload.id}`);
+   return;
+  }
+  const childEvent = parsed.data.payload.event;
+  if (childEvent.type === 'message_end') {
+   const message = JsonObjectSchema.safeParse(childEvent.message);
+   if (message.success) {
+    this.emitSubagentMessage(output, state, message.data);
+    return;
+   }
+  }
+  if (childEvent.type === 'tool_execution_start') {
+   this.emitSubagentToolLifecycle(output, state, childEvent, 'in_progress');
+   return;
+  }
+  if (childEvent.type === 'tool_execution_update') {
+   // Same duplicate-row guard as handleToolUpdate.
+   if (typeof childEvent.toolCallId === 'string' && this.inProgressToolCards.has(`${state.id}:${childEvent.toolCallId}`)) return;
+   this.emitSubagentToolLifecycle(output, state, childEvent, 'in_progress');
+   return;
+  }
+  if (childEvent.type === 'tool_execution_end') {
+   this.emitSubagentToolLifecycle(output,
+    state,
+    childEvent,
+    childEvent.isError === true ? 'failed' : 'completed'
+   );
+   return;
+  }
+  if (childEvent.type === 'notice' && typeof childEvent.message === 'string') {
+   this.emitSubagentTrace(output, state, { type: 'error', message: childEvent.message });
+   return;
+  }
+  if (
+   childEvent.type === 'auto_retry_start'
+   || childEvent.type === 'auto_retry_end'
+   || childEvent.type === 'retry_fallback_applied'
+   || childEvent.type === 'retry_fallback_succeeded'
+  ) {
+   this.emitSubagentTrace(output, state, {
+    type: 'error',
+    message: `OMP ${String(childEvent.type)}: ${JSON.stringify(childEvent)}`
+   });
+   return;
+  }
+ }
+
+ private emitSubagentMessage(output: OmpEventProjection, state: SubagentState, message: JsonObject): void {
+  const signature = this.subagentMessageSignature(message);
+  if (state.seenMessages.has(signature)) return;
+  state.seenMessages.add(signature);
+
+  const assistant = AssistantMessageSchema.safeParse(message);
+  if (assistant.success) {
+   const model = `${assistant.data.provider}/${assistant.data.model}`;
+   let pendingUsage: AgentUsage | undefined = this.toAgentUsage(assistant.data.usage);
+   const takeUsage = (): AgentUsage | undefined => {
+    const next = pendingUsage;
+    pendingUsage = undefined;
+    return next;
+   };
+   const assistantText = this.textFromContent(assistant.data.content);
+   if (assistantText.length > 0) {
+    state.lastResultText = assistantText;
+   }
+   for (const block of assistant.data.content) {
+    if (block.type === 'text' && typeof block.text === 'string' && block.text.length > 0) {
+     const usage = takeUsage();
+     this.emitSubagentTrace(output, state, {
+      type: 'text',
+      text: block.text,
+      model,
+      ...(usage ? { usage } : {})
+     });
+    } else if (block.type === 'thinking' && typeof block.thinking === 'string' && block.thinking.length > 0) {
+     const usage = takeUsage();
+     this.emitSubagentTrace(output, state, {
+      type: 'reasoning',
+      text: block.thinking,
+      model,
+      ...(usage ? { usage } : {})
+     });
+    } else if (
+     block.type === 'toolCall'
+     && typeof block.id === 'string'
+     && typeof block.name === 'string'
+    ) {
+     const cardKey = `${state.id}:${block.id}`;
+     if (!this.inProgressToolCards.has(cardKey)) {
+      this.trackInProgressCard(output, cardKey, 'in_progress');
+      const usage = takeUsage();
+      this.emitSubagentTrace(output, state, {
+       type: 'tool_call',
+       id: block.id,
+       name: block.name,
+       input: block.arguments,
+       status: 'in_progress',
+       model,
+       ...(usage ? { usage } : {})
+      });
+     }
     }
+   }
+   if (assistant.data.errorMessage) {
+    this.emitSubagentTrace(output, state, { type: 'error', message: assistant.data.errorMessage });
+   }
+   if (state.terminalStatus) {
+    this.emitSubagentTerminal(output, state, state.terminalStatus);
+   }
+   return;
+  }
 
-    private handleKnown(output: OmpEventProjection, event: OmpKnownEvent): void {
-        switch (event.type) {
-            case 'agent_start':
-                this.callbacks.onTurnStarted();
-                return;
-            case 'agent_end':
-                this.reconcileBoundary('agent_end');
-                this.callbacks.onTurnFinished();
-                return;
-            case 'turn_start':
-            case 'tool_stream_update':
-            case 'config_warnings_changed':
-            case 'advisor_cost_changed':
-            case 'advisor_yielded':
-                return;
-            case 'turn_end':
-                this.reconcileBoundary('turn_end');
-                return;
-            case 'message_start':
-                this.handleMessageStart(event.raw);
-                return;
-            case 'message_update':
-                this.handleMessageUpdate(event.raw);
-                return;
-            case 'message_end':
-                this.handleMessageEnd(output, event.raw);
-                return;
-            case 'tool_execution_start':
-                this.handleToolStart(output, event.raw);
-                return;
-            case 'tool_execution_update':
-                this.handleToolUpdate(output, event.raw);
-                return;
-            case 'tool_execution_end':
-                this.handleToolEnd(output, event.raw);
-                return;
-            case 'prompt_result': {
-                const parsed = z.object({
-                    agentInvoked: z.boolean(),
-                    status: z.string().optional(),
-                    error: z.object({ message: z.string().optional() }).passthrough().optional()
-                }).safeParse(event.raw);
-                if (parsed.success) {
-                    const { agentInvoked, status, error } = parsed.data;
-                    // Runs that reached the agent report provider errors in their own assistant message.
-                    const failure = !agentInvoked && status === 'error'
-                        ? (error?.message?.trim() || 'OMP reported an error without a message')
-                        : undefined;
-                    this.callbacks.onPromptResult(agentInvoked, failure);
-                } else {
-                    this.invalidEvent(event.type, parsed.error);
-                }
-                return;
-            }
-            case 'notice':
-                this.handleNotice(output, event.raw);
-                return;
-            case 'auto_retry_start':
-                this.handleRetryEvent(output, event.raw, 'started');
-                return;
-            case 'auto_retry_end':
-                this.handleRetryEvent(output, event.raw, 'finished');
-                return;
-            case 'retry_fallback_applied':
-                this.handleRetryEvent(output, event.raw, 'fallback-applied');
-                return;
-            case 'retry_fallback_succeeded':
-                this.handleRetryEvent(output, event.raw, 'fallback-succeeded');
-                return;
-            case 'auto_compaction_start':
-                this.handleCompactionStart(output, event.raw);
-                return;
-            case 'auto_compaction_end':
-                this.handleCompactionEnd(output, event.raw);
-                return;
-            case 'thinking_level_changed':
-                this.handleThinkingLevelChanged(event.raw);
-                return;
-            case 'available_commands_update': {
-                const parsed = AvailableCommandsUpdateSchema.safeParse(event.raw);
-                if (!parsed.success) {
-                    this.invalidEvent('available_commands_update', parsed.error);
-                    return;
-                }
-                this.callbacks.onAvailableCommandsChanged(parsed.data.commands);
-                return;
-            }
-            case 'session_info_update':
-            case 'config_update':
-                this.callbacks.onSessionInfoUpdate();
-                return;
-            case 'ttsr_triggered':
-            case 'todo_reminder':
-            case 'todo_auto_clear':
-            case 'irc_message':
-            case 'goal_updated':
-            case 'model_changed':
-                output.onStructuredEvent({
-                    type: 'omp-session-event',
-                    eventType: event.type,
-                    frame: event.raw
-                });
-                this.callbacks.onSessionInfoUpdate();
-                return;
-            case 'command_output':
-                this.handleCommandOutput(output, event.raw);
-                return;
-            case 'extension_error':
-                this.handleExtensionError(output, event.raw);
-                return;
-            case 'rpc_frame_error':
-                this.handleRpcFrameError(output, event.raw);
-                return;
-            case 'subagent_lifecycle':
-                this.handleSubagentLifecycle(output, event.raw);
-                return;
-            case 'subagent_progress':
-                this.handleSubagentProgress(output, event.raw);
-                return;
-            case 'subagent_event':
-                this.handleSubagentEvent(output, event.raw);
-                return;
-            case 'extension_ui_request':
-            case 'host_tool_call':
-            case 'host_tool_cancel':
-            case 'host_uri_request':
-            case 'host_uri_cancel':
-                this.callbacks.onHostEvent({ type: event.type, raw: event.raw });
-                return;
-        }
-        const exhaustive: never = event.type;
-        return exhaustive;
-    }
+  const toolResult = ToolResultMessageSchema.safeParse(message);
+  if (toolResult.success) {
+   this.emitSubagentTrace(output, state, {
+    type: 'tool_result',
+    id: toolResult.data.toolCallId,
+    output: {
+     content: toolResult.data.content,
+     details: toolResult.data.details
+    },
+    status: toolResult.data.isError ? 'failed' : 'completed'
+   });
+   state.tools.delete(toolResult.data.toolCallId);
+   this.inProgressToolCards.delete(`${state.id}:${toolResult.data.toolCallId}`);
+  }
+ }
 
-    private handleMessageStart(raw: JsonObject): void {
-        const parsed = MessageStartSchema.safeParse(raw);
-        if (!parsed.success) {
-            this.invalidEvent('message_start', parsed.error);
-            return;
-        }
-        if (this.activeMessage) {
-            this.callbacks.onDiagnostic(
-                `OMP message_start replaced unfinished ${String(this.activeMessage.role ?? 'unknown')} message`
-            );
-        }
-        this.activeMessage = {
-            displayId: randomUUID(),
-            role: parsed.data.message.role,
-            snapshot: parsed.data.message
-        };
-    }
+ private emitSubagentToolLifecycle(output: OmpEventProjection,
+  state: SubagentState,
+  event: JsonObject,
+  status: Extract<AgentMessage, { type: 'tool_call' }>['status']
+ ): void {
+  if (
+   typeof event.toolCallId !== 'string'
+   || typeof event.toolName !== 'string'
+  ) {
+   this.callbacks.onDiagnostic(`Invalid OMP subagent tool event: ${JSON.stringify(event)}`);
+   return;
+  }
+  const existing = state.tools.get(event.toolCallId);
+  const tool: ToolLifecycle = {
+   id: event.toolCallId,
+   name: existing?.name ?? event.toolName,
+   args: existing?.args ?? event.args ?? {},
+   partialResult: event.partialResult ?? existing?.partialResult,
+   executionResult: event.result ?? existing?.executionResult,
+   executionFailed: event.isError === true || existing?.executionFailed
+  };
+  state.tools.set(tool.id, tool);
+  const cardKey = `${state.id}:${tool.id}`;
+  if (status === 'in_progress') {
+   if (this.inProgressToolCards.has(cardKey)) {
+    return;
+   }
+   this.trackInProgressCard(output, cardKey, status);
+  } else if (this.inProgressToolCards.delete(cardKey)) {
+   return;
+  }
+  this.emitSubagentTrace(output, state, {
+   type: 'tool_call',
+   id: tool.id,
+   name: tool.name,
+   input: tool.args,
+   status
+  });
+ }
 
-    private handleMessageUpdate(raw: JsonObject): void {
-        const parsed = MessageUpdateSchema.safeParse(raw);
-        if (!parsed.success) {
-            this.invalidEvent('message_update', parsed.error);
-            return;
-        }
-        if (!this.activeMessage) {
-            this.callbacks.onDiagnostic('OMP message_update arrived without message_start; allocated a display UUID');
-            this.activeMessage = {
-                displayId: randomUUID(),
-                role: parsed.data.message.role,
-                snapshot: parsed.data.message
-            };
-        } else {
-            this.activeMessage = {
-                ...this.activeMessage,
-                role: parsed.data.message.role,
-                snapshot: parsed.data.message
-            };
-        }
+ /** Remembers which tool cards are already shown as running, so updates do not repeat them. */
+ private trackInProgressCard(output: OmpEventProjection, key: string, status: Extract<AgentMessage, { type: 'tool_call' }>['status']): void {
+  if (status !== 'in_progress') {
+   this.inProgressToolCards.delete(key);
+  } else if (output.enabled) {
+   this.inProgressToolCards.add(key);
+  }
+ }
 
-        const { type, delta } = parsed.data.assistantMessageEvent;
-        if (!delta) return;
-        if (type === 'text_delta') {
-            this.callbacks.onInkMessage(delta, 'assistant');
-        } else if (type === 'thinking_delta') {
-            this.callbacks.onInkMessage(`[Thinking] ${delta}`, 'system');
-        }
-    }
+ private ensureSubagent(input: {
+  id: string;
+  agent: string;
+  agentSource: string;
+  index: number;
+  startedAt: number;
+  description?: string;
+  task?: string;
+  assignment?: string;
+  sessionFile?: string;
+  parentToolCallId?: string;
+ }, parentOrder?: OmpNativeOrder): SubagentState {
+  const existing = this.subagents.get(input.id);
+  if (existing) {
+   existing.description = input.description ?? existing.description;
+   existing.task = input.task ?? existing.task;
+   existing.assignment = input.assignment ?? existing.assignment;
+   existing.sessionFile = input.sessionFile ?? existing.sessionFile;
+   existing.parentToolCallId = input.parentToolCallId ?? existing.parentToolCallId;
+   existing.parentOrder ??= parentOrder;
+   return existing;
+  }
+  const state: SubagentState = {
+   ...input,
+   cardId: `omp-subagent:${input.id}`,
+   startEmitted: false,
+   seenMessages: new Set(),
+   tools: new Map(),
+   parentOrder
+  };
+  this.subagents.set(input.id, state);
+  return state;
+ }
 
-    private handleMessageEnd(output: OmpEventProjection, raw: JsonObject): void {
-        const event = MessageEndSchema.safeParse(raw);
-        if (!event.success) {
-            this.invalidEvent('message_end', event.error);
-            return;
-        }
+ private emitSubagentStart(output: OmpEventProjection, state: SubagentState): void {
+  if (!output.enabled || state.startEmitted) return;
+  state.startEmitted = true;
+  const summary = state.description ?? state.assignment ?? state.task ?? state.agent;
+  output.onAgentRunEvent({
+   type: 'agent-run-start',
+   agentId: state.id,
+   cardId: state.cardId,
+   startedAt: state.startedAt,
+   status: 'running',
+   statusText: 'Running',
+   activity: 'Starting',
+   activityKind: 'starting',
+   summary,
+   parentToolCallId: state.parentToolCallId,
+   input: {
+    agent: state.agent,
+    agentSource: state.agentSource,
+    index: state.index,
+    description: state.description,
+    task: state.task,
+    assignment: state.assignment,
+    parentToolCallId: state.parentToolCallId,
+    sessionFile: state.sessionFile
+   }
+  });
+ }
 
-        const displayId = this.activeMessage?.displayId ?? randomUUID();
-        if (!this.activeMessage) {
-            this.callbacks.onDiagnostic('OMP message_end arrived without message_start; allocated a display UUID');
-        }
-        this.activeMessage = null;
+ private emitSubagentProgress(output: OmpEventProjection, state: SubagentState, progress: JsonObject, status: string): void {
+  const retryState = RetryStateSchema.safeParse(progress.retryState);
+  const retryFailure = RetryFailureSchema.safeParse(progress.retryFailure);
+  const yieldedResult = this.subagentYieldResult(progress);
+  if (yieldedResult !== undefined) {
+   state.lastResultText = yieldedResult;
+  }
+  const currentTool = typeof progress.currentTool === 'string' ? progress.currentTool : null;
+  const activity = retryState.success
+   ? `Retrying provider request (${retryState.data.attempt}/${retryState.data.maxAttempts})`
+   : currentTool
+    ? `Using ${currentTool}`
+    : status === 'running' ? 'Running' : status;
+  const activityKind = retryState.success ? 'retry' : currentTool ? 'tool' : status;
+  const summary = state.description ?? state.assignment ?? state.task ?? state.agent;
+  const signature = JSON.stringify({
+   status,
+   activity,
+   activityKind,
+   summary,
+   parentToolCallId: state.parentToolCallId ?? null,
+   retryState: retryState.success ? retryState.data : null,
+   retryFailure: retryFailure.success ? retryFailure.data : null
+  });
+  if (status === 'running' && state.lastProgressSignature === signature) {
+   return;
+  }
+  if (output.enabled) {
+   state.lastProgressSignature = signature;
+  }
+  output.onAgentRunEvent({
+   type: 'agent-run-update',
+   agentId: state.id,
+   cardId: state.cardId,
+   startedAt: state.startedAt,
+   status,
+   statusText: activity,
+   activity,
+   activityKind,
+   summary,
+   parentToolCallId: state.parentToolCallId,
+   progress,
+   retryState: retryState.success ? retryState.data : undefined,
+   retryFailure: retryFailure.success ? retryFailure.data : undefined,
+   result: status === 'completed' ? state.lastResultText : undefined
+  });
+ }
 
-        const assistant = AssistantMessageSchema.safeParse(event.data.message);
-        if (assistant.success) {
-            this.commitAssistant(output, displayId, assistant.data);
-            return;
-        }
+ private emitSubagentTerminal(output: OmpEventProjection, state: SubagentState, status: string): void {
+  state.lastProgressSignature = undefined;
+  const normalizedStatus = status === 'aborted' ? 'canceled' : status;
+  const activity = normalizedStatus === 'completed'
+   ? 'Completed'
+   : normalizedStatus === 'canceled' ? 'Canceled' : 'Failed';
+  output.onAgentRunEvent({
+   type: 'agent-run-update',
+   agentId: state.id,
+   cardId: state.cardId,
+   startedAt: state.startedAt,
+   completedAt: Date.now(),
+   status: normalizedStatus,
+   statusText: activity,
+   activity,
+   activityKind: normalizedStatus,
+   summary: state.description ?? state.assignment ?? state.task ?? state.agent,
+   parentToolCallId: state.parentToolCallId,
+   result: state.lastResultText
+  });
+ }
 
-        const toolResult = ToolResultMessageSchema.safeParse(event.data.message);
-        if (toolResult.success) {
-            this.commitToolResult(output, displayId, toolResult.data);
-            return;
-        }
+ private subagentYieldResult(progress: JsonObject): string | undefined {
+  const extracted = progress.extractedToolData;
+  if (extracted === null || Array.isArray(extracted) || typeof extracted !== 'object') {
+   return undefined;
+  }
+  const yields = extracted.yield;
+  if (!Array.isArray(yields)) return undefined;
 
-        const user = UserMessageSchema.safeParse(event.data.message);
-        if (user.success) {
-            this.callbacks.onUserMessageCommitted(user.data.steering === true);
-            return;
-        }
+  for (let index = yields.length - 1; index >= 0; index -= 1) {
+   const entry = yields[index];
+   if (entry === null || Array.isArray(entry) || typeof entry !== 'object') continue;
+   if (entry.status === 'success' && typeof entry.data === 'string' && entry.data.length > 0) {
+    return entry.data;
+   }
+  }
+  return undefined;
+ }
 
-        const role = event.data.message.role;
-        if (role === 'custom') {
-            this.handleCustomMessage(output, event.data.message, raw);
-            return;
-        }
-        if (role !== 'developer') {
-            this.callbacks.onDiagnostic(`Unsupported OMP message_end role: ${String(role)}`);
-        }
-    }
+ private emitSubagentTrace(output: OmpEventProjection, state: SubagentState, message: AgentMessage): void {
+  this.emitSubagentStart(output, state);
+  output.onAgentRunTrace({
+   agentId: state.id,
+   cardId: state.cardId,
+   parentToolCallId: state.parentToolCallId,
+   startedAt: state.startedAt
+  }, message);
+ }
 
-    /**
-     * OMP injects its own messages with role "custom": background job results (async-result),
-     * todo nudges, resolve reminders. Only the ones OMP marks display:true are meant for the user;
-     * show their first sentence as a notice (the body can be a whole command output) and keep the
-     * rest out of the chat.
-     */
-    private handleCustomMessage(output: OmpEventProjection, message: JsonObject, raw: JsonObject): void {
-        if (message.display !== true) return;
-        const text = typeof message.content === 'string' ? summarizeCustomMessage(message.content) : '';
-        if (!text) return;
-        output.onStructuredEvent({
-            type: 'omp-notice',
-            level: 'info',
-            message: text,
-            source: typeof message.customType === 'string' ? message.customType : undefined,
-            frame: raw
-        });
-    }
+ private subagentMessageSignature(message: JsonObject): string {
+  const responseId = typeof message.responseId === 'string' ? message.responseId : null;
+  if (responseId) return `response:${responseId}`;
+  if (message.role === 'toolResult' && typeof message.toolCallId === 'string') {
+   return `toolResult:${message.toolCallId}:${JSON.stringify(message.content)}`;
+  }
+  return JSON.stringify(message);
+ }
 
-    private commitAssistant(output: OmpEventProjection, 
-        displayId: string,
-        assistant: z.infer<typeof AssistantMessageSchema>
-    ): void {
-        const modelLabel = `${assistant.provider}/${assistant.model}`;
-        const usage = this.toAgentUsage(assistant.usage);
-        const content = assistant.content.flatMap((block): JsonObject[] => {
-            if (block.type === 'text' && typeof block.text === 'string' && block.text.length > 0) {
-                return [{ type: 'text', text: block.text }];
-            }
-            if (block.type === 'thinking' && typeof block.thinking === 'string' && block.thinking.length > 0) {
-                return [{ type: 'thinking', thinking: block.thinking }];
-            }
-            if (
-                block.type === 'toolCall'
-                && typeof block.id === 'string'
-                && typeof block.name === 'string'
-                && block.arguments !== null
-                && typeof block.arguments === 'object'
-                && !Array.isArray(block.arguments)
-            ) {
-                return [{
-                    type: 'tool_use',
-                    id: block.id,
-                    name: block.name,
-                    input: block.arguments
-                }];
-            }
-            // Empty thinking blocks (encrypted provider reasoning) carry nothing to show.
-            if (!['image', 'redactedThinking', 'fallback', 'thinking'].includes(String(block.type))) {
-                this.callbacks.onDiagnostic(`Unknown OMP assistant content block: ${String(block.type)}`);
-            }
-            return [];
-        });
+ private reconcileBoundary(boundary: 'turn_end' | 'agent_end'): void {
+  if (!this.activeMessage) return;
+  this.#abortRuntimeItem(this.activeMessage.displayId);
+  this.callbacks.onDiagnostic(`OMP ${boundary} reconciled an unfinished assistant message`);
+  this.#commitUnfinishedAssistant(this.#runtimeLastStopReason === 'error' ? 'error' : 'aborted');
+ }
 
-        const parentUuid = this.lastDisplayId;
-        // Stamp at commit time, NOT with omp's message timestamp: omp sets it to
-        // the turn/model-request start, several seconds before the response exists.
-        // The hub compares this value against the hub-receive time of the user's
-        // prompt, so a runner clock even ~40ms behind the hub clock made the first
-        // assistant message of every turn sort ABOVE the request in the web chat.
-        // Commit time keeps the display order causal regardless of clock skew.
-        const timestamp = new Date().toISOString();
-        output.onCanonicalMessage({
-            type: 'assistant',
-            uuid: displayId,
-            parentUuid,
-            isSidechain: false,
-            providerMessageId: assistant.responseId,
-            timestamp,
-            message: {
-                role: 'assistant',
-                content,
-                model: modelLabel,
-                usage: {
-                    input_tokens: assistant.usage.input,
-                    output_tokens: assistant.usage.output,
-                    cache_creation_input_tokens: assistant.usage.cacheWrite,
-                    cache_read_input_tokens: assistant.usage.cacheRead,
-                    reasoning_output_tokens: assistant.usage.reasoningTokens,
-                    cost_usd: assistant.usage.cost.total
-                }
-            }
-        });
-        if (output.enabled) this.lastDisplayId = displayId;
-        output.onAgentMessage({ type: 'usage', ...usage });
-        if (assistant.errorMessage) {
-            output.onAgentMessage({ type: 'error', message: assistant.errorMessage });
-        }
-    }
+ /** External abort is control state, never a presentation event. */
+ noteExternalAbort(): void {
+  this.#endRuntimeRun('aborted', 'aborted');
+ }
 
-    private commitToolResult(output: OmpEventProjection, 
-        displayId: string,
-        toolResult: z.infer<typeof ToolResultMessageSchema>
-    ): void {
-        const parentUuid = this.lastDisplayId;
-        const timestamp = new Date(toolResult.timestamp ?? Date.now()).toISOString();
-        const toolOutput = {
-            toolName: toolResult.toolName,
-            content: toolResult.content,
-            details: toolResult.details
-        };
-        output.onCanonicalMessage({
-            type: 'user',
-            uuid: displayId,
-            parentUuid,
-            isSidechain: false,
-            timestamp,
-            message: {
-                role: 'user',
-                content: [{
-                    type: 'tool_result',
-                    tool_use_id: toolResult.toolCallId,
-                    content: toolOutput,
-                    is_error: toolResult.isError
-                }]
-            },
-            toolUseResult: toolOutput
-        });
-        if (output.enabled) this.lastDisplayId = displayId;
-        this.tools.delete(toolResult.toolCallId);
-        this.callbacks.onInkMessage(
-            this.textFromContent(toolResult.content) || `Tool ${toolResult.toolName} finished`,
-            'result'
-        );
-    }
+ noteRuntimeFailure(errorMessage?: string): void {
+  this.#endRuntimeRun('error', 'error', errorMessage);
+ }
 
-    private handleToolStart(output: OmpEventProjection, raw: JsonObject): void {
-        const parsed = ToolStartSchema.safeParse(raw);
-        if (!parsed.success) {
-            this.invalidEvent('tool_execution_start', parsed.error);
-            return;
-        }
-        const tool: ToolLifecycle = {
-            id: parsed.data.toolCallId,
-            name: parsed.data.toolName,
-            args: parsed.data.args
-        };
-        this.tools.set(tool.id, tool);
-        if (!this.inProgressToolCards.has(tool.id)) {
-            this.emitToolLifecycle(output, tool, 'in_progress');
-        }
-        this.callbacks.onInkMessage(`Tool call: ${tool.name}`, 'tool');
-    }
+ closeRuntime(): void {
+  this.#commitUnfinishedAssistant(this.#runtimeLastStopReason === 'error' ? 'error' : 'aborted');
+  this.#endRuntimeRun('aborted', 'aborted');
+  this.#runtimeProducer?.dispose();
+ }
 
-    private handleToolUpdate(output: OmpEventProjection, raw: JsonObject): void {
-        const parsed = ToolUpdateSchema.safeParse(raw);
-        if (!parsed.success) {
-            this.invalidEvent('tool_execution_update', parsed.error);
-            return;
-        }
-        const existing = this.tools.get(parsed.data.toolCallId);
-        const tool: ToolLifecycle = {
-            id: parsed.data.toolCallId,
-            name: existing?.name ?? parsed.data.toolName,
-            args: existing?.args ?? parsed.data.args,
-            partialResult: parsed.data.partialResult,
-            executionResult: existing?.executionResult,
-            executionFailed: existing?.executionFailed
-        };
-        this.tools.set(tool.id, tool);
-        // The card carries no partial output, so each update used to store a row
-        // identical to the start one: a 15-minute `wait` wrote ~900 copies, and
-        // one maa-agent session held 173k such rows out of 180k.
-        if (this.inProgressToolCards.has(tool.id)) return;
-        this.emitToolLifecycle(output, tool, 'in_progress');
-    }
+ #emitRuntime(changes: RuntimeChange[]): void {
+  this.#runtimeProducer?.push(changes);
+ }
 
-    private handleToolEnd(output: OmpEventProjection, raw: JsonObject): void {
-        const parsed = ToolEndSchema.safeParse(raw);
-        if (!parsed.success) {
-            this.invalidEvent('tool_execution_end', parsed.error);
-            return;
-        }
-        const existing = this.tools.get(parsed.data.toolCallId);
-        const tool: ToolLifecycle = {
-            id: parsed.data.toolCallId,
-            name: parsed.data.toolName,
-            args: existing?.args ?? {},
-            partialResult: existing?.partialResult,
-            executionResult: parsed.data.result,
-            executionFailed: parsed.data.isError === true
-        };
-        this.tools.set(tool.id, tool);
-        if (this.inProgressToolCards.delete(tool.id)) {
-            return;
-        }
-        this.emitToolLifecycle(output, tool, tool.executionFailed ? 'failed' : 'completed');
-    }
+ /** Only agent_start opens a subsequent run; late callbacks retain the old
+  *  terminal run id and cannot manufacture a new live run. */
+ #ensureRuntimeRun(): string {
+  if (this.#runtimeRunId === null) this.#beginRuntimeRun();
+  return this.#runtimeRunId!;
+ }
 
-    private emitToolLifecycle(output: OmpEventProjection, tool: ToolLifecycle, status: Extract<AgentMessage, { type: 'tool_call' }>['status']): void {
-        this.trackInProgressCard(output, tool.id, status);
-        output.onAgentMessage({
-            type: 'tool_call',
-            id: tool.id,
-            name: tool.name,
-            input: tool.args,
-            status
-        });
-    }
+ #beginRuntimeRun(): void {
+  if (this.#runtimeRunId !== null) {
+   this.#commitUnfinishedAssistant(this.#runtimeLastStopReason === 'error' ? 'error' : 'aborted');
+   if (!this.#runtimeRunTerminal) this.#endRuntimeRun('aborted', 'aborted');
+   this.activeMessage = null;
+   this.#runtimeItems.clear();
+  }
+  this.#runtimeRunId = `run:${randomUUID()}`;
+  this.#runtimeRunStartedAt = Date.now();
+  this.#runtimeRunTerminal = false;
+  this.#runtimeLastStopReason = null;
+  this.#runtimeLastErrorMessage = null;
+  this.#emitRuntime([{
+   type: 'run', run: {
+    id: this.#runtimeRunId, state: 'running', startedAt: this.#runtimeRunStartedAt
+   }
+  }]);
+ }
 
-    private handleRetryEvent(output: OmpEventProjection, raw: JsonObject, phase: string): void {
-        output.onStructuredEvent({ type: 'omp-retry', phase, frame: raw });
-        this.callbacks.onInkMessage(`OMP retry ${phase}`, 'status');
-    }
+ #endRuntimeRun(state: 'idle' | 'error' | 'aborted', stopReason: RuntimeStopReason, errorMessage?: string): void {
+  if (this.#runtimeRunId === null || this.#runtimeRunTerminal) return;
+  const now = Date.now();
+  const changes: RuntimeChange[] = [];
+  for (const [id, prior] of this.#runtimeItems) {
+   if (prior.runId !== this.#runtimeRunId || prior.state !== 'running') continue;
+   const item: RuntimeItem = {
+    ...prior, updatedAt: now,
+    state: state === 'error' ? 'error' : 'aborted',
+    stopReason: state === 'error' ? 'error' : 'aborted',
+    ...(errorMessage ? { errorMessage } : {})
+   };
+   this.#runtimeItems.set(id, item);
+   changes.push({ type: 'item', item });
+  }
+  this.#runtimeLastStopReason = stopReason;
+  this.#runtimeLastErrorMessage = errorMessage ?? this.#runtimeLastErrorMessage;
+  this.#runtimeRunTerminal = true;
+  changes.push({
+   type: 'run', run: {
+    id: this.#runtimeRunId, state, startedAt: this.#runtimeRunStartedAt,
+    endedAt: now, stopReason, ...(errorMessage ? { errorMessage } : {})
+   }
+  });
+  this.#emitRuntime(changes);
+ }
 
-    private handleCompactionStart(output: OmpEventProjection, raw: JsonObject): void {
-        const parsed = CompactionStartEventSchema.safeParse(raw);
-        if (!parsed.success) {
-            this.invalidEvent('auto_compaction_start', parsed.error);
-            return;
-        }
-        output.onStructuredEvent({
-            type: 'omp-compaction',
-            phase: 'started',
-            action: parsed.data.action,
-            reason: parsed.data.reason
-        });
-        this.callbacks.onInkMessage('OMP compaction started', 'status');
-    }
+ /** Only agent_end finishes the run. toolUse ends a message, not a run. */
+ #finishRuntimeRun(): void {
+  const reason = this.#runtimeLastStopReason ?? 'stop';
+  this.#endRuntimeRun(reason === 'aborted' ? 'aborted' : reason === 'error' ? 'error' : 'idle',
+   reason, this.#runtimeLastErrorMessage ?? undefined);
+ }
 
-    private handleCompactionEnd(output: OmpEventProjection, raw: JsonObject): void {
-        const parsed = CompactionEndEventSchema.safeParse(raw);
-        if (!parsed.success) {
-            this.invalidEvent('auto_compaction_end', parsed.error);
-            return;
-        }
+ #abortRuntimeItem(itemId: string): void {
+  const prior = this.#runtimeItems.get(itemId);
+  if (!prior || prior.state !== 'running') return;
+  const item: RuntimeItem = { ...prior, updatedAt: Date.now(), state: 'aborted', stopReason: 'aborted' };
+  this.#recordRuntimeItem(item);
+ }
 
-        const { action, aborted, errorMessage, skipped } = parsed.data;
-        const base: OmpCompactionFinishedBase = {
-            type: 'omp-compaction',
-            phase: 'finished',
-            action,
-            willRetry: parsed.data.willRetry ?? false
-        };
+ #runtimeItemBase(id: string, kind: RuntimeItem['kind']): RuntimeItem {
+  const now = Date.now();
+  const prior = this.#runtimeItems.get(id);
+  return {
+   ...prior, id, kind, runId: prior?.runId ?? this.#ensureRuntimeRun(),
+   createdAt: prior?.createdAt ?? now, updatedAt: now, state: 'running'
+  };
+ }
 
-        if (aborted) {
-            output.onStructuredEvent({ ...base, outcome: 'aborted' });
-        } else if (skipped) {
-            output.onStructuredEvent({
-                ...base,
-                outcome: 'skipped',
-                ...(errorMessage ? { message: errorMessage } : {})
-            });
-        } else if (errorMessage) {
-            output.onStructuredEvent({ ...base, outcome: 'failed', errorMessage });
-        } else {
-            const result = summarizeCompactionResult(parsed.data.result);
-            output.onStructuredEvent({
-                ...base,
-                outcome: 'completed',
-                ...(result ? { result } : {})
-            });
-        }
-        this.callbacks.onInkMessage('OMP compaction finished', 'status');
-    }
+ #recordRuntimeItem(item: RuntimeItem): void {
+  // After external abort, even a late message_end cannot revive the run.
+  if (this.#runtimeRunTerminal) return;
+  this.#runtimeItems.set(item.id, item);
+  while (this.#runtimeItems.size > MAX_RUNTIME_ITEMS) {
+   const oldest = this.#runtimeItems.keys().next().value;
+   if (oldest === undefined) break;
+   this.#runtimeItems.delete(oldest);
+  }
+  this.#emitRuntime([{ type: 'item', item }]);
+ }
 
-    private handleNotice(output: OmpEventProjection, raw: JsonObject): void {
-        const parsed = z.object({
-            level: z.string(),
-            message: z.string(),
-            source: z.string().optional()
-        }).safeParse(raw);
-        if (!parsed.success) {
-            this.invalidEvent('notice', parsed.error);
-            return;
-        }
-        // Persistence relocation changes the native ID/file during a live turn.
-        // Query OMP's authoritative state now, even if notice display is filtered.
-        if (parsed.data.source === 'session-persistence'
-            && (raw.reason === 'open-elsewhere' || raw.reason === 'replaced' || raw.reason === 'contested')
-            && typeof raw.from === 'string' && typeof raw.to === 'string') {
-            this.callbacks.onSessionInfoUpdate();
-        }
-        output.onStructuredEvent({
-            type: 'omp-notice',
-            level: parsed.data.level,
-            message: parsed.data.message,
-            source: parsed.data.source,
-            frame: raw
-        });
-        this.callbacks.onInkMessage(`[${parsed.data.level}] ${parsed.data.message}`, 'status');
-    }
+ #emitRuntimeAssistantItem(displayId: string, message: JsonObject, state: RuntimeItem['state']): void {
+  const item = this.#runtimeItemBase(displayId, 'assistant');
+  item.state = state;
+  item.canonicalId = displayId;
+  const content = Array.isArray(message.content) ? message.content : [];
+  const blocks = content.filter((block): block is JsonObject => block !== null && typeof block === 'object' && !Array.isArray(block));
+  item.text = blocks.map(block => block.type === 'text' && typeof block.text === 'string' ? block.text : '').filter(Boolean).join('\n');
+  item.reasoning = blocks.map(block => block.type === 'thinking' && typeof block.thinking === 'string' ? block.thinking : '').filter(Boolean).join('\n');
+  // Tool-only/empty assistant envelopes have no visible body. Their tools and
+  // run status already have their own identities; do not create ghost rows.
+  if (!item.text && !item.reasoning) return;
+  if (typeof message.model === 'string') item.model = message.model;
+  if (typeof message.provider === 'string') item.provider = message.provider;
+  if (state !== 'running') {
+   const parsed = AssistantMessageSchema.safeParse(message);
+   if (parsed.success) {
+    item.stopReason = parsed.data.stopReason;
+    item.errorMessage = parsed.data.errorMessage;
+   }
+  }
+  this.#recordRuntimeItem(item);
+ }
 
-    private handleCommandOutput(output: OmpEventProjection, raw: JsonObject): void {
-        const parsed = z.object({ text: z.string() }).safeParse(raw);
-        if (!parsed.success) {
-            this.invalidEvent('command_output', parsed.error);
-            return;
-        }
-        output.onStructuredEvent({ type: 'omp-command-output', text: parsed.data.text, frame: raw });
-        this.callbacks.onInkMessage(parsed.data.text, 'status');
-    }
+ #emitRuntimeToolItem(
+  toolCallId: string,
+  state: RuntimeItem['state'],
+  extra: { name?: string; input?: unknown; output?: unknown; isError?: boolean; canonicalId?: string } = {}
+ ): void {
+  const item = this.#runtimeItemBase(toolCallId, 'tool');
+  // A delayed progress callback must not overwrite a finished result.
+  const prior = this.#runtimeItems.get(toolCallId);
+  if (prior && prior.state !== 'running' && state === 'running') return;
+  item.state = state;
+  const existing = this.tools.get(toolCallId);
+  item.tool = {
+   ...prior?.tool, id: toolCallId,
+   name: extra.name ?? existing?.name ?? prior?.tool?.name ?? 'tool',
+   input: extra.input ?? existing?.args ?? prior?.tool?.input ?? null,
+   ...(extra.output !== undefined ? { output: extra.output } : {}),
+   ...(extra.isError !== undefined ? { isError: extra.isError } : {})
+  };
+  if (extra.canonicalId) item.canonicalId = extra.canonicalId;
+  this.#recordRuntimeItem(item);
+ }
 
-    private handleExtensionError(output: OmpEventProjection, raw: JsonObject): void {
-        const error = typeof raw.error === 'string' ? raw.error : JSON.stringify(raw.error ?? raw);
-        output.onStructuredEvent({ type: 'omp-extension-error', message: error, frame: raw });
-        this.callbacks.onDiagnostic(`OMP extension error: ${error}`);
-    }
+ #commitUnfinishedAssistant(reason: 'aborted' | 'error'): void {
+  const active = this.activeMessage;
+  this.activeMessage = null;
+  if (!active) return;
+  const parsed = AssistantMessageSchema.safeParse(active.snapshot);
+  if (!parsed.success) return;
+  const previousReason = this.#runtimeLastStopReason;
+  const previousError = this.#runtimeLastErrorMessage;
+  this.commitAssistant(this.projection('message_end', active.nativeOrder), active.displayId, {
+   ...parsed.data, stopReason: reason,
+   errorMessage: previousError ?? parsed.data.errorMessage,
+  });
+  // A missing message boundary is not itself proof that the native run failed.
+  this.#runtimeLastStopReason = previousReason;
+  this.#runtimeLastErrorMessage = previousError;
+ }
 
-    private handleRpcFrameError(output: OmpEventProjection, raw: JsonObject): void {
-        const error = typeof raw.error === 'string' ? raw.error : 'RPC frame exceeded the transport limit';
-        const originalType = typeof raw.originalType === 'string' ? raw.originalType : undefined;
-        output.onStructuredEvent({
-            type: 'omp-rpc-warning',
-            eventType: originalType ?? 'rpc_frame_error',
-            warning: originalType ? `OMP frame too large: ${originalType.replaceAll('_', ' ')}` : error,
-            frame: raw
-        });
-        this.callbacks.onDiagnostic(`OMP rpc_frame_error: ${error}`);
-    }
+ private toAgentUsage(usage: z.infer<typeof UsageSchema>): AgentUsage {
+  return {
+   inputTokens: usage.input,
+   outputTokens: usage.output,
+   totalTokens: usage.totalTokens,
+   thoughtTokens: usage.reasoningTokens,
+   cacheReadTokens: usage.cacheRead,
+   cacheCreationTokens: usage.cacheWrite,
+   costUsd: usage.cost.total
+  };
+ }
 
-    private handleThinkingLevelChanged(raw: JsonObject): void {
-        const parsed = z.object({
-            thinkingLevel: z.enum([
-                'inherit',
-                'off',
-                'minimal',
-                'low',
-                'medium',
-                'high',
-                'xhigh',
-                'max'
-            ]).optional(),
-            configured: z.union([
-                z.enum([
-                    'inherit',
-                    'off',
-                    'minimal',
-                    'low',
-                    'medium',
-                    'high',
-                    'xhigh',
-                    'max'
-                ]),
-                z.literal('auto')
-            ]).optional(),
-            resolved: z.enum(['minimal', 'low', 'medium', 'high', 'xhigh', 'max']).optional()
-        }).safeParse(raw);
-        if (!parsed.success) {
-            this.invalidEvent('thinking_level_changed', parsed.error);
-            return;
-        }
-        this.callbacks.onThinkingStateChanged(parsed.data);
-    }
+ private textFromContent(content: JsonObject[]): string {
+  return content
+   .map((block) => block.type === 'text' && typeof block.text === 'string' ? block.text : '')
+   .filter(Boolean)
+   .join('\n');
+ }
 
-    private handleSubagentLifecycle(output: OmpEventProjection, raw: JsonObject): void {
-        const parsed = SubagentLifecycleSchema.safeParse(raw);
-        if (!parsed.success) {
-            this.invalidEvent('subagent_lifecycle', parsed.error);
-            return;
-        }
-        const payload = parsed.data.payload;
-        const state = this.ensureSubagent({
-            ...payload,
-            startedAt: Date.now()
-        });
-        if (payload.status === 'started') {
-            this.emitSubagentStart(output, state);
-            return;
-        }
-        state.terminalStatus = payload.status;
-        this.emitSubagentTerminal(output, state, payload.status);
-    }
-
-    private handleSubagentProgress(output: OmpEventProjection, raw: JsonObject): void {
-        const parsed = SubagentProgressSchema.safeParse(raw);
-        if (!parsed.success) {
-            this.invalidEvent('subagent_progress', parsed.error);
-            return;
-        }
-        const payload = parsed.data.payload;
-        const progressId = typeof payload.progress.id === 'string' ? payload.progress.id : null;
-        if (!progressId) {
-            this.callbacks.onDiagnostic('Invalid OMP subagent_progress: progress.id is missing');
-            return;
-        }
-        const state = this.ensureSubagent({
-            id: progressId,
-            agent: payload.agent,
-            agentSource: payload.agentSource,
-            index: payload.index,
-            task: payload.task,
-            assignment: payload.assignment,
-            sessionFile: payload.sessionFile,
-            parentToolCallId: payload.parentToolCallId,
-            startedAt: Date.now()
-        });
-        this.emitSubagentStart(output, state);
-        const status = typeof payload.progress.status === 'string' ? payload.progress.status : 'running';
-        this.emitSubagentProgress(output, state, payload.progress, status);
-    }
-
-    private handleSubagentEvent(output: OmpEventProjection, raw: JsonObject): void {
-        const parsed = SubagentEventSchema.safeParse(raw);
-        if (!parsed.success) {
-            this.invalidEvent('subagent_event', parsed.error);
-            return;
-        }
-        const state = this.subagents.get(parsed.data.payload.id);
-        if (!state) {
-            this.callbacks.onDiagnostic(`OMP subagent_event has no registry entry: ${parsed.data.payload.id}`);
-            return;
-        }
-        const childEvent = parsed.data.payload.event;
-        if (childEvent.type === 'message_end') {
-            const message = JsonObjectSchema.safeParse(childEvent.message);
-            if (message.success) {
-                this.emitSubagentMessage(output, state, message.data);
-                return;
-            }
-        }
-        if (childEvent.type === 'tool_execution_start') {
-            this.emitSubagentToolLifecycle(output, state, childEvent, 'in_progress');
-            return;
-        }
-        if (childEvent.type === 'tool_execution_update') {
-            // Same duplicate-row guard as handleToolUpdate.
-            if (typeof childEvent.toolCallId === 'string' && this.inProgressToolCards.has(`${state.id}:${childEvent.toolCallId}`)) return;
-            this.emitSubagentToolLifecycle(output, state, childEvent, 'in_progress');
-            return;
-        }
-        if (childEvent.type === 'tool_execution_end') {
-            this.emitSubagentToolLifecycle(output, 
-                state,
-                childEvent,
-                childEvent.isError === true ? 'failed' : 'completed'
-            );
-            return;
-        }
-        if (childEvent.type === 'notice' && typeof childEvent.message === 'string') {
-            this.emitSubagentTrace(output, state, { type: 'error', message: childEvent.message });
-            return;
-        }
-        if (
-            childEvent.type === 'auto_retry_start'
-            || childEvent.type === 'auto_retry_end'
-            || childEvent.type === 'retry_fallback_applied'
-            || childEvent.type === 'retry_fallback_succeeded'
-        ) {
-            this.emitSubagentTrace(output, state, {
-                type: 'error',
-                message: `OMP ${String(childEvent.type)}: ${JSON.stringify(childEvent)}`
-            });
-            return;
-        }
-    }
-
-    private emitSubagentMessage(output: OmpEventProjection, state: SubagentState, message: JsonObject): void {
-        const signature = this.subagentMessageSignature(message);
-        if (state.seenMessages.has(signature)) return;
-        state.seenMessages.add(signature);
-
-        const assistant = AssistantMessageSchema.safeParse(message);
-        if (assistant.success) {
-            const model = `${assistant.data.provider}/${assistant.data.model}`;
-            let pendingUsage: AgentUsage | undefined = this.toAgentUsage(assistant.data.usage);
-            const takeUsage = (): AgentUsage | undefined => {
-                const next = pendingUsage;
-                pendingUsage = undefined;
-                return next;
-            };
-            const assistantText = this.textFromContent(assistant.data.content);
-            if (assistantText.length > 0) {
-                state.lastResultText = assistantText;
-            }
-            for (const block of assistant.data.content) {
-                if (block.type === 'text' && typeof block.text === 'string' && block.text.length > 0) {
-                    const usage = takeUsage();
-                    this.emitSubagentTrace(output, state, {
-                        type: 'text',
-                        text: block.text,
-                        model,
-                        ...(usage ? { usage } : {})
-                    });
-                } else if (block.type === 'thinking' && typeof block.thinking === 'string' && block.thinking.length > 0) {
-                    const usage = takeUsage();
-                    this.emitSubagentTrace(output, state, {
-                        type: 'reasoning',
-                        text: block.thinking,
-                        model,
-                        ...(usage ? { usage } : {})
-                    });
-                } else if (
-                    block.type === 'toolCall'
-                    && typeof block.id === 'string'
-                    && typeof block.name === 'string'
-                ) {
-                    const cardKey = `${state.id}:${block.id}`;
-                    if (!this.inProgressToolCards.has(cardKey)) {
-                        this.trackInProgressCard(output, cardKey, 'in_progress');
-                        const usage = takeUsage();
-                        this.emitSubagentTrace(output, state, {
-                            type: 'tool_call',
-                            id: block.id,
-                            name: block.name,
-                            input: block.arguments,
-                            status: 'in_progress',
-                            model,
-                            ...(usage ? { usage } : {})
-                        });
-                    }
-                }
-            }
-            if (assistant.data.errorMessage) {
-                this.emitSubagentTrace(output, state, { type: 'error', message: assistant.data.errorMessage });
-            }
-            if (state.terminalStatus) {
-                this.emitSubagentTerminal(output, state, state.terminalStatus);
-            }
-            return;
-        }
-
-        const toolResult = ToolResultMessageSchema.safeParse(message);
-        if (toolResult.success) {
-            this.emitSubagentTrace(output, state, {
-                type: 'tool_result',
-                id: toolResult.data.toolCallId,
-                output: {
-                    content: toolResult.data.content,
-                    details: toolResult.data.details
-                },
-                status: toolResult.data.isError ? 'failed' : 'completed'
-            });
-            state.tools.delete(toolResult.data.toolCallId);
-            this.inProgressToolCards.delete(`${state.id}:${toolResult.data.toolCallId}`);
-        }
-    }
-
-    private emitSubagentToolLifecycle(output: OmpEventProjection, 
-        state: SubagentState,
-        event: JsonObject,
-        status: Extract<AgentMessage, { type: 'tool_call' }>['status']
-    ): void {
-        if (
-            typeof event.toolCallId !== 'string'
-            || typeof event.toolName !== 'string'
-        ) {
-            this.callbacks.onDiagnostic(`Invalid OMP subagent tool event: ${JSON.stringify(event)}`);
-            return;
-        }
-        const existing = state.tools.get(event.toolCallId);
-        const tool: ToolLifecycle = {
-            id: event.toolCallId,
-            name: existing?.name ?? event.toolName,
-            args: existing?.args ?? event.args ?? {},
-            partialResult: event.partialResult ?? existing?.partialResult,
-            executionResult: event.result ?? existing?.executionResult,
-            executionFailed: event.isError === true || existing?.executionFailed
-        };
-        state.tools.set(tool.id, tool);
-        const cardKey = `${state.id}:${tool.id}`;
-        if (status === 'in_progress') {
-            if (this.inProgressToolCards.has(cardKey)) {
-                return;
-            }
-            this.trackInProgressCard(output, cardKey, status);
-        } else if (this.inProgressToolCards.delete(cardKey)) {
-            return;
-        }
-        this.emitSubagentTrace(output, state, {
-            type: 'tool_call',
-            id: tool.id,
-            name: tool.name,
-            input: tool.args,
-            status
-        });
-    }
-
-    /** Remembers which tool cards are already shown as running, so updates do not repeat them. */
-    private trackInProgressCard(output: OmpEventProjection, key: string, status: Extract<AgentMessage, { type: 'tool_call' }>['status']): void {
-        if (status !== 'in_progress') {
-            this.inProgressToolCards.delete(key);
-        } else if (output.enabled) {
-            this.inProgressToolCards.add(key);
-        }
-    }
-
-    private ensureSubagent(input: {
-        id: string;
-        agent: string;
-        agentSource: string;
-        index: number;
-        startedAt: number;
-        description?: string;
-        task?: string;
-        assignment?: string;
-        sessionFile?: string;
-        parentToolCallId?: string;
-    }): SubagentState {
-        const existing = this.subagents.get(input.id);
-        if (existing) {
-            existing.description = input.description ?? existing.description;
-            existing.task = input.task ?? existing.task;
-            existing.assignment = input.assignment ?? existing.assignment;
-            existing.sessionFile = input.sessionFile ?? existing.sessionFile;
-            existing.parentToolCallId = input.parentToolCallId ?? existing.parentToolCallId;
-            return existing;
-        }
-        const state: SubagentState = {
-            ...input,
-            cardId: `omp-subagent:${input.id}`,
-            startEmitted: false,
-            seenMessages: new Set(),
-            tools: new Map()
-        };
-        this.subagents.set(input.id, state);
-        return state;
-    }
-
-    private emitSubagentStart(output: OmpEventProjection, state: SubagentState): void {
-        if (!output.enabled || state.startEmitted) return;
-        state.startEmitted = true;
-        const summary = state.description ?? state.assignment ?? state.task ?? state.agent;
-        output.onAgentRunEvent({
-            type: 'agent-run-start',
-            agentId: state.id,
-            cardId: state.cardId,
-            startedAt: state.startedAt,
-            status: 'running',
-            statusText: 'Running',
-            activity: 'Starting',
-            activityKind: 'starting',
-            summary,
-            parentToolCallId: state.parentToolCallId,
-            input: {
-                agent: state.agent,
-                agentSource: state.agentSource,
-                index: state.index,
-                description: state.description,
-                task: state.task,
-                assignment: state.assignment,
-                parentToolCallId: state.parentToolCallId,
-                sessionFile: state.sessionFile
-            }
-        });
-    }
-
-    private emitSubagentProgress(output: OmpEventProjection, state: SubagentState, progress: JsonObject, status: string): void {
-        const retryState = RetryStateSchema.safeParse(progress.retryState);
-        const retryFailure = RetryFailureSchema.safeParse(progress.retryFailure);
-        const yieldedResult = this.subagentYieldResult(progress);
-        if (yieldedResult !== undefined) {
-            state.lastResultText = yieldedResult;
-        }
-        const currentTool = typeof progress.currentTool === 'string' ? progress.currentTool : null;
-        const activity = retryState.success
-            ? `Retrying provider request (${retryState.data.attempt}/${retryState.data.maxAttempts})`
-            : currentTool
-                ? `Using ${currentTool}`
-                : status === 'running' ? 'Running' : status;
-        const activityKind = retryState.success ? 'retry' : currentTool ? 'tool' : status;
-        const summary = state.description ?? state.assignment ?? state.task ?? state.agent;
-        const signature = JSON.stringify({
-            status,
-            activity,
-            activityKind,
-            summary,
-            parentToolCallId: state.parentToolCallId ?? null,
-            retryState: retryState.success ? retryState.data : null,
-            retryFailure: retryFailure.success ? retryFailure.data : null
-        });
-        if (status === 'running' && state.lastProgressSignature === signature) {
-            return;
-        }
-        if (output.enabled) {
-            state.lastProgressSignature = signature;
-        }
-        output.onAgentRunEvent({
-            type: 'agent-run-update',
-            agentId: state.id,
-            cardId: state.cardId,
-            startedAt: state.startedAt,
-            status,
-            statusText: activity,
-            activity,
-            activityKind,
-            summary,
-            parentToolCallId: state.parentToolCallId,
-            progress,
-            retryState: retryState.success ? retryState.data : undefined,
-            retryFailure: retryFailure.success ? retryFailure.data : undefined,
-            result: status === 'completed' ? state.lastResultText : undefined
-        });
-    }
-
-    private emitSubagentTerminal(output: OmpEventProjection, state: SubagentState, status: string): void {
-        state.lastProgressSignature = undefined;
-        const normalizedStatus = status === 'aborted' ? 'canceled' : status;
-        const activity = normalizedStatus === 'completed'
-            ? 'Completed'
-            : normalizedStatus === 'canceled' ? 'Canceled' : 'Failed';
-        output.onAgentRunEvent({
-            type: 'agent-run-update',
-            agentId: state.id,
-            cardId: state.cardId,
-            startedAt: state.startedAt,
-            completedAt: Date.now(),
-            status: normalizedStatus,
-            statusText: activity,
-            activity,
-            activityKind: normalizedStatus,
-            summary: state.description ?? state.assignment ?? state.task ?? state.agent,
-            parentToolCallId: state.parentToolCallId,
-            result: state.lastResultText
-        });
-    }
-
-    private subagentYieldResult(progress: JsonObject): string | undefined {
-        const extracted = progress.extractedToolData;
-        if (extracted === null || Array.isArray(extracted) || typeof extracted !== 'object') {
-            return undefined;
-        }
-        const yields = extracted.yield;
-        if (!Array.isArray(yields)) return undefined;
-
-        for (let index = yields.length - 1; index >= 0; index -= 1) {
-            const entry = yields[index];
-            if (entry === null || Array.isArray(entry) || typeof entry !== 'object') continue;
-            if (entry.status === 'success' && typeof entry.data === 'string' && entry.data.length > 0) {
-                return entry.data;
-            }
-        }
-        return undefined;
-    }
-
-    private emitSubagentTrace(output: OmpEventProjection, state: SubagentState, message: AgentMessage): void {
-        this.emitSubagentStart(output, state);
-        output.onAgentRunTrace({
-            agentId: state.id,
-            cardId: state.cardId,
-            parentToolCallId: state.parentToolCallId,
-            startedAt: state.startedAt
-        }, message);
-    }
-
-    private subagentMessageSignature(message: JsonObject): string {
-        const responseId = typeof message.responseId === 'string' ? message.responseId : null;
-        if (responseId) return `response:${responseId}`;
-        if (message.role === 'toolResult' && typeof message.toolCallId === 'string') {
-            return `toolResult:${message.toolCallId}:${JSON.stringify(message.content)}`;
-        }
-        return JSON.stringify(message);
-    }
-
-    private reconcileBoundary(boundary: 'turn_end' | 'agent_end'): void {
-        if (!this.activeMessage) return;
-        this.callbacks.onDiagnostic(
-            `OMP ${boundary} reconciled an unfinished ${String(this.activeMessage.role ?? 'unknown')} message without appending it`
-        );
-        this.activeMessage = null;
-    }
-
-    private toAgentUsage(usage: z.infer<typeof UsageSchema>): AgentUsage {
-        return {
-            inputTokens: usage.input,
-            outputTokens: usage.output,
-            totalTokens: usage.totalTokens,
-            thoughtTokens: usage.reasoningTokens,
-            cacheReadTokens: usage.cacheRead,
-            cacheCreationTokens: usage.cacheWrite,
-            costUsd: usage.cost.total
-        };
-    }
-
-    private textFromContent(content: JsonObject[]): string {
-        return content
-            .map((block) => block.type === 'text' && typeof block.text === 'string' ? block.text : '')
-            .filter(Boolean)
-            .join('\n');
-    }
-
-    private invalidEvent(type: string, error: z.ZodError): void {
-        this.callbacks.onDiagnostic(`Invalid OMP RPC event ${type}: ${error.message}`);
-    }
+ private invalidEvent(type: string, error: z.ZodError): void {
+  this.callbacks.onDiagnostic(`Invalid OMP RPC event ${type}: ${error.message}`);
+ }
 }

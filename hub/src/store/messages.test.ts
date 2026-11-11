@@ -188,6 +188,27 @@ describe('recordMessagesConsumed', () => {
             .toEqual([{ localId: 'local-rollback', invokedAt: null }])
         expect(store.sessions.getSession(session.id)?.updatedAt).toBe(originalUpdatedAt)
     })
+
+    it('uses the Hub activity clock for native delivery while preserving native provenance', () => {
+        const store = makeStore()
+        try {
+            for (const skew of [-60_000, 60_000]) {
+                const session = makeSession(store, `native-skew-${skew}`)
+                store.messages.addMessage(session.id, { role: 'user', content: 'hello' }, 'input')
+                const before = Date.now()
+                const deliveredAt = new Date(before + skew).toISOString()
+                const proof = { sessionId: `native-${skew}`, entryId: 'U1', entryOrder: 1, deliveredAt }
+                const activity = store.recordMessagesConsumed(session.id, ['input'], Date.parse(deliveredAt), 'default', proof)
+                const after = Date.now()
+                expect(activity).toBeGreaterThanOrEqual(before)
+                expect(activity).toBeLessThanOrEqual(after)
+                expect(store.messages.getLocalMessageStates(session.id, ['input'])[0]?.invokedAt).toBe(Date.parse(deliveredAt))
+                expect(store.recordMessagesConsumed(session.id, ['input'], Date.parse(deliveredAt), 'default', proof)).toBe(activity)
+            }
+        } finally {
+            store.close()
+        }
+    })
 })
 
 describe('position pagination and structural epochs', () => {

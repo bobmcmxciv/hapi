@@ -9,9 +9,12 @@
  * socket heartbeat owns the persisted runner_state afterwards — without the
  * socket-side advertisement, a runner upgraded in place would never get its
  * new capabilities observed by the hub.
+ * OMP generation-aware resume additionally fences native readiness, consumption
+ * and cleanup receipts to the hub-issued attempt instead of an old socket.
  */
 export const RUNNER_CAPABILITIES = {
-    piExistingSessionResume: true
+ piExistingSessionResume: true,
+ ompExistingSessionResumeGeneration: true
 } as const
 
 export type RunnerCapabilities = typeof RUNNER_CAPABILITIES

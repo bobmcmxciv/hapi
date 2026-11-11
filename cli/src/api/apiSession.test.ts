@@ -1,5 +1,8 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { Session } from './types'
+import type { OmpInputMode } from '@hapi/protocol/types'
+import { OmpInputQueue } from '../omp/OmpInputQueue'
+import { RPC_METHODS } from '@hapi/protocol/rpcMethods'
 
 const socketHarness = vi.hoisted(() => ({
     sockets: [] as Array<{
@@ -26,9 +29,9 @@ vi.mock('socket.io-client', () => ({
             connectImmediately: true,
             emitted: [] as Array<{ event: string; args: unknown[] }>,
             listeners: new Map<string, Array<(...args: any[]) => void>>(),
-            trigger: () => {},
-            triggerConnect: () => {},
-            triggerConnectError: () => {}
+            trigger: () => { },
+            triggerConnect: () => { },
+            triggerConnectError: () => { }
         }
         state.trigger = (event: string, ...args: any[]) => {
             for (const listener of state.listeners.get(event) ?? []) {
@@ -140,6 +143,8 @@ function triggerIncomingUserMessage(
         seq: number
         text: string
         sentFrom: 'cli' | 'webapp' | 'telegram-bot'
+        localId?: string
+        meta?: { ompInputMode?: OmpInputMode; forceSendRequestedAt?: number }
     }
 ): void {
     socket.trigger('update', {
@@ -148,7 +153,7 @@ function triggerIncomingUserMessage(
             message: {
                 id: message.id,
                 seq: message.seq,
-                localId: null,
+                localId: message.localId ?? null,
                 content: {
                     role: 'user',
                     content: {
@@ -156,7 +161,8 @@ function triggerIncomingUserMessage(
                         text: message.text
                     },
                     meta: {
-                        sentFrom: message.sentFrom
+                        sentFrom: message.sentFrom,
+                        ...message.meta
                     }
                 }
             }
@@ -165,6 +171,60 @@ function triggerIncomingUserMessage(
 }
 
 describe('ApiSessionClient lazy materialization', () => {
+    it('holds native transcript and terminal receipts until source registration on initial connect and reconnect', () => {
+        socketHarness.sockets.length = 0
+        axiosHarness.get.mockResolvedValue({ data: { messages: [] } })
+        const client = new ApiSessionClient('token', createSession({
+            namespace: 'default', metadata: { path: '/tmp/project', host: 'localhost', flavor: 'omp' }
+        }))
+        const socket = socketHarness.sockets[0]!
+        const proof = { sessionId: 'native', entryId: 'native-entry', entryOrder: 4, deliveredAt: '2026-11-09T00:00:00Z' }
+        const isPublication = (entry: { event: string }) => ['message', 'messages-consumed', 'messages-resolved'].includes(entry.event)
+        try {
+            client.sendAgentMessage({ type: 'message', message: 'native answer' })
+            client.emitMessagesConsumed(['input'], { nativeDelivery: proof })
+            client.sendMessagesResolved([{ localId: 'handled', outcome: 'handled' }])
+            expect(socket.emitted.filter(isPublication)).toEqual([])
+            client.rpcHandlerManager.registerHandler(RPC_METHODS.KillSession, async () => ({}))
+            expect(socket.emitted.filter(isPublication).map(entry => entry.event)).toEqual(['message', 'messages-consumed', 'messages-resolved'])
+            expect(socket.emitted.findIndex(entry => entry.event === 'rpc-register')).toBeLessThan(socket.emitted.findIndex(isPublication))
+
+            socket.connected = false
+            socket.trigger('disconnect', 'transport close')
+            client.rpcHandlerManager.clearHandlers()
+            socket.emitted.length = 0
+            client.emitMessagesConsumed(['offline-input'], { nativeDelivery: { ...proof, entryId: 'offline-entry', entryOrder: 5 } })
+            client.sendAgentMessage({ type: 'message', message: 'answer completed while offline' })
+            expect(socket.emitted).toEqual([])
+            socket.triggerConnect()
+            expect(socket.emitted.filter(isPublication)).toEqual([])
+            client.rpcHandlerManager.registerHandler(RPC_METHODS.KillSession, async () => ({}))
+            expect(socket.emitted.filter(isPublication).map(entry => entry.event)).toEqual(['messages-consumed', 'message'])
+            expect(socket.emitted.find(entry => entry.event === 'messages-consumed')?.args[0]).toMatchObject({
+                localIds: ['offline-input'], nativeDelivery: { entryId: 'offline-entry', entryOrder: 5 }
+            })
+            expect(socket.emitted.findIndex(entry => entry.event === 'rpc-register')).toBeLessThan(socket.emitted.findIndex(isPublication))
+        } finally { client.close() }
+    })
+
+    it('reports deduplicated Hub input for receipt repair without enqueuing the prompt again', () => {
+        socketHarness.sockets.length = 0
+        const client = new ApiSessionClient('token', createSession({ namespace: 'default' }))
+        const socket = socketHarness.sockets[0]!
+        const submitted: string[] = []
+        const replayed: string[] = []
+        client.onUserMessage((_message, localId) => { submitted.push(localId!) })
+        client.on('user-message-replay', localId => { replayed.push(localId) })
+        try {
+            const message = { id: 'server-row', seq: 1, text: 'original input', localId: 'input-token', sentFrom: 'webapp' as const }
+            triggerIncomingUserMessage(socket, message)
+            triggerIncomingUserMessage(socket, message)
+            triggerIncomingUserMessage(socket, { ...message, id: 'replacement-row', seq: 2 })
+            expect(submitted).toEqual(['input-token'])
+            expect(replayed).toEqual(['input-token', 'input-token'])
+        } finally { client.close() }
+    })
+
     it('does not connect or materialize without a real user message', async () => {
         socketHarness.sockets.length = 0
         const materialize = vi.fn(async () => createSession())
@@ -411,6 +471,130 @@ describe('ApiSessionClient lazy materialization', () => {
         expect(socket.connectCalls).toBeGreaterThan(0)
         client.close()
     })
+})
+
+describe('ApiSessionClient native queued cancellation', () => {
+    it('does not acknowledge removal before native cancellation settles, including a false result', async () => {
+        socketHarness.sockets.length = 0
+        const client = new ApiSessionClient('token', createSession({ namespace: 'default' }))
+        const socket = socketHarness.sockets[0]
+        if (!socket) throw new Error('expected socket')
+        const nativeCancellation = Promise.withResolvers<boolean>()
+        const ack = vi.fn()
+        client.onCancelQueuedMessage(() => nativeCancellation.promise)
+        try {
+            socket.trigger('update', { body: { t: 'cancel-queued-message', localId: 'native-queued-token' } }, ack)
+            await Promise.resolve()
+            expect(ack).not.toHaveBeenCalled()
+            nativeCancellation.resolve(false)
+            await vi.waitFor(() => expect(ack).toHaveBeenCalledWith({ removed: false }))
+        } finally {
+            client.close()
+        }
+    })
+})
+
+describe('ApiSessionClient queued input forcing', () => {
+    it('registers identity marks before the callback and acknowledges only after native forcing settles', async () => {
+        socketHarness.sockets.length = 0
+        const client = new ApiSessionClient('token', createSession({ namespace: 'default' }))
+        const socket = socketHarness.sockets[0]
+        if (!socket) throw new Error('expected socket')
+        const nativeForce = Promise.withResolvers<Array<{ localId: string; status: 'promoted' | 'not-found' }>>()
+        const order: string[] = []
+        const force = vi.fn((localIds: string[]) => {
+            order.push('callback')
+            expect(localIds).toEqual(['queued', 'consumed'])
+            expect(client.consumeForceMark('queued')).toBe(true)
+            expect(client.consumeForceMark('consumed')).toBe(true)
+            return nativeForce.promise
+        })
+        const ack = vi.fn(() => { order.push('ack') })
+        client.onForceQueuedMessages(force)
+        try {
+            socket.trigger('update', { body: { t: 'force-queued-messages', localIds: ['queued', 'consumed'] } }, ack)
+            await Promise.resolve()
+            expect(force).toHaveBeenCalledOnce()
+            expect(ack).not.toHaveBeenCalled()
+            const results = [{ localId: 'queued', status: 'promoted' as const }, { localId: 'consumed', status: 'not-found' as const }]
+            nativeForce.resolve(results)
+            await vi.waitFor(() => expect(ack).toHaveBeenCalledWith({ results }))
+            expect(ack).toHaveBeenCalledOnce()
+            expect(order).toEqual(['callback', 'ack'])
+        } finally {
+            client.close()
+        }
+    })
+
+    it('acknowledges every identity as unsupported when no flavor force callback is registered', async () => {
+        socketHarness.sockets.length = 0
+        const client = new ApiSessionClient('token', createSession({ namespace: 'default' }))
+        const socket = socketHarness.sockets[0]
+        if (!socket) throw new Error('expected socket')
+        const ack = vi.fn()
+        try {
+            socket.trigger('update', { body: { t: 'force-queued-messages', localIds: ['first', 'second'] } }, ack)
+            await vi.waitFor(() => expect(ack).toHaveBeenCalledWith({
+                results: [
+                    { localId: 'first', status: 'unsupported', error: 'runner does not support queue forcing' },
+                    { localId: 'second', status: 'unsupported', error: 'runner does not support queue forcing' }
+                ]
+            }))
+            expect(ack).toHaveBeenCalledOnce()
+        } finally {
+            client.close()
+        }
+    })
+
+    it.each(['live-frame', 'durable-message'] as const)(
+        'enqueues a %s forced localId only once across distinct transport message ids', async (source) => {
+            socketHarness.sockets.length = 0
+            const client = new ApiSessionClient('token', createSession({ namespace: 'default' }))
+            const socket = socketHarness.sockets[0]
+            if (!socket) throw new Error('expected socket')
+            const queue = new OmpInputQueue(() => 'original-mode')
+            const receive = vi.fn((message: Parameters<Parameters<ApiSessionClient['onUserMessage']>[0]>[0], localId?: string) => {
+                queue.push({
+                    text: message.content.text,
+                    attachments: message.content.attachments,
+                    inputMode: message.meta?.ompInputMode ?? 'prompt',
+                    mode: { permissionMode: 'default' },
+                    localId,
+                    forced: client.consumeForceMark(localId)
+                })
+            })
+            client.onUserMessage(receive)
+            client.onForceQueuedMessages(localIds => localIds.map(localId => ({
+                localId, status: queue.markForced(localId) ? 'accepted' as const : 'not-found' as const
+            })))
+            try {
+                if (source === 'live-frame') {
+                    const ack = vi.fn()
+                    socket.trigger('update', { body: { t: 'force-queued-messages', localIds: ['same-local-id'] } }, ack)
+                    await vi.waitFor(() => expect(ack).toHaveBeenCalledOnce())
+                }
+                const message = {
+                    text: '/review same text', sentFrom: 'webapp' as const, localId: 'same-local-id',
+                    meta: { ompInputMode: 'follow_up' as const, ...(source === 'durable-message' ? { forceSendRequestedAt: 123 } : {}) }
+                }
+                triggerIncomingUserMessage(socket, { ...message, id: 'original-row', seq: 1 })
+                triggerIncomingUserMessage(socket, { ...message, id: 'replayed-row', seq: 2 })
+                expect(receive).toHaveBeenCalledOnce()
+                expect(queue.size()).toBe(1)
+                const input = queue.queue[0]!
+                expect(input).toMatchObject({ localId: 'same-local-id', text: '/review same text', inputMode: 'follow_up', modeHash: 'original-mode' })
+                expect(queue.isForced(input)).toBe(true)
+                expect(client.consumeForceMark('same-local-id')).toBe(false)
+                const ack = vi.fn()
+                socket.trigger('update', { body: { t: 'force-queued-messages', localIds: ['same-local-id'] } }, ack)
+                await vi.waitFor(() => expect(ack).toHaveBeenCalledWith({ results: [{ localId: 'same-local-id', status: 'accepted' }] }))
+                expect(receive).toHaveBeenCalledOnce()
+                expect(queue.queue[0]).toBe(input)
+            } finally {
+                client.close()
+            }
+        }
+    )
 })
 
 describe('ApiSessionClient agy transcript messages', () => {

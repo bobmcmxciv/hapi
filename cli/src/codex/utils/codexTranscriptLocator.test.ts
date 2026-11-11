@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { appendFile, mkdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -70,9 +70,7 @@ describe('codexTranscriptLocator', () => {
             type: 'event_msg',
             payload: { type: 'user_message', message: 'hello' }
         })}\n`);
-        await wait(150);
-
-        expect(located).toEqual([transcriptPath]);
+        await vi.waitFor(() => expect(located).toEqual([transcriptPath]), { timeout: 2000 });
     });
 
     it('attaches after Codex 0.147 completed user-message activity', async () => {
@@ -100,9 +98,7 @@ describe('codexTranscriptLocator', () => {
                 }
             }
         })}\n`);
-        await wait(150);
-
-        expect(located).toEqual([transcriptPath]);
+        await vi.waitFor(() => expect(located).toEqual([transcriptPath]), { timeout: 2000 });
     });
 
     it('attaches after image-only user activity', async () => {
@@ -126,9 +122,7 @@ describe('codexTranscriptLocator', () => {
                 images: ['data:image/png;base64,abc']
             }
         })}\n`);
-        await wait(100);
-
-        expect(located).toEqual([transcriptPath]);
+        await vi.waitFor(() => expect(located).toEqual([transcriptPath]), { timeout: 2000 });
     });
 
     it('refuses fallback when fresh activity is ambiguous', async () => {
@@ -152,10 +146,8 @@ describe('codexTranscriptLocator', () => {
             payload: { type: 'user_message', message: 'hello' }
         })}\n`;
         await Promise.all([appendFile(first, userEvent), appendFile(second, userEvent)]);
-        await wait(150);
-
+        await vi.waitFor(() => expect(ambiguous).toHaveLength(1), { timeout: 2000 });
         expect(located).toEqual([]);
-        expect(ambiguous).toHaveLength(1);
         expect(new Set(ambiguous[0])).toEqual(new Set([first, second]));
     });
 
@@ -189,9 +181,7 @@ describe('codexTranscriptLocator', () => {
 
         const primary = await createTranscript('thread-review-primary', '/tmp/project', 'cli');
         await appendFile(primary, userEvent('/review'));
-        await wait(150);
-
-        expect(located).toEqual([primary]);
+        await vi.waitFor(() => expect(located).toEqual([primary]), { timeout: 2000 });
         expect(ambiguous).toEqual([]);
     });
 
@@ -218,10 +208,8 @@ describe('codexTranscriptLocator', () => {
         await appendFile(first, `${userEvent('first')}\n`);
         await wait(60);
         await appendFile(second, `${userEvent('second')}\n`);
-        await wait(150);
-
+        await vi.waitFor(() => expect(ambiguous).toHaveLength(1), { timeout: 2000 });
         expect(located).toEqual([]);
-        expect(ambiguous).toHaveLength(1);
         expect(new Set(ambiguous[0])).toEqual(new Set([first, second]));
     });
 
@@ -248,8 +236,7 @@ describe('codexTranscriptLocator', () => {
         expect(located).toEqual([]);
 
         await appendFile(transcriptPath, userEvent.slice(splitAt));
-        await wait(100);
-        expect(located).toEqual([transcriptPath]);
+        await vi.waitFor(() => expect(located).toEqual([transcriptPath]), { timeout: 2000 });
     });
 
     it('ignores pre-existing fresh transcripts even when they receive new activity', async () => {
@@ -303,9 +290,7 @@ describe('codexTranscriptLocator', () => {
             type: 'event_msg',
             payload: { type: 'user_message', message: 'resume activity' }
         })}\n`);
-        await wait(100);
-
-        expect(located).toEqual([target]);
+        await vi.waitFor(() => expect(located).toEqual([target]), { timeout: 2000 });
         expect(ambiguous).toEqual([]);
     });
 

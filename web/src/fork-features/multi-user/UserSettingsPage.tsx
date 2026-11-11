@@ -5,8 +5,9 @@ import { SettingsPageContent, SettingsRow, SettingsSection } from '@/components/
 import { useAppContext } from '@/lib/app-context'
 import { useTranslation } from '@/lib/use-translation'
 import { type Account, type Grant, type Machine, settingsInputClass, useSettingsRequest } from './settingsApi'
+import { MachineScopeField, grantScopeDraft, scopeFromDraft } from './MachineScopeField'
 
-type MachineGrant = { machine: Machine; role: Grant['role'] | null }
+type MachineGrant = { machine: Machine; role: Grant['role'] | null; scopeDraft: string | null }
 
 export default function UserSettingsPage() {
     const { accountId } = useParams({ strict: false }) as { accountId: string }
@@ -37,7 +38,8 @@ export default function UserSettingsPage() {
             if (found) {
                 const grants = await Promise.all(machines.map(async machine => {
                     const result = await request<{ grants: Grant[] }>(`/api/grants/machine/${encodeURIComponent(machine.id)}`)
-                    return { machine, role: result.grants.find(grant => grant.accountId === found.id)?.role ?? null }
+                    const grant = result.grants.find(grant => grant.accountId === found.id)
+                    return { machine, role: grant?.role ?? null, scopeDraft: grantScopeDraft(grant) }
                 }))
                 setMachineGrants(grants)
             }
@@ -96,13 +98,21 @@ export default function UserSettingsPage() {
         </SettingsSection>
         <SettingsSection title={t('settings.fork.user.memory')}><div className="space-y-3 p-3"><textarea aria-label={t('settings.fork.user.memory')} className={`${settingsInputClass} min-h-28 resize-y`} value={memory} maxLength={4000} onChange={event => setMemory(event.target.value)} /><div className="flex justify-end"><Button disabled={pending !== null} onClick={() => void mutate({ memory: memory.trim() || null })}>{t('settings.fork.action.save')}</Button></div></div></SettingsSection>
         {!current ? <SettingsSection title={t('settings.fork.user.machineAccess')}>
-            {machineGrants.length === 0 ? <SettingsRow label={t('settings.fork.user.noMachines')} /> : machineGrants.map(({ machine, role: grantRole }) => <SettingsRow key={machine.id} label={machine.metadata?.displayName ?? machine.metadata?.host ?? machine.id} trailing={<select aria-label={`${t('settings.fork.user.machineAccess')}: ${machine.id}`} className={settingsInputClass} disabled={pending !== null} value={grantRole ?? 'none'} onChange={event => void run(`grant-${machine.id}`, async () => {
+            {machineGrants.length === 0 ? <SettingsRow label={t('settings.fork.user.noMachines')} /> : machineGrants.map(({ machine, role: grantRole, scopeDraft }) => <SettingsRow key={machine.id} label={machine.metadata?.displayName ?? machine.metadata?.host ?? machine.id} trailing={<select aria-label={`${t('settings.fork.user.machineAccess')}: ${machine.id}`} className={settingsInputClass} disabled={pending !== null} value={grantRole ?? 'none'} onChange={event => void run(`grant-${machine.id}`, async () => {
                 const next = event.target.value as Grant['role'] | 'none'
                 const path = `/api/grants/machine/${encodeURIComponent(machine.id)}`
                 if (next === 'none') await request(`${path}/${account.id}`, { method: 'DELETE' })
-                else await request(path, { method: 'POST', body: JSON.stringify({ accountId: account.id, role: next }) })
+                else await request(path, { method: 'POST', body: JSON.stringify({ accountId: account.id, role: next, pathScopes: scopeFromDraft(scopeDraft) }) })
                 await load()
-            })}><option value="none">{t('settings.fork.user.noAccess')}</option><option value="viewer">viewer</option><option value="operator">operator</option></select>} />)}
+            })}><option value="none">{t('settings.fork.user.noAccess')}</option><option value="viewer">viewer</option><option value="operator">operator</option></select>}>
+                {grantRole && <div className="space-y-2 p-3">
+                    <MachineScopeField value={scopeDraft} disabled={pending !== null} onChange={value => setMachineGrants(items => items.map(item => item.machine.id === machine.id ? { ...item, scopeDraft: value } : item))} />
+                    <Button disabled={pending !== null || scopeDraft?.trim() === ''} onClick={() => void run(`scope-${machine.id}`, async () => {
+                        await request(`/api/grants/machine/${encodeURIComponent(machine.id)}`, { method: 'POST', body: JSON.stringify({ accountId: account.id, role: grantRole, pathScopes: scopeFromDraft(scopeDraft) }) })
+                        await load()
+                    })}>保存目录范围</Button>
+                </div>}
+            </SettingsRow>)}
         </SettingsSection> : null}
         {!current ? <SettingsSection title={t('settings.fork.user.danger')}><SettingsRow label={t('settings.fork.user.delete')} trailing={<Button variant="destructive" disabled={pending !== null} onClick={() => {
             if (!window.confirm(t('settings.fork.user.deleteConfirm', { username: account.username }))) return

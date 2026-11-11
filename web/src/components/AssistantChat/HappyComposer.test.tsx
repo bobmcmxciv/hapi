@@ -192,7 +192,7 @@ describe('HappyComposer resume model setting', () => {
         expect(onModelChange).not.toHaveBeenCalled()
     })
 
-    it('shows native OMP thinking choices and the Claude-only boundary', () => {
+    it('shows native OMP thinking choices and its native configuration boundary', () => {
         const onEffortChange = vi.fn()
         renderInProviders(
             <HappyComposer
@@ -208,13 +208,41 @@ describe('HappyComposer resume model setting', () => {
                 ]}
                 onModelChange={vi.fn()}
                 onEffortChange={onEffortChange}
+                onRefreshOmpModels={vi.fn()}
             />
         )
 
         fireEvent.click(screen.getByRole('button', { name: 'Settings' }))
-        expect(screen.getByText(/Fallback model, custom\/append system prompts/)).toBeInTheDocument()
+        expect(screen.getByText(/Signing in does not enable a provider/)).toBeInTheDocument()
         fireEvent.click(screen.getByRole('button', { name: 'high' }))
         expect(onEffortChange).toHaveBeenCalledWith('high')
+    })
+
+    it('keeps refresh available when the native catalog fails and never substitutes Claude effort options', () => {
+        const onRefreshOmpModels = vi.fn()
+        renderInProviders(
+            <HappyComposer agentFlavor="omp" active availableModelOptions={[]} availableEffortOptions={[]}
+                ompModelsError="native catalog unavailable" onRefreshOmpModels={onRefreshOmpModels}
+                onEffortChange={vi.fn()} />
+        )
+        fireEvent.click(screen.getByRole('button', { name: 'Settings' }))
+        expect(screen.getByRole('alert')).toHaveTextContent('native catalog unavailable')
+        expect(screen.queryByRole('button', { name: 'Max' })).toBeNull()
+        expect(screen.queryByRole('button', { name: 'High' })).toBeNull()
+        fireEvent.click(screen.getByRole('button', { name: 'Refresh native models' }))
+        expect(onRefreshOmpModels).toHaveBeenCalledOnce()
+    })
+
+    it('selects the exact provider-qualified native model rather than a Claude Code alias', () => {
+        const onModelChange = vi.fn()
+        renderInProviders(
+            <HappyComposer agentFlavor="omp" active model="devin/swe-2"
+                availableModelOptions={[{ value: 'anthropic/claude-sonnet-5-5', label: 'Claude Sonnet (anthropic/claude-sonnet-5-5)' }]}
+                onModelChange={onModelChange} onRefreshOmpModels={vi.fn()} />
+        )
+        fireEvent.click(screen.getByRole('button', { name: 'Settings' }))
+        fireEvent.click(screen.getByRole('button', { name: 'Claude Sonnet (anthropic/claude-sonnet-5-5)' }))
+        expect(onModelChange).toHaveBeenCalledWith('anthropic/claude-sonnet-5-5')
     })
 })
 

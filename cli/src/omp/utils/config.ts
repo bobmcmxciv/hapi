@@ -1,7 +1,16 @@
 import { existsSync, realpathSync } from 'node:fs';
 import { basename, dirname, extname, join } from 'node:path';
+import { isBunCompiled } from '@/projectPath';
+import { resolveHappyCliExecutable } from '@/utils/spawnHappyCLI';
 
 export function resolveOmpLaunchCommand(command = 'omp'): { command: string; args: string[] } {
+ // A compiled fleet release can carry its capability-matched native runtime.
+ // Explicit commands and source/SDK launches retain their existing resolution.
+ if (command === 'omp' && isBunCompiled()) {
+  const directory = dirname(realpathSync(resolveHappyCliExecutable()));
+  const paired = join(directory, process.platform === 'win32' ? 'omp.exe' : 'omp');
+  if (existsSync(paired)) return { command: paired, args: [] };
+ }
  const resolved = Bun.which(command);
  if (!resolved) throw new Error(`OMP executable not found: ${command}`);
  if (process.platform !== 'win32' || extname(resolved).toLowerCase() === '.exe') {

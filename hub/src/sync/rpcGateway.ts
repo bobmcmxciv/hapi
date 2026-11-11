@@ -1,59 +1,60 @@
 import type { AgentFlavor, ClaudeLaunch, CodexCollaborationMode, CopilotAgentMode, PermissionMode } from '@hapi/protocol/types'
 import { RPC_METHODS } from '@hapi/protocol/rpcMethods'
+import { OMP_USAGE_RPC_TIMEOUT_MS, OmpUsageResponseSchema, type OmpUsageResponse } from '@hapi/protocol/ompUsage'
 import {
-    ArchiveCodexSessionRpcResponseSchema,
-    CursorChatStoreStatusSchema,
-    ListCodexSessionsRpcResponseSchema,
-    ListPiSessionsRpcResponseSchema
+ ArchiveCodexSessionRpcResponseSchema,
+ CursorChatStoreStatusSchema,
+ ListCodexSessionsRpcResponseSchema,
+ ListPiSessionsRpcResponseSchema
 } from '@hapi/protocol/apiTypes'
 import type {
-    AgyModelsResponse,
-    CodexModelSummary,
-    CodexModelsResponse,
-    CommandResponse,
-    CursorModelSummary,
-    CursorModelsResponse,
-    CycleOmpModelResponse,
-    MachineCreateDirectoryResponse,
-    CursorChatStoreStatus,
-    DeleteUploadResponse,
-    DirectoryEntry,
-    FileReadResponse,
-    FileWriteResponse,
-    GeneratedBlobChunkRequest,
-    GeneratedBlobChunkResponse,
-    GeneratedFileResponse,
-    GeneratedImageResponse,
-    PrepareP2pFileTransferRpcRequest,
-    PrepareP2pFileTransferRpcResponse,
-    SignalP2pFileTransferRpcRequest,
-    SignalP2pFileTransferRpcResponse,
-    CopilotModelsResponse,
-    GrokModelsResponse,
-    GrokReasoningEffortResponse,
-    ListCcSwitchProvidersResponse,
-    ValidateCcSwitchProviderResponse,
-    ListDirectoryResponse,
-    StatFilesResponse,
-    ListCodexSessionsRpcResponse,
-    ListPiSessionsRpcResponse,
-    ArchiveCodexSessionRpcResponse,
-    OpencodeModelsResponse,
-    OpencodeModelSummary,
-    OpencodeReasoningEffortResponse,
-    OmpModelsResponse,
-    OmpThinkingOptionsResponse,
-    OmpLoginProvidersResponse,
-    StartOmpLoginResponse,
-    RespondOmpLoginInputResponse,
-    GetOmpExtensionUiResponse,
-    PathExistsResponse,
-    SlashCommandsResponse,
-    UploadFileResponse,
-    ListImportableSessionsRequest,
-    ListImportableSessionsResponse,
-    ImportProviderSessionRequest,
-    ImportProviderSessionResponse
+ AgyModelsResponse,
+ CodexModelSummary,
+ CodexModelsResponse,
+ CommandResponse,
+ CursorModelSummary,
+ CursorModelsResponse,
+ CycleOmpModelResponse,
+ MachineCreateDirectoryResponse,
+ CursorChatStoreStatus,
+ DeleteUploadResponse,
+ DirectoryEntry,
+ FileReadResponse,
+ FileWriteResponse,
+ GeneratedBlobChunkRequest,
+ GeneratedBlobChunkResponse,
+ GeneratedFileResponse,
+ GeneratedImageResponse,
+ PrepareP2pFileTransferRpcRequest,
+ PrepareP2pFileTransferRpcResponse,
+ SignalP2pFileTransferRpcRequest,
+ SignalP2pFileTransferRpcResponse,
+ CopilotModelsResponse,
+ GrokModelsResponse,
+ GrokReasoningEffortResponse,
+ ListCcSwitchProvidersResponse,
+ ValidateCcSwitchProviderResponse,
+ ListDirectoryResponse,
+ StatFilesResponse,
+ ListCodexSessionsRpcResponse,
+ ListPiSessionsRpcResponse,
+ ArchiveCodexSessionRpcResponse,
+ OpencodeModelsResponse,
+ OpencodeModelSummary,
+ OpencodeReasoningEffortResponse,
+ OmpModelsResponse,
+ OmpThinkingOptionsResponse,
+ OmpLoginProvidersResponse,
+ StartOmpLoginResponse,
+ RespondOmpLoginInputResponse,
+ GetOmpExtensionUiResponse,
+ PathExistsResponse,
+ SlashCommandsResponse,
+ UploadFileResponse,
+ ListImportableSessionsRequest,
+ ListImportableSessionsResponse,
+ ImportProviderSessionRequest,
+ ImportProviderSessionResponse
 } from '@hapi/protocol/apiTypes'
 import type { Server } from 'socket.io'
 import type { RpcRegistry } from '../socket/rpcRegistry'
@@ -79,17 +80,17 @@ const HISTORY_IMPORT_RPC_TIMEOUT_MS = 10 * 60_000
  * timeouts or protocol failures.
  */
 export class RpcTargetMissingError extends Error {
-    readonly code: 'handler-not-registered' | 'socket-disconnected'
-    readonly method: string
+ readonly code: 'handler-not-registered' | 'socket-disconnected'
+ readonly method: string
 
-    constructor(method: string, reason: 'handler-not-registered' | 'socket-disconnected') {
-        super(reason === 'handler-not-registered'
-            ? `RPC handler not registered: ${method}`
-            : `RPC socket disconnected: ${method}`)
-        this.name = 'RpcTargetMissingError'
-        this.code = reason
-        this.method = method
-    }
+ constructor(method: string, reason: 'handler-not-registered' | 'socket-disconnected') {
+  super(reason === 'handler-not-registered'
+   ? `RPC handler not registered: ${method}`
+   : `RPC socket disconnected: ${method}`)
+  this.name = 'RpcTargetMissingError'
+  this.code = reason
+  this.method = method
+ }
 }
 
 export type RpcCommandResponse = CommandResponse
@@ -129,571 +130,594 @@ export type RpcGetOmpExtensionUiResponse = GetOmpExtensionUiResponse
 export type RpcListAgyModelsResponse = AgyModelsResponse
 
 export class RpcGateway {
-    constructor(
-        private readonly io: Server,
-        private readonly rpcRegistry: RpcRegistry
-    ) {
-    }
-
-    async approvePermission(
-        sessionId: string,
-        requestId: string,
-        mode?: PermissionMode,
-        allowTools?: string[],
-        decision?: 'approved' | 'approved_for_session' | 'denied' | 'abort',
-        answers?: Record<string, string[]> | Record<string, { answers: string[] }>
-    ): Promise<void> {
-        await this.sessionRpc(sessionId, RPC_METHODS.Permission, {
-            id: requestId,
-            approved: true,
-            mode,
-            allowTools,
-            decision,
-            answers
-        })
-    }
-
-    async denyPermission(
-        sessionId: string,
-        requestId: string,
-        decision?: 'approved' | 'approved_for_session' | 'denied' | 'abort'
-    ): Promise<void> {
-        await this.sessionRpc(sessionId, RPC_METHODS.Permission, {
-            id: requestId,
-            approved: false,
-            decision
-        })
-    }
-
-    async abortSession(sessionId: string): Promise<void> {
-        await this.sessionRpc(sessionId, RPC_METHODS.Abort, { reason: 'User aborted via Telegram Bot' })
-    }
-
-    async switchSession(sessionId: string, to: 'remote' | 'local'): Promise<void> {
-        await this.sessionRpc(sessionId, RPC_METHODS.Switch, { to })
-    }
-
-    async requestSessionConfig(
-        sessionId: string,
-        config: {
-            permissionMode?: PermissionMode
-            model?: { provider: string; modelId: string } | string | null
-            modelReasoningEffort?: string | null
-            effort?: string | null
-            collaborationMode?: CodexCollaborationMode
-            copilotAgentMode?: CopilotAgentMode
-        }
-    ): Promise<unknown> {
-        return await this.sessionRpc(sessionId, RPC_METHODS.SetSessionConfig, config)
-    }
-
-    async killSession(sessionId: string): Promise<void> {
-        const result = await this.sessionRpc(sessionId, RPC_METHODS.KillSession, {})
-        if (result && typeof result === 'object' && 'success' in result && result.success === true) return
-        if (result && typeof result === 'object') {
-            if ('error' in result && typeof result.error === 'string') throw new Error(result.error)
-            if ('message' in result && typeof result.message === 'string') throw new Error(result.message)
-        }
-        throw new Error('Session cleanup was not acknowledged')
-    }
-
-    async stopRunnerSession(machineId: string, sessionId: string): Promise<'stopped' | 'already_gone' | 'still_alive'> {
-        const result = await this.machineRpc(machineId, RPC_METHODS.StopSession, { sessionId })
-        const status = result && typeof result === 'object' ? (result as { status?: unknown }).status : undefined
-        if (status === 'stopped' || status === 'already_gone' || status === 'still_alive') return status
-        throw new Error('Unexpected stop-session response')
-    }
-
-    async handoffSessionToLocal(sessionId: string): Promise<void> {
-        await this.sessionRpc(sessionId, RPC_METHODS.HandoffLocal, {})
-    }
-
-    async spawnSession(
-        machineId: string,
-        directory: string,
-        agent: AgentFlavor = 'claude',
-        model?: string,
-        modelReasoningEffort?: string,
-        yolo?: boolean,
-        sessionType?: 'simple' | 'worktree',
-        worktreeName?: string,
-        resumeSessionId?: string,
-        effort?: string,
-        permissionMode?: PermissionMode,
-        serviceTier?: string,
-        claudeLaunch?: ClaudeLaunch,
-        ccSwitchProviderId?: string,
-        existingSessionId?: string,
-        collaborationMode?: CodexCollaborationMode,
-        copilotAgentMode?: CopilotAgentMode,
-        startingMode?: 'remote' | 'pty',
-        // Hub session id to reuse for this spawn. When set, the runner boots the
-        // CLI with `--hapi-session-id`, so the child reuses the existing hub
-        // session row (same id) instead of minting a new one.
-        forkSession?: boolean
-    ): Promise<{ type: 'success'; sessionId: string } | { type: 'error'; message: string }> {
-        try {
-            const result = await this.machineRpc(
-                machineId,
-                RPC_METHODS.SpawnHappySession,
-                {
-                    type: 'spawn-in-directory',
-                    directory,
-                    agent,
-                    model,
-                    modelReasoningEffort,
-                    yolo,
-                    sessionType,
-                    worktreeName,
-                    resumeSessionId,
-                    effort,
-                    permissionMode,
-                    serviceTier,
-                    existingSessionId,
-                    sessionId: existingSessionId,
-                    claudeLaunch,
-                    ccSwitchProviderId,
-                    collaborationMode,
-                    copilotAgentMode,
-                    startingMode,
-                    forkSession: forkSession === true
-                }
-            )
-            if (result && typeof result === 'object') {
-                const obj = result as Record<string, unknown>
-                if (obj.type === 'success' && typeof obj.sessionId === 'string') {
-                    return { type: 'success', sessionId: obj.sessionId }
-                }
-                if (obj.type === 'error' && typeof obj.errorMessage === 'string') {
-                    return { type: 'error', message: obj.errorMessage }
-                }
-                if (obj.type === 'requestToApproveDirectoryCreation' && typeof obj.directory === 'string') {
-                    return { type: 'error', message: `Directory creation requires approval: ${obj.directory}` }
-                }
-                if (typeof obj.error === 'string') {
-                    return { type: 'error', message: obj.error }
-                }
-                if (obj.type !== 'success' && typeof obj.message === 'string') {
-                    return { type: 'error', message: obj.message }
-                }
-            }
-            const details = typeof result === 'string'
-                ? result
-                : (() => {
-                    try {
-                        return JSON.stringify(result)
-                    } catch {
-                        return String(result)
-                    }
-                })()
-            return { type: 'error', message: `Unexpected spawn result: ${details}` }
-        } catch (error) {
-            return { type: 'error', message: error instanceof Error ? error.message : String(error) }
-        }
-    }
-
-/**
-     * Trigger a provider-native session fork on the target machine.
-     * Used by fork-features/session-fork to clone a session into a new
-     * provider session id. Returns the raw RPC result (typed by the caller
-     * via ForkSpawnResult); status code mapping happens in hubForkController.
-     */
-    async forkProviderSessionOnMachine(
-        machineId: string,
-        request: { flavor: string; payload: unknown }
-    ): Promise<unknown> {
-        return await this.machineRpc(machineId, RPC_METHODS.ForkSpawnSession, request)
-    }
-
-    async listMachineDirectory(machineId: string, path: string, includeHidden?: boolean): Promise<RpcListDirectoryResponse> {
-        const result = await this.machineRpc(machineId, RPC_METHODS.ListMachineDirectory, { path, includeHidden }) as RpcListDirectoryResponse | unknown
-        if (!result || typeof result !== 'object') {
-            return { success: false, error: 'Unexpected list-directory result' }
-        }
-        return result as RpcListDirectoryResponse
-    }
-
-    async createMachineDirectory(machineId: string, parentPath: string, name: string): Promise<MachineCreateDirectoryResponse> {
-        const result = await this.machineRpc(
-            machineId,
-            RPC_METHODS.CreateMachineDirectory,
-            { parentPath, name }
-        ) as MachineCreateDirectoryResponse | unknown
-        if (!result || typeof result !== 'object') {
-            return { success: false, error: 'Unexpected create-directory result' }
-        }
-        return result as MachineCreateDirectoryResponse
-    }
-
-    async checkPathsExist(machineId: string, paths: string[]): Promise<Record<string, boolean>> {
-        const result = await this.machineRpc(machineId, RPC_METHODS.PathExists, { paths }) as RpcPathExistsResponse | unknown
-        if (!result || typeof result !== 'object') {
-            throw new Error('Unexpected path-exists result')
-        }
-
-        const existsValue = (result as RpcPathExistsResponse).exists
-        if (!existsValue || typeof existsValue !== 'object') {
-            throw new Error('Unexpected path-exists result')
-        }
-
-        const exists: Record<string, boolean> = {}
-        for (const [key, value] of Object.entries(existsValue)) {
-            exists[key] = value === true
-        }
-        return exists
-    }
-
-    async getCursorChatStoreStatus(
-        machineId: string,
-        workspacePath: string,
-        cursorSessionId: string,
-        homeDir?: string
-    ): Promise<RpcCursorChatStoreStatus> {
-        const result = await this.machineRpc(
-            machineId,
-            RPC_METHODS.CursorChatStoreStatus,
-            { workspacePath, cursorSessionId, homeDir }
-        )
-        return CursorChatStoreStatusSchema.parse(result)
-    }
-
-    async getGitStatus(sessionId: string, cwd?: string): Promise<RpcCommandResponse> {
-        return await this.sessionRpc(sessionId, RPC_METHODS.GitStatus, { cwd }) as RpcCommandResponse
-    }
-
-    async getGitDiffNumstat(sessionId: string, options: { cwd?: string; staged?: boolean }): Promise<RpcCommandResponse> {
-        return await this.sessionRpc(sessionId, RPC_METHODS.GitDiffNumstat, options) as RpcCommandResponse
-    }
-
-    async getGitDiffFile(sessionId: string, options: { cwd?: string; filePath: string; staged?: boolean }): Promise<RpcCommandResponse> {
-        return await this.sessionRpc(sessionId, RPC_METHODS.GitDiffFile, options) as RpcCommandResponse
-    }
-
-    async readSessionFile(sessionId: string, path: string): Promise<RpcReadFileResponse> {
-        return await this.sessionRpc(sessionId, RPC_METHODS.ReadFile, { path }) as RpcReadFileResponse
-    }
-
-    async writeSessionFile(sessionId: string, path: string, content: string, expectedHash: string): Promise<RpcWriteFileResponse> {
-        return await this.sessionRpc(sessionId, RPC_METHODS.WriteFile, { path, content, expectedHash }) as RpcWriteFileResponse
-    }
-
-    async readGeneratedImage(sessionId: string, imageId: string): Promise<RpcGeneratedImageResponse> {
-        return await this.sessionRpc(sessionId, RPC_METHODS.ReadGeneratedImage, { id: imageId }, GENERATED_BLOB_RPC_TIMEOUT_MS) as RpcGeneratedImageResponse
-    }
-
-    async readGeneratedFile(sessionId: string, fileId: string): Promise<RpcGeneratedFileResponse> {
-        return await this.sessionRpc(sessionId, RPC_METHODS.ReadGeneratedFile, { id: fileId }, GENERATED_BLOB_RPC_TIMEOUT_MS) as RpcGeneratedFileResponse
-    }
-
-    /** One slice of a sent file or generated image. Throws `RpcTargetMissingError`
-     *  with `handler-not-registered` on CLIs predating the method — the caller
-     *  uses that to fall back to the whole-blob read. */
-    async readGeneratedBlobChunk(
-        sessionId: string,
-        request: GeneratedBlobChunkRequest,
-        timeoutMs: number = GENERATED_BLOB_RPC_TIMEOUT_MS
-    ): Promise<RpcGeneratedBlobChunkResponse> {
-        return await this.sessionRpc(
-            sessionId,
-            RPC_METHODS.ReadGeneratedBlobChunk,
-            request,
-            timeoutMs
-        ) as RpcGeneratedBlobChunkResponse
-    }
-
-    async prepareP2pFileTransfer(
-        sessionId: string,
-        request: PrepareP2pFileTransferRpcRequest,
-        timeoutMs: number = 8_000
-    ): Promise<RpcPrepareP2pFileTransferResponse> {
-        return await this.sessionRpc(
-            sessionId,
-            RPC_METHODS.PrepareP2pFileTransfer,
-            request,
-            timeoutMs
-        ) as RpcPrepareP2pFileTransferResponse
-    }
-
-    async signalP2pFileTransfer(
-        sessionId: string,
-        request: SignalP2pFileTransferRpcRequest,
-        timeoutMs: number = 8_000
-    ): Promise<RpcSignalP2pFileTransferResponse> {
-        return await this.sessionRpc(
-            sessionId,
-            RPC_METHODS.SignalP2pFileTransfer,
-            request,
-            timeoutMs
-        ) as RpcSignalP2pFileTransferResponse
-    }
-
-    async listDirectory(sessionId: string, path: string): Promise<RpcListDirectoryResponse> {
-        return await this.sessionRpc(sessionId, RPC_METHODS.ListDirectory, { path }) as RpcListDirectoryResponse
-    }
-
-    async statFiles(sessionId: string, paths: string[]): Promise<RpcStatFilesResponse> {
-        return await this.sessionRpc(sessionId, RPC_METHODS.StatFiles, { paths }) as RpcStatFilesResponse
-    }
-
-    async uploadFile(sessionId: string, filename: string, content: string, mimeType: string): Promise<RpcUploadFileResponse> {
-        return await this.sessionRpc(sessionId, RPC_METHODS.UploadFile, { sessionId, filename, content, mimeType }) as RpcUploadFileResponse
-    }
-
-    async deleteUploadFile(sessionId: string, path: string): Promise<RpcDeleteUploadResponse> {
-        return await this.sessionRpc(sessionId, RPC_METHODS.DeleteUpload, { sessionId, path }) as RpcDeleteUploadResponse
-    }
-
-    async runRipgrep(sessionId: string, args: string[], cwd?: string): Promise<RpcCommandResponse> {
-        return await this.sessionRpc(sessionId, RPC_METHODS.Ripgrep, { args, cwd }) as RpcCommandResponse
-    }
-
-    async listSlashCommands(sessionId: string, agent: string): Promise<SlashCommandsResponse> {
-        return await this.sessionRpc(sessionId, RPC_METHODS.ListSlashCommands, { agent }) as SlashCommandsResponse
-    }
-
-    async listSkills(sessionId: string, flavor?: string): Promise<{
-        success: boolean
-        skills?: Array<{ name: string; description?: string }>
-        error?: string
-    }> {
-        return await this.sessionRpc(sessionId, RPC_METHODS.ListSkills, { flavor }) as {
-            success: boolean
-            skills?: Array<{ name: string; description?: string }>
-            error?: string
-        }
-    }
-
-    async listCodexModelsForMachine(machineId: string): Promise<RpcListCodexModelsResponse> {
-        return await this.machineRpc(machineId, RPC_METHODS.ListCodexModels, {}, MODEL_LIST_RPC_TIMEOUT_MS) as RpcListCodexModelsResponse
-    }
-
-    async listCodexModelsForSession(sessionId: string): Promise<RpcListCodexModelsResponse> {
-        return await this.sessionRpc(
-            sessionId,
-            RPC_METHODS.ListCodexModels,
-            {},
-            MODEL_LIST_RPC_TIMEOUT_MS
-        ) as RpcListCodexModelsResponse
-    }
-
-    async listCodexSessionsForMachine(machineId: string, cwd?: string | null, sessionIds?: string[]): Promise<RpcListCodexSessionsResponse> {
-        const result = await this.machineRpc(machineId, RPC_METHODS.ListCodexSessions, { cwd: cwd ?? null, sessionIds }, MODEL_LIST_RPC_TIMEOUT_MS)
-        return ListCodexSessionsRpcResponseSchema.parse(result)
-    }
-
-    async listPiSessionsForMachine(machineId: string, cwd?: string | null, sessionIds?: string[]): Promise<RpcListPiSessionsResponse> {
-        const result = await this.machineRpc(machineId, RPC_METHODS.ListPiSessions, { cwd: cwd ?? null, sessionIds }, MODEL_LIST_RPC_TIMEOUT_MS)
-        return ListPiSessionsRpcResponseSchema.parse(result)
-    }
-
-    async archiveCodexSessionForMachine(machineId: string, sessionId: string): Promise<RpcArchiveCodexSessionResponse> {
-        const result = await this.machineRpc(machineId, RPC_METHODS.ArchiveCodexSession, { sessionId }, MODEL_LIST_RPC_TIMEOUT_MS)
-        return ArchiveCodexSessionRpcResponseSchema.parse(result)
-    }
-
-    async listCursorModelsForSession(sessionId: string): Promise<RpcListCursorModelsResponse> {
-        return await this.sessionRpc(sessionId, RPC_METHODS.ListCursorModels, {}, MODEL_LIST_RPC_TIMEOUT_MS) as RpcListCursorModelsResponse
-    }
-
-    async listCursorModelsForMachine(machineId: string): Promise<RpcListCursorModelsResponse> {
-        return await this.machineRpc(machineId, RPC_METHODS.ListCursorModels, {}, MODEL_LIST_RPC_TIMEOUT_MS) as RpcListCursorModelsResponse
-    }
-
-    async listCcSwitchProvidersForMachine(machineId: string): Promise<ListCcSwitchProvidersResponse> {
-        return await this.machineRpc(machineId, RPC_METHODS.ListCcSwitchProviders, {}, MODEL_LIST_RPC_TIMEOUT_MS) as ListCcSwitchProvidersResponse
-    }
-
-    async validateCcSwitchProviderForMachine(machineId: string, providerId: string): Promise<ValidateCcSwitchProviderResponse> {
-        return await this.machineRpc(machineId, RPC_METHODS.ValidateCcSwitchProvider, { providerId }) as ValidateCcSwitchProviderResponse
-    }
-
-    async listImportableSessions(machineId: string, request: ListImportableSessionsRequest): Promise<ListImportableSessionsResponse> {
-        return await this.machineRpc(machineId, RPC_METHODS.ListImportableSessions, request, MODEL_LIST_RPC_TIMEOUT_MS) as ListImportableSessionsResponse
-    }
-
-    async importProviderSession(machineId: string, request: ImportProviderSessionRequest): Promise<ImportProviderSessionResponse> {
-        return await this.machineRpc(machineId, RPC_METHODS.ImportProviderSession, request, HISTORY_IMPORT_RPC_TIMEOUT_MS) as ImportProviderSessionResponse
-    }
-
-    async listOpencodeModelsForSession(sessionId: string): Promise<RpcListOpencodeModelsResponse> {
-        return await this.sessionRpc(sessionId, RPC_METHODS.ListOpencodeModels, {}) as RpcListOpencodeModelsResponse
-    }
-
-    async listOmpModelsForSession(sessionId: string): Promise<RpcListOmpModelsResponse> {
-        return await this.sessionRpc(sessionId, RPC_METHODS.ListOmpModels, {}) as RpcListOmpModelsResponse
-    }
-    async listOmpModelsForMachine(machineId: string, cwd: string): Promise<RpcListOmpModelsResponse> {
-        return await this.machineRpc(
-            machineId,
-            RPC_METHODS.ListOmpModels,
-            { cwd },
-            MODEL_LIST_RPC_TIMEOUT_MS
-        ) as RpcListOmpModelsResponse
-    }
-
-
-    async listOmpThinkingOptionsForSession(sessionId: string): Promise<RpcListOmpThinkingOptionsResponse> {
-        return await this.sessionRpc(sessionId, RPC_METHODS.ListOmpThinkingOptions, {}) as RpcListOmpThinkingOptionsResponse
-    }
-
-    async cycleOmpModelForSession(sessionId: string): Promise<CycleOmpModelResponse> {
-        return await this.sessionRpc(sessionId, RPC_METHODS.CycleOmpModel, {}) as CycleOmpModelResponse
-    }
-
-
-    async listOmpLoginProvidersForMachine(machineId: string): Promise<RpcListOmpLoginProvidersResponse> {
-        return await this.machineRpc(
-            machineId,
-            RPC_METHODS.ListOmpLoginProviders,
-            {}
-        ) as RpcListOmpLoginProvidersResponse
-    }
-
-    async startOmpLoginForMachine(machineId: string, providerId: string): Promise<RpcStartOmpLoginResponse> {
-        return await this.machineRpc(
-            machineId,
-            RPC_METHODS.StartOmpLogin,
-            { providerId }
-        ) as RpcStartOmpLoginResponse
-    }
-
-    async respondOmpLoginInputForMachine(
-        machineId: string,
-        flowId: string,
-        value: string
-    ): Promise<RpcRespondOmpLoginInputResponse> {
-        return await this.machineRpc(
-            machineId,
-            RPC_METHODS.RespondOmpLoginInput,
-            { flowId, value }
-        ) as RpcRespondOmpLoginInputResponse
-    }
-
-    async getOmpExtensionUiRequestForSession(
-        sessionId: string,
-        requestId: string
-    ): Promise<RpcGetOmpExtensionUiResponse> {
-        return await this.sessionRpc(
-            sessionId,
-            RPC_METHODS.GetOmpExtensionUiRequest,
-            { requestId }
-        ) as RpcGetOmpExtensionUiResponse
-    }
-
-    async listOpencodeModelsForCwd(machineId: string, cwd: string): Promise<RpcListOpencodeModelsResponse> {
-        return await this.machineRpc(machineId, RPC_METHODS.ListOpencodeModelsForCwd, { cwd }) as RpcListOpencodeModelsResponse
-    }
-
-    async listGrokModelsForCwd(machineId: string, cwd: string): Promise<RpcListGrokModelsResponse> {
-        return await this.machineRpc(machineId, RPC_METHODS.ListGrokModelsForCwd, { cwd }) as RpcListGrokModelsResponse
-    }
-
-    async listGrokModelsForSession(sessionId: string): Promise<RpcListGrokModelsResponse> {
-        return await this.sessionRpc(sessionId, RPC_METHODS.ListGrokModels, {}) as RpcListGrokModelsResponse
-    }
-
-    async listGrokReasoningEffortOptionsForSession(sessionId: string): Promise<RpcListGrokReasoningEffortOptionsResponse> {
-        return await this.sessionRpc(sessionId, RPC_METHODS.ListGrokReasoningEffortOptions, {}) as RpcListGrokReasoningEffortOptionsResponse
-    }
-
-    async listCopilotModelsForCwd(machineId: string, cwd: string): Promise<RpcListCopilotModelsResponse> {
-        return await this.machineRpc(
-            machineId,
-            RPC_METHODS.ListCopilotModelsForCwd,
-            { cwd },
-            MODEL_LIST_RPC_TIMEOUT_MS
-        ) as RpcListCopilotModelsResponse
-    }
-
-    async listCopilotModelsForSession(sessionId: string): Promise<RpcListCopilotModelsResponse> {
-        return await this.sessionRpc(
-            sessionId,
-            RPC_METHODS.ListCopilotModels,
-            {},
-            MODEL_LIST_RPC_TIMEOUT_MS
-        ) as RpcListCopilotModelsResponse
-    }
-
-    /** Generic Pi RPC call — routes all Pi-specific session RPCs through
-     *  a single entry point instead of per-method wrappers. */
-    async callPiRpc<T = unknown>(sessionId: string, method: string, params?: Record<string, unknown>, timeoutMs?: number): Promise<T> {
-        return await this.sessionRpc(sessionId, method, params ?? {}, timeoutMs ?? DEFAULT_RPC_TIMEOUT_MS) as T
-    }
-
-    async forkConversation(
-        sessionId: string,
-        params: { messageLocalId?: string }
-    ): Promise<import('@hapi/protocol/apiTypes').ForkConversationRpcResult> {
-        return await this.sessionRpc(
-            sessionId,
-            RPC_METHODS.ForkConversation,
-            params,
-            120_000
-        ) as import('@hapi/protocol/apiTypes').ForkConversationRpcResult
-    }
-
-    async rewindConversation(
-        sessionId: string,
-        params: { messageLocalId: string }
-    ): Promise<import('@hapi/protocol/apiTypes').RewindConversationRpcResult> {
-        return await this.sessionRpc(
-            sessionId,
-            RPC_METHODS.RewindConversation,
-            params,
-            120_000
-        ) as import('@hapi/protocol/apiTypes').RewindConversationRpcResult
-    }
-
-    async listOpencodeReasoningEffortOptionsForSession(sessionId: string): Promise<RpcListOpencodeReasoningEffortOptionsResponse> {
-        return await this.sessionRpc(sessionId, RPC_METHODS.ListOpencodeReasoningEffortOptions, {}) as RpcListOpencodeReasoningEffortOptionsResponse
-    }
-
-    async listAgyModelsForMachine(machineId: string): Promise<RpcListAgyModelsResponse> {
-        return await this.machineRpc(machineId, RPC_METHODS.ListAgyModels, {}, MODEL_LIST_RPC_TIMEOUT_MS) as RpcListAgyModelsResponse
-    }
-
-    private async sessionRpc(
-        sessionId: string,
-        method: string,
-        params: unknown,
-        timeoutMs: number = DEFAULT_RPC_TIMEOUT_MS
-    ): Promise<unknown> {
-        return await this.rpcCall(`${sessionId}:${method}`, params, timeoutMs)
-    }
-
-    private async machineRpc(
-        machineId: string,
-        method: string,
-        params: unknown,
-        timeoutMs: number = DEFAULT_RPC_TIMEOUT_MS
-    ): Promise<unknown> {
-        return await this.rpcCall(`${machineId}:${method}`, params, timeoutMs)
-    }
-
-    private async rpcCall(method: string, params: unknown, timeoutMs: number = DEFAULT_RPC_TIMEOUT_MS): Promise<unknown> {
-        const socketId = this.rpcRegistry.getSocketIdForMethod(method)
-        if (!socketId) {
-            throw new RpcTargetMissingError(method, 'handler-not-registered')
-        }
-
-        const socket = this.io.of('/cli').sockets.get(socketId)
-        if (!socket) {
-            throw new RpcTargetMissingError(method, 'socket-disconnected')
-        }
-
-        const response = await socket.timeout(timeoutMs).emitWithAck('rpc-request', {
-            method,
-            params: JSON.stringify(params)
-        }) as unknown
-
-        if (typeof response !== 'string') {
-            return response
-        }
-
-        try {
-            return JSON.parse(response) as unknown
-        } catch {
-            return response
-        }
-    }
+ constructor(
+  private readonly io: Server,
+  private readonly rpcRegistry: RpcRegistry
+ ) {
+ }
+
+ async approvePermission(
+  sessionId: string,
+  requestId: string,
+  mode?: PermissionMode,
+  allowTools?: string[],
+  decision?: 'approved' | 'approved_for_session' | 'denied' | 'abort',
+  answers?: Record<string, string[]> | Record<string, { answers: string[] }>
+ ): Promise<void> {
+  await this.sessionRpc(sessionId, RPC_METHODS.Permission, {
+   id: requestId,
+   approved: true,
+   mode,
+   allowTools,
+   decision,
+   answers
+  })
+ }
+
+ async denyPermission(
+  sessionId: string,
+  requestId: string,
+  decision?: 'approved' | 'approved_for_session' | 'denied' | 'abort'
+ ): Promise<void> {
+  await this.sessionRpc(sessionId, RPC_METHODS.Permission, {
+   id: requestId,
+   approved: false,
+   decision
+  })
+ }
+
+ async abortSession(sessionId: string): Promise<void> {
+  await this.sessionRpc(sessionId, RPC_METHODS.Abort, { reason: 'User aborted via Telegram Bot' })
+ }
+
+ async switchSession(sessionId: string, to: 'remote' | 'local'): Promise<void> {
+  await this.sessionRpc(sessionId, RPC_METHODS.Switch, { to })
+ }
+
+ async requestSessionConfig(
+  sessionId: string,
+  config: {
+   permissionMode?: PermissionMode
+   model?: { provider: string; modelId: string } | string | null
+   modelReasoningEffort?: string | null
+   effort?: string | null
+   collaborationMode?: CodexCollaborationMode
+   copilotAgentMode?: CopilotAgentMode
+  }
+ ): Promise<unknown> {
+  return await this.sessionRpc(sessionId, RPC_METHODS.SetSessionConfig, config)
+ }
+
+ async killSession(sessionId: string): Promise<void> {
+  const result = await this.sessionRpc(sessionId, RPC_METHODS.KillSession, {})
+  if (result && typeof result === 'object' && 'success' in result && result.success === true) return
+  if (result && typeof result === 'object') {
+   if ('error' in result && typeof result.error === 'string') throw new Error(result.error)
+   if ('message' in result && typeof result.message === 'string') throw new Error(result.message)
+  }
+  throw new Error('Session cleanup was not acknowledged')
+ }
+
+ async stopRunnerSession(machineId: string, sessionId: string): Promise<'stopped' | 'already_gone' | 'still_alive'> {
+  const result = await this.machineRpc(machineId, RPC_METHODS.StopSession, { sessionId })
+  const status = result && typeof result === 'object' ? (result as { status?: unknown }).status : undefined
+  if (status === 'stopped' || status === 'already_gone' || status === 'still_alive') return status
+  throw new Error('Unexpected stop-session response')
+ }
+
+ async handoffSessionToLocal(sessionId: string): Promise<void> {
+  await this.sessionRpc(sessionId, RPC_METHODS.HandoffLocal, {})
+ }
+
+ async spawnSession(
+  machineId: string,
+  directory: string,
+  agent: AgentFlavor = 'claude',
+  model?: string,
+  modelReasoningEffort?: string,
+  yolo?: boolean,
+  sessionType?: 'simple' | 'worktree',
+  worktreeName?: string,
+  resumeSessionId?: string,
+  effort?: string,
+  permissionMode?: PermissionMode,
+  serviceTier?: string,
+  claudeLaunch?: ClaudeLaunch,
+  ccSwitchProviderId?: string,
+  existingSessionId?: string,
+  collaborationMode?: CodexCollaborationMode,
+  copilotAgentMode?: CopilotAgentMode,
+  startingMode?: 'remote' | 'pty',
+  // Hub session id to reuse for this spawn. When set, the runner boots the
+  // CLI with `--hapi-session-id`, so the child reuses the existing hub
+  // session row (same id) instead of minting a new one.
+  forkSession?: boolean,
+  ompResumeAttemptId?: string
+ ): Promise<{ type: 'success'; sessionId: string } | { type: 'error'; message: string }> {
+  try {
+   const result = await this.machineRpc(
+    machineId,
+    RPC_METHODS.SpawnHappySession,
+    {
+     type: 'spawn-in-directory',
+     directory,
+     agent,
+     model,
+     modelReasoningEffort,
+     yolo,
+     sessionType,
+     worktreeName,
+     resumeSessionId,
+     effort,
+     permissionMode,
+     serviceTier,
+     existingSessionId,
+     sessionId: existingSessionId,
+     claudeLaunch,
+     ccSwitchProviderId,
+     collaborationMode,
+     copilotAgentMode,
+     startingMode,
+     forkSession: forkSession === true,
+     ompResumeAttemptId
+    }
+   )
+   if (result && typeof result === 'object') {
+    const obj = result as Record<string, unknown>
+    if (obj.type === 'success' && typeof obj.sessionId === 'string') {
+     return { type: 'success', sessionId: obj.sessionId }
+    }
+    if (obj.type === 'error' && typeof obj.errorMessage === 'string') {
+     return { type: 'error', message: obj.errorMessage }
+    }
+    if (obj.type === 'requestToApproveDirectoryCreation' && typeof obj.directory === 'string') {
+     return { type: 'error', message: `Directory creation requires approval: ${obj.directory}` }
+    }
+    if (typeof obj.error === 'string') {
+     return { type: 'error', message: obj.error }
+    }
+    if (obj.type !== 'success' && typeof obj.message === 'string') {
+     return { type: 'error', message: obj.message }
+    }
+   }
+   const details = typeof result === 'string'
+    ? result
+    : (() => {
+     try {
+      return JSON.stringify(result)
+     } catch {
+      return String(result)
+     }
+    })()
+   return { type: 'error', message: `Unexpected spawn result: ${details}` }
+  } catch (error) {
+   return { type: 'error', message: error instanceof Error ? error.message : String(error) }
+  }
+ }
+
+ /**
+      * Trigger a provider-native session fork on the target machine.
+      * Used by fork-features/session-fork to clone a session into a new
+      * provider session id. Returns the raw RPC result (typed by the caller
+      * via ForkSpawnResult); status code mapping happens in hubForkController.
+      */
+ async forkProviderSessionOnMachine(
+  machineId: string,
+  request: { flavor: string; payload: unknown }
+ ): Promise<unknown> {
+  return await this.machineRpc(machineId, RPC_METHODS.ForkSpawnSession, request)
+ }
+
+ async listMachineDirectory(machineId: string, path: string, includeHidden?: boolean): Promise<RpcListDirectoryResponse> {
+  const result = await this.machineRpc(machineId, RPC_METHODS.ListMachineDirectory, { path, includeHidden }) as RpcListDirectoryResponse | unknown
+  if (!result || typeof result !== 'object') {
+   return { success: false, error: 'Unexpected list-directory result' }
+  }
+  return result as RpcListDirectoryResponse
+ }
+
+ async createMachineDirectory(machineId: string, parentPath: string, name: string): Promise<MachineCreateDirectoryResponse> {
+  const result = await this.machineRpc(
+   machineId,
+   RPC_METHODS.CreateMachineDirectory,
+   { parentPath, name }
+  ) as MachineCreateDirectoryResponse | unknown
+  if (!result || typeof result !== 'object') {
+   return { success: false, error: 'Unexpected create-directory result' }
+  }
+  return result as MachineCreateDirectoryResponse
+ }
+
+ async checkPathsExist(machineId: string, paths: string[]): Promise<Record<string, boolean>> {
+  const result = await this.machineRpc(machineId, RPC_METHODS.PathExists, { paths }) as RpcPathExistsResponse | unknown
+  if (!result || typeof result !== 'object') {
+   throw new Error('Unexpected path-exists result')
+  }
+
+  const existsValue = (result as RpcPathExistsResponse).exists
+  if (!existsValue || typeof existsValue !== 'object') {
+   throw new Error('Unexpected path-exists result')
+  }
+
+  const exists: Record<string, boolean> = {}
+  for (const [key, value] of Object.entries(existsValue)) {
+   exists[key] = value === true
+  }
+  return exists
+ }
+
+ async getCursorChatStoreStatus(
+  machineId: string,
+  workspacePath: string,
+  cursorSessionId: string,
+  homeDir?: string
+ ): Promise<RpcCursorChatStoreStatus> {
+  const result = await this.machineRpc(
+   machineId,
+   RPC_METHODS.CursorChatStoreStatus,
+   { workspacePath, cursorSessionId, homeDir }
+  )
+  return CursorChatStoreStatusSchema.parse(result)
+ }
+
+ async getGitStatus(sessionId: string, cwd?: string): Promise<RpcCommandResponse> {
+  return await this.sessionRpc(sessionId, RPC_METHODS.GitStatus, { cwd }) as RpcCommandResponse
+ }
+
+ async getGitDiffNumstat(sessionId: string, options: { cwd?: string; staged?: boolean }): Promise<RpcCommandResponse> {
+  return await this.sessionRpc(sessionId, RPC_METHODS.GitDiffNumstat, options) as RpcCommandResponse
+ }
+
+ async getGitDiffFile(sessionId: string, options: { cwd?: string; filePath: string; staged?: boolean }): Promise<RpcCommandResponse> {
+  return await this.sessionRpc(sessionId, RPC_METHODS.GitDiffFile, options) as RpcCommandResponse
+ }
+
+ async readSessionFile(sessionId: string, path: string): Promise<RpcReadFileResponse> {
+  return await this.sessionRpc(sessionId, RPC_METHODS.ReadFile, { path }) as RpcReadFileResponse
+ }
+
+ async writeSessionFile(sessionId: string, path: string, content: string, expectedHash: string): Promise<RpcWriteFileResponse> {
+  return await this.sessionRpc(sessionId, RPC_METHODS.WriteFile, { path, content, expectedHash }) as RpcWriteFileResponse
+ }
+
+ async readGeneratedImage(sessionId: string, imageId: string): Promise<RpcGeneratedImageResponse> {
+  return await this.sessionRpc(sessionId, RPC_METHODS.ReadGeneratedImage, { id: imageId }, GENERATED_BLOB_RPC_TIMEOUT_MS) as RpcGeneratedImageResponse
+ }
+
+ async readGeneratedFile(sessionId: string, fileId: string): Promise<RpcGeneratedFileResponse> {
+  return await this.sessionRpc(sessionId, RPC_METHODS.ReadGeneratedFile, { id: fileId }, GENERATED_BLOB_RPC_TIMEOUT_MS) as RpcGeneratedFileResponse
+ }
+
+ /** One slice of a sent file or generated image. Throws `RpcTargetMissingError`
+  *  with `handler-not-registered` on CLIs predating the method — the caller
+  *  uses that to fall back to the whole-blob read. */
+ async readGeneratedBlobChunk(
+  sessionId: string,
+  request: GeneratedBlobChunkRequest,
+  timeoutMs: number = GENERATED_BLOB_RPC_TIMEOUT_MS
+ ): Promise<RpcGeneratedBlobChunkResponse> {
+  return await this.sessionRpc(
+   sessionId,
+   RPC_METHODS.ReadGeneratedBlobChunk,
+   request,
+   timeoutMs
+  ) as RpcGeneratedBlobChunkResponse
+ }
+
+ async prepareP2pFileTransfer(
+  sessionId: string,
+  request: PrepareP2pFileTransferRpcRequest,
+  timeoutMs: number = 8_000
+ ): Promise<RpcPrepareP2pFileTransferResponse> {
+  return await this.sessionRpc(
+   sessionId,
+   RPC_METHODS.PrepareP2pFileTransfer,
+   request,
+   timeoutMs
+  ) as RpcPrepareP2pFileTransferResponse
+ }
+
+ async signalP2pFileTransfer(
+  sessionId: string,
+  request: SignalP2pFileTransferRpcRequest,
+  timeoutMs: number = 8_000
+ ): Promise<RpcSignalP2pFileTransferResponse> {
+  return await this.sessionRpc(
+   sessionId,
+   RPC_METHODS.SignalP2pFileTransfer,
+   request,
+   timeoutMs
+  ) as RpcSignalP2pFileTransferResponse
+ }
+
+ async listDirectory(sessionId: string, path: string): Promise<RpcListDirectoryResponse> {
+  return await this.sessionRpc(sessionId, RPC_METHODS.ListDirectory, { path }) as RpcListDirectoryResponse
+ }
+
+ async statFiles(sessionId: string, paths: string[]): Promise<RpcStatFilesResponse> {
+  return await this.sessionRpc(sessionId, RPC_METHODS.StatFiles, { paths }) as RpcStatFilesResponse
+ }
+
+ async uploadFile(sessionId: string, filename: string, content: string, mimeType: string): Promise<RpcUploadFileResponse> {
+  return await this.sessionRpc(sessionId, RPC_METHODS.UploadFile, { sessionId, filename, content, mimeType }) as RpcUploadFileResponse
+ }
+
+ async deleteUploadFile(sessionId: string, path: string): Promise<RpcDeleteUploadResponse> {
+  return await this.sessionRpc(sessionId, RPC_METHODS.DeleteUpload, { sessionId, path }) as RpcDeleteUploadResponse
+ }
+
+ async runRipgrep(sessionId: string, args: string[], cwd?: string): Promise<RpcCommandResponse> {
+  return await this.sessionRpc(sessionId, RPC_METHODS.Ripgrep, { args, cwd }) as RpcCommandResponse
+ }
+
+ async listSlashCommands(sessionId: string, agent: string): Promise<SlashCommandsResponse> {
+  return await this.sessionRpc(sessionId, RPC_METHODS.ListSlashCommands, { agent }) as SlashCommandsResponse
+ }
+
+ async listSkills(sessionId: string, flavor?: string): Promise<{
+  success: boolean
+  skills?: Array<{ name: string; description?: string }>
+  error?: string
+ }> {
+  return await this.sessionRpc(sessionId, RPC_METHODS.ListSkills, { flavor }) as {
+   success: boolean
+   skills?: Array<{ name: string; description?: string }>
+   error?: string
+  }
+ }
+
+ async listCodexModelsForMachine(machineId: string): Promise<RpcListCodexModelsResponse> {
+  return await this.machineRpc(machineId, RPC_METHODS.ListCodexModels, {}, MODEL_LIST_RPC_TIMEOUT_MS) as RpcListCodexModelsResponse
+ }
+
+ async listCodexModelsForSession(sessionId: string): Promise<RpcListCodexModelsResponse> {
+  return await this.sessionRpc(
+   sessionId,
+   RPC_METHODS.ListCodexModels,
+   {},
+   MODEL_LIST_RPC_TIMEOUT_MS
+  ) as RpcListCodexModelsResponse
+ }
+
+ async listCodexSessionsForMachine(machineId: string, cwd?: string | null, sessionIds?: string[]): Promise<RpcListCodexSessionsResponse> {
+  const result = await this.machineRpc(machineId, RPC_METHODS.ListCodexSessions, { cwd: cwd ?? null, sessionIds }, MODEL_LIST_RPC_TIMEOUT_MS)
+  return ListCodexSessionsRpcResponseSchema.parse(result)
+ }
+
+ async listPiSessionsForMachine(machineId: string, cwd?: string | null, sessionIds?: string[]): Promise<RpcListPiSessionsResponse> {
+  const result = await this.machineRpc(machineId, RPC_METHODS.ListPiSessions, { cwd: cwd ?? null, sessionIds }, MODEL_LIST_RPC_TIMEOUT_MS)
+  return ListPiSessionsRpcResponseSchema.parse(result)
+ }
+
+ async archiveCodexSessionForMachine(machineId: string, sessionId: string): Promise<RpcArchiveCodexSessionResponse> {
+  const result = await this.machineRpc(machineId, RPC_METHODS.ArchiveCodexSession, { sessionId }, MODEL_LIST_RPC_TIMEOUT_MS)
+  return ArchiveCodexSessionRpcResponseSchema.parse(result)
+ }
+
+ async listCursorModelsForSession(sessionId: string): Promise<RpcListCursorModelsResponse> {
+  return await this.sessionRpc(sessionId, RPC_METHODS.ListCursorModels, {}, MODEL_LIST_RPC_TIMEOUT_MS) as RpcListCursorModelsResponse
+ }
+
+ async listCursorModelsForMachine(machineId: string): Promise<RpcListCursorModelsResponse> {
+  return await this.machineRpc(machineId, RPC_METHODS.ListCursorModels, {}, MODEL_LIST_RPC_TIMEOUT_MS) as RpcListCursorModelsResponse
+ }
+
+ async listCcSwitchProvidersForMachine(machineId: string): Promise<ListCcSwitchProvidersResponse> {
+  return await this.machineRpc(machineId, RPC_METHODS.ListCcSwitchProviders, {}, MODEL_LIST_RPC_TIMEOUT_MS) as ListCcSwitchProvidersResponse
+ }
+
+ async validateCcSwitchProviderForMachine(machineId: string, providerId: string): Promise<ValidateCcSwitchProviderResponse> {
+  return await this.machineRpc(machineId, RPC_METHODS.ValidateCcSwitchProvider, { providerId }) as ValidateCcSwitchProviderResponse
+ }
+
+ async listImportableSessions(machineId: string, request: ListImportableSessionsRequest): Promise<ListImportableSessionsResponse> {
+  return await this.machineRpc(machineId, RPC_METHODS.ListImportableSessions, request, MODEL_LIST_RPC_TIMEOUT_MS) as ListImportableSessionsResponse
+ }
+
+ async importProviderSession(machineId: string, request: ImportProviderSessionRequest): Promise<ImportProviderSessionResponse> {
+  return await this.machineRpc(machineId, RPC_METHODS.ImportProviderSession, request, HISTORY_IMPORT_RPC_TIMEOUT_MS) as ImportProviderSessionResponse
+ }
+
+ async listOpencodeModelsForSession(sessionId: string): Promise<RpcListOpencodeModelsResponse> {
+  return await this.sessionRpc(sessionId, RPC_METHODS.ListOpencodeModels, {}) as RpcListOpencodeModelsResponse
+ }
+
+ async listOmpModelsForSession(sessionId: string): Promise<RpcListOmpModelsResponse> {
+  return await this.sessionRpc(sessionId, RPC_METHODS.ListOmpModels, {}) as RpcListOmpModelsResponse
+ }
+ async listOmpModelsForMachine(machineId: string, cwd: string): Promise<RpcListOmpModelsResponse> {
+  return await this.machineRpc(
+   machineId,
+   RPC_METHODS.ListOmpModels,
+   { cwd },
+   MODEL_LIST_RPC_TIMEOUT_MS
+  ) as RpcListOmpModelsResponse
+ }
+
+ async getOmpUsageForMachine(machineId: string): Promise<OmpUsageResponse> {
+  try {
+   const result = await this.machineRpc(machineId, RPC_METHODS.GetOmpUsage, {}, OMP_USAGE_RPC_TIMEOUT_MS)
+   const parsed = OmpUsageResponseSchema.safeParse(result)
+   if (parsed.success) return parsed.data.success ? parsed.data : { ...parsed.data, error: 'OMP native usage request failed.' }
+   return { success: false, source: 'omp-native', errorCode: 'invalid_output', error: 'Runner returned an invalid OMP usage report.' }
+  } catch (error) {
+   if (error instanceof RpcTargetMissingError && error.code === 'handler-not-registered') {
+    return { success: false, source: 'omp-native', errorCode: 'unsupported', error: 'This Runner does not support OMP native usage.' }
+   }
+   const timedOut = error instanceof Error && /timed?\s*out|timeout/i.test(error.message)
+   return {
+    success: false, source: 'omp-native', errorCode: timedOut ? 'timeout' : 'unavailable',
+    error: timedOut ? 'OMP native usage exceeded its request budget.' : 'OMP native usage is unavailable on this machine.'
+   }
+  }
+ }
+
+
+ async listOmpThinkingOptionsForSession(sessionId: string): Promise<RpcListOmpThinkingOptionsResponse> {
+  return await this.sessionRpc(sessionId, RPC_METHODS.ListOmpThinkingOptions, {}) as RpcListOmpThinkingOptionsResponse
+ }
+
+ async cycleOmpModelForSession(sessionId: string): Promise<CycleOmpModelResponse> {
+  return await this.sessionRpc(sessionId, RPC_METHODS.CycleOmpModel, {}) as CycleOmpModelResponse
+ }
+
+
+ async listOmpLoginProvidersForMachine(machineId: string): Promise<RpcListOmpLoginProvidersResponse> {
+  return await this.machineRpc(
+   machineId,
+   RPC_METHODS.ListOmpLoginProviders,
+   {}
+  ) as RpcListOmpLoginProvidersResponse
+ }
+
+ async startOmpLoginForMachine(machineId: string, providerId: string): Promise<RpcStartOmpLoginResponse> {
+  return await this.machineRpc(
+   machineId,
+   RPC_METHODS.StartOmpLogin,
+   { providerId }
+  ) as RpcStartOmpLoginResponse
+ }
+
+ async respondOmpLoginInputForMachine(
+  machineId: string,
+  flowId: string,
+  value: string
+ ): Promise<RpcRespondOmpLoginInputResponse> {
+  return await this.machineRpc(
+   machineId,
+   RPC_METHODS.RespondOmpLoginInput,
+   { flowId, value }
+  ) as RpcRespondOmpLoginInputResponse
+ }
+
+ async getOmpExtensionUiRequestForSession(
+  sessionId: string,
+  requestId: string
+ ): Promise<RpcGetOmpExtensionUiResponse> {
+  return await this.sessionRpc(
+   sessionId,
+   RPC_METHODS.GetOmpExtensionUiRequest,
+   { requestId }
+  ) as RpcGetOmpExtensionUiResponse
+ }
+
+ async listOpencodeModelsForCwd(machineId: string, cwd: string): Promise<RpcListOpencodeModelsResponse> {
+  return await this.machineRpc(machineId, RPC_METHODS.ListOpencodeModelsForCwd, { cwd }) as RpcListOpencodeModelsResponse
+ }
+
+ async listGrokModelsForCwd(machineId: string, cwd: string): Promise<RpcListGrokModelsResponse> {
+  return await this.machineRpc(machineId, RPC_METHODS.ListGrokModelsForCwd, { cwd }) as RpcListGrokModelsResponse
+ }
+
+ async listGrokModelsForSession(sessionId: string): Promise<RpcListGrokModelsResponse> {
+  return await this.sessionRpc(sessionId, RPC_METHODS.ListGrokModels, {}) as RpcListGrokModelsResponse
+ }
+
+ async listGrokReasoningEffortOptionsForSession(sessionId: string): Promise<RpcListGrokReasoningEffortOptionsResponse> {
+  return await this.sessionRpc(sessionId, RPC_METHODS.ListGrokReasoningEffortOptions, {}) as RpcListGrokReasoningEffortOptionsResponse
+ }
+
+ async listCopilotModelsForCwd(machineId: string, cwd: string): Promise<RpcListCopilotModelsResponse> {
+  return await this.machineRpc(
+   machineId,
+   RPC_METHODS.ListCopilotModelsForCwd,
+   { cwd },
+   MODEL_LIST_RPC_TIMEOUT_MS
+  ) as RpcListCopilotModelsResponse
+ }
+
+ async listCopilotModelsForSession(sessionId: string): Promise<RpcListCopilotModelsResponse> {
+  return await this.sessionRpc(
+   sessionId,
+   RPC_METHODS.ListCopilotModels,
+   {},
+   MODEL_LIST_RPC_TIMEOUT_MS
+  ) as RpcListCopilotModelsResponse
+ }
+
+ /** Generic Pi RPC call — routes all Pi-specific session RPCs through
+  *  a single entry point instead of per-method wrappers. */
+ async callPiRpc<T = unknown>(sessionId: string, method: string, params?: Record<string, unknown>, timeoutMs?: number): Promise<T> {
+  return await this.sessionRpc(sessionId, method, params ?? {}, timeoutMs ?? DEFAULT_RPC_TIMEOUT_MS) as T
+ }
+
+ async forkConversation(
+  sessionId: string,
+  params: { messageLocalId?: string }
+ ): Promise<import('@hapi/protocol/apiTypes').ForkConversationRpcResult> {
+  return await this.sessionRpc(
+   sessionId,
+   RPC_METHODS.ForkConversation,
+   params,
+   120_000
+  ) as import('@hapi/protocol/apiTypes').ForkConversationRpcResult
+ }
+
+ async rewindConversation(
+  sessionId: string,
+  params: { messageLocalId: string }
+ ): Promise<import('@hapi/protocol/apiTypes').RewindConversationRpcResult> {
+  return await this.sessionRpc(
+   sessionId,
+   RPC_METHODS.RewindConversation,
+   params,
+   120_000
+  ) as import('@hapi/protocol/apiTypes').RewindConversationRpcResult
+ }
+
+ async listOpencodeReasoningEffortOptionsForSession(sessionId: string): Promise<RpcListOpencodeReasoningEffortOptionsResponse> {
+  return await this.sessionRpc(sessionId, RPC_METHODS.ListOpencodeReasoningEffortOptions, {}) as RpcListOpencodeReasoningEffortOptionsResponse
+ }
+
+ async listAgyModelsForMachine(machineId: string): Promise<RpcListAgyModelsResponse> {
+  return await this.machineRpc(machineId, RPC_METHODS.ListAgyModels, {}, MODEL_LIST_RPC_TIMEOUT_MS) as RpcListAgyModelsResponse
+ }
+
+ private async sessionRpc(
+  sessionId: string,
+  method: string,
+  params: unknown,
+  timeoutMs: number = DEFAULT_RPC_TIMEOUT_MS
+ ): Promise<unknown> {
+  return await this.rpcCall(`${sessionId}:${method}`, params, timeoutMs)
+ }
+
+ private async machineRpc(
+  machineId: string,
+  method: string,
+  params: unknown,
+  timeoutMs: number = DEFAULT_RPC_TIMEOUT_MS
+ ): Promise<unknown> {
+  return await this.rpcCall(`${machineId}:${method}`, params, timeoutMs)
+ }
+
+ private async rpcCall(method: string, params: unknown, timeoutMs: number = DEFAULT_RPC_TIMEOUT_MS): Promise<unknown> {
+  const socketId = this.rpcRegistry.getSocketIdForMethod(method)
+  if (!socketId) {
+   throw new RpcTargetMissingError(method, 'handler-not-registered')
+  }
+
+  const socket = this.io.of('/cli').sockets.get(socketId)
+  if (!socket) {
+   throw new RpcTargetMissingError(method, 'socket-disconnected')
+  }
+
+  const response = await socket.timeout(timeoutMs).emitWithAck('rpc-request', {
+   method,
+   params: JSON.stringify(params)
+  }) as unknown
+  if (this.rpcRegistry.getSocketIdForMethod(method) !== socketId) {
+   throw new Error(`RPC source changed before acknowledgement: ${method}`)
+  }
+
+  if (typeof response !== 'string') {
+   return response
+  }
+
+  try {
+   return JSON.parse(response) as unknown
+  } catch {
+   return response
+  }
+ }
 }

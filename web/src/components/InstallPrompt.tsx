@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { usePWAInstall } from '@/hooks/usePWAInstall'
 import { usePlatform } from '@/hooks/usePlatform'
 import { CloseIcon, ShareIcon, PlusCircleIcon } from '@/components/icons'
+import { useVirtualKeyboardOpen } from '@/hooks/useViewportHeight'
 import { useTranslation } from '@/lib/use-translation'
 
 export function InstallPrompt() {
@@ -9,7 +10,9 @@ export function InstallPrompt() {
     const { canInstall, canInstallIOS, promptInstall, dismissInstall, isStandalone } = usePWAInstall()
     const { isTelegram, haptic } = usePlatform()
     const [showIOSGuide, setShowIOSGuide] = useState(false)
-    const showFloatingPrompt = !isTelegram && !isStandalone && ((canInstallIOS && !showIOSGuide) || canInstall)
+    // 软键盘展开时暂藏安装提示（纯展示，不触碰 dismiss/install 状态）。
+    const keyboardCompact = useVirtualKeyboardOpen()
+    const showFloatingPrompt = !keyboardCompact && !isTelegram && !isStandalone && ((canInstallIOS && !showIOSGuide) || canInstall)
 
     useEffect(() => {
         const root = document.documentElement
@@ -26,7 +29,7 @@ export function InstallPrompt() {
         }
     }, [showFloatingPrompt])
 
-    if (isTelegram || isStandalone) {
+    if (isTelegram || isStandalone || keyboardCompact) {
         return null
     }
 

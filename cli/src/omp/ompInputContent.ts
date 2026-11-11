@@ -1,6 +1,7 @@
 import { readFile, stat } from 'node:fs/promises';
 import { hostname } from 'node:os';
 import type { AttachmentMetadata } from '@/api/types';
+import { formatMessageWithAttachments } from '@/utils/attachmentFormatter';
 import type { OmpImageContent } from './rpc/types';
 
 const MAX_IMAGE_BYTES = 50 * 1024 * 1024;
@@ -9,7 +10,6 @@ const HAPI_USER_CONTEXT_OPEN_TAG_RE = /<hapi_user_context(\b[^>]*?)>/;
 export type PreparedOmpInput = {
     message: string;
     images?: OmpImageContent[];
-    ignoredAttachments: AttachmentMetadata[];
 };
 
 export function annotateRunnerHostInUserContext(
@@ -38,7 +38,7 @@ export async function prepareOmpInput(
     attachments: AttachmentMetadata[]
 ): Promise<PreparedOmpInput> {
     const imageAttachments = attachments.filter((attachment) => attachment.mimeType.startsWith('image/'));
-    const ignoredAttachments = attachments.filter((attachment) => !attachment.mimeType.startsWith('image/'));
+    const fileAttachments = attachments.filter((attachment) => !attachment.mimeType.startsWith('image/'));
     const images: OmpImageContent[] = [];
 
     for (const attachment of imageAttachments) {
@@ -68,18 +68,7 @@ export async function prepareOmpInput(
     }
 
     return {
-        message: annotateRunnerHostInUserContext(message),
-        ...(images.length > 0 ? { images } : {}),
-        ignoredAttachments
+        message: formatMessageWithAttachments(annotateRunnerHostInUserContext(message), fileAttachments),
+        ...(images.length > 0 ? { images } : {})
     };
-}
-
-export function describeIgnoredOmpAttachments(attachments: AttachmentMetadata[]): string | null {
-    if (attachments.length === 0) {
-        return null;
-    }
-    const files = attachments
-        .map((attachment) => `${attachment.filename} (${attachment.mimeType})`)
-        .join(', ');
-    return `OMP RPC supports image attachments only; ignored: ${files}`;
 }

@@ -15,6 +15,7 @@ import {
 } from '@/hooks/queries/useFlavorCapabilities'
 import { useSessionActions } from '@/hooks/mutations/useSessionActions'
 import { setForkedFromText } from '@/lib/fork-restore'
+import { useTranslation } from '@/lib/use-translation'
 
 function RewindIcon(props: { className?: string }) {
     return (
@@ -39,6 +40,7 @@ function RewindIcon(props: { className?: string }) {
 
 export function HappyUserMessage() {
     const ctx = useHappyChatContext()
+    const { t } = useTranslation()
     const [rewindError, setRewindError] = useState<string | null>(null)
     const navigate = useNavigate()
     const sessionFlavor = ctx.metadata?.flavor ?? null
@@ -69,7 +71,13 @@ export function HappyUserMessage() {
     const status = useAuiState((s) => {
         if (s.message.role !== 'user') return undefined
         const custom = s.message.metadata.custom as Partial<HappyChatMessageMetadata> | undefined
-        return custom?.status
+        // Native consumption wins over a late HTTP settlement or retry error.
+        if (custom?.invokedAt != null) return 'sent'
+        return !custom?.resolution && custom?.invokedAt === null && custom?.status !== 'failed' && custom?.status !== 'sending' ? 'queued' : custom?.status
+    })
+    const resolution = useAuiState((s) => {
+        const custom = s.message.metadata.custom as Partial<HappyChatMessageMetadata> | undefined
+        return custom?.resolution
     })
     const localId = useAuiState((s) => {
         if (s.message.role !== 'user') return null
@@ -91,10 +99,10 @@ export function HappyUserMessage() {
         return s.message.content.find((part): part is TextMessagePart => part.type === 'text')?.text ?? ''
     })
     if (role !== 'user') return null
-    const canRetry = status === 'failed' && typeof localId === 'string' && Boolean(ctx.onRetryMessage)
+    const canRetry = !resolution && status === 'failed' && typeof localId === 'string' && Boolean(ctx.onRetryMessage)
     const onRetry = canRetry ? () => ctx.onRetryMessage!(localId) : undefined
-    const showStatus = shouldShowMessageStatus(status)
-    const canRewind = rewindSupported && typeof hubMessageId === 'string' && hubMessageId.length > 0
+    const showStatus = !resolution && shouldShowMessageStatus(status)
+    const canRewind = !resolution && status !== 'queued' && status !== 'sending' && status !== 'failed' && rewindSupported && typeof hubMessageId === 'string' && hubMessageId.length > 0
 
     const handleRewind = async () => {
         if (!canRewind || !hubMessageId) return
@@ -165,10 +173,10 @@ export function HappyUserMessage() {
         <MessagePrimitive.Root
             id={elementId}
             data-hapi-message-role="user"
-            className={`happy-message ${getUserBubbleClassName(status)} group/msg scroll-mt-4`}
+            className={`happy-message ${getUserBubbleClassName(resolution ? 'sent' : status)} group/msg scroll-mt-4`}
         >
             <div className="flex flex-col gap-1">
-                <div className="flex items-start gap-2">
+                <div className={status === 'queued' ? 'flex flex-col gap-1' : 'flex items-start gap-2'}>
                     <div className="min-w-0 flex-1">
                         {hasText ? <UserBubbleContent text={text} /> : null}
                         {hasAttachments ? <MessageAttachments attachments={attachments} /> : null}
@@ -182,6 +190,11 @@ export function HappyUserMessage() {
                         </div>
                     ) : null}
                 </div>
+                {resolution ? (
+                    <div role="status" className="text-right text-xs text-[var(--app-hint)]">
+                        {t(resolution.outcome === 'handled' ? 'message.resolution.handled' : 'message.resolution.cancelled')}
+                    </div>
+                ) : null}
                 <div className="flex justify-end items-center gap-2">
                     {canRewind && (
                         <button
@@ -195,7 +208,7 @@ export function HappyUserMessage() {
                             <RewindIcon className="h-3.5 w-3.5" />
                         </button>
                     )}
-                    <MessageActions align="end" copyText={hasText ? text : undefined} messageElementId={elementId} />
+                    <MessageActions align="end" copyText={hasText ? resolution ? `${text}\n\n${t(resolution.outcome === 'handled' ? 'message.resolution.handled' : 'message.resolution.cancelled')}` : text : undefined} messageElementId={elementId} />
                 </div>
                 {rewindError && (
                     <div className="mt-0.5 text-right text-[10px] text-red-500" role="alert">

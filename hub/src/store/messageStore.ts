@@ -1,6 +1,17 @@
 import type { Database } from 'bun:sqlite'
+import type { InputResolution } from '@hapi/protocol/types'
 
 import type { StoredMessage } from './types'
+import { initializeMessageResolutions, resolveMessages } from './messageResolutions'
+import { initializeMessageOrdering, type NativeMessageOrder, type NativeDelivery } from './messageOrdering'
+import {
+    initializeMessageTurnIndex,
+    prepareMessageTurnIndex,
+    requireMessageTurnIndex,
+    getTurnStartsBefore,
+    getSelectedTurnBounds,
+    getTurnHistoryRows
+} from './messageTurnQueries'
 import {
     addMessage,
     addImportedMessage,
@@ -19,6 +30,8 @@ import {
     getUninvokedLocalMessages,
     getMatureScheduledMessages,
     getImmediateQueuedLocalMessages,
+    getLocalMessagesByLocalIds,
+    markForceSendRequested,
     countFutureScheduledBySessionIds,
     countFutureScheduledLocalMessages,
     minFutureScheduledAtBySessionIds,
@@ -52,6 +65,36 @@ export class MessageStore {
 
     constructor(db: Database) {
         this.db = db
+        initializeMessageOrdering(db)
+        initializeMessageResolutions(db)
+        initializeMessageTurnIndex(db)
+    }
+
+    prepareTurnIndex(sessionId: string): Promise<void> {
+        return prepareMessageTurnIndex(this.db, sessionId)
+    }
+
+    requireTurnIndex(sessionId: string): void {
+        requireMessageTurnIndex(this.db, sessionId)
+    }
+
+    getTurnStartsBefore(sessionId: string, before: MessagePosition, limit: number, inclusive = false) {
+        return getTurnStartsBefore(this.db, sessionId, before, limit, inclusive)
+    }
+
+    getSelectedTurnBounds(sessionId: string, turnId: string) {
+        return getSelectedTurnBounds(this.db, sessionId, turnId)
+    }
+
+    getTurnHistoryRows(sessionId: string, options: {
+        before?: MessagePosition | null
+        after?: MessagePosition | null
+        from?: MessagePosition | null
+        until?: MessagePosition | null
+        limit: number
+        descending: boolean
+    }): StoredMessage[] {
+        return getTurnHistoryRows(this.db, sessionId, options)
     }
 
     // fork-features/usage: token 用量统计的唯一存储接缝。SQL 与口径都在
@@ -90,8 +133,8 @@ export class MessageStore {
         return whenUsageEventCacheWarm(this.db, maxWaitMs)
     }
 
-    addMessage(sessionId: string, content: unknown, localId?: string, scheduledAt?: number | null, createdAt?: number): StoredMessage {
-        return addMessage(this.db, sessionId, content, localId, scheduledAt, createdAt)
+    addMessage(sessionId: string, content: unknown, localId?: string, scheduledAt?: number | null, createdAt?: number, nativeOrder?: NativeMessageOrder): StoredMessage {
+        return addMessage(this.db, sessionId, content, localId, scheduledAt, createdAt, nativeOrder)
     }
 
     addImportedMessage(sessionId: string, content: unknown, localId: string, createdAt: number): { message: StoredMessage; inserted: boolean } {
@@ -100,7 +143,7 @@ export class MessageStore {
 
     copyMessageToSession(
         sessionId: string,
-        message: Pick<StoredMessage, 'content' | 'createdAt' | 'localId' | 'invokedAt' | 'scheduledAt'>
+        message: Pick<StoredMessage, 'content' | 'createdAt' | 'localId' | 'invokedAt' | 'scheduledAt' | 'resolution' | 'position'>
     ): StoredMessage {
         // 中文注释：重复会话合并时需要保留源消息的时间戳和排队信息，因此走专门的复制入口而不是普通 addMessage。
         return copyStoredMessageToSession(this.db, sessionId, message)
@@ -108,7 +151,7 @@ export class MessageStore {
 
     copyMessagesToSession(
         sessionId: string,
-        messages: Array<Pick<StoredMessage, 'content' | 'createdAt' | 'localId' | 'invokedAt' | 'scheduledAt'>>
+        messages: Array<Pick<StoredMessage, 'content' | 'createdAt' | 'localId' | 'invokedAt' | 'scheduledAt' | 'resolution' | 'position'>>
     ): number {
         return copyStoredMessagesToSession(this.db, sessionId, messages)
     }
@@ -133,21 +176,22 @@ export class MessageStore {
         return getDeliverableMessagesAfter(this.db, sessionId, afterSeq, now, limit)
     }
 
-    getMessagesByPosition(sessionId: string, limit: number, before?: { at: number; seq: number }): StoredMessage[] {
-        return getMessagesByPosition(this.db, sessionId, limit, before)
+    getMessagesByPosition(sessionId: string, limit: number, before?: MessagePosition, legacyPosition = false): StoredMessage[] {
+        return getMessagesByPosition(this.db, sessionId, limit, before, legacyPosition)
     }
 
     getMessagesAfterPosition(
         sessionId: string,
         limit: number,
         after: MessagePosition,
-        until?: MessagePosition
+        until?: MessagePosition,
+        legacyPosition = false
     ): StoredMessage[] {
-        return getMessagesAfterPosition(this.db, sessionId, limit, after, until)
+        return getMessagesAfterPosition(this.db, sessionId, limit, after, until, legacyPosition)
     }
 
-    getNewestMessagePosition(sessionId: string): MessagePosition | null {
-        return getNewestMessagePosition(this.db, sessionId)
+    getNewestMessagePosition(sessionId: string, legacyPosition = false): MessagePosition | null {
+        return getNewestMessagePosition(this.db, sessionId, legacyPosition)
     }
 
     getMessageEpoch(sessionId: string): number {
@@ -172,6 +216,14 @@ export class MessageStore {
 
     getImmediateQueuedLocalMessages(sessionId: string): StoredMessage[] {
         return getImmediateQueuedLocalMessages(this.db, sessionId)
+    }
+
+    getLocalMessagesByLocalIds(sessionId: string, localIds: string[]): StoredMessage[] {
+        return getLocalMessagesByLocalIds(this.db, sessionId, localIds)
+    }
+
+    markForceSendRequested(sessionId: string, localIds: string[], requestedAt: number): StoredMessage[] {
+        return markForceSendRequested(this.db, sessionId, localIds, requestedAt)
     }
 
     countFutureScheduledLocalMessages(sessionId: string, now: number = Date.now()): number {
@@ -202,8 +254,12 @@ export class MessageStore {
         return deleteQueuedMessageById(this.db, sessionId, messageId)
     }
 
-    markMessagesInvoked(sessionId: string, localIds: string[], invokedAt: number): number {
-        return markMessagesInvoked(this.db, sessionId, localIds, invokedAt)
+    markMessagesInvoked(sessionId: string, localIds: string[], invokedAt: number, nativeDelivery?: NativeDelivery): number {
+        return markMessagesInvoked(this.db, sessionId, localIds, invokedAt, nativeDelivery)
+    }
+
+    resolveMessages(sessionId: string, resolutions: Array<{ localId: string; outcome: InputResolution['outcome']; nativeOrder?: NativeMessageOrder }>, resolvedAt: number) {
+        return resolveMessages(this.db, sessionId, resolutions, resolvedAt)
     }
 
     markUninvokedImmediateMessages(sessionId: string, invokedAt: number): string[] {
@@ -230,6 +286,7 @@ export class MessageStore {
             localId?: string | null
             createdAt?: number
             invokedAt?: number | null
+            resolution?: InputResolution
         }> = []
     ): { deleted: number; inserted: number; epoch: number } {
         return truncateMessagesFromLocalId(this.db, sessionId, localId, replacement)

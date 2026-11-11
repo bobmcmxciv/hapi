@@ -1,18 +1,18 @@
-import type { AttachmentMetadata, MessageStatus } from '@/types/api'
+import type { AttachmentMetadata, DecryptedMessage, MessageStatus } from '@/types/api'
 import type { ThreadGoal } from '@/types/api'
 
 export type UsageData = {
-    input_tokens: number
-    output_tokens: number
-    reasoning_output_tokens?: number
-    cache_creation_input_tokens?: number
-    cache_read_input_tokens?: number
-    context_tokens?: number
-    context_window?: number
-    thread_id?: string
-    scope_role?: string
-    service_tier?: string
-    cost_usd?: number
+ input_tokens: number
+ output_tokens: number
+ reasoning_output_tokens?: number
+ cache_creation_input_tokens?: number
+ cache_read_input_tokens?: number
+ context_tokens?: number
+ context_window?: number
+ thread_id?: string
+ scope_role?: string
+ service_tier?: string
+ cost_usd?: number
 }
 
 /**
@@ -20,324 +20,326 @@ export type UsageData = {
  * 里的原始 JSON），避免新版 CLI 加了新消息类型时糊一整屏 JSON 出来。
  */
 export type UnsupportedPayloadEvent = {
-    type: 'unsupported-payload'
-    payloadType: string | null
-    payload: string
+ type: 'unsupported-payload'
+ payloadType: string | null
+ payload: string
 }
 
 export type ModelRefusalFallbackEvent = {
-    type: 'model-refusal-fallback'
-    originalModel: string
-    message: string
-    direction?: string
-    trigger?: string
+ type: 'model-refusal-fallback'
+ originalModel: string
+ message: string
+ direction?: string
+ trigger?: string
 }
 
 export type AgentEvent =
-    | { type: 'switch'; mode: 'local' | 'remote' }
-    | { type: 'message'; message: string }
-    | { type: 'error'; message: string }
-    | { type: 'title-changed'; title: string }
-    | { type: 'limit-reached'; endsAt: number; limitType: string }
-    | { type: 'limit-warning'; /** 0–1 ratio (e.g. 0.9 = 90%), integer-precision via CLI pipe format */ utilization: number; endsAt: number; limitType: string }
-    | { type: 'ready' }
-    | { type: 'api-error'; retryAttempt: number; maxRetries: number; error: unknown }
-    | { type: 'turn-duration'; durationMs: number; targetMessageId?: string }
-    | { type: 'microcompact'; trigger: string; preTokens: number; tokensSaved: number }
-    | { type: 'compact'; trigger: string; preTokens: number }
-    // Claude Code's automatic away-summary recap (TUI window blur 5min+, then focus).
-    | { type: 'recap'; text: string }
-    | ModelRefusalFallbackEvent
-    | UnsupportedPayloadEvent
-    | { type: 'thread-goal-updated'; goal: ThreadGoal; threadId?: string; turnId?: string }
-    | { type: 'thread-goal-cleared'; threadId?: string }
-    | { type: 'abort-restore'; text: string }
-    | ({ type: string } & Record<string, unknown>)
+ | { type: 'switch'; mode: 'local' | 'remote' }
+ | { type: 'message'; message: string }
+ | { type: 'error'; message: string }
+ | { type: 'title-changed'; title: string }
+ | { type: 'limit-reached'; endsAt: number; limitType: string }
+ | { type: 'limit-warning'; /** 0–1 ratio (e.g. 0.9 = 90%), integer-precision via CLI pipe format */ utilization: number; endsAt: number; limitType: string }
+ | { type: 'ready' }
+ | { type: 'api-error'; retryAttempt: number; maxRetries: number; error: unknown }
+ | { type: 'turn-duration'; durationMs: number; targetMessageId?: string }
+ | { type: 'microcompact'; trigger: string; preTokens: number; tokensSaved: number }
+ | { type: 'compact'; trigger: string; preTokens: number }
+ // Claude Code's automatic away-summary recap (TUI window blur 5min+, then focus).
+ | { type: 'recap'; text: string }
+ | ModelRefusalFallbackEvent
+ | UnsupportedPayloadEvent
+ | { type: 'thread-goal-updated'; goal: ThreadGoal; threadId?: string; turnId?: string }
+ | { type: 'thread-goal-cleared'; threadId?: string }
+ | { type: 'abort-restore'; text: string }
+ | ({ type: string } & Record<string, unknown>)
 
 export type ToolResultPermission = {
-    date: number
-    result: 'approved' | 'denied'
-    mode?: string
-    allowedTools?: string[]
-    decision?: 'approved' | 'approved_for_session' | 'denied' | 'abort'
+ date: number
+ result: 'approved' | 'denied'
+ mode?: string
+ allowedTools?: string[]
+ decision?: 'approved' | 'approved_for_session' | 'denied' | 'abort'
 }
 
 export type ToolUse = {
-    type: 'tool-call'
-    id: string
-    name: string
-    input: unknown
-    description: string | null
-    nativeTitle?: string | null
-    nativeKind?: string | null
-    progress?: unknown
-    uuid: string
-    parentUUID: string | null
+ type: 'tool-call'
+ id: string
+ name: string
+ input: unknown
+ description: string | null
+ nativeTitle?: string | null
+ nativeKind?: string | null
+ progress?: unknown
+ uuid: string
+ parentUUID: string | null
 }
 
 export type ToolResult = {
-    type: 'tool-result'
-    tool_use_id: string
-    content: unknown
-    is_error: boolean
-    uuid: string
-    parentUUID: string | null
-    permissions?: ToolResultPermission
+ type: 'tool-result'
+ tool_use_id: string
+ content: unknown
+ is_error: boolean
+ uuid: string
+ parentUUID: string | null
+ permissions?: ToolResultPermission
 }
 
 export type GeneratedImageContent = {
-    type: 'generated-image'
-    imageId: string
-    fileName: string
-    mimeType: string | null
-    uuid: string
-    parentUUID: string | null
+ type: 'generated-image'
+ imageId: string
+ fileName: string
+ mimeType: string | null
+ uuid: string
+ parentUUID: string | null
 }
 
 export type GeneratedFileContent = {
-    type: 'generated-file'
-    fileId: string
-    fileName: string
-    mimeType: string | null
-    size: number | null
-    uuid: string
-    parentUUID: string | null
+ type: 'generated-file'
+ fileId: string
+ fileName: string
+ mimeType: string | null
+ size: number | null
+ uuid: string
+ parentUUID: string | null
 }
 
 export type CodexReviewFinding = {
-    title: string
-    body: string
-    priority: number | null
-    confidenceScore: number | null
-    filePath: string | null
-    lineStart: number | null
-    lineEnd: number | null
+ title: string
+ body: string
+ priority: number | null
+ confidenceScore: number | null
+ filePath: string | null
+ lineStart: number | null
+ lineEnd: number | null
 }
 
 export type CodexReview = {
-    findings: CodexReviewFinding[]
-    overallCorrectness: string | null
-    overallExplanation: string | null
-    overallConfidenceScore: number | null
+ findings: CodexReviewFinding[]
+ overallCorrectness: string | null
+ overallExplanation: string | null
+ overallConfidenceScore: number | null
 }
 
 export type NormalizedAgentContent =
-    | {
-        type: 'text'
-        text: string
-        uuid: string
-        streamId?: string
-        parentUUID: string | null
-    }
-    | {
-        type: 'reasoning'
-        text: string
-        uuid: string
-        streamId?: string
-        parentUUID: string | null
-    }
-    | ToolUse
-    | ToolResult
-    | GeneratedImageContent
-    | GeneratedFileContent
-    | {
-        type: 'codex-review'
-        review: CodexReview
-        uuid: string
-        parentUUID: string | null
-    }
-    | { type: 'summary'; summary: string }
-    | { type: 'sidechain'; uuid: string; parentUUID: string | null; prompt: string }
+ | {
+  type: 'text'
+  text: string
+  uuid: string
+  streamId?: string
+  parentUUID: string | null
+ }
+ | {
+  type: 'reasoning'
+  text: string
+  uuid: string
+  streamId?: string
+  parentUUID: string | null
+ }
+ | ToolUse
+ | ToolResult
+ | GeneratedImageContent
+ | GeneratedFileContent
+ | {
+  type: 'codex-review'
+  review: CodexReview
+  uuid: string
+  parentUUID: string | null
+ }
+ | { type: 'summary'; summary: string }
+ | { type: 'sidechain'; uuid: string; parentUUID: string | null; prompt: string }
 
 export type NormalizedMessage = ({
-    role: 'user'
-    content: { type: 'text'; text: string; attachments?: AttachmentMetadata[] }
+ role: 'user'
+ content: { type: 'text'; text: string; attachments?: AttachmentMetadata[] }
 } | {
-    role: 'agent'
-    content: NormalizedAgentContent[]
+ role: 'agent'
+ content: NormalizedAgentContent[]
 } | {
-    role: 'event'
-    content: AgentEvent
+ role: 'event'
+ content: AgentEvent
 }) & {
-    id: string
-    localId: string | null
-    createdAt: number
-    isSidechain: boolean
-    // The tool_use id of the Agent/Task tool_use that spawned this sidechain
-    // message (SDK's parent_tool_use_id, preserved end-to-end). The tracer
-    // groups sidechain messages under their parent Agent card by this id
-    // directly, falling back to prompt exact-match only for older stored
-    // messages that predate this field.
-    parentToolUseId?: string | null
-    meta?: unknown
-    usage?: UsageData
-    status?: MessageStatus
-    originalText?: string
-    invokedAt?: number | null
-    model?: string | null
-    /**
-     * Execution-machine wall clock (epoch ms) parsed from the Claude entry's
-     * own `timestamp` field (see `parseAgentTimestampMs`), as opposed to
-     * `createdAt` which is when the hub received the message. Null when the
-     * source entry has no parseable timestamp (e.g. non-Claude agent
-     * flavors) — consumers should fall back to `createdAt` in that case.
-     */
-    agentTimestamp?: number | null
+ id: string
+ localId: string | null
+ createdAt: number
+ isSidechain: boolean
+ // The tool_use id of the Agent/Task tool_use that spawned this sidechain
+ // message (SDK's parent_tool_use_id, preserved end-to-end). The tracer
+ // groups sidechain messages under their parent Agent card by this id
+ // directly, falling back to prompt exact-match only for older stored
+ // messages that predate this field.
+ parentToolUseId?: string | null
+ meta?: unknown
+ usage?: UsageData
+ status?: MessageStatus
+ originalText?: string
+ invokedAt?: number | null
+ resolution?: DecryptedMessage['resolution']
+ model?: string | null
+ /**
+  * Execution-machine wall clock (epoch ms) parsed from the Claude entry's
+  * own `timestamp` field (see `parseAgentTimestampMs`), as opposed to
+  * `createdAt` which is when the hub received the message. Null when the
+  * source entry has no parseable timestamp (e.g. non-Claude agent
+  * flavors) — consumers should fall back to `createdAt` in that case.
+  */
+ agentTimestamp?: number | null
 }
 
 export type ToolPermission = {
-    id: string
-    status: 'pending' | 'approved' | 'denied' | 'canceled'
-    reason?: string
-    mode?: string
-    allowedTools?: string[]
-    decision?: 'approved' | 'approved_for_session' | 'denied' | 'abort'
-    answers?: Record<string, string[]> | Record<string, { answers: string[] }>
-    date?: number
-    createdAt?: number | null
-    completedAt?: number | null
+ id: string
+ status: 'pending' | 'approved' | 'denied' | 'canceled'
+ reason?: string
+ mode?: string
+ allowedTools?: string[]
+ decision?: 'approved' | 'approved_for_session' | 'denied' | 'abort'
+ answers?: Record<string, string[]> | Record<string, { answers: string[] }>
+ date?: number
+ createdAt?: number | null
+ completedAt?: number | null
 }
 
 export type ChatToolCall = {
-    id: string
-    name: string
-    state: 'pending' | 'running' | 'completed' | 'error'
-    input: unknown
-    createdAt: number
-    startedAt: number | null
-    completedAt: number | null
-    /**
-     * Execution-machine timestamps (from `NormalizedMessage.agentTimestamp`)
-     * for the tool_use/tool_result entries, when available. Kept separate
-     * from `startedAt`/`completedAt` (rather than replacing them) because the
-     * running-state live timer (`ElapsedView`) reads `startedAt` directly —
-     * swapping that to the execution machine's clock would expose it to
-     * viewer/execution-machine clock skew. `toolDurationMs` prefers these
-     * fields for *completed* tool duration only; null when the source Claude
-     * entry had no parseable timestamp (e.g. non-Claude agent flavors).
-     */
-    execStartedAt: number | null
-    execCompletedAt: number | null
-    description: string | null
-    nativeTitle?: string | null
-    nativeKind?: string | null
-    result?: unknown
-    permission?: ToolPermission
+ id: string
+ name: string
+ state: 'pending' | 'running' | 'completed' | 'error'
+ input: unknown
+ createdAt: number
+ startedAt: number | null
+ completedAt: number | null
+ /**
+  * Execution-machine timestamps (from `NormalizedMessage.agentTimestamp`)
+  * for the tool_use/tool_result entries, when available. Kept separate
+  * from `startedAt`/`completedAt` (rather than replacing them) because the
+  * running-state live timer (`ElapsedView`) reads `startedAt` directly —
+  * swapping that to the execution machine's clock would expose it to
+  * viewer/execution-machine clock skew. `toolDurationMs` prefers these
+  * fields for *completed* tool duration only; null when the source Claude
+  * entry had no parseable timestamp (e.g. non-Claude agent flavors).
+  */
+ execStartedAt: number | null
+ execCompletedAt: number | null
+ description: string | null
+ nativeTitle?: string | null
+ nativeKind?: string | null
+ result?: unknown
+ permission?: ToolPermission
 }
 
 export type UserTextBlock = {
-    kind: 'user-text'
-    id: string
-    localId: string | null
-    createdAt: number
-    invokedAt?: number | null
-    text: string
-    attachments?: AttachmentMetadata[]
-    status?: MessageStatus
-    originalText?: string
-    meta?: unknown
+ kind: 'user-text'
+ id: string
+ localId: string | null
+ createdAt: number
+ invokedAt?: number | null
+ resolution?: DecryptedMessage['resolution']
+ text: string
+ attachments?: AttachmentMetadata[]
+ status?: MessageStatus
+ originalText?: string
+ meta?: unknown
 }
 
 export type AgentTextBlock = {
-    kind: 'agent-text'
-    id: string
-    localId: string | null
-    createdAt: number
-    invokedAt?: number | null
-    durationMs?: number
-    usage?: UsageData
-    model?: string | null
-    text: string
-    meta?: unknown
+ kind: 'agent-text'
+ id: string
+ localId: string | null
+ createdAt: number
+ invokedAt?: number | null
+ durationMs?: number
+ usage?: UsageData
+ model?: string | null
+ text: string
+ meta?: unknown
 }
 
 export type AgentReasoningBlock = {
-    kind: 'agent-reasoning'
-    id: string
-    localId: string | null
-    createdAt: number
-    invokedAt?: number | null
-    durationMs?: number
-    usage?: UsageData
-    model?: string | null
-    text: string
-    meta?: unknown
+ kind: 'agent-reasoning'
+ id: string
+ localId: string | null
+ createdAt: number
+ invokedAt?: number | null
+ durationMs?: number
+ usage?: UsageData
+ model?: string | null
+ text: string
+ meta?: unknown
 }
 
 export type CodexReviewBlock = {
-    kind: 'codex-review'
-    id: string
-    localId: string | null
-    createdAt: number
-    invokedAt?: number | null
-    durationMs?: number
-    usage?: UsageData
-    model?: string | null
-    review: CodexReview
-    meta?: unknown
+ kind: 'codex-review'
+ id: string
+ localId: string | null
+ createdAt: number
+ invokedAt?: number | null
+ durationMs?: number
+ usage?: UsageData
+ model?: string | null
+ review: CodexReview
+ meta?: unknown
 }
 
 export type CliOutputBlock = {
-    kind: 'cli-output'
-    id: string
-    localId: string | null
-    createdAt: number
-    invokedAt?: number | null
-    durationMs?: number
-    usage?: UsageData
-    model?: string | null
-    text: string
-    source: 'user' | 'assistant'
-    meta?: unknown
+ kind: 'cli-output'
+ id: string
+ localId: string | null
+ createdAt: number
+ invokedAt?: number | null
+ durationMs?: number
+ usage?: UsageData
+ model?: string | null
+ text: string
+ source: 'user' | 'assistant'
+ meta?: unknown
 }
 
 export type GeneratedImageBlock = {
-    kind: 'generated-image'
-    id: string
-    localId: string | null
-    createdAt: number
-    invokedAt?: number | null
-    imageId: string
-    fileName: string
-    mimeType: string | null
-    meta?: unknown
+ kind: 'generated-image'
+ id: string
+ localId: string | null
+ createdAt: number
+ invokedAt?: number | null
+ imageId: string
+ fileName: string
+ mimeType: string | null
+ meta?: unknown
 }
 
 export type GeneratedFileBlock = {
-    kind: 'generated-file'
-    id: string
-    localId: string | null
-    createdAt: number
-    invokedAt?: number | null
-    fileId: string
-    fileName: string
-    mimeType: string | null
-    size: number | null
-    meta?: unknown
+ kind: 'generated-file'
+ id: string
+ localId: string | null
+ createdAt: number
+ invokedAt?: number | null
+ fileId: string
+ fileName: string
+ mimeType: string | null
+ size: number | null
+ meta?: unknown
 }
 
 export type AgentEventBlock = {
-    kind: 'agent-event'
-    id: string
-    createdAt: number
-    invokedAt?: number | null
-    model?: string | null
-    event: AgentEvent
-    meta?: unknown
+ kind: 'agent-event'
+ id: string
+ createdAt: number
+ invokedAt?: number | null
+ model?: string | null
+ event: AgentEvent
+ meta?: unknown
 }
 
 export type ToolCallBlock = {
-    kind: 'tool-call'
-    id: string
-    localId: string | null
-    createdAt: number
-    invokedAt?: number | null
-    durationMs?: number
-    usage?: UsageData
-    model?: string | null
-    tool: ChatToolCall
-    children: ChatBlock[]
-    meta?: unknown
+ kind: 'tool-call'
+ id: string
+ localId: string | null
+ createdAt: number
+ invokedAt?: number | null
+ durationMs?: number
+ usage?: UsageData
+ model?: string | null
+ tool: ChatToolCall
+ children: ChatBlock[]
+ meta?: unknown
 }
 
 export type ChatBlock = UserTextBlock | AgentTextBlock | AgentReasoningBlock | CodexReviewBlock | CliOutputBlock | ToolCallBlock | GeneratedImageBlock | GeneratedFileBlock | AgentEventBlock

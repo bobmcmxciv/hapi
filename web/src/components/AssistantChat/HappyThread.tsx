@@ -441,7 +441,7 @@ export function ConversationOutlinePanel(props: {
     )
 }
 
-export function HappyThread(props: {
+export type HappyThreadProps = {
     api: ApiClient
     session: Session
     serviceTier?: string | null
@@ -471,7 +471,9 @@ export function HappyThread(props: {
     outlineItems: readonly ConversationOutlineItem[]
     onOutlineOpenChange: (open: boolean) => void
     onOutlineItemClick?: (item: ConversationOutlineItem) => void
-}) {
+}
+
+export function HappyThread(props: HappyThreadProps) {
     const { t, locale } = useTranslation()
     const { preferences: headerMetadata } = useSessionHeaderMetadata()
     const { machines } = useMachines(props.api, true)
@@ -573,7 +575,7 @@ export function HappyThread(props: {
     const requestOlderRef = useRef<(source: HistoryLoadSource) => Promise<OlderHistoryLoadResult>>(
         () => Promise.resolve('transient-stop')
     )
-    const startHistoryLoadAttemptRef = useRef<(runId: number) => void>(() => {})
+    const startHistoryLoadAttemptRef = useRef<(runId: number) => void>(() => { })
     const needsViewportCoverageRef = useRef<() => boolean>(() => false)
     const atBottomRef = useRef(true)
     const onViewModeChangeRef = useRef(props.onViewModeChange)

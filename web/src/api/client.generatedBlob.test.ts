@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { ApiClient, ApiError, formatGeneratedBlobProgress, generatedBlobRequestsInFlight, isRetryableBlobStatus } from './client'
+import { ApiClient, ApiError, generatedBlobRequestsInFlight, isRetryableBlobStatus, type GeneratedBlobProgress } from './client'
 
 type Scripted = Array<() => Response | Promise<Response>>
 
@@ -56,16 +56,16 @@ describe('generated blob download', () => {
             () => jsonResponse(202, { success: false, state: 'fetching', received: 3000, size: 4000, retryAfterMs: 1000 }),
             () => bytesResponse('pdf-bytes')
         ])
-        const progress: string[] = []
+        const progress: GeneratedBlobProgress[] = []
         const client = new ApiClient('jwt-1')
 
         const blob = await drain(client.getGeneratedFileBlob('session-1', 'file-1', {
-            onProgress: (p) => progress.push(formatGeneratedBlobProgress(p))
+            onProgress: (p) => progress.push(p)
         }))
 
         expect(blob.size).toBe('pdf-bytes'.length)
         expect(blob.type).toBe('application/pdf')
-        expect(progress).toEqual(['Uploading from machine 25%', 'Fetching from machine 75%', 'Downloading…'])
+        expect(progress.map(item => item.state)).toEqual(['uploading', 'fetching', 'downloading'])
         expect(calls.map((c) => c.url)).toEqual(Array(3).fill('/api/sessions/session-1/generated-files/file-1'))
         expect(calls[0].auth).toBe('Bearer jwt-1')
     })

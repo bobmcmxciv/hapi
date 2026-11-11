@@ -5,11 +5,12 @@ import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import type { Grant } from './settingsApi'
+import { MachineScopeField, grantScopeDraft, scopeFromDraft } from './MachineScopeField'
 
 type Account = { id: number; username: string; role: 'admin' | 'user'; defaultNamespace: string; disabledAt: number | null; memory: string | null }
 type Token = { id: number; name: string | null; createdAt: number }
 type Machine = { id: string; metadata?: { displayName?: string; host?: string } }
-type Grant = { accountId: number; role: 'viewer' | 'operator' }
 type Request = <T>(path: string, init?: RequestInit) => Promise<T>
 
 const inputClass = 'w-full rounded-lg border border-[var(--app-border)] bg-[var(--app-bg)] px-3 py-2 text-[var(--app-fg)] placeholder:text-[var(--app-hint)] focus:outline-none focus:ring-2 focus:ring-[var(--app-button)] disabled:opacity-50'
@@ -135,6 +136,7 @@ function MachineGrants(props: { machines: Machine[]; accounts: Account[]; reques
 function GrantEditor(props: { machine: Machine; accounts: Account[]; request: Request }) {
     const [accountId, setAccountId] = useState('')
     const [role, setRole] = useState<'viewer' | 'operator'>('viewer')
+    const [scopeDraft, setScopeDraft] = useState<string | null>(null)
     const [grants, setGrants] = useState<Grant[]>([])
     const [error, setError] = useState<string | null>(null)
     const [isPending, setIsPending] = useState(false)
@@ -150,9 +152,28 @@ function GrantEditor(props: { machine: Machine; accounts: Account[]; request: Re
     const grant = async (event: React.FormEvent) => {
         event.preventDefault()
         await mutate(async () => {
-            await props.request(`/api/grants/machine/${encodeURIComponent(props.machine.id)}`, { method: 'POST', body: JSON.stringify({ accountId: Number(accountId), role }) })
-            setAccountId(''); setRole('viewer')
+            await props.request(`/api/grants/machine/${encodeURIComponent(props.machine.id)}`, { method: 'POST', body: JSON.stringify({ accountId: Number(accountId), role, pathScopes: scopeFromDraft(scopeDraft) }) })
+            setAccountId(''); setRole('viewer'); setScopeDraft(null)
         })
     }
-    return <div className="space-y-3"><form className="grid gap-2 md:grid-cols-[1fr_150px_auto]" onSubmit={grant}><select className={inputClass} value={accountId} disabled={isPending} onChange={e => { setAccountId(e.target.value); setError(null) }}><option value="">选择用户</option>{props.accounts.map(account => <option key={account.id} value={account.id}>{account.username}</option>)}</select><select className={inputClass} value={role} disabled={isPending} onChange={e => setRole(e.target.value as 'viewer' | 'operator')}><option value="viewer">viewer</option><option value="operator">operator</option></select><Button disabled={!accountId || isPending}>{isPending ? '处理中…' : '授权'}</Button></form>{error && <div role="alert" className="text-sm text-red-500">{error}</div>}{grants.map(item => <div key={item.accountId} className="flex items-center justify-between gap-3 rounded-lg border border-[var(--app-border)] p-3"><div><div className="font-medium">{props.accounts.find(account => account.id === item.accountId)?.username ?? `#${item.accountId}`}</div><div className="text-xs text-[var(--app-hint)]">role: {item.role}</div></div><Button size="sm" variant="outline" disabled={isPending} onClick={() => mutate(async () => { await props.request(`/api/grants/machine/${encodeURIComponent(props.machine.id)}/${item.accountId}`, { method: 'DELETE' }) })}>移除</Button></div>)}</div>
+    return <div className="space-y-3">
+        <form className="space-y-2" onSubmit={grant}>
+            <select aria-label="选择用户" className={inputClass} value={accountId} disabled={isPending} onChange={event => {
+                const id = event.target.value
+                setAccountId(id)
+                const existing = grants.find(item => item.accountId === Number(id))
+                setRole(existing?.role ?? 'viewer'); setScopeDraft(grantScopeDraft(existing)); setError(null)
+            }}><option value="">选择用户</option>{props.accounts.map(account => <option key={account.id} value={account.id}>{account.username}</option>)}</select>
+            <select aria-label="授权角色" className={inputClass} value={role} disabled={isPending} onChange={event => setRole(event.target.value as 'viewer' | 'operator')}><option value="viewer">viewer</option><option value="operator">operator</option></select>
+            <MachineScopeField value={scopeDraft} onChange={setScopeDraft} disabled={isPending} />
+            <Button disabled={!accountId || isPending || scopeDraft?.trim() === ''}>{isPending ? '处理中…' : '保存授权'}</Button>
+        </form>
+        {error && <div role="alert" className="text-sm text-red-500">{error}</div>}
+        {grants.map(item => <div key={item.accountId} className="space-y-2 rounded-lg border border-[var(--app-border)] p-3">
+            <div>{props.accounts.find(account => account.id === item.accountId)?.username ?? `#${item.accountId}`} · {item.role}</div>
+            <div className="whitespace-pre-wrap break-all text-xs">{grantScopeDraft(item) ?? '整机授权'}</div>
+            <Button size="sm" variant="outline" disabled={isPending} onClick={() => { setAccountId(String(item.accountId)); setRole(item.role); setScopeDraft(grantScopeDraft(item)) }}>编辑授权</Button>
+            <Button size="sm" variant="outline" disabled={isPending} onClick={() => mutate(async () => { await props.request(`/api/grants/machine/${encodeURIComponent(props.machine.id)}/${item.accountId}`, { method: 'DELETE' }) })}>移除</Button>
+        </div>)}
+    </div>
 }

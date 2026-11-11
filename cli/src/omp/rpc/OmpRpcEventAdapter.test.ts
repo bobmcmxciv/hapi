@@ -1,10 +1,12 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { AgentMessage } from '@/agent/types';
 import type { RawJSONLines } from '@/claude/types';
 import type { JsonObject, OmpKnownEventType } from './types';
 import type { OmpAgentRunEvent, OmpRpcEventAdapterCallbacks, OmpStructuredEvent } from './OmpRpcEventAdapter';
 import { OmpRpcEventAdapter } from './OmpRpcEventAdapter';
 import { parseOmpInboundLine } from './schemas';
+import { RuntimeTimelineProjection, type RuntimePublication } from '@hapi/protocol/runtimeTimeline';
+import { RawJSONLinesSchema } from '@/claude/types';
 
 function rpcEvent(frame: Record<string, unknown>) {
     const parsed = parseOmpInboundLine(JSON.stringify(frame));
@@ -35,7 +37,7 @@ function assistantMessage(text: string, responseId?: string): JsonObject {
     };
 }
 
-function createHarness(eventAllowlist?: ReadonlySet<OmpKnownEventType>) {
+function createHarness(eventAllowlist?: ReadonlySet<OmpKnownEventType>, enableRuntime = false) {
     const canonicalMessages: RawJSONLines[] = [];
     const agentMessages: AgentMessage[] = [];
     const agentRunEvents: OmpAgentRunEvent[] = [];
@@ -47,7 +49,9 @@ function createHarness(eventAllowlist?: ReadonlySet<OmpKnownEventType>) {
     const hostEvents: Parameters<OmpRpcEventAdapterCallbacks['onHostEvent']>[0][] = [];
     const availableCommands: Parameters<OmpRpcEventAdapterCallbacks['onAvailableCommandsChanged']>[0][] = [];
     const diagnostics: string[] = [];
+    const publications: RuntimePublication[] = [];
     const callbacks: OmpRpcEventAdapterCallbacks = {
+        ...(enableRuntime ? { onRuntimePublication: (publication: RuntimePublication) => publications.push(publication) } : {}),
         onAgentMessage: (message) => agentMessages.push(message),
         onCanonicalMessage: (message) => canonicalMessages.push(message),
         onAgentRunEvent: (event) => agentRunEvents.push(event),
@@ -67,6 +71,7 @@ function createHarness(eventAllowlist?: ReadonlySet<OmpKnownEventType>) {
     return {
         adapter: new OmpRpcEventAdapter(callbacks, eventAllowlist),
         callbacks,
+        publications,
         canonicalMessages,
         agentMessages,
         agentRunEvents,
@@ -79,6 +84,20 @@ function createHarness(eventAllowlist?: ReadonlySet<OmpKnownEventType>) {
 }
 
 describe('OmpRpcEventAdapter', () => {
+    it('keeps input receipt controls out of timeline, chat, and native user-commit callbacks', () => {
+        const harness = createHarness(undefined, true);
+        const initialPublications = structuredClone(harness.publications);
+        harness.adapter.handle(rpcEvent({
+            type: 'input_receipt', receipt: {
+                token: 'local-id', sessionId: 'original-native', admitted: true, delivered: true, entryId: 'user-entry'
+            }
+        }));
+        expect(harness.canonicalMessages).toEqual([]);
+        expect(harness.agentMessages).toEqual([]);
+        expect(harness.structuredEvents).toEqual([]);
+        expect(harness.publications).toEqual(initialPublications);
+        expect(harness.callbacks.onUserMessageCommitted).not.toHaveBeenCalled();
+    });
     it.each(['open-elsewhere', 'replaced', 'contested'])('reconciles %s persistence relocation before the turn ends even when notices are hidden', (reason) => {
         const harness = createHarness(new Set<OmpKnownEventType>());
         harness.adapter.handle(rpcEvent({
@@ -192,20 +211,85 @@ describe('OmpRpcEventAdapter', () => {
             costUsd: 0.035
         });
     });
+    it('propagates authoritative nativeOrder to canonical, agent, and structured outputs', () => {
+        const origins: unknown[] = [];
+        const structuredOrigins: unknown[] = [];
+        const harness = createHarness();
+        const callbacks: OmpRpcEventAdapterCallbacks = {
+            ...harness.callbacks,
+            onCanonicalMessage: (message, nativeOrder) => origins.push(nativeOrder),
+            onStructuredEvent: (event, nativeOrder) => structuredOrigins.push(nativeOrder)
+        };
+        const adapter = new OmpRpcEventAdapter(callbacks);
+        const order = { sessionId: 'native-a', entryId: 'E7', entryOrder: 7, eventOrder: 2 };
+        adapter.handle(rpcEvent({ type: 'message_start', message: assistantMessage('x'), nativeOrder: order }));
+        adapter.handle(rpcEvent({ type: 'message_end', message: assistantMessage('x'), nativeOrder: order }));
+        expect(origins).toEqual([order]);
+        adapter.handle(rpcEvent({
+            type: 'notice', level: 'info', message: 'm', source: 'status', nativeOrder: order
+        }));
+        expect(structuredOrigins).toEqual([order]);
+    });
 
-    it('stamps the canonical assistant with commit time, not the omp turn-start timestamp', () => {
-        // Regression: omp's message timestamp is the turn/model-request start.
-        // Forwarding it made the hub sort the first assistant message of a turn
-        // ABOVE the user's prompt whenever the runner clock lagged the hub clock.
+    it('keeps an interrupted assistant message on its message_start journal anchor', () => {
+        const origins: unknown[] = [];
+        const harness = createHarness();
+        const adapter = new OmpRpcEventAdapter({
+            ...harness.callbacks,
+            onCanonicalMessage: (message, nativeOrder) => origins.push(nativeOrder)
+        });
+        const startOrder = { sessionId: 'native-a', entryId: 'U1', entryOrder: 4, eventOrder: 1 };
+        const laterAnchor = { sessionId: 'native-a', entryId: 'E9', entryOrder: 9, eventOrder: 0 };
+        adapter.handle(rpcEvent({ type: 'message_start', message: assistantMessage('partial'), nativeOrder: startOrder }));
+        adapter.handle(rpcEvent({ type: 'turn_end', nativeOrder: laterAnchor }));
+        expect(origins).toEqual([startOrder]);
+    });
+
+    it('publishes tokenless local user entries as canonical user rows on their committed entry', () => {
+        const committed: Array<{ message: RawJSONLines; nativeOrder: unknown }> = [];
+        const harness = createHarness();
+        const adapter = new OmpRpcEventAdapter({
+            ...harness.callbacks,
+            onCanonicalMessage: (message, nativeOrder) => committed.push({ message, nativeOrder })
+        });
+        const order = { sessionId: 'native-a', entryId: 'E3', entryOrder: 3, eventOrder: 0 };
+        adapter.handle(rpcEvent({
+            type: 'message_end',
+            message: { role: 'user', content: 'typed locally', timestamp: 1_710_000_000_000 },
+            nativeOrder: order
+        }));
+        expect(harness.callbacks.onUserMessageCommitted).toHaveBeenCalledOnce();
+        expect(committed).toHaveLength(1);
+        expect(committed[0].nativeOrder).toEqual(order);
+        expect(committed[0].message.type).toBe('user');
+        adapter.handle(rpcEvent({
+            type: 'message_end',
+            message: { role: 'user', clientToken: 'remote-local-id', content: 'remote prompt' },
+            nativeOrder: order
+        }));
+        expect(committed).toHaveLength(1);
+    });
+
+    it('stamps native-ordered assistants with their source timestamp; legacy stays commit time', () => {
+        // With nativeOrder the hub sorts by journal coordinates, so wall-time
+        // provenance must be preserved. Without the capability, commit time
+        // remains the legacy causal approximation.
         const harness = createHarness();
         const turnStart = Date.now() - 10_000;
         const message = { ...assistantMessage('final', 'provider-response-1'), timestamp: turnStart };
-        harness.adapter.handle(rpcEvent({ type: 'message_start', message }));
-        harness.adapter.handle(rpcEvent({ type: 'message_end', message }));
-
+        const order = { sessionId: 'native-a', entryId: 'E1', entryOrder: 1, eventOrder: 0 };
+        harness.adapter.handle(rpcEvent({ type: 'message_start', message, nativeOrder: order }));
+        harness.adapter.handle(rpcEvent({ type: 'message_end', message, nativeOrder: order }));
         const committed = harness.canonicalMessages[0];
         if (committed.type !== 'assistant') throw new Error(`Expected assistant, received ${committed.type}`);
-        expect(Date.parse(committed.timestamp ?? '')).toBeGreaterThanOrEqual(turnStart + 9_000);
+        expect(Date.parse(committed.timestamp ?? '')).toBe(turnStart);
+
+        const legacy = createHarness();
+        legacy.adapter.handle(rpcEvent({ type: 'message_start', message }));
+        legacy.adapter.handle(rpcEvent({ type: 'message_end', message }));
+        const legacyCommitted = legacy.canonicalMessages[0];
+        if (legacyCommitted.type !== 'assistant') throw new Error(`Expected assistant, received ${legacyCommitted.type}`);
+        expect(Date.parse(legacyCommitted.timestamp ?? '')).toBeGreaterThanOrEqual(turnStart + 9_000);
     });
 
     it('keeps one tool card identity through start/update/end and commits only the message_end result', () => {
@@ -630,8 +714,10 @@ describe('OmpRpcEventAdapter', () => {
         for (const text of ['first', 'second']) {
             harness.adapter.handle(rpcEvent({ type: 'agent_start' }));
             harness.adapter.handle(rpcEvent({ type: 'message_start', message: assistantMessage(text) }));
-            harness.adapter.handle(rpcEvent({ type: 'message_update', message: assistantMessage(text),
-                assistantMessageEvent: { type: 'text_delta', delta: text } }));
+            harness.adapter.handle(rpcEvent({
+                type: 'message_update', message: assistantMessage(text),
+                assistantMessageEvent: { type: 'text_delta', delta: text }
+            }));
             harness.adapter.handle(rpcEvent({ type: 'message_end', message: assistantMessage(text) }));
             harness.adapter.handle(rpcEvent({ type: 'message_end', message: { role: 'user', steering: false } }));
             harness.adapter.handle(rpcEvent({ type: 'tool_execution_start', toolCallId: text, toolName: 'read', args: {} }));
@@ -657,17 +743,21 @@ describe('OmpRpcEventAdapter', () => {
         expect(harness.callbacks.onThinkingStateChanged).toHaveBeenCalledWith({ thinkingLevel: 'high' });
         expect(harness.callbacks.onSessionInfoUpdate).toHaveBeenCalledOnce();
         expect(harness.availableCommands).toEqual([[{ name: 'review', source: 'extension' }]]);
-        expect(harness.hostEvents).toEqual([{ type: 'host_tool_cancel', raw: {
-            type: 'host_tool_cancel', id: 'cancel', targetId: 'call'
-        } }]);
+        expect(harness.hostEvents).toEqual([{
+            type: 'host_tool_cancel', raw: {
+                type: 'host_tool_cancel', id: 'cancel', targetId: 'call'
+            }
+        }]);
     });
 
     it('projects selected state and stream events without requiring final messages', () => {
         const harness = createHarness(new Set(['message_start', 'message_update', 'available_commands_update']));
         const frames = [
             { type: 'message_start', message: assistantMessage('start') },
-            { type: 'message_update', message: assistantMessage('delta'),
-                assistantMessageEvent: { type: 'text_delta', delta: 'delta' } },
+            {
+                type: 'message_update', message: assistantMessage('delta'),
+                assistantMessageEvent: { type: 'text_delta', delta: 'delta' }
+            },
             { type: 'available_commands_update', commands: [{ name: 'review', source: 'extension' }] }
         ];
         for (const frame of frames) harness.adapter.handle(rpcEvent(frame));
@@ -682,8 +772,10 @@ describe('OmpRpcEventAdapter', () => {
         const harness = createHarness();
         harness.adapter.handle(rpcEvent({ type: 'tool_execution_start', toolCallId: 'wait-1', toolName: 'wait', args: { i: 'waiting' } }));
         for (let second = 0; second < 900; second += 1) {
-            harness.adapter.handle(rpcEvent({ type: 'tool_execution_update', toolCallId: 'wait-1', toolName: 'wait',
-                args: { i: 'waiting' }, partialResult: { elapsed: second } }));
+            harness.adapter.handle(rpcEvent({
+                type: 'tool_execution_update', toolCallId: 'wait-1', toolName: 'wait',
+                args: { i: 'waiting' }, partialResult: { elapsed: second }
+            }));
         }
         harness.adapter.handle(rpcEvent({ type: 'tool_execution_end', toolCallId: 'wait-1', toolName: 'wait', result: { done: true } }));
         harness.adapter.handle(rpcEvent({ type: 'tool_execution_start', toolCallId: 'wait-2', toolName: 'wait', args: { i: 'again' } }));
@@ -707,12 +799,18 @@ describe('OmpRpcEventAdapter', () => {
 
     it('reconstructs a selected tool end from excluded start and update events', () => {
         const harness = createHarness(new Set(['tool_execution_end']));
-        harness.adapter.handle(rpcEvent({ type: 'tool_execution_start', toolCallId: 'read-1', toolName: 'read',
-            args: { path: 'file.ts' } }));
-        harness.adapter.handle(rpcEvent({ type: 'tool_execution_update', toolCallId: 'read-1', toolName: 'read',
-            args: {}, partialResult: { text: 'partial' } }));
-        harness.adapter.handle(rpcEvent({ type: 'tool_execution_end', toolCallId: 'read-1', toolName: 'read',
-            result: { text: 'complete' } }));
+        harness.adapter.handle(rpcEvent({
+            type: 'tool_execution_start', toolCallId: 'read-1', toolName: 'read',
+            args: { path: 'file.ts' }
+        }));
+        harness.adapter.handle(rpcEvent({
+            type: 'tool_execution_update', toolCallId: 'read-1', toolName: 'read',
+            args: {}, partialResult: { text: 'partial' }
+        }));
+        harness.adapter.handle(rpcEvent({
+            type: 'tool_execution_end', toolCallId: 'read-1', toolName: 'read',
+            result: { text: 'complete' }
+        }));
         expect(harness.agentMessages).toEqual([{
             type: 'tool_call', id: 'read-1', name: 'read', input: { path: 'file.ts' }, status: 'completed'
         }]);
@@ -729,10 +827,14 @@ describe('OmpRpcEventAdapter', () => {
             }]);
             expect(harness.agentRunEvents).toEqual([]);
             harness.adapter.seedSubagentMessages('alpha', [assistantMessage('replayed', 'replay-id')]);
-            harness.adapter.handle(rpcEvent({ type: 'subagent_event', payload: {
-                id: 'alpha', event: { type: 'tool_execution_start', toolCallId: 'child', toolName: 'read',
-                    args: { path: 'child.ts' } }
-            } }));
+            harness.adapter.handle(rpcEvent({
+                type: 'subagent_event', payload: {
+                    id: 'alpha', event: {
+                        type: 'tool_execution_start', toolCallId: 'child', toolName: 'read',
+                        args: { path: 'child.ts' }
+                    }
+                }
+            }));
         }
         expect(hidden.agentRunEvents).toEqual([]);
         expect(hidden.traces).toEqual([]);
@@ -752,15 +854,19 @@ describe('OmpRpcEventAdapter', () => {
         const harness = createHarness(new Set(['message_end', 'subagent_lifecycle', 'subagent_event']));
         harness.adapter.handle(rpcEvent({ type: 'message_end', message: { role: 'user', steering: false } }));
         harness.adapter.handle(rpcEvent({ type: 'message_end', message: { role: 'developer', content: 'context' } }));
-        const lifecycle = { type: 'subagent_lifecycle', payload: {
-            id: 'alpha', index: 0, agent: 'task', agentSource: 'bundled', status: 'started'
-        } };
+        const lifecycle = {
+            type: 'subagent_lifecycle', payload: {
+                id: 'alpha', index: 0, agent: 'task', agentSource: 'bundled', status: 'started'
+            }
+        };
         harness.adapter.handle(rpcEvent(lifecycle));
         harness.adapter.handle(rpcEvent(lifecycle));
         harness.adapter.seedSubagentMessages('alpha', [assistantMessage('replayed', 'same-response')]);
-        harness.adapter.handle(rpcEvent({ type: 'subagent_event', payload: {
-            id: 'alpha', event: { type: 'message_end', message: assistantMessage('replayed', 'same-response') }
-        } }));
+        harness.adapter.handle(rpcEvent({
+            type: 'subagent_event', payload: {
+                id: 'alpha', event: { type: 'message_end', message: assistantMessage('replayed', 'same-response') }
+            }
+        }));
         expect(harness.structuredEvents).toEqual([]);
         expect(harness.canonicalMessages).toEqual([]);
         expect(harness.agentRunEvents).toEqual([expect.objectContaining({
@@ -772,27 +878,62 @@ describe('OmpRpcEventAdapter', () => {
         ]);
     });
 
+    it('inherits the parent journal anchor for replayed child transcripts', () => {
+        const traces: Array<{ message: AgentMessage; nativeOrder: unknown }> = [];
+        const harness = createHarness();
+        const adapter = new OmpRpcEventAdapter({
+            ...harness.callbacks,
+            onAgentRunTrace: (_scope, message, nativeOrder) => traces.push({ message, nativeOrder })
+        });
+        const parentAnchor = { sessionId: 'native-parent', entryId: 'E2', entryOrder: 2, eventOrder: 1 };
+        adapter.seedSubagents([{
+            id: 'alpha', index: 0, agent: 'task', agentSource: 'bundled',
+            status: 'running', lastUpdate: 123,
+            nativeOrder: parentAnchor
+        } as Parameters<OmpRpcEventAdapter['seedSubagents']>[0][number]]);
+        adapter.seedSubagentMessages('alpha', [
+            { ...assistantMessage('first replay'), nativeOrder: { sessionId: 'child-sess', entryId: 'C9', entryOrder: 9, eventOrder: 0 } },
+            { ...assistantMessage('second replay'), nativeOrder: { sessionId: 'child-sess', entryId: 'C11', entryOrder: 11, eventOrder: 0 } }
+        ]);
+        // Each replayed assistant has separate reasoning and text projections;
+        // both must inherit the same parent entry, never the child's session.
+        expect(traces).toEqual([
+            { message: expect.objectContaining({ type: 'reasoning', text: 'reasoning:first replay' }), nativeOrder: { ...parentAnchor, eventOrder: 9 } },
+            { message: expect.objectContaining({ type: 'text', text: 'first replay' }), nativeOrder: { ...parentAnchor, eventOrder: 9 } },
+            { message: expect.objectContaining({ type: 'reasoning', text: 'reasoning:second replay' }), nativeOrder: { ...parentAnchor, eventOrder: 11 } },
+            { message: expect.objectContaining({ type: 'text', text: 'second replay' }), nativeOrder: { ...parentAnchor, eventOrder: 11 } }
+        ]);
+    });
+
     it('keeps nested stream and state events quiet while retaining final child traces', () => {
         const visible = createHarness();
         const hidden = createHarness(new Set());
         const childEvents: JsonObject[] = [
             { type: 'message_start', message: assistantMessage('partial') },
-            { type: 'message_update', message: assistantMessage('partial'),
-                assistantMessageEvent: { type: 'text_delta', delta: 'partial' } },
-            { type: 'message_update', message: assistantMessage('final'),
-                assistantMessageEvent: { type: 'done', message: assistantMessage('final') } },
+            {
+                type: 'message_update', message: assistantMessage('partial'),
+                assistantMessageEvent: { type: 'text_delta', delta: 'partial' }
+            },
+            {
+                type: 'message_update', message: assistantMessage('final'),
+                assistantMessageEvent: { type: 'done', message: assistantMessage('final') }
+            },
             { type: 'advisor_yielded' },
             { type: 'config_warnings_changed' },
             { type: 'turn_end', message: assistantMessage('final'), toolResults: [] },
             { type: 'message_end', message: assistantMessage('final', 'child-final') },
             { type: 'tool_execution_start', toolCallId: 'read-child', toolName: 'read', args: { path: 'child.ts' } },
-            { type: 'tool_execution_end', toolCallId: 'read-child', toolName: 'read',
-                result: { content: [{ type: 'text', text: 'read output' }] }, isError: false }
+            {
+                type: 'tool_execution_end', toolCallId: 'read-child', toolName: 'read',
+                result: { content: [{ type: 'text', text: 'read output' }] }, isError: false
+            }
         ];
         for (const harness of [visible, hidden]) {
-            harness.adapter.handle(rpcEvent({ type: 'subagent_lifecycle', payload: {
-                id: 'alpha', index: 0, agent: 'task', agentSource: 'bundled', status: 'started'
-            } }));
+            harness.adapter.handle(rpcEvent({
+                type: 'subagent_lifecycle', payload: {
+                    id: 'alpha', index: 0, agent: 'task', agentSource: 'bundled', status: 'started'
+                }
+            }));
             for (const event of childEvents) {
                 harness.adapter.handle(rpcEvent({ type: 'subagent_event', payload: { id: 'alpha', event } }));
             }
@@ -952,5 +1093,150 @@ describe('OmpRpcEventAdapter', () => {
             ['running', 'Using read'],
             ['completed', 'Completed']
         ]);
+    });
+});
+
+function projectedRuntime(publications: RuntimePublication[]) {
+    const projection = new RuntimeTimelineProjection('test');
+    for (const publication of publications) {
+        if (publication.kind === 'snapshot') projection.replace(publication.snapshot);
+        else projection.apply(publication.patch);
+    }
+    return projection.snapshot();
+}
+
+describe('OMP native runtime timeline', () => {
+    afterEach(() => vi.useRealTimers());
+    it('keeps stable assistant UUIDs, thinking and native toolUse without finishing the run', () => {
+        vi.useFakeTimers();
+        const h = createHarness(undefined, true);
+        h.adapter.handle(rpcEvent({ type: 'agent_start' }));
+        h.adapter.handle(rpcEvent({ type: 'message_start', message: assistantMessage('') }));
+        vi.advanceTimersByTime(50);
+        const startedId = projectedRuntime(h.publications).items[0].id;
+        h.adapter.handle(rpcEvent({ type: 'message_update', message: assistantMessage('partial'), assistantMessageEvent: { type: 'text_delta', delta: 'partial' } }));
+        vi.advanceTimersByTime(50);
+        expect(projectedRuntime(h.publications).items[0]).toMatchObject({ id: startedId, text: 'partial', reasoning: 'reasoning:partial' });
+        h.adapter.handle(rpcEvent({ type: 'message_end', message: { ...assistantMessage('final', 'provider-id'), stopReason: 'toolUse' } }));
+        const live = projectedRuntime(h.publications);
+        expect(live.run?.state).toBe('running');
+        expect(live.items).toHaveLength(1);
+        expect(live.items[0].id).toBe(startedId);
+        expect(live.items[0]).toMatchObject({
+            id: h.canonicalMessages[0].uuid, canonicalId: h.canonicalMessages[0].uuid,
+            text: 'final', reasoning: 'reasoning:final', state: 'completed', stopReason: 'toolUse'
+        });
+        expect(RawJSONLinesSchema.parse(h.canonicalMessages[0])).toMatchObject({
+            stopReason: 'toolUse', runId: live.run?.id, providerMessageId: 'provider-id', isSidechain: false
+        });
+        h.adapter.handle(rpcEvent({ type: 'agent_end' }));
+        expect(projectedRuntime(h.publications).run).toMatchObject({ state: 'idle', stopReason: 'toolUse' });
+        h.adapter.closeRuntime();
+    });
+
+    it.each(['length', 'error', 'aborted'] as const)('retains native %s instead of inferring success from answer text', (stopReason) => {
+        const h = createHarness(undefined, true);
+        h.adapter.handle(rpcEvent({ type: 'agent_start' }));
+        h.adapter.handle(rpcEvent({ type: 'message_start', message: assistantMessage('') }));
+        h.adapter.handle(rpcEvent({ type: 'message_end', message: { ...assistantMessage('Looks done.'), stopReason, errorMessage: stopReason === 'error' ? 'Provider disconnected' : undefined } }));
+        h.adapter.handle(rpcEvent({ type: 'agent_end' }));
+        const runtime = projectedRuntime(h.publications);
+        expect(runtime.items[0].stopReason).toBe(stopReason);
+        expect(runtime.run).toMatchObject({ stopReason, state: stopReason === 'length' ? 'idle' : stopReason });
+        expect(RawJSONLinesSchema.parse(h.canonicalMessages[0])).toMatchObject({ stopReason, runId: runtime.run?.id });
+        h.adapter.closeRuntime();
+    });
+
+    it('publishes tool input/progress/result and runtime control even with every presentation event hidden', () => {
+        const h = createHarness(new Set<OmpKnownEventType>(), true);
+        h.adapter.handle(rpcEvent({ type: 'agent_start' }));
+        h.adapter.handle(rpcEvent({ type: 'tool_execution_start', toolCallId: 'tool-1', toolName: 'bash', args: { command: 'echo hi' } }));
+        h.adapter.handle(rpcEvent({ type: 'tool_execution_update', toolCallId: 'tool-1', toolName: 'bash', args: {}, partialResult: { text: 'partial' } }));
+        h.adapter.handle(rpcEvent({ type: 'tool_execution_end', toolCallId: 'tool-1', toolName: 'bash', result: { content: [{ type: 'text', text: 'hi' }] }, isError: true }));
+        expect(projectedRuntime(h.publications).items[0]).toMatchObject({
+            id: 'tool-1', state: 'error', tool: { id: 'tool-1', name: 'bash', input: { command: 'echo hi' }, isError: true, output: { content: [{ type: 'text', text: 'hi' }] } }
+        });
+        expect(h.agentMessages).toEqual([]);
+        expect(h.canonicalMessages).toEqual([]);
+        h.adapter.handle(rpcEvent({ type: 'agent_end' }));
+        expect(projectedRuntime(h.publications).run?.state).toBe('idle');
+        h.adapter.closeRuntime();
+    });
+
+    it('keeps tool identity and structured details through the durable result UUID bridge', () => {
+        const h = createHarness(undefined, true);
+        h.adapter.handle(rpcEvent({ type: 'agent_start' }));
+        h.adapter.handle(rpcEvent({ type: 'tool_execution_start', toolCallId: 'tool-1', toolName: 'read', args: { path: 'file' } }));
+        h.adapter.handle(rpcEvent({ type: 'tool_execution_end', toolCallId: 'tool-1', toolName: 'read', result: { content: [] }, isError: false }));
+        const createdAt = projectedRuntime(h.publications).items[0].createdAt;
+        h.adapter.handle(rpcEvent({
+            type: 'message_end', message: {
+                role: 'toolResult', toolCallId: 'tool-1', toolName: 'read',
+                content: [{ type: 'text', text: 'contents' }], details: { lines: 3 }, isError: false
+            }
+        }));
+        expect(projectedRuntime(h.publications).items[0]).toMatchObject({
+            id: 'tool-1', createdAt, canonicalId: h.canonicalMessages[0].uuid, state: 'completed',
+            tool: { id: 'tool-1', name: 'read', input: { path: 'file' }, output: { content: [{ type: 'text', text: 'contents' }], details: { lines: 3 } } }
+        });
+        h.adapter.closeRuntime();
+    });
+
+    it('flushes unfinished text before agent_end and preserves it on abort without late resurrection', () => {
+        const h = createHarness(undefined, true);
+        h.adapter.handle(rpcEvent({ type: 'agent_start' }));
+        h.adapter.handle(rpcEvent({ type: 'message_start', message: assistantMessage('partial') }));
+        h.adapter.noteExternalAbort();
+        const aborted = projectedRuntime(h.publications);
+        expect(aborted.items[0]).toMatchObject({ text: 'partial', reasoning: 'reasoning:partial', state: 'aborted' });
+        h.adapter.handle(rpcEvent({ type: 'message_end', message: assistantMessage('Late final') }));
+        h.adapter.handle(rpcEvent({ type: 'agent_end' }));
+        expect(projectedRuntime(h.publications)).toEqual(aborted);
+        expect(h.canonicalMessages[0]).toMatchObject({ uuid: aborted.items[0].canonicalId, stopReason: 'aborted' });
+        h.adapter.closeRuntime();
+    });
+
+    it('reconciles an unfinished native assistant before the final run update', () => {
+        const h = createHarness(undefined, true);
+        h.adapter.handle(rpcEvent({ type: 'agent_start' }));
+        h.adapter.handle(rpcEvent({ type: 'message_start', message: assistantMessage('last chunk') }));
+        h.adapter.handle(rpcEvent({ type: 'agent_end' }));
+        const runtime = projectedRuntime(h.publications);
+        expect(runtime.items[0]).toMatchObject({ text: 'last chunk', state: 'aborted' });
+        expect(runtime.run?.state).toBe('idle');
+        expect(h.canonicalMessages[0]).toMatchObject({ stopReason: 'aborted', message: { content: [{ type: 'thinking', thinking: 'reasoning:last chunk' }, { type: 'text', text: 'last chunk' }] } });
+        h.adapter.closeRuntime();
+    });
+
+    it('keeps one assistant identity while custom notices and steering echoes interleave', () => {
+        vi.useFakeTimers();
+        const h = createHarness(undefined, true);
+        h.adapter.handle(rpcEvent({ type: 'agent_start' }));
+        h.adapter.handle(rpcEvent({ type: 'message_start', message: assistantMessage('first') }));
+        vi.advanceTimersByTime(50);
+        const id = projectedRuntime(h.publications).items[0].id;
+        h.adapter.handle(rpcEvent({ type: 'message_end', message: { role: 'custom', display: true, customType: 'async-result', content: 'Background completed' } }));
+        h.adapter.handle(rpcEvent({ type: 'message_start', message: { role: 'user', content: 'steer' } }));
+        h.adapter.handle(rpcEvent({ type: 'message_end', message: { role: 'user', content: 'steer', steering: true } }));
+        h.adapter.handle(rpcEvent({ type: 'message_update', message: assistantMessage('continued'), assistantMessageEvent: { type: 'text_delta', delta: 'continued' } }));
+        h.adapter.handle(rpcEvent({ type: 'message_end', message: assistantMessage('final') }));
+        const snapshot = projectedRuntime(h.publications);
+        expect(snapshot.items.map(item => item.id)).toEqual([id]);
+        expect(snapshot.items[0]).toMatchObject({ text: 'final', state: 'completed' });
+        expect(h.canonicalMessages[0].uuid).toBe(id);
+        h.adapter.closeRuntime();
+    });
+
+    it('does not create a ghost assistant row for a tool-only native message', () => {
+        const h = createHarness(undefined, true);
+        const message = { ...assistantMessage(''), content: [{ type: 'toolCall', id: 'native-read', name: 'read', arguments: { path: 'file' } }], stopReason: 'toolUse' };
+        h.adapter.handle(rpcEvent({ type: 'agent_start' }));
+        h.adapter.handle(rpcEvent({ type: 'message_start', message }));
+        h.adapter.handle(rpcEvent({ type: 'message_end', message }));
+        h.adapter.handle(rpcEvent({ type: 'tool_execution_start', toolCallId: 'native-read', toolName: 'read', args: { path: 'file' } }));
+        h.adapter.handle(rpcEvent({ type: 'tool_execution_end', toolCallId: 'native-read', toolName: 'read', result: { content: [] }, isError: false }));
+        expect(projectedRuntime(h.publications).items.map(item => [item.id, item.kind])).toEqual([['native-read', 'tool']]);
+        expect(h.canonicalMessages[0]).toMatchObject({ stopReason: 'toolUse' });
+        h.adapter.closeRuntime();
     });
 });

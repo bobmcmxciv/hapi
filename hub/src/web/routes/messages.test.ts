@@ -21,175 +21,222 @@ type GetMessagesPage = SyncEngine['getMessagesPage']
 // ---------------------------------------------------------------------------
 
 function createApp(opts: {
-    active?: boolean
-    sendMessage?: (sessionId: string, payload: unknown) => Promise<void>
-    getMessagesPage?: GetMessagesPage
-    getQueuedState?: (sessionId: string, localIds: string[]) => {
-        queuedLocalIds: string[]
-        invokedLocalMessages: Array<{ localId: string; invokedAt: number }>
-    }
+ active?: boolean
+ forceSendQueuedMessages?: SyncEngine['forceSendQueuedMessages']
+ sendMessage?: (sessionId: string, payload: unknown) => Promise<void>
+ getMessagesPage?: GetMessagesPage
+ getQueuedState?: (sessionId: string, localIds: string[]) => {
+  queuedLocalIds: string[]
+  invokedLocalMessages: Array<{ localId: string; invokedAt: number }>
+ }
 }) {
-    const sentMessages: Array<{ sessionId: string; payload: unknown }> = []
-    const queuedStateCalls: Array<{ sessionId: string; localIds: string[] }> = []
-    const sendMessage = opts.sendMessage ?? (async (sessionId: string, payload: unknown) => {
-        sentMessages.push({ sessionId, payload })
-    })
-    const getQueuedState = opts.getQueuedState ?? ((sessionId: string, localIds: string[]) => {
-        queuedStateCalls.push({ sessionId, localIds })
-        return {
-            queuedLocalIds: localIds.filter((localId) => localId.startsWith('queued-')),
-            invokedLocalMessages: localIds
-                .filter((localId) => localId.startsWith('invoked-'))
-                .map((localId) => ({ localId, invokedAt: 1_000 }))
-        }
-    })
-    const getMessagesPage = opts.getMessagesPage ?? (() => ({
-        messages: [],
-        page: {
-            direction: 'latest',
-            limit: 50,
-            epoch: 0,
-            reset: false,
-            nextBeforeSeq: null,
-            nextBeforeAt: null,
-            nextAfterSeq: null,
-            nextAfterAt: null,
-            snapshotHeadSeq: null,
-            snapshotHeadAt: null,
-            hasMore: false
-        }
-    }))
+ const sentMessages: Array<{ sessionId: string; payload: unknown }> = []
+ const queuedStateCalls: Array<{ sessionId: string; localIds: string[] }> = []
+ const sendMessage = opts.sendMessage ?? (async (sessionId: string, payload: unknown) => {
+  sentMessages.push({ sessionId, payload })
+ })
+ const getQueuedState = opts.getQueuedState ?? ((sessionId: string, localIds: string[]) => {
+  queuedStateCalls.push({ sessionId, localIds })
+  return {
+   queuedLocalIds: localIds.filter((localId) => localId.startsWith('queued-')),
+   invokedLocalMessages: localIds
+    .filter((localId) => localId.startsWith('invoked-'))
+    .map((localId) => ({ localId, invokedAt: 1_000 }))
+  }
+ })
+ const getMessagesPage = opts.getMessagesPage ?? (() => ({
+  messages: [],
+  page: {
+   direction: 'latest',
+   limit: 50,
+   epoch: 0,
+   reset: false,
+   nextBeforeSeq: null,
+   nextBeforeAt: null,
+   nextAfterSeq: null,
+   nextAfterAt: null,
+   snapshotHeadSeq: null,
+   snapshotHeadAt: null,
+   hasMore: false
+  }
+ }))
 
-    const engine = {
-        resolveSessionAccess: () => ({
-            ok: true,
-            sessionId: 'session-1',
-            session: { id: 'session-1', active: opts.active !== false }
-        }),
-        sendMessage,
-        getQueuedState,
-        cancelQueuedMessage: async () => ({ status: 'cancelled' }),
-        getMessagesPage,
-    } as unknown as SyncEngine
+ const engine = {
+  resolveSessionAccess: () => ({
+   ok: true,
+   sessionId: 'session-1',
+   session: { id: 'session-1', active: opts.active !== false }
+  }),
+  sendMessage,
+  getQueuedState,
+  forceSendQueuedMessages: opts.forceSendQueuedMessages ?? (async () => ({ results: [], messages: [] })),
+  cancelQueuedMessage: async () => ({ status: 'cancelled' }),
+  getMessagesPage,
+ } as unknown as SyncEngine
 
-    const app = new Hono<WebAppEnv>()
-    app.use('*', async (c, next) => {
-        c.set('namespace', 'default')
-        await next()
-    })
-    app.route('/api', createMessagesRoutes(() => engine as SyncEngine))
+ const app = new Hono<WebAppEnv>()
+ app.use('*', async (c, next) => {
+  c.set('namespace', 'default')
+  await next()
+ })
+ app.route('/api', createMessagesRoutes(() => engine as SyncEngine))
 
-    return { app, sentMessages, queuedStateCalls }
+ return { app, sentMessages, queuedStateCalls }
 }
 
+describe('POST /api/sessions/:id/messages/force-send', () => {
+ it('withholds pending message payloads when access is revoked during the runner acknowledgement', async () => {
+  const entered = Promise.withResolvers<void>()
+  const release = Promise.withResolvers<void>()
+  let revoked = false
+  const engine = {
+   resolveSessionAccess: () => revoked
+    ? { ok: false, reason: 'access-denied' }
+    : { ok: true, sessionId: 'session-1', session: { id: 'session-1', active: true } },
+   forceSendQueuedMessages: async () => {
+    entered.resolve()
+    await release.promise
+    return { results: [], messages: [{ content: { role: 'user', content: 'private pending input' } }] }
+   }
+  } as unknown as SyncEngine
+  const app = new Hono<WebAppEnv>()
+  app.use('*', async (c, next) => { c.set('namespace', 'default'); await next() })
+  app.route('/api', createMessagesRoutes(() => engine))
+  const request = app.request('/api/sessions/session-1/messages/force-send', {
+   method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}'
+  })
+  await entered.promise
+  revoked = true
+  release.resolve()
+  const response = await request
+  expect(response.status).toBe(403)
+  expect(await response.json()).toEqual({ error: 'Session access denied' })
+ })
+
+ it('validates scheduling opt-in before calling the engine', async () => {
+  let called = false
+  const { app } = createApp({
+   forceSendQueuedMessages: async () => {
+    called = true
+    return { results: [], messages: [] }
+   }
+  })
+  const response = await app.request('/api/sessions/session-1/messages/force-send', {
+   method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"includeScheduled":"yes"}'
+  })
+  expect(response.status).toBe(400)
+  expect(called).toBe(false)
+ })
+})
+
 describe('GET /api/sessions/:id/messages', () => {
-    it('uses latest mode by default and returns the full page metadata', async () => {
-        const calls: Array<{ sessionId: string; options: Parameters<GetMessagesPage>[1] }> = []
-        const { app } = createApp({
-            getMessagesPage: (sessionId, options) => {
-                calls.push({ sessionId, options })
-                return {
-                    messages: [],
-                    page: {
-                        direction: 'latest',
-                        limit: options.limit,
-                        epoch: 4,
-                        reset: false,
-                        nextBeforeSeq: 10,
-                        nextBeforeAt: 1_000,
-                        nextAfterSeq: null,
-                        nextAfterAt: null,
-                        snapshotHeadSeq: 20,
-                        snapshotHeadAt: 2_000,
-                        hasMore: true
-                    }
-                }
-            }
-        })
+ it('uses latest mode by default and returns the full page metadata', async () => {
+  const calls: Array<{ sessionId: string; options: Parameters<GetMessagesPage>[1] }> = []
+  const { app } = createApp({
+   getMessagesPage: (sessionId, options) => {
+    calls.push({ sessionId, options })
+    return {
+     messages: [],
+     page: {
+      direction: 'latest',
+      limit: options.limit,
+      epoch: 4,
+      reset: false,
+      nextBeforeSeq: 10,
+      nextBeforeAt: 1_000,
+      nextAfterSeq: null,
+      nextAfterAt: null,
+      snapshotHeadSeq: 20,
+      snapshotHeadAt: 2_000,
+      hasMore: true
+     }
+    }
+   }
+  })
 
-        const response = await app.request('/api/sessions/session-1/messages')
+  const response = await app.request('/api/sessions/session-1/messages')
 
-        expect(response.status).toBe(200)
-        expect(calls).toEqual([{
-            sessionId: 'session-1',
-            options: { limit: 50, before: null, after: null, until: null, epoch: null }
-        }])
-        expect(await response.json()).toEqual({
-            messages: [],
-            page: {
-                direction: 'latest',
-                limit: 50,
-                epoch: 4,
-                reset: false,
-                nextBeforeSeq: 10,
-                nextBeforeAt: 1_000,
-                nextAfterSeq: null,
-                nextAfterAt: null,
-                snapshotHeadSeq: 20,
-                snapshotHeadAt: 2_000,
-                hasMore: true
-            }
-        })
-    })
+  expect(response.status).toBe(200)
+  expect(calls).toEqual([{
+   sessionId: 'session-1',
+   options: { limit: 50, before: null, after: null, until: null, epoch: null }
+  }])
+  expect(await response.json()).toEqual({
+   messages: [],
+   page: {
+    direction: 'latest',
+    limit: 50,
+    epoch: 4,
+    reset: false,
+    nextBeforeSeq: 10,
+    nextBeforeAt: 1_000,
+    nextAfterSeq: null,
+    nextAfterAt: null,
+    snapshotHeadSeq: 20,
+    snapshotHeadAt: 2_000,
+    hasMore: true
+   }
+  })
+ })
 
-    it('forwards after, snapshot-head, epoch, and limit query parameters', async () => {
-        const calls: Array<{ sessionId: string; options: Parameters<GetMessagesPage>[1] }> = []
-        const { app } = createApp({
-            getMessagesPage: (sessionId, options) => {
-                calls.push({ sessionId, options })
-                return {
-                    messages: [],
-                    page: {
-                        direction: 'after',
-                        limit: options.limit,
-                        epoch: options.epoch ?? 0,
-                        reset: false,
-                        nextBeforeSeq: null,
-                        nextBeforeAt: null,
-                        nextAfterSeq: 11,
-                        nextAfterAt: 1_100,
-                        snapshotHeadSeq: 20,
-                        snapshotHeadAt: 2_000,
-                        hasMore: true
-                    }
-                }
-            }
-        })
+ it('forwards after, snapshot-head, epoch, and limit query parameters', async () => {
+  const calls: Array<{ sessionId: string; options: Parameters<GetMessagesPage>[1] }> = []
+  const { app } = createApp({
+   getMessagesPage: (sessionId, options) => {
+    calls.push({ sessionId, options })
+    return {
+     messages: [],
+     page: {
+      direction: 'after',
+      limit: options.limit,
+      epoch: options.epoch ?? 0,
+      reset: false,
+      nextBeforeSeq: null,
+      nextBeforeAt: null,
+      nextAfterSeq: 11,
+      nextAfterAt: 1_100,
+      snapshotHeadSeq: 20,
+      snapshotHeadAt: 2_000,
+      hasMore: true
+     }
+    }
+   }
+  })
 
-        const response = await app.request(
-            '/api/sessions/session-1/messages?afterAt=1000&afterSeq=10&untilAt=2000&untilSeq=20&epoch=3&limit=25'
-        )
+  const response = await app.request(
+   '/api/sessions/session-1/messages?afterAt=1000&afterSeq=10&untilAt=2000&untilSeq=20&epoch=3&limit=25'
+  )
 
-        expect(response.status).toBe(200)
-        expect(calls).toEqual([{
-            sessionId: 'session-1',
-            options: {
-                limit: 25,
-                before: null,
-                after: { at: 1_000, seq: 10 },
-                until: { at: 2_000, seq: 20 },
-                epoch: 3
-            }
-        }])
-    })
+  expect(response.status).toBe(200)
+  expect(calls).toEqual([{
+   sessionId: 'session-1',
+   options: {
+    limit: 25,
+    before: null,
+    after: { at: 1_000, seq: 10 },
+    until: { at: 2_000, seq: 20 },
+    epoch: 3
+   }
+  }])
+ })
 
-    it('rejects mixed directional cursors before calling the engine', async () => {
-        let called = false
-        const { app } = createApp({
-            getMessagesPage: () => {
-                called = true
-                throw new Error('must not be called')
-            }
-        })
+ it('rejects mixed directional cursors before calling the engine', async () => {
+  let called = false
+  const { app } = createApp({
+   getMessagesPage: () => {
+    called = true
+    throw new Error('must not be called')
+   }
+  })
 
-        const response = await app.request(
-            '/api/sessions/session-1/messages?beforeAt=1000&beforeSeq=10&afterAt=2000&afterSeq=20'
-        )
+  const response = await app.request(
+   '/api/sessions/session-1/messages?beforeAt=1000&beforeSeq=10&afterAt=2000&afterSeq=20'
+  )
 
-        expect(response.status).toBe(400)
-        expect(await response.json()).toMatchObject({ error: 'Invalid query' })
-        expect(called).toBe(false)
-    })
+  expect(response.status).toBe(400)
+  expect(await response.json()).toMatchObject({ error: 'Invalid query' })
+  expect(called).toBe(false)
+ })
 })
 
 // ---------------------------------------------------------------------------
@@ -197,112 +244,112 @@ describe('GET /api/sessions/:id/messages', () => {
 // ---------------------------------------------------------------------------
 
 describe('POST /api/sessions/:id/messages — #2 scheduledAt upper bound', () => {
-    it('rejects scheduledAt more than 7 days in the future with 400 and clear message', async () => {
-        const { app } = createApp({})
+ it('rejects scheduledAt more than 7 days in the future with 400 and clear message', async () => {
+  const { app } = createApp({})
 
-        const eightDaysMs = Date.now() + 8 * 24 * 60 * 60 * 1000
-        const response = await app.request('/api/sessions/session-1/messages', {
-            method: 'POST',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ text: 'hello', localId: 'local-1', scheduledAt: eightDaysMs })
-        })
+  const eightDaysMs = Date.now() + 8 * 24 * 60 * 60 * 1000
+  const response = await app.request('/api/sessions/session-1/messages', {
+   method: 'POST',
+   headers: { 'content-type': 'application/json' },
+   body: JSON.stringify({ text: 'hello', localId: 'local-1', scheduledAt: eightDaysMs })
+  })
 
-        expect(response.status).toBe(400)
-        const body = await response.json() as { error: string; issues?: { _errors?: string[] } }
-        expect(body.error).toBe('Invalid body')
-        // #4: issues field must be present
-        expect(body.issues).toBeDefined()
-        // The 7-day message must appear somewhere in the issues
-        const issuesStr = JSON.stringify(body.issues)
-        expect(issuesStr).toContain('7 days')
-    })
+  expect(response.status).toBe(400)
+  const body = await response.json() as { error: string; issues?: { _errors?: string[] } }
+  expect(body.error).toBe('Invalid body')
+  // #4: issues field must be present
+  expect(body.issues).toBeDefined()
+  // The 7-day message must appear somewhere in the issues
+  const issuesStr = JSON.stringify(body.issues)
+  expect(issuesStr).toContain('7 days')
+ })
 
-    it('accepts scheduledAt exactly at the 7-day boundary (inclusive)', async () => {
-        const { app, sentMessages } = createApp({})
+ it('accepts scheduledAt exactly at the 7-day boundary (inclusive)', async () => {
+  const { app, sentMessages } = createApp({})
 
-        // Use slightly less than 7 days to avoid flakiness at the exact boundary
-        const nearlySevenDays = Date.now() + 7 * 24 * 60 * 60 * 1000 - 1000
-        const response = await app.request('/api/sessions/session-1/messages', {
-            method: 'POST',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ text: 'hello', localId: 'local-2', scheduledAt: nearlySevenDays })
-        })
+  // Use slightly less than 7 days to avoid flakiness at the exact boundary
+  const nearlySevenDays = Date.now() + 7 * 24 * 60 * 60 * 1000 - 1000
+  const response = await app.request('/api/sessions/session-1/messages', {
+   method: 'POST',
+   headers: { 'content-type': 'application/json' },
+   body: JSON.stringify({ text: 'hello', localId: 'local-2', scheduledAt: nearlySevenDays })
+  })
 
-        expect(response.status).toBe(200)
-        expect(sentMessages).toHaveLength(1)
-    })
+  expect(response.status).toBe(200)
+  expect(sentMessages).toHaveLength(1)
+ })
 
-    it('accepts null scheduledAt (immediate send)', async () => {
-        const { app, sentMessages } = createApp({})
+ it('accepts null scheduledAt (immediate send)', async () => {
+  const { app, sentMessages } = createApp({})
 
-        const response = await app.request('/api/sessions/session-1/messages', {
-            method: 'POST',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ text: 'hello', localId: 'local-3', scheduledAt: null })
-        })
+  const response = await app.request('/api/sessions/session-1/messages', {
+   method: 'POST',
+   headers: { 'content-type': 'application/json' },
+   body: JSON.stringify({ text: 'hello', localId: 'local-3', scheduledAt: null })
+  })
 
-        expect(response.status).toBe(200)
-        expect(sentMessages).toHaveLength(1)
-    })
+  expect(response.status).toBe(200)
+  expect(sentMessages).toHaveLength(1)
+ })
 
-    it('accepts missing scheduledAt (immediate send)', async () => {
-        const { app, sentMessages } = createApp({})
+ it('accepts missing scheduledAt (immediate send)', async () => {
+  const { app, sentMessages } = createApp({})
 
-        const response = await app.request('/api/sessions/session-1/messages', {
-            method: 'POST',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ text: 'hello' })
-        })
+  const response = await app.request('/api/sessions/session-1/messages', {
+   method: 'POST',
+   headers: { 'content-type': 'application/json' },
+   body: JSON.stringify({ text: 'hello' })
+  })
 
-        expect(response.status).toBe(200)
-        expect(sentMessages).toHaveLength(1)
-    })
+  expect(response.status).toBe(200)
+  expect(sentMessages).toHaveLength(1)
+ })
 })
 
 describe('POST /api/sessions/:id/messages — deliveryMode', () => {
-    it('forwards an immediate steer intent to the hub', async () => {
-        const { app, sentMessages } = createApp({})
+ it('forwards an immediate steer intent to the hub', async () => {
+  const { app, sentMessages } = createApp({})
 
-        const response = await app.request('/api/sessions/session-1/messages', {
-            method: 'POST',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ text: 'steer now', localId: 'local-steer', deliveryMode: 'steer' })
-        })
+  const response = await app.request('/api/sessions/session-1/messages', {
+   method: 'POST',
+   headers: { 'content-type': 'application/json' },
+   body: JSON.stringify({ text: 'steer now', localId: 'local-steer', deliveryMode: 'steer' })
+  })
 
-        expect(response.status).toBe(200)
-        expect(sentMessages).toEqual([{
-            sessionId: 'session-1',
-            payload: {
-                text: 'steer now',
-                localId: 'local-steer',
-                attachments: undefined,
-                ompInputMode: undefined,
-                sentFrom: 'webapp',
-                scheduledAt: undefined,
-                deliveryMetadata: {},
-                deliveryMode: 'steer'
-            }
-        }])
-    })
+  expect(response.status).toBe(200)
+  expect(sentMessages).toEqual([{
+   sessionId: 'session-1',
+   payload: {
+    text: 'steer now',
+    localId: 'local-steer',
+    attachments: undefined,
+    ompInputMode: undefined,
+    sentFrom: 'webapp',
+    scheduledAt: undefined,
+    deliveryMetadata: {},
+    deliveryMode: 'steer'
+   }
+  }])
+ })
 
-    it('rejects scheduled steer delivery before calling the hub', async () => {
-        const { app, sentMessages } = createApp({})
+ it('rejects scheduled steer delivery before calling the hub', async () => {
+  const { app, sentMessages } = createApp({})
 
-        const response = await app.request('/api/sessions/session-1/messages', {
-            method: 'POST',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({
-                text: 'steer later',
-                localId: 'local-scheduled-steer',
-                scheduledAt: Date.now() + 60_000,
-                deliveryMode: 'steer'
-            })
-        })
+  const response = await app.request('/api/sessions/session-1/messages', {
+   method: 'POST',
+   headers: { 'content-type': 'application/json' },
+   body: JSON.stringify({
+    text: 'steer later',
+    localId: 'local-scheduled-steer',
+    scheduledAt: Date.now() + 60_000,
+    deliveryMode: 'steer'
+   })
+  })
 
-        expect(response.status).toBe(400)
-        expect(JSON.stringify(await response.json())).toContain('deliveryMode')
-        expect(sentMessages).toHaveLength(0)
-    })
+  expect(response.status).toBe(400)
+  expect(JSON.stringify(await response.json())).toContain('deliveryMode')
+  expect(sentMessages).toHaveLength(0)
+ })
 })
 
 // ---------------------------------------------------------------------------
@@ -310,38 +357,38 @@ describe('POST /api/sessions/:id/messages — deliveryMode', () => {
 // ---------------------------------------------------------------------------
 
 describe('POST /api/sessions/:id/messages — #4 Zod error issues in response', () => {
-    it('returns issues when scheduledAt is set but localId is missing', async () => {
-        const { app } = createApp({})
+ it('returns issues when scheduledAt is set but localId is missing', async () => {
+  const { app } = createApp({})
 
-        const futureMs = Date.now() + 60_000
-        const response = await app.request('/api/sessions/session-1/messages', {
-            method: 'POST',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ text: 'hello', scheduledAt: futureMs })
-        })
+  const futureMs = Date.now() + 60_000
+  const response = await app.request('/api/sessions/session-1/messages', {
+   method: 'POST',
+   headers: { 'content-type': 'application/json' },
+   body: JSON.stringify({ text: 'hello', scheduledAt: futureMs })
+  })
 
-        expect(response.status).toBe(400)
-        const body = await response.json() as { error: string; issues?: unknown }
-        expect(body.error).toBe('Invalid body')
-        expect(body.issues).toBeDefined()
-        const issuesStr = JSON.stringify(body.issues)
-        expect(issuesStr).toContain('localId')
-    })
+  expect(response.status).toBe(400)
+  const body = await response.json() as { error: string; issues?: unknown }
+  expect(body.error).toBe('Invalid body')
+  expect(body.issues).toBeDefined()
+  const issuesStr = JSON.stringify(body.issues)
+  expect(issuesStr).toContain('localId')
+ })
 
-    it('returns issues with a non-string text field', async () => {
-        const { app } = createApp({})
+ it('returns issues with a non-string text field', async () => {
+  const { app } = createApp({})
 
-        const response = await app.request('/api/sessions/session-1/messages', {
-            method: 'POST',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ text: 123 })
-        })
+  const response = await app.request('/api/sessions/session-1/messages', {
+   method: 'POST',
+   headers: { 'content-type': 'application/json' },
+   body: JSON.stringify({ text: 123 })
+  })
 
-        expect(response.status).toBe(400)
-        const body = await response.json() as { error: string; issues?: unknown }
-        expect(body.error).toBe('Invalid body')
-        expect(body.issues).toBeDefined()
-    })
+  expect(response.status).toBe(400)
+  const body = await response.json() as { error: string; issues?: unknown }
+  expect(body.error).toBe('Invalid body')
+  expect(body.issues).toBeDefined()
+ })
 })
 
 // ---------------------------------------------------------------------------
@@ -349,100 +396,100 @@ describe('POST /api/sessions/:id/messages — #4 Zod error issues in response', 
 // ---------------------------------------------------------------------------
 
 describe('POST /api/sessions/:id/messages — scheduledAt + attachments rejected', () => {
-    it('rejects scheduledAt combined with non-empty attachments with 400', async () => {
-        const { app, sentMessages } = createApp({})
+ it('rejects scheduledAt combined with non-empty attachments with 400', async () => {
+  const { app, sentMessages } = createApp({})
 
-        const futureMs = Date.now() + 60_000
-        const response = await app.request('/api/sessions/session-1/messages', {
-            method: 'POST',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({
-                text: 'hello',
-                localId: 'local-att',
-                scheduledAt: futureMs,
-                attachments: [{ id: 'att-1', filename: 'a.png', mimeType: 'image/png', size: 10, path: '/tmp/a.png' }]
-            })
-        })
+  const futureMs = Date.now() + 60_000
+  const response = await app.request('/api/sessions/session-1/messages', {
+   method: 'POST',
+   headers: { 'content-type': 'application/json' },
+   body: JSON.stringify({
+    text: 'hello',
+    localId: 'local-att',
+    scheduledAt: futureMs,
+    attachments: [{ id: 'att-1', filename: 'a.png', mimeType: 'image/png', size: 10, path: '/tmp/a.png' }]
+   })
+  })
 
-        expect(response.status).toBe(400)
-        const body = await response.json() as { error: string; issues?: unknown }
-        expect(body.error).toBe('Invalid body')
-        const issuesStr = JSON.stringify(body.issues)
-        expect(issuesStr).toContain('attachments')
-        expect(sentMessages).toHaveLength(0)
-    })
+  expect(response.status).toBe(400)
+  const body = await response.json() as { error: string; issues?: unknown }
+  expect(body.error).toBe('Invalid body')
+  const issuesStr = JSON.stringify(body.issues)
+  expect(issuesStr).toContain('attachments')
+  expect(sentMessages).toHaveLength(0)
+ })
 
-    it('accepts scheduledAt with empty attachments array', async () => {
-        const { app, sentMessages } = createApp({})
+ it('accepts scheduledAt with empty attachments array', async () => {
+  const { app, sentMessages } = createApp({})
 
-        const futureMs = Date.now() + 60_000
-        const response = await app.request('/api/sessions/session-1/messages', {
-            method: 'POST',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({
-                text: 'hello',
-                localId: 'local-att-2',
-                scheduledAt: futureMs,
-                attachments: []
-            })
-        })
+  const futureMs = Date.now() + 60_000
+  const response = await app.request('/api/sessions/session-1/messages', {
+   method: 'POST',
+   headers: { 'content-type': 'application/json' },
+   body: JSON.stringify({
+    text: 'hello',
+    localId: 'local-att-2',
+    scheduledAt: futureMs,
+    attachments: []
+   })
+  })
 
-        expect(response.status).toBe(200)
-        expect(sentMessages).toHaveLength(1)
-    })
+  expect(response.status).toBe(200)
+  expect(sentMessages).toHaveLength(1)
+ })
 
-    it('accepts immediate send with attachments (no scheduledAt)', async () => {
-        const { app, sentMessages } = createApp({})
+ it('accepts immediate send with attachments (no scheduledAt)', async () => {
+  const { app, sentMessages } = createApp({})
 
-        const response = await app.request('/api/sessions/session-1/messages', {
-            method: 'POST',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({
-                text: 'hello',
-                attachments: [{ id: 'att-2', filename: 'b.png', mimeType: 'image/png', size: 10, path: '/tmp/b.png' }]
-            })
-        })
+  const response = await app.request('/api/sessions/session-1/messages', {
+   method: 'POST',
+   headers: { 'content-type': 'application/json' },
+   body: JSON.stringify({
+    text: 'hello',
+    attachments: [{ id: 'att-2', filename: 'b.png', mimeType: 'image/png', size: 10, path: '/tmp/b.png' }]
+   })
+  })
 
-        expect(response.status).toBe(200)
-        expect(sentMessages).toHaveLength(1)
-    })
+  expect(response.status).toBe(200)
+  expect(sentMessages).toHaveLength(1)
+ })
 })
 
 describe('POST /api/sessions/:id/messages — OMP input command', () => {
-    it('passes an explicit atomic OMP input mode to the sync engine', async () => {
-        const { app, sentMessages } = createApp({})
-        const response = await app.request('/api/sessions/session-1/messages', {
-            method: 'POST',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({
-                text: 'replace the active turn',
-                localId: 'replace-1',
-                ompInputMode: 'abort_and_prompt'
-            })
-        })
+ it('passes an explicit atomic OMP input mode to the sync engine', async () => {
+  const { app, sentMessages } = createApp({})
+  const response = await app.request('/api/sessions/session-1/messages', {
+   method: 'POST',
+   headers: { 'content-type': 'application/json' },
+   body: JSON.stringify({
+    text: 'replace the active turn',
+    localId: 'replace-1',
+    ompInputMode: 'abort_and_prompt'
+   })
+  })
 
-        expect(response.status).toBe(200)
-        expect(sentMessages).toEqual([{
-            sessionId: 'session-1',
-            payload: expect.objectContaining({
-                text: 'replace the active turn',
-                localId: 'replace-1',
-                ompInputMode: 'abort_and_prompt'
-            })
-        }])
-    })
+  expect(response.status).toBe(200)
+  expect(sentMessages).toEqual([{
+   sessionId: 'session-1',
+   payload: expect.objectContaining({
+    text: 'replace the active turn',
+    localId: 'replace-1',
+    ompInputMode: 'abort_and_prompt'
+   })
+  }])
+ })
 
-    it('rejects unknown OMP input modes', async () => {
-        const { app, sentMessages } = createApp({})
-        const response = await app.request('/api/sessions/session-1/messages', {
-            method: 'POST',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ text: 'bad mode', ompInputMode: 'interrupt' })
-        })
+ it('rejects unknown OMP input modes', async () => {
+  const { app, sentMessages } = createApp({})
+  const response = await app.request('/api/sessions/session-1/messages', {
+   method: 'POST',
+   headers: { 'content-type': 'application/json' },
+   body: JSON.stringify({ text: 'bad mode', ompInputMode: 'interrupt' })
+  })
 
-        expect(response.status).toBe(400)
-        expect(sentMessages).toHaveLength(0)
-    })
+  expect(response.status).toBe(400)
+  expect(sentMessages).toHaveLength(0)
+ })
 })
 
 // ---------------------------------------------------------------------------
@@ -450,77 +497,77 @@ describe('POST /api/sessions/:id/messages — OMP input command', () => {
 // ---------------------------------------------------------------------------
 
 describe('POST /api/sessions/:id/messages — inactive session response shape', () => {
-    it('returns 409 with code "session_inactive" when sending to an inactive session', async () => {
-        const { app, sentMessages } = createApp({ active: false })
+ it('returns 409 with code "session_inactive" when sending to an inactive session', async () => {
+  const { app, sentMessages } = createApp({ active: false })
 
-        const response = await app.request('/api/sessions/session-1/messages', {
-            method: 'POST',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ text: 'hello', localId: 'local-inactive' })
-        })
+  const response = await app.request('/api/sessions/session-1/messages', {
+   method: 'POST',
+   headers: { 'content-type': 'application/json' },
+   body: JSON.stringify({ text: 'hello', localId: 'local-inactive' })
+  })
 
-        expect(response.status).toBe(409)
-        const body = await response.json() as { error: string; code: string }
-        expect(body.error).toBe('Session is inactive')
-        // Web client discriminates this branch via `code` without string-matching
-        // the human message; see useSendMessage onError consumer in router.tsx.
-        expect(body.code).toBe('session_inactive')
-        expect(sentMessages).toHaveLength(0)
-    })
+  expect(response.status).toBe(409)
+  const body = await response.json() as { error: string; code: string }
+  expect(body.error).toBe('Session is inactive')
+  // Web client discriminates this branch via `code` without string-matching
+  // the human message; see useSendMessage onError consumer in router.tsx.
+  expect(body.code).toBe('session_inactive')
+  expect(sentMessages).toHaveLength(0)
+ })
 })
 
 describe('POST /api/sessions/:id/messages/queued-state', () => {
-    it('deduplicates local IDs, forwards the session, and works for inactive sessions', async () => {
-        const { app, queuedStateCalls } = createApp({ active: false })
+ it('deduplicates local IDs, forwards the session, and works for inactive sessions', async () => {
+  const { app, queuedStateCalls } = createApp({ active: false })
 
-        const response = await app.request('/api/sessions/session-1/messages/queued-state', {
-            method: 'POST',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({
-                localIds: ['queued-2', 'missing-1', 'queued-2', 'invoked-1', 'queued-1']
-            })
-        })
+  const response = await app.request('/api/sessions/session-1/messages/queued-state', {
+   method: 'POST',
+   headers: { 'content-type': 'application/json' },
+   body: JSON.stringify({
+    localIds: ['queued-2', 'missing-1', 'queued-2', 'invoked-1', 'queued-1']
+   })
+  })
 
-        expect(response.status).toBe(200)
-        expect(await response.json()).toEqual({
-            queuedLocalIds: ['queued-2', 'queued-1'],
-            invokedLocalMessages: [{ localId: 'invoked-1', invokedAt: 1_000 }]
-        })
-        expect(queuedStateCalls).toEqual([{
-            sessionId: 'session-1',
-            localIds: ['queued-2', 'missing-1', 'invoked-1', 'queued-1']
-        }])
-    })
+  expect(response.status).toBe(200)
+  expect(await response.json()).toEqual({
+   queuedLocalIds: ['queued-2', 'queued-1'],
+   invokedLocalMessages: [{ localId: 'invoked-1', invokedAt: 1_000 }]
+  })
+  expect(queuedStateCalls).toEqual([{
+   sessionId: 'session-1',
+   localIds: ['queued-2', 'missing-1', 'invoked-1', 'queued-1']
+  }])
+ })
 
-    it('accepts an empty candidate list as a no-op', async () => {
-        const { app, queuedStateCalls } = createApp({})
+ it('accepts an empty candidate list as a no-op', async () => {
+  const { app, queuedStateCalls } = createApp({})
 
-        const response = await app.request('/api/sessions/session-1/messages/queued-state', {
-            method: 'POST',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ localIds: [] })
-        })
+  const response = await app.request('/api/sessions/session-1/messages/queued-state', {
+   method: 'POST',
+   headers: { 'content-type': 'application/json' },
+   body: JSON.stringify({ localIds: [] })
+  })
 
-        expect(response.status).toBe(200)
-        expect(await response.json()).toEqual({ queuedLocalIds: [], invokedLocalMessages: [] })
-        expect(queuedStateCalls).toHaveLength(0)
-    })
+  expect(response.status).toBe(200)
+  expect(await response.json()).toEqual({ queuedLocalIds: [], invokedLocalMessages: [] })
+  expect(queuedStateCalls).toHaveLength(0)
+ })
 
-    it.each([
-        ['an empty local ID', { localIds: [''] }],
-        ['a non-array localIds value', { localIds: 'queued-1' }],
-        ['more than 1000 local IDs', { localIds: Array.from({ length: 1001 }, (_, i) => `local-${i}`) }]
-    ])('rejects %s', async (_label, body) => {
-        const { app, queuedStateCalls } = createApp({})
+ it.each([
+  ['an empty local ID', { localIds: [''] }],
+  ['a non-array localIds value', { localIds: 'queued-1' }],
+  ['more than 1000 local IDs', { localIds: Array.from({ length: 1001 }, (_, i) => `local-${i}`) }]
+ ])('rejects %s', async (_label, body) => {
+  const { app, queuedStateCalls } = createApp({})
 
-        const response = await app.request('/api/sessions/session-1/messages/queued-state', {
-            method: 'POST',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify(body)
-        })
+  const response = await app.request('/api/sessions/session-1/messages/queued-state', {
+   method: 'POST',
+   headers: { 'content-type': 'application/json' },
+   body: JSON.stringify(body)
+  })
 
-        expect(response.status).toBe(400)
-        expect(await response.json()).toMatchObject({ error: 'Invalid body' })
-        expect(queuedStateCalls).toHaveLength(0)
-    })
+  expect(response.status).toBe(400)
+  expect(await response.json()).toMatchObject({ error: 'Invalid body' })
+  expect(queuedStateCalls).toHaveLength(0)
+ })
 })

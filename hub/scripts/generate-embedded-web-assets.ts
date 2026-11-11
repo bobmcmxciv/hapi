@@ -56,7 +56,8 @@ function resolveMimeType(filePath: string): string {
 function main(): void {
     const scriptDir = dirname(fileURLToPath(import.meta.url));
     const workspaceRoot = join(scriptDir, '..', '..');
-    const webDistDir = join(workspaceRoot, 'web', 'dist');
+    // Optional positional source directory keeps staged companion builds separate from web/dist.
+    const webDistDir = process.argv[2] ?? join(workspaceRoot, 'web', 'dist');
     const outputPath = join(workspaceRoot, 'hub', 'src', 'web', 'embeddedAssets.generated.ts');
     const outputDir = dirname(outputPath);
 
@@ -84,9 +85,9 @@ function main(): void {
         const importName = `asset${index}`;
         const mimeType = resolveMimeType(filePath);
 
-        imports.push(`import ${importName} from '${importPath}' assert { type: 'file' };`);
-        // tsc resolves .json imports as parsed objects (resolveJsonModule) even with
-        // the Bun file-type assertion, so force the manifest entry back to a path string.
+        imports.push(`import ${importName} from '${importPath}' with { type: 'file' };`);
+        // TypeScript resolves .json imports as parsed objects (resolveJsonModule) even with
+        // the Bun file-type attribute, so force the manifest entry back to a path string.
         const sourceExt = extname(filePath).toLowerCase();
         const sourceExpr = sourceExt === '.json' || sourceExt === '.webmanifest' || sourceExt === '.map'
             ? `${importName} as unknown as string`

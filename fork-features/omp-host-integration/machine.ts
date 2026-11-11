@@ -24,6 +24,8 @@ import type {
     StartOmpLoginResponse
 } from '@hapi/protocol/apiTypes';
 import { RPC_METHODS } from '@hapi/protocol/rpcMethods';
+import { registerOmpUsageHandler } from './usage';
+import { ensureCx2ccUsageExtension } from './cx2ccUsageExtension';
 
 const StartLoginRequestSchema = z.object({ providerId: z.string().trim().min(1) });
 const RespondLoginInputRequestSchema = z.object({
@@ -126,6 +128,8 @@ export class OmpMachineIntegration {
     }
 
     register(rpcHandlerManager: RpcHandlerManager): void {
+        registerOmpUsageHandler(rpcHandlerManager, { cwd: this.options.defaultCwd });
+        void ensureCx2ccUsageExtension({ env: buildOmpEnv() }).catch(() => undefined);
         rpcHandlerManager.registerHandler<Record<string, never>, OmpLoginProvidersResponse>(
             RPC_METHODS.ListOmpLoginProviders,
             async () => await this.listLoginProviders()
@@ -179,13 +183,10 @@ export class OmpMachineIntegration {
             const resolvedCwd = await this.options.resolveModelCwd(cwd);
             const client = await this.connectClient(resolvedCwd);
             try {
-                const [catalog, state] = await Promise.all([
-                    client.request({ type: 'get_available_models' }),
-                    client.request({ type: 'get_state' })
-                ]);
+                const { models, state } = client.discovery;
                 return {
                     success: true,
-                    availableModels: catalog.models.map(toModelSummary),
+                    availableModels: models.map(toModelSummary),
                     currentModel: state.model
                         ? { provider: state.model.provider, modelId: state.model.id }
                         : null

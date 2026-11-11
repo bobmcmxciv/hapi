@@ -26,6 +26,7 @@ export type RuntimeHandlersDeps = {
   * denied unless the socket is cliTrusted.
   */
  authorizeSessionPublication?: (sessionId: string) => boolean
+ isCurrentSessionSource?: (sessionId: string) => boolean
 }
 
 /**
@@ -98,7 +99,7 @@ export function registerRuntimeHandlers(socket: CliSocketWithData, deps: Runtime
   // operate-level authorization: the handshake sessionId is user input;
   // the authenticated principal must independently be allowed to drive
   // this session's runtime feed.
-  if (!(authorizeSessionPublication?.(sid) ?? false)) {
+  if (!(authorizeSessionPublication?.(sid) ?? false) || !(deps.isCurrentSessionSource?.(sid) ?? false)) {
    deny(sid, 'access-denied')
    return
   }
@@ -126,6 +127,7 @@ export function registerRuntimeHandlers(socket: CliSocketWithData, deps: Runtime
   const sid = data.sid
   if (!authenticatedSessionId || authenticatedSessionId !== sid) return
   if (!resolveSessionAccess(sid).ok) return
+  if (!(authorizeSessionPublication?.(sid) ?? false) || !(deps.isCurrentSessionSource?.(sid) ?? false)) return
   registry.markSessionEnded(sid, socket.id)
  })
 

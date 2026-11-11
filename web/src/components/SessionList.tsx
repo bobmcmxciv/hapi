@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { SessionSummary } from '@/types/api'
 import type { ApiClient } from '@/api/client'
 import { useLongPress } from '@/hooks/useLongPress'
@@ -41,6 +41,12 @@ import { SessionRowSummary } from '@/components/SessionRowSummary'
 import { Spinner } from '@/components/Spinner'
 import { transferComposerDraftThenNavigate } from '@/lib/composer-draft-transfer'
 import { isToolbarButtonHidden, useListPrefs } from '@/fork-features/list-prefs/listPrefs'
+import { BETA_TIMELINE_ENABLED } from '@/fork-features/beta-timeline/enabled'
+import { BetaSidebarWindow } from '@/fork-features/beta-sidebar/BetaSidebarWindow'
+import { sameSidebarValue } from '@/fork-features/beta-sidebar/sidebarWindow'
+import { buildSidebarProjects, sortSidebarProjects, type SidebarProject } from '@/fork-features/beta-sidebar/projectAggregation'
+import { useProjectPreferences } from '@/fork-features/beta-sidebar/projectPreferences'
+import { BetaProjectHeader } from '@/fork-features/beta-sidebar/BetaProjectHeader'
 
 export { getWorktreeSessionLabel } from '@/lib/sessionWorktreeLabel'
 
@@ -384,7 +390,8 @@ function ArchiveFoldIcon(props: { className?: string }) {
     )
 }
 
-function CopyPathButton({ path, className }: { path: string; className?: string }) {
+function CopyPathButton({ path, className, beta = false }: { path: string; className?: string; beta?: boolean }) {
+    const { t } = useTranslation()
     const [copied, setCopied] = useState(false)
     const timerRef = useRef<ReturnType<typeof setTimeout>>(undefined)
 
@@ -402,7 +409,8 @@ function CopyPathButton({ path, className }: { path: string; className?: string 
         <button
             type="button"
             className={`shrink-0 p-0.5 rounded transition-colors ${copied ? 'text-[var(--app-badge-success-text)]' : 'text-[var(--app-hint)] hover:text-[var(--app-fg)]'} ${className ?? ''}`}
-            title={copied ? 'Copied!' : `Copy: ${path}`}
+            title={beta ? t(copied ? 'beta.sidebar.copiedPath' : 'beta.sidebar.copyPath', { path }) : copied ? 'Copied!' : `Copy: ${path}`}
+            aria-label={beta ? t(copied ? 'beta.sidebar.copiedPath' : 'beta.sidebar.copyPath', { path }) : undefined}
             onClick={handleClick}
         >
             {copied
@@ -732,7 +740,7 @@ function SessionListSearch(props: {
         }
 
         return (
-            <>
+            <div className={variant === 'standalone' ? 'relative shrink-0' : 'contents'}>
                 <button
                     ref={dateButtonRef}
                     type="button"
@@ -740,7 +748,7 @@ function SessionListSearch(props: {
                     className={cn(
                         'relative shrink-0 transition-colors hover:bg-[var(--app-subtle-bg)]',
                         variant === 'standalone'
-                            ? 'rounded-full p-1.5 hover:text-[var(--app-fg)]'
+                            ? 'flex h-8 w-8 items-center justify-center rounded-full hover:text-[var(--app-fg)]'
                             : 'flex items-center rounded-r-lg rounded-l-md px-2',
                         hasDateRange ? 'text-[var(--app-link)]' : 'text-[var(--app-hint)]'
                     )}
@@ -788,7 +796,7 @@ function SessionListSearch(props: {
                         />
                     </>
                 ) : null}
-            </>
+            </div>
         )
     }
 
@@ -797,7 +805,7 @@ function SessionListSearch(props: {
         const openLabel = t('sessions.search.open')
         const collapsedLabel = hasTextQuery ? `${openLabel}: ${props.value}` : openLabel
         return (
-            <div className="relative flex items-center gap-1">
+            <div className={BETA_TIMELINE_ENABLED ? 'contents' : 'relative flex items-center gap-1'}>
                 <button
                     type="button"
                     onClick={() => props.onExpandedChange(true)}
@@ -807,7 +815,7 @@ function SessionListSearch(props: {
                             // Dedicated chip tokens (blue wash) so the active query stays
                             // readable when truncated text disappears at small widths.
                             ? 'bg-[var(--app-chat-user-chip-bg)] px-2 py-1 text-[var(--app-chat-user-chip-fg)] hover:opacity-90'
-                            : 'shrink-0 p-1.5 text-[var(--app-hint)] hover:bg-[var(--app-subtle-bg)] hover:text-[var(--app-fg)]'
+                            : 'h-8 w-8 shrink-0 justify-center text-[var(--app-hint)] hover:bg-[var(--app-subtle-bg)] hover:text-[var(--app-fg)]'
                     )}
                     title={collapsedLabel}
                     aria-label={collapsedLabel}
@@ -877,6 +885,10 @@ function SessionItem(props: {
     machineIcon?: React.ReactNode
     completed?: boolean
     digestLine?: string
+    beta?: boolean
+    onInteractionChange?: (sessionId: string, active: boolean) => void
+    betaMachinePlatform?: string | null
+    betaMachineIcon?: MachineIconId | null
 }) {
     const { t } = useTranslation()
     const { session: s, onSelect, showPath = true, api, selected = false, showDetailedStatus = false, inRunningSection = false, projectLabel, machineLabel, machineIcon, completed = false, digestLine } = props
@@ -916,6 +928,11 @@ function SessionItem(props: {
         getFlavorForkCapability(capabilities, sessionFlavor).fork !== 'none'
     const [reopenError, setReopenError] = useState<string | null>(null)
     const [forkError, setForkError] = useState<string | null>(null)
+    const interactionActive = menuOpen || renameOpen || exportOpen || archiveOpen || deleteOpen || Boolean(reopenError) || Boolean(forkError) || isPending
+    useEffect(() => {
+        props.onInteractionChange?.(s.id, interactionActive)
+        return () => props.onInteractionChange?.(s.id, false)
+    }, [props.onInteractionChange, s.id, interactionActive])
 
     const handleReopen = async () => {
         // Server serializes/dedupes per-session lifecycle ops, but don't even
@@ -965,7 +982,8 @@ function SessionItem(props: {
                 onSelect(s.id)
             }
         },
-        threshold: 500
+        threshold: 500,
+        interaction: props.beta ? 'touch-only-native-click' : 'legacy',
     })
 
     const sessionName = getSessionTitle(s)
@@ -983,33 +1001,63 @@ function SessionItem(props: {
         Boolean(attention),
         hasScheduleTooltip
     )
+    const row = (
+        <button
+            type="button"
+            {...longPressHandlers}
+            onContextMenu={props.beta ? event => {
+                event.preventDefault()
+                setMenuAnchorPoint({ x: event.clientX, y: event.clientY })
+                setMenuOpen(true)
+            } : longPressHandlers.onContextMenu}
+            data-session-id={s.id}
+            className={`session-list-item group/session-row flex ${props.beta ? 'min-h-9 pointer-coarse:min-h-11 py-1.5 pointer-coarse:py-2' : 'min-h-11 py-2'} min-w-0 w-full flex-col gap-1 pl-2.5 pr-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--app-link)] select-none rounded-lg ${selected ? 'bg-[var(--app-secondary-bg)]' : ''}`}
+            style={{ WebkitTouchCallout: 'none' }}
+            aria-current={selected ? 'page' : undefined}
+            aria-describedby={describedBy}
+        >
+            <SessionRowSummary
+                session={s}
+                className={props.beta ? '[&>div:first-child]:grid-cols-[minmax(0,1fr)_minmax(0,max-content)]' : undefined}
+                showPath={showPath}
+                showDetailedStatus={showDetailedStatus}
+                selected={selected}
+                nestedTooltips
+                attentionTooltipId={attentionId}
+                scheduleTooltipId={scheduleId}
+                inRunningSection={inRunningSection}
+                projectLabel={projectLabel}
+                machineLabel={props.beta ? undefined : machineLabel}
+                machineIcon={props.beta ? undefined : machineIcon}
+                completed={completed}
+                digestLine={props.beta ? undefined : digestLine}
+            />
+            {props.beta ? <div className="flex min-w-0 items-center gap-1.5 text-[11px] text-[var(--app-hint)]">
+                <span className="flex max-w-[40%] min-w-0 shrink-0 items-center gap-1 rounded border border-[var(--app-border)] px-1" title={machineLabel}>
+                    <MachineOsIcon platform={props.betaMachinePlatform ?? null} icon={props.betaMachineIcon ?? null} className="h-3 w-3 shrink-0" />
+                    <span className="truncate">{machineLabel}</span>
+                </span>
+                <span className="min-w-0 flex-1 truncate" title={digestLine || s.metadata?.summary?.text}>{digestLine || s.metadata?.summary?.text}</span>
+            </div> : null}
+        </button>
+    )
     return (
         <>
-            <button
-                type="button"
-                {...longPressHandlers}
-                data-session-id={s.id}
-                className={`session-list-item group/session-row flex w-full flex-col gap-1 py-2 pl-2.5 pr-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--app-link)] select-none rounded-lg ${selected ? 'bg-[var(--app-secondary-bg)]' : ''}`}
-                style={{ WebkitTouchCallout: 'none' }}
-                aria-current={selected ? 'page' : undefined}
-                aria-describedby={describedBy}
-            >
-                <SessionRowSummary
-                    session={s}
-                    showPath={showPath}
-                    showDetailedStatus={showDetailedStatus}
-                    selected={selected}
-                    nestedTooltips
-                    attentionTooltipId={attentionId}
-                    scheduleTooltipId={scheduleId}
-                    inRunningSection={inRunningSection}
-                    projectLabel={projectLabel}
-                    machineLabel={machineLabel}
-                    machineIcon={machineIcon}
-                    completed={completed}
-                    digestLine={digestLine}
-                />
-            </button>
+            {props.beta ? <div className="relative pr-9 pointer-coarse:pr-11">
+                {row}
+                <button
+                    type="button"
+                    aria-label={t('beta.sidebar.actions', { name: sessionName })}
+                    aria-haspopup="menu"
+                    aria-expanded={menuOpen}
+                    className="absolute right-0 top-0 flex h-9 w-9 pointer-coarse:h-11 pointer-coarse:w-11 items-center justify-center rounded-lg text-[var(--app-hint)] hover:bg-[var(--app-secondary-bg)] focus-visible:ring-2 focus-visible:ring-[var(--app-link)]"
+                    onClick={event => {
+                        const rect = event.currentTarget.getBoundingClientRect()
+                        setMenuAnchorPoint({ x: rect.right, y: rect.bottom })
+                        setMenuOpen(true)
+                    }}
+                ><span aria-hidden="true">⋯</span></button>
+            </div> : row}
 
             <SessionActionMenu
                 isOpen={menuOpen}
@@ -1107,6 +1155,20 @@ function SessionItem(props: {
     )
 }
 
+// Only Beta opts into granular row memoization. Compare values for cloned query
+// snapshots too; a liveness heartbeat cannot rebuild every tooltip/action tree.
+const BetaSessionItem = memo(SessionItem, (previous, next) => sameSidebarValue(previous, next))
+
+type BetaListRow =
+    | { id: string; kind: 'session'; session: SessionSummary; running?: boolean }
+    | { id: string; kind: 'running' }
+    | { id: string; kind: 'bucket'; bucket: typeof RUNNING_BUCKETS[number]; count: number; focusable: false }
+    | { id: string; kind: 'group'; group: SidebarProject; collapsed: boolean }
+    | { id: string; kind: 'section'; label: string; focusable: false }
+    | { id: string; kind: 'miscellaneous'; count: number; directories: number }
+    | { id: string; kind: 'preview'; group: SessionGroup; hidden: number; collapse: number }
+    | { id: string; kind: 'archived'; group: SessionGroup; count: number }
+
 type PullToRefreshState = 'idle' | 'pulling' | 'ready'
 
 const PULL_REFRESH_FEEDBACK_PX = 16
@@ -1159,11 +1221,15 @@ export function SessionList(props: {
     /** machineId → 归属账号用户名的粘性映射，见 useMachineOwners。 */
     machineOwnersById?: Record<string, string>
     selectedSessionId?: string | null
+    /** Opaque Hub + account scope; no token. Missing scope keeps preferences in memory. */
+    sidebarPreferenceScope?: string
     /** Required binding keeps the real scroll node and pre-navigation selection coupled. */
     scrollStability: SessionListScrollStability
 }) {
     const { t } = useTranslation()
     const listPrefs = useListPrefs()
+    const [projectPreferences, updateProjectPreferences] = useProjectPreferences(props.sidebarPreferenceScope)
+    const [betaViewRevision, setBetaViewRevision] = useState(0)
     const {
         renderHeader = true,
         api,
@@ -1267,7 +1333,7 @@ export function SessionList(props: {
 
     const allSessions = useMemo(
         () => {
-            const prepared = prepareSidebarSessions(props.sessions, selectedSessionId)
+            const prepared = BETA_TIMELINE_ENABLED ? props.sessions : prepareSidebarSessions(props.sessions, selectedSessionId)
             return showActiveSessionsOnly
                 ? filterActiveSessionsOnly(prepared, selectedSessionId)
                 : prepared
@@ -1357,7 +1423,7 @@ export function SessionList(props: {
             working: [],
             pending: [],
         }
-        if (!pinInProgressSessions) {
+        if (!pinInProgressSessions || (BETA_TIMELINE_ENABLED && projectPreferences.mode !== 'directories')) {
             return buckets
         }
         for (const session of machineFilteredSessions) {
@@ -1376,7 +1442,7 @@ export function SessionList(props: {
             buckets[key].sort(byRecent)
         }
         return buckets
-    }, [machineFilteredSessions, pinInProgressSessions])
+    }, [machineFilteredSessions, pinInProgressSessions, projectPreferences.mode])
     const runningSessionTotal = runningSessions.working.length
         + runningSessions.pending.length
     const groups = useMemo(
@@ -1387,6 +1453,16 @@ export function SessionList(props: {
         ),
         [machineFilteredSessions, pinInProgressSessions]
     )
+    const sidebarModel = useMemo(() => buildSidebarProjects(machineFilteredSessions, Object.fromEntries([
+        ...Object.entries(machineOwnersById),
+        ...Object.entries(machinesById).filter(([, machine]) => machine.ownerUsername).map(([id, machine]) => [id, machine.ownerUsername]),
+    ]), projectDigestByKey, Object.fromEntries(Object.entries(machinesById).map(([id, machine]) => [id, machine.metadata?.homeDir]))), [machineFilteredSessions, machineOwnersById, machinesById, projectDigestByKey])
+    const betaGroups = useMemo(() => {
+        let candidates = projectPreferences.mode === 'directories' ? sidebarModel.directories : sidebarModel.projects
+        if (projectPreferences.mode === 'favorites') candidates = candidates.filter(group => projectPreferences.favorites[group.favoriteKey])
+        return sortSidebarProjects(candidates, projectPreferences.favorites)
+    }, [sidebarModel, projectPreferences.mode, projectPreferences.favorites])
+    const isBetaGroupCollapsed = (group: SidebarProject) => isFiltering ? false : projectPreferences.collapsed[group.key] ?? (projectPreferences.collapseAll || (!group.hasActiveSession && !group.sessions.some(session => session.id === selectedSessionId)))
     const [collapseOverrides, setCollapseOverrides] = useState<Map<string, boolean>>(
         () => new Map()
     )
@@ -1473,6 +1549,7 @@ export function SessionList(props: {
     // session-list refresh (for example tool-call updates from a running selected
     // session) reopens a path the user just collapsed.
     useEffect(() => {
+        if (BETA_TIMELINE_ENABLED) return
         if (!selectedSessionId) {
             autoExpandedSelectedSessionKeyRef.current = null
             return
@@ -1503,6 +1580,7 @@ export function SessionList(props: {
 
     // Clean up stale collapse overrides
     useEffect(() => {
+        if (BETA_TIMELINE_ENABLED) return
         setCollapseOverrides(prev => {
             if (prev.size === 0) return prev
             const next = new Map(prev)
@@ -1524,6 +1602,7 @@ export function SessionList(props: {
 
     // Clean up reveal caps for groups that no longer exist.
     useEffect(() => {
+        if (BETA_TIMELINE_ENABLED) return
         setSessionVisibleCounts(prev => {
             if (prev.size === 0) return prev
             const knownKeys = new Set(allGroups.map(g => g.key))
@@ -1561,6 +1640,19 @@ export function SessionList(props: {
         beforeSelect(sessionId)
         props.onSelect(sessionId)
     }, [beforeSelect, props.onSelect])
+    const selectSessionRef = useRef(selectSession)
+    selectSessionRef.current = selectSession
+    const selectBetaSession = useCallback((id: string) => selectSessionRef.current(id), [])
+    const [interactionIds, setInteractionIds] = useState<ReadonlySet<string>>(() => new Set())
+    const updateInteraction = useCallback((id: string, active: boolean) => {
+        setInteractionIds(current => {
+            if (current.has(id) === active) return current
+            const next = new Set(current)
+            if (active) next.add(id)
+            else next.delete(id)
+            return next
+        })
+    }, [])
     const [pullState, setPullState] = useState<PullToRefreshState>('idle')
     const pullStateRef = useRef<PullToRefreshState>('idle')
     const [isRefreshing, setIsRefreshing] = useState(false)
@@ -1646,326 +1738,461 @@ export function SessionList(props: {
         }
     }, [])
 
-    return (
-        <div className="flex min-h-0 w-full flex-1 flex-col">
-            <div className="session-list-scrollbar-offset mx-auto w-full max-w-content shrink-0">
-            {showHeaderRow ? (
-                <div className="flex min-w-0 items-center gap-1 px-2 py-1">
-                    {props.headerLeading}
-                    {showSearch ? (
-                        <SessionListSearch
-                            value={searchQuery}
-                            onChange={setSearchQuery}
-                            customStart={customStart}
-                            customEnd={customEnd}
-                            sessionActivityDates={sessionActivityDates}
-                            onDateRangeChange={(start, end) => {
-                                setCustomStart(start)
-                                setCustomEnd(end)
-                            }}
-                            expanded={searchExpanded}
-                            onExpandedChange={setSearchExpanded}
-                            hideCalendar={isToolbarButtonHidden(listPrefs, 'calendar')}
-                        />
-                    ) : null}
-                    {!(showSearch && searchExpanded) ? (
-                        <>
-                            {/* fork：tiann 同 hunk 里的 MachineFilterMenu（漏斗二级菜单）不落回——
-                                fork 已用平铺的 MachineFilterBar（下方）取代（568692df），只取 Unread 按钮。
-                                fork(list-prefs)：右侧按钮组靠右、放不下时向右滑动露出左边的按钮（row-reverse，子元素倒序）。 */}
-                            <div className="list-toolbar-scroll flex min-w-0 flex-1 flex-row-reverse items-center gap-1 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
-                                {props.headerActions}
-                                {renderHeader ? (
-                                    <button type="button" onClick={props.onNewSession} className="session-list-new-button flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-[var(--app-link)] transition-colors" title={t('sessions.new')}>
-                                        <PlusIcon className="h-5 w-5" />
-                                    </button>
-                                ) : null}
-                                {!isToolbarButtonHidden(listPrefs, 'unread') ? (
-                                    <button type="button" onClick={() => setShowUnreadOnly(!showUnreadOnly)} aria-pressed={showUnreadOnly} title={t('sessions.unreadFilter.toggle')} aria-label={t('sessions.unreadFilter.toggle')} className={cn('flex h-9 w-9 shrink-0 items-center justify-center rounded-full transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--app-link)]', showUnreadOnly ? 'bg-[var(--app-subtle-bg)]' : 'hover:bg-[var(--app-subtle-bg)]')}>
-                                        <span aria-hidden className={cn('inline-flex h-2.5 w-2.5 shrink-0 rounded-full', showUnreadOnly ? 'bg-[var(--app-link)]' : 'bg-[var(--app-hint)]')} />
-                                    </button>
-                                ) : null}
-                                {!isToolbarButtonHidden(listPrefs, 'archive') ? (
-                                    <button type="button" onClick={toggleFoldArchived} aria-pressed={foldArchived} title={foldArchived ? t('sessions.foldArchived.off') : t('sessions.foldArchived.on')} aria-label={t('sessions.foldArchived.on')} className={cn('flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-[var(--app-hint)] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--app-link)]', foldArchived ? 'bg-[var(--app-subtle-bg)] text-[var(--app-link)]' : 'hover:bg-[var(--app-subtle-bg)] hover:text-[var(--app-fg)]')}>
-                                        <ArchiveFoldIcon className="h-[18px] w-[18px]" />
-                                    </button>
-                                ) : null}
-                            </div>
-                        </>
-                    ) : null}
-                </div>
-            ) : null}
+    const regularBetaGroups = betaGroups.filter(group => !group.miscellaneous)
+    const miscellaneousBetaGroups = betaGroups.filter(group => group.miscellaneous)
+    const allBetaGroupsCollapsed = betaGroups.length > 0 && betaGroups.every(isBetaGroupCollapsed)
+    const betaRows: BetaListRow[] = []
+    if (BETA_TIMELINE_ENABLED) {
+        if (runningSessionTotal > 0) {
+            betaRows.push({ id: 'section:running', kind: 'running' })
+            if (!runningSectionCollapsed || isFiltering) {
+                for (const bucket of RUNNING_BUCKETS) {
+                    const sessions = runningSessions[bucket.key]
+                    if (!sessions.length) continue
+                    betaRows.push({ id: `bucket:${bucket.key}`, kind: 'bucket', bucket, count: sessions.length, focusable: false })
+                    for (const session of sessions) betaRows.push({ id: session.id, kind: 'session', session, running: true })
+                }
+            }
+        }
+        const pinnedGroups = regularBetaGroups.filter(group => projectPreferences.favorites[group.favoriteKey] || group.hasActiveSession)
+        const recentGroups = regularBetaGroups.filter(group => !projectPreferences.favorites[group.favoriteKey] && !group.hasActiveSession)
+        const showMiscellaneous = projectPreferences.miscellaneousOpen || isFiltering
+        const orderedGroups = [...pinnedGroups, ...recentGroups, ...(showMiscellaneous ? miscellaneousBetaGroups : [])]
+        for (const fullGroup of orderedGroups) {
+            if (allBetaGroupsCollapsed && fullGroup === pinnedGroups[0]) betaRows.push({ id: 'section:priority', kind: 'section', label: t('beta.projects.priority', { n: pinnedGroups.length }), focusable: false })
+            if (allBetaGroupsCollapsed && fullGroup === recentGroups[0]) betaRows.push({ id: 'section:recent', kind: 'section', label: t('beta.projects.recent', { n: recentGroups.length }), focusable: false })
+            if (fullGroup === miscellaneousBetaGroups[0]) betaRows.push({ id: 'section:miscellaneous', kind: 'miscellaneous', count: miscellaneousBetaGroups.reduce((total, item) => total + item.sessions.length, 0), directories: miscellaneousBetaGroups.reduce((total, item) => total + item.origins.length, 0) })
+            const directorySessions = projectPreferences.mode === 'directories' && pinInProgressSessions ? fullGroup.sessions.filter(session => !isPinnedInProgressSession(session)) : fullGroup.sessions
+            const archived = foldArchived && !isFiltering ? directorySessions.filter(session => !session.active && session.id !== selectedSessionId) : []
+            const group = { ...fullGroup, sessions: archived.length ? directorySessions.filter(session => session.active || session.id === selectedSessionId) : directorySessions }
+            const collapsed = isBetaGroupCollapsed(fullGroup)
+            betaRows.push({ id: `group:${group.key}`, kind: 'group', group: fullGroup, collapsed })
+            if (collapsed) continue
+            const visible = getVisibleGroupSessions(group)
+            for (const session of visible) betaRows.push({ id: session.id, kind: 'session', session })
+            const limit = Math.min(getGroupVisibleCount(group), group.sessions.length)
+            const previousLimit = getPreviousSessionVisibleCount(limit, sessionPreviewLimit)
+            const collapse = previousLimit < limit ? visible.length - getVisibleSessionPreview(group.sessions, { selectedSessionId, limit: previousLimit }).length : 0
+            const hidden = group.sessions.length - visible.length
+            if (hidden > 0 || collapse > 0) betaRows.push({ id: `preview:${group.key}`, kind: 'preview', group, hidden, collapse })
+            if (archived.length) {
+                betaRows.push({ id: `archived:${group.key}`, kind: 'archived', group, count: archived.length })
+                if (expandedArchivedGroups.has(group.key)) {
+                    for (const session of archived) betaRows.push({ id: session.id, kind: 'session', session })
+                }
+            }
+        }
+        if (miscellaneousBetaGroups.length && !showMiscellaneous) betaRows.push({ id: 'section:miscellaneous', kind: 'miscellaneous', count: miscellaneousBetaGroups.reduce((total, item) => total + item.sessions.length, 0), directories: miscellaneousBetaGroups.reduce((total, item) => total + item.origins.length, 0) })
+        // A live archive/filter transition may remove the row before its action
+        // resolves. Retain that action owner, but never retain a revoked session.
+        if (interactionIds.size) {
+            const visibleIds = new Set(betaRows.map(row => row.id))
+            for (const id of interactionIds) {
+                if (visibleIds.has(id)) continue
+                const session = props.sessions.find(candidate => candidate.id === id)
+                if (session) betaRows.push({ id, kind: 'session', session })
+            }
+        }
+    }
 
-            {showMachineFilterBar ? (
-                <MachineFilterBar
-                    machines={machineFilterItems}
-                    totalCount={allSessions.length}
-                    value={activeMachineFilter}
-                    onChange={setMachineFilter}
-                    onRenameMachine={api ? renameMachine : undefined}
-                />
-            ) : null}
+    const renderBetaRow = (row: BetaListRow): React.ReactNode => {
+        if (row.kind === 'session') {
+            const session = row.session
+            const machineId = session.metadata?.machineId
+            return <div className="ml-3 pl-1"><BetaSessionItem
+                beta
+                session={session}
+                api={api}
+                onSelect={selectBetaSession}
+                onInteractionChange={updateInteraction}
+                selected={session.id === selectedSessionId}
+                showPath={false}
+                showDetailedStatus={showDetailedStatus}
+                inRunningSection={row.running}
+                projectLabel={row.running ? getGroupDisplayName(session.metadata?.worktree?.basePath ?? session.metadata?.path ?? 'Other') : undefined}
+                machineLabel={resolveMachineLabel(machineId ?? null)}
+                betaMachinePlatform={machineId ? getMachinePlatform(machinesById[machineId]) ?? osByMachineId.get(machineId) : undefined}
+                betaMachineIcon={machineId ? machineIconsById[machineId] : undefined}
+                completed={digestIndex[session.id]?.completed}
+                digestLine={digestIndex[session.id]?.status}
+            /></div>
+        }
+        if (row.kind === 'running') return <button type="button" aria-expanded={!runningSectionCollapsed || isFiltering} onClick={() => setRunningSectionCollapsed(value => !value)} className="flex min-h-8 pointer-coarse:min-h-11 w-full items-center gap-2 rounded-lg px-2 text-sm font-medium hover:bg-[var(--app-secondary-bg)]">
+            <ChevronIcon collapsed={runningSectionCollapsed && !isFiltering} className="h-4 w-4" />
+            {t('sessions.runningSection')} <span className="text-[var(--app-hint)]">({runningSessionTotal})</span>
+        </button>
+        if (row.kind === 'bucket') return <div className={`px-4 py-1 text-xs ${row.bucket.colorClass}`}>{t(row.bucket.labelKey)} ({row.count})</div>
+        if (row.kind === 'section') return <div className="px-2 py-1 text-[11px] font-semibold text-[var(--app-hint)]">{row.label}</div>
+        if (row.kind === 'miscellaneous') return <button type="button" data-testid="beta-project-miscellaneous" aria-expanded={projectPreferences.miscellaneousOpen} onClick={() => updateProjectPreferences(current => ({ ...current, miscellaneousOpen: !current.miscellaneousOpen }))} className="flex min-h-8 pointer-coarse:min-h-11 w-full min-w-0 flex-wrap items-center gap-2 rounded-lg border border-dashed border-[var(--app-border)] px-2 py-1.5 text-left text-xs text-[var(--app-hint)]"><ChevronIcon collapsed={!projectPreferences.miscellaneousOpen} className="h-4 w-4 shrink-0" /><span className="min-w-0 flex-1">{t('beta.projects.miscellaneous')}</span><span>{t('beta.projects.miscellaneousCounts', { directories: row.directories, sessions: row.count })}</span></button>
+        const group = row.group
+        if (row.kind === 'group') return <BetaProjectHeader
+            project={row.group}
+            collapsed={row.collapsed}
+            favorite={Boolean(projectPreferences.favorites[row.group.favoriteKey])}
+            alias={projectPreferences.aliases[row.group.favoriteKey]}
+            machineLabels={Object.fromEntries(row.group.origins.filter(origin => origin.machineId).map(origin => [origin.machineId!, resolveMachineLabel(origin.machineId)]))}
+            onToggle={() => updateProjectPreferences(current => ({ ...current, collapsed: { ...current.collapsed, [group.key]: !row.collapsed } }))}
+            onFavorite={() => updateProjectPreferences(current => ({ ...current, favorites: { ...current.favorites, [row.group.favoriteKey]: !current.favorites[row.group.favoriteKey] } }))}
+            onAlias={alias => updateProjectPreferences(current => ({ ...current, aliases: { ...current.aliases, [row.group.favoriteKey]: alias } }))}
+            onNewSession={onNewSessionInDirectory}
+            onInteraction={updateInteraction}
+        />
+        if (row.kind === 'preview') return <div className="ml-4 flex gap-2">
+            {row.collapse > 0 ? <button type="button" onClick={() => showFewerSessions(group)} className="min-h-8 pointer-coarse:min-h-11 flex-1 rounded-lg border border-dashed border-[var(--app-border)] px-2 text-xs">{t('sessions.group.collapse', { n: row.collapse })}</button> : null}
+            {row.hidden > 0 ? <button type="button" onClick={() => showMoreSessions(group)} className="min-h-8 pointer-coarse:min-h-11 flex-1 rounded-lg border border-dashed border-[var(--app-border)] px-2 text-xs">{t('sessions.group.expand', { n: Math.min(sessionPreviewLimit, row.hidden) })}</button> : null}
+        </div>
+        return <button type="button" data-testid="archived-fold-row" aria-expanded={expandedArchivedGroups.has(group.key)} onClick={() => setExpandedArchivedGroups(current => {
+            const next = new Set(current)
+            if (next.has(group.key)) next.delete(group.key)
+            else next.add(group.key)
+            return next
+        })} className="ml-4 flex min-h-8 pointer-coarse:min-h-11 items-center gap-2 rounded-lg px-2 text-xs text-[var(--app-hint)] hover:bg-[var(--app-secondary-bg)]"><ChevronIcon collapsed={!expandedArchivedGroups.has(group.key)} className="h-3 w-3" /><ArchiveFoldIcon className="h-4 w-4" />{t('sessions.foldArchived.row', { n: row.count })}</button>
+    }
+
+    return (
+        <div className="flex min-h-0 min-w-0 w-full flex-1 flex-col">
+            <div className={cn('session-list-scrollbar-offset mx-auto w-full max-w-content shrink-0', BETA_TIMELINE_ENABLED && 'pointer-coarse:[&_button]:min-h-11 pointer-coarse:[&_button]:min-w-11')}>
+                {showHeaderRow ? (
+                    <div className={BETA_TIMELINE_ENABLED ? 'flex min-w-0 flex-wrap items-center gap-1 px-2 py-0.5' : 'flex min-w-0 flex-wrap items-center gap-1 px-2 py-1'}>
+                        {props.headerLeading}
+                        {showSearch ? (
+                            <SessionListSearch
+                                value={searchQuery}
+                                onChange={setSearchQuery}
+                                customStart={customStart}
+                                customEnd={customEnd}
+                                sessionActivityDates={sessionActivityDates}
+                                onDateRangeChange={(start, end) => {
+                                    setCustomStart(start)
+                                    setCustomEnd(end)
+                                }}
+                                expanded={searchExpanded}
+                                onExpandedChange={setSearchExpanded}
+                                hideCalendar={isToolbarButtonHidden(listPrefs, 'calendar')}
+                            />
+                        ) : null}
+                        {!(showSearch && searchExpanded) ? (
+                            <>
+                                {/* beta: all controls share one flat wrapping flow —
+                                    search left, actions pushed right by the spacer; at
+                                    narrow widths controls wrap individually without the
+                                    stranded gaps nested row-reverse groups produced. */}
+                                {BETA_TIMELINE_ENABLED ? <div aria-hidden="true" className="flex-1" /> : null}
+                                <div className={BETA_TIMELINE_ENABLED ? 'contents' : 'list-toolbar-scroll flex min-w-0 flex-1 flex-row-reverse flex-wrap items-center justify-end gap-1 max-split:min-w-full'}>
+                                    {props.headerActions}
+                                    {renderHeader ? (
+                                        <button type="button" onClick={props.onNewSession} className={cn('session-list-new-button flex shrink-0 items-center justify-center rounded-full text-[var(--app-link)] transition-colors', BETA_TIMELINE_ENABLED ? 'h-8 w-8 pointer-coarse:h-11 pointer-coarse:w-11' : 'h-9 w-9')} title={t('sessions.new')}>
+                                            <PlusIcon className="h-5 w-5" />
+                                        </button>
+                                    ) : null}
+                                    {!isToolbarButtonHidden(listPrefs, 'unread') ? (
+                                        <button type="button" onClick={() => setShowUnreadOnly(!showUnreadOnly)} aria-pressed={showUnreadOnly} title={t('sessions.unreadFilter.toggle')} aria-label={t('sessions.unreadFilter.toggle')} className={cn('flex shrink-0 items-center justify-center rounded-full transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--app-link)]', BETA_TIMELINE_ENABLED ? 'h-8 w-8 pointer-coarse:h-11 pointer-coarse:w-11' : 'h-9 w-9', showUnreadOnly ? 'bg-[var(--app-subtle-bg)]' : 'hover:bg-[var(--app-subtle-bg)]')}>
+                                            <span aria-hidden className={cn('inline-flex h-2.5 w-2.5 shrink-0 rounded-full', showUnreadOnly ? 'bg-[var(--app-link)]' : 'bg-[var(--app-hint)]')} />
+                                        </button>
+                                    ) : null}
+                                    {!isToolbarButtonHidden(listPrefs, 'archive') ? (
+                                        <button type="button" onClick={toggleFoldArchived} aria-pressed={foldArchived} title={foldArchived ? t('sessions.foldArchived.off') : t('sessions.foldArchived.on')} aria-label={t('sessions.foldArchived.on')} className={cn('flex shrink-0 items-center justify-center rounded-full text-[var(--app-hint)] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--app-link)]', BETA_TIMELINE_ENABLED ? 'h-8 w-8 pointer-coarse:h-11 pointer-coarse:w-11' : 'h-9 w-9', foldArchived ? 'bg-[var(--app-subtle-bg)] text-[var(--app-link)]' : 'hover:bg-[var(--app-subtle-bg)] hover:text-[var(--app-fg)]')}>
+                                            <ArchiveFoldIcon className="h-[18px] w-[18px]" />
+                                        </button>
+                                    ) : null}
+                                </div>
+                            </>
+                        ) : null}
+                    </div>
+                ) : null}
+                {BETA_TIMELINE_ENABLED ? <div data-testid="beta-project-modes" className="flex min-w-0 items-center gap-1 px-2 py-0.5">
+                    <div role="group" aria-label={t('beta.projects.view')} className="flex min-w-0 flex-1 rounded-lg bg-[var(--app-secondary-bg)] p-0.5">
+                        {([
+                            ['directories', 'beta.projects.directories', sidebarModel.directories.length],
+                            ['projects', 'beta.projects.projects', sidebarModel.projects.length],
+                            ['favorites', 'beta.projects.favorites', sidebarModel.projects.filter(group => projectPreferences.favorites[group.favoriteKey]).length],
+                        ] as const).map(([mode, key, count]) => <button key={mode} type="button" data-project-mode={mode} aria-pressed={projectPreferences.mode === mode} onClick={() => { updateProjectPreferences(current => ({ ...current, mode })); setBetaViewRevision(value => value + 1) }} className={cn('flex min-h-7 min-w-0 flex-auto flex-wrap items-center justify-center gap-x-1 whitespace-nowrap rounded-md px-1.5 py-0.5 text-xs leading-tight pointer-coarse:min-h-11', projectPreferences.mode === mode && 'bg-[var(--app-bg)] font-semibold shadow-sm')}><span>{t(key)}</span><span className="tabular-nums">({count})</span></button>)}
+                    </div>
+                    <button type="button" data-testid="beta-project-collapse-all" aria-label={t(allBetaGroupsCollapsed ? 'beta.projects.expandAll' : 'beta.projects.collapseAll')} title={t(allBetaGroupsCollapsed ? 'beta.projects.expandAll' : 'beta.projects.collapseAll')} onClick={() => {
+                        updateProjectPreferences(current => ({ ...current, collapseAll: !allBetaGroupsCollapsed, collapsed: Object.fromEntries([...sidebarModel.directories, ...sidebarModel.projects].map(group => [group.key, !allBetaGroupsCollapsed])) }))
+                        setRunningSectionCollapsed(!allBetaGroupsCollapsed)
+                        setBetaViewRevision(value => value + 1)
+                    }} className="flex min-h-7 min-w-7 shrink-0 items-center justify-center rounded-lg px-1.5 text-[var(--app-link)] pointer-coarse:min-h-11 pointer-coarse:min-w-11"><ChevronIcon collapsed={allBetaGroupsCollapsed} className="h-4 w-4" /></button>
+                </div> : null}
+
+                {showMachineFilterBar ? (
+                    <MachineFilterBar
+                        machines={machineFilterItems}
+                        totalCount={allSessions.length}
+                        value={activeMachineFilter}
+                        onChange={setMachineFilter}
+                        onRenameMachine={api ? renameMachine : undefined}
+                    />
+                ) : null}
             </div>
 
             <div className="relative flex min-h-0 flex-1 flex-col">
-            {isRefreshing || pullState !== 'idle' || props.isLoading ? (
+                {isRefreshing || pullState !== 'idle' || props.isLoading ? (
+                    <div
+                        role="status"
+                        aria-live="polite"
+                        className="pointer-events-none absolute left-1/2 top-3 z-20 flex -translate-x-1/2 items-center gap-1.5 rounded-full border border-[var(--app-border)] bg-[var(--app-bg)]/90 px-2.5 py-1 text-xs text-[var(--app-hint)] shadow-sm backdrop-blur"
+                    >
+                        {isRefreshing || props.isLoading
+                            ? <Spinner size="sm" label={null} className="text-current" />
+                            : <PullRefreshIcon rotation={getPullRefreshIndicatorRotation(pullState)} />}
+                        <span>
+                            {isRefreshing
+                                ? t('sessions.refresh.refreshing')
+                                : props.isLoading
+                                    ? t('misc.loading')
+                                    : pullState === 'ready'
+                                        ? t('sessions.refresh.release')
+                                        : t('sessions.refresh.pull')}
+                        </span>
+                    </div>
+                ) : null}
                 <div
-                    role="status"
-                    aria-live="polite"
-                    className="pointer-events-none absolute left-1/2 top-3 z-20 flex -translate-x-1/2 items-center gap-1.5 rounded-full border border-[var(--app-border)] bg-[var(--app-bg)]/90 px-2.5 py-1 text-xs text-[var(--app-hint)] shadow-sm backdrop-blur"
+                    ref={assignScrollContainer}
+                    className="app-scroll-y session-list-scrollbar-left min-h-0 flex-1"
                 >
-                    {isRefreshing || props.isLoading
-                        ? <Spinner size="sm" label={null} className="text-current" />
-                        : <PullRefreshIcon rotation={getPullRefreshIndicatorRotation(pullState)} />}
-                    <span>
-                        {isRefreshing
-                            ? t('sessions.refresh.refreshing')
-                            : props.isLoading
-                                ? t('misc.loading')
-                                : pullState === 'ready'
-                                    ? t('sessions.refresh.release')
-                                    : t('sessions.refresh.pull')}
-                    </span>
-                </div>
-            ) : null}
-            <div
-                ref={assignScrollContainer}
-                className="app-scroll-y session-list-scrollbar-left min-h-0 flex-1"
-            >
-            <div className="mx-auto flex w-full max-w-content flex-col gap-1 pl-1.5 pr-2 pb-2">
-                {props.sessions.length === 0 && !props.isLoading ? (
-                    <SessionsEmptyState
-                        onNewSession={props.onNewSession}
-                        onBrowse={props.onBrowse}
-                    />
-                ) : null}
+                    <div className="mx-auto flex w-full max-w-content flex-col gap-1 pl-1.5 pr-2 pb-2">
+                        {props.sessions.length === 0 && !props.isLoading ? (
+                            <SessionsEmptyState
+                                onNewSession={props.onNewSession}
+                                onBrowse={props.onBrowse}
+                            />
+                        ) : null}
 
-                {props.sessions.length > 0 && (isFiltering || activeMachineFilter !== null || showUnreadOnly) && groups.length === 0 && runningSessionTotal === 0 ? (
-                    <div className="px-4 py-8 text-center text-sm text-[var(--app-hint)]">
-                        {t('sessions.search.noResults')}
-                    </div>
-                ) : null}
+                        {props.sessions.length > 0 && (BETA_TIMELINE_ENABLED ? betaGroups.length === 0 && runningSessionTotal === 0 : (isFiltering || activeMachineFilter !== null || showUnreadOnly) && groups.length === 0 && runningSessionTotal === 0) ? (
+                            <div className="px-4 py-8 text-center text-sm text-[var(--app-hint)]">
+                                {t('sessions.search.noResults')}
+                            </div>
+                        ) : null}
 
-                {runningSessionTotal > 0 ? (
-                    <div key="running-section">
-                        <div
-                            className="group/running flex min-w-0 w-full select-none cursor-pointer items-center gap-2 rounded-lg py-1.5 pl-2 pr-2 transition-colors hover:bg-[var(--app-secondary-bg)]"
-                            role="button"
-                            tabIndex={0}
-                            aria-expanded={!runningSectionCollapsed || isFiltering}
-                            onClick={() => setRunningSectionCollapsed((value) => !value)}
-                            onKeyDown={(event) => {
-                                if (event.key === 'Enter' || event.key === ' ') {
-                                    event.preventDefault()
-                                    setRunningSectionCollapsed((value) => !value)
-                                }
-                            }}
-                            title={t('sessions.runningSection')}
-                        >
-                            <ChevronIcon className="h-3.5 w-3.5 text-[var(--app-hint)] shrink-0" collapsed={runningSectionCollapsed && !isFiltering} />
-                            <span className="inline-flex h-3.5 w-3.5 shrink-0 items-center justify-center" aria-hidden="true">
-                                <span className="h-1.5 w-1.5 rounded-full bg-[var(--app-badge-success-text)] animate-pulse" />
-                            </span>
-                            <span className="min-w-0 flex-1 truncate text-sm font-medium">
-                                {t('sessions.runningSection')}
-                            </span>
-                            <span className="shrink-0 text-[11px] tabular-nums text-[var(--app-hint)]">
-                                ({runningSessionTotal})
-                            </span>
-                        </div>
-                        <div className="collapsible-panel" data-open={(!runningSectionCollapsed || isFiltering) || undefined}>
-                            <div className="collapsible-inner">
-                            <div className="flex flex-col gap-0.5 ml-3 pl-1 py-1">
-                                {RUNNING_BUCKETS.map((bucket) => {
-                                    const sessions = runningSessions[bucket.key]
-                                    if (sessions.length === 0) {
-                                        return null
-                                    }
-                                    return (
-                                        <div key={bucket.key}>
-                                            <div className={`flex items-center gap-1 px-1 pt-1 pb-0.5 text-[11px] font-medium ${bucket.colorClass}`}>
-                                                <span className={`h-1.5 w-1.5 shrink-0 rounded-full bg-current ${bucket.pulse ? 'animate-pulse' : ''}`} aria-hidden="true" />
-                                                {t(bucket.labelKey)} ({sessions.length})
-                                            </div>
-                                            {sessions.map((s) => (
-                                                <SessionItem
-                                                    key={s.id}
-                                                    session={s}
-                                                    onSelect={selectSession}
-                                                    showPath={false}
-                                                    api={api}
-                                                    selected={s.id === selectedSessionId}
-                                                    showDetailedStatus={showDetailedStatus}
-                                                    inRunningSection
-                                                    projectLabel={getGroupDisplayName(s.metadata?.worktree?.basePath ?? s.metadata?.path ?? 'Other')}
-                                                    machineLabel={resolveMachineLabel(s.metadata?.machineId ?? null)}
-                                                    machineIcon={showMachineFilterBar ? renderMachineIcon(s.metadata?.machineId ?? null, 'h-3 w-3') : undefined}
-                                                />
-                                            ))}
-                                        </div>
-                                    )
-                                })}
-                            </div>
-                            </div>
-                        </div>
-                    </div>
-                ) : null}
-                {groups.map((fullGroup) => {
-                    const archivedInGroup = foldArchived
-                        ? fullGroup.sessions.filter(session => !session.active && session.id !== selectedSessionId)
-                        : []
-                    const group = archivedInGroup.length > 0
-                        ? { ...fullGroup, sessions: fullGroup.sessions.filter(session => session.active || session.id === selectedSessionId) }
-                        : fullGroup
-                    const archivedExpanded = expandedArchivedGroups.has(group.key)
-                    const isCollapsed = isGroupCollapsed(group)
-                    const visibleGroupSessions = getVisibleGroupSessions(group)
-                    const hiddenSessionCount = group.sessions.length - visibleGroupSessions.length
-                    const currentLimit = Math.min(
-                        getGroupVisibleCount(group),
-                        group.sessions.length
-                    )
-                    const previousLimit = getPreviousSessionVisibleCount(currentLimit, sessionPreviewLimit)
-                    const previousGroupSessions = getVisibleSessionPreview(group.sessions, {
-                        selectedSessionId,
-                        limit: previousLimit
-                    })
-                    const collapseCount = visibleGroupSessions.length - previousGroupSessions.length
-                    const canShowFewerSessions = previousLimit < currentLimit && collapseCount > 0
-                    const expandCount = Math.min(sessionPreviewLimit, hiddenSessionCount)
-                    const canStartInGroupDirectory = group.directory !== 'Other'
-                    // With multiple machines in the unfiltered view, disambiguate
-                    // same-named directories by suffixing the machine label.
-                    const showGroupMachine = showMachineFilterBar && activeMachineFilter === null
-                    const groupTitle = showGroupMachine
-                        ? `${group.displayName} · ${resolveMachineLabel(group.machineId)}`
-                        : group.displayName
-                    return (
-                        <div key={group.key}>
-                            <div
-                                className="group/project sticky top-0 z-10 flex items-center gap-2 bg-[var(--app-bg)] py-1.5 pl-2 pr-2 text-left rounded-lg transition-colors hover:bg-[var(--app-secondary-bg)] cursor-pointer min-w-0 w-full select-none"
-                                onClick={() => toggleGroup(group.key, isCollapsed)}
-                                title={group.directory}
-                            >
-                                <ChevronIcon className="h-3.5 w-3.5 text-[var(--app-hint)] shrink-0" collapsed={isCollapsed} />
-                                {showGroupMachine ? renderMachineIcon(group.machineId, 'h-4 w-4') : null}
-                                <span className="font-medium text-sm truncate flex-1">
-                                    {groupTitle}
-                                </span>
-                                <CopyPathButton path={group.directory} className="opacity-0 group-hover/project:opacity-100 transition-opacity duration-150" />
-                                <ProjectDigestButton projectKey={group.key} title={group.displayName} className="opacity-50 md:opacity-0 md:group-hover/project:opacity-100 transition-opacity duration-150" />
-                                {onNewSessionInDirectory && canStartInGroupDirectory ? (
-                                    <button
-                                        type="button"
-                                        onClick={(event) => {
-                                            event.stopPropagation()
-                                            onNewSessionInDirectory({
-                                                machineId: group.machineId,
-                                                directory: group.directory
-                                            })
+                        {BETA_TIMELINE_ENABLED ? <BetaSidebarWindow
+                            rows={betaRows}
+                            scrollRef={scrollContainerRef}
+                            resetKey={JSON.stringify([normalizedQuery, timeRange?.start, timeRange?.end, activeMachineFilter, showUnreadOnly, showActiveSessionsOnly, projectPreferences.mode, betaViewRevision])}
+                            pinnedIds={[...interactionIds]}
+                            renderRow={renderBetaRow}
+                        /> : <>
+                            {runningSessionTotal > 0 ? (
+                                <div key="running-section">
+                                    <div
+                                        className="group/running flex min-w-0 w-full select-none cursor-pointer items-center gap-2 rounded-lg py-1.5 pl-2 pr-2 transition-colors hover:bg-[var(--app-secondary-bg)]"
+                                        role="button"
+                                        tabIndex={0}
+                                        aria-expanded={!runningSectionCollapsed || isFiltering}
+                                        onClick={() => setRunningSectionCollapsed((value) => !value)}
+                                        onKeyDown={(event) => {
+                                            if (event.key === 'Enter' || event.key === ' ') {
+                                                event.preventDefault()
+                                                setRunningSectionCollapsed((value) => !value)
+                                            }
                                         }}
-                                        className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[var(--app-hint)] opacity-70 transition-colors hover:bg-[var(--app-secondary-bg)] hover:text-[var(--app-link)] hover:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--app-link)]"
-                                        title={t('sessions.group.new')}
-                                        aria-label={t('sessions.group.new')}
+                                        title={t('sessions.runningSection')}
                                     >
-                                        <PlusIcon className="h-3.5 w-3.5" />
-                                    </button>
-                                ) : null}
-                                <span className="text-[11px] tabular-nums text-[var(--app-hint)] shrink-0">
-                                    ({fullGroup.sessions.length})
-                                </span>
-                            </div>
-
-                            {(() => {
-                                const projectDigest = projectDigestByKey.get(group.key)
-                                const text = projectDigest?.overview || projectDigest?.status
-                                return projectDigest?.generatedAt && text ? (
-                                    <ProjectDigestLine projectKey={group.key} title={group.displayName} stage={projectDigest.stage} text={text} />
-                                ) : null
-                            })()}
-
-                            {/* Sessions */}
-                            <div className="collapsible-panel" data-open={!isCollapsed || undefined}>
-                                <div className="collapsible-inner">
-                                <div className="flex flex-col gap-0.5 ml-3 pl-1 py-1">
-                                    {visibleGroupSessions.map((s) => (
-                                        <SessionItem
-                                            key={s.id}
-                                            session={s}
-                                            onSelect={selectSession}
-                                            showPath={false}
-                                            api={api}
-                                            selected={s.id === selectedSessionId}
-                                            showDetailedStatus={showDetailedStatus}
-                                            completed={digestIndex[s.id]?.completed}
-                                            digestLine={digestIndex[s.id]?.status}
-                                        />
-                                    ))}
-                                    {group.sessions.length > sessionPreviewLimit && (hiddenSessionCount > 0 || canShowFewerSessions) ? (
-                                        <div className="ml-2.5 mr-2 my-1 flex gap-1.5">
-                                            {canShowFewerSessions ? (
-                                                <button
-                                                    type="button"
-                                                    onClick={() => showFewerSessions(group)}
-                                                    className="flex min-w-0 flex-1 items-center justify-center gap-1 rounded-md border border-dashed border-[var(--app-border)] px-2 py-1 text-center text-xs text-[var(--app-hint)] transition-colors hover:bg-[var(--app-subtle-bg)] hover:text-[var(--app-fg)]"
-                                                >
-                                                    <SessionPreviewArrowIcon direction="up" className="h-3 w-3 shrink-0" />
-                                                    {t('sessions.group.collapse', { n: collapseCount })}
-                                                </button>
-                                            ) : null}
-                                            {hiddenSessionCount > 0 ? (
-                                                <button
-                                                    type="button"
-                                                    onClick={() => showMoreSessions(group)}
-                                                    className="flex min-w-0 flex-1 items-center justify-center gap-1 rounded-md border border-dashed border-[var(--app-border)] px-2 py-1 text-center text-xs text-[var(--app-hint)] transition-colors hover:bg-[var(--app-subtle-bg)] hover:text-[var(--app-fg)]"
-                                                >
-                                                    <SessionPreviewArrowIcon direction="down" className="h-3 w-3 shrink-0" />
-                                                    {t('sessions.group.expand', { n: expandCount })}
-                                                </button>
-                                            ) : null}
-                                        </div>
-                                    ) : null}
-                                    {archivedInGroup.length > 0 ? (
-                                        <>
-                                            <button
-                                                type="button"
-                                                data-testid="archived-fold-row"
-                                                aria-expanded={archivedExpanded}
-                                                onClick={() => setExpandedArchivedGroups((current) => {
-                                                    const next = new Set(current)
-                                                    if (next.has(group.key)) next.delete(group.key)
-                                                    else next.add(group.key)
-                                                    return next
+                                        <ChevronIcon className="h-3.5 w-3.5 text-[var(--app-hint)] shrink-0" collapsed={runningSectionCollapsed && !isFiltering} />
+                                        <span className="inline-flex h-3.5 w-3.5 shrink-0 items-center justify-center" aria-hidden="true">
+                                            <span className="h-1.5 w-1.5 rounded-full bg-[var(--app-badge-success-text)] animate-pulse" />
+                                        </span>
+                                        <span className="min-w-0 flex-1 truncate text-sm font-medium">
+                                            {t('sessions.runningSection')}
+                                        </span>
+                                        <span className="shrink-0 text-[11px] tabular-nums text-[var(--app-hint)]">
+                                            ({runningSessionTotal})
+                                        </span>
+                                    </div>
+                                    <div className="collapsible-panel" data-open={(!runningSectionCollapsed || isFiltering) || undefined}>
+                                        <div className="collapsible-inner">
+                                            <div className="flex flex-col gap-0.5 ml-3 pl-1 py-1">
+                                                {RUNNING_BUCKETS.map((bucket) => {
+                                                    const sessions = runningSessions[bucket.key]
+                                                    if (sessions.length === 0) {
+                                                        return null
+                                                    }
+                                                    return (
+                                                        <div key={bucket.key}>
+                                                            <div className={`flex items-center gap-1 px-1 pt-1 pb-0.5 text-[11px] font-medium ${bucket.colorClass}`}>
+                                                                <span className={`h-1.5 w-1.5 shrink-0 rounded-full bg-current ${bucket.pulse ? 'animate-pulse' : ''}`} aria-hidden="true" />
+                                                                {t(bucket.labelKey)} ({sessions.length})
+                                                            </div>
+                                                            {sessions.map((s) => (
+                                                                <SessionItem
+                                                                    key={s.id}
+                                                                    session={s}
+                                                                    onSelect={selectSession}
+                                                                    showPath={false}
+                                                                    api={api}
+                                                                    selected={s.id === selectedSessionId}
+                                                                    showDetailedStatus={showDetailedStatus}
+                                                                    inRunningSection
+                                                                    projectLabel={getGroupDisplayName(s.metadata?.worktree?.basePath ?? s.metadata?.path ?? 'Other')}
+                                                                    machineLabel={resolveMachineLabel(s.metadata?.machineId ?? null)}
+                                                                    machineIcon={showMachineFilterBar ? renderMachineIcon(s.metadata?.machineId ?? null, 'h-3 w-3') : undefined}
+                                                                />
+                                                            ))}
+                                                        </div>
+                                                    )
                                                 })}
-                                                className="ml-2.5 mr-2 my-0.5 flex items-center gap-1.5 rounded-md px-2 py-1 text-left text-xs text-[var(--app-hint)] transition-colors hover:bg-[var(--app-subtle-bg)] hover:text-[var(--app-fg)]"
-                                            >
-                                                <ChevronIcon className="h-3 w-3 shrink-0" collapsed={!archivedExpanded} />
-                                                <ArchiveFoldIcon className="h-3.5 w-3.5 shrink-0" />
-                                                {t('sessions.foldArchived.row', { n: archivedInGroup.length })}
-                                            </button>
-                                            {archivedExpanded ? archivedInGroup.map((s) => (
-                                                <SessionItem
-                                                    key={s.id}
-                                                    session={s}
-                                                    onSelect={selectSession}
-                                                    showPath={false}
-                                                    api={api}
-                                                    selected={s.id === selectedSessionId}
-                                                    showDetailedStatus={showDetailedStatus}
-                                                    completed={digestIndex[s.id]?.completed}
-                                                    digestLine={digestIndex[s.id]?.status}
-                                                />
-                                            )) : null}
-                                        </>
-                                    ) : null}
+                                            </div>
+                                        </div>
+                                    </div>
                                 </div>
-                                </div>
-                            </div>
-                        </div>
-                    )
-                })}
-            </div>
-            </div>
+                            ) : null}
+                            {groups.map((fullGroup) => {
+                                const archivedInGroup = foldArchived
+                                    ? fullGroup.sessions.filter(session => !session.active && session.id !== selectedSessionId)
+                                    : []
+                                const group = archivedInGroup.length > 0
+                                    ? { ...fullGroup, sessions: fullGroup.sessions.filter(session => session.active || session.id === selectedSessionId) }
+                                    : fullGroup
+                                const archivedExpanded = expandedArchivedGroups.has(group.key)
+                                const isCollapsed = isGroupCollapsed(group)
+                                const visibleGroupSessions = getVisibleGroupSessions(group)
+                                const hiddenSessionCount = group.sessions.length - visibleGroupSessions.length
+                                const currentLimit = Math.min(
+                                    getGroupVisibleCount(group),
+                                    group.sessions.length
+                                )
+                                const previousLimit = getPreviousSessionVisibleCount(currentLimit, sessionPreviewLimit)
+                                const previousGroupSessions = getVisibleSessionPreview(group.sessions, {
+                                    selectedSessionId,
+                                    limit: previousLimit
+                                })
+                                const collapseCount = visibleGroupSessions.length - previousGroupSessions.length
+                                const canShowFewerSessions = previousLimit < currentLimit && collapseCount > 0
+                                const expandCount = Math.min(sessionPreviewLimit, hiddenSessionCount)
+                                const canStartInGroupDirectory = group.directory !== 'Other'
+                                // With multiple machines in the unfiltered view, disambiguate
+                                // same-named directories by suffixing the machine label.
+                                const showGroupMachine = showMachineFilterBar && activeMachineFilter === null
+                                const groupTitle = showGroupMachine
+                                    ? `${group.displayName} · ${resolveMachineLabel(group.machineId)}`
+                                    : group.displayName
+                                return (
+                                    <div key={group.key}>
+                                        <div
+                                            className="group/project sticky top-0 z-10 flex items-center gap-2 bg-[var(--app-bg)] py-1.5 pl-2 pr-2 text-left rounded-lg transition-colors hover:bg-[var(--app-secondary-bg)] cursor-pointer min-w-0 w-full select-none"
+                                            onClick={() => toggleGroup(group.key, isCollapsed)}
+                                            title={group.directory}
+                                        >
+                                            <ChevronIcon className="h-3.5 w-3.5 text-[var(--app-hint)] shrink-0" collapsed={isCollapsed} />
+                                            {showGroupMachine ? renderMachineIcon(group.machineId, 'h-4 w-4') : null}
+                                            <span className="font-medium text-sm truncate flex-1">
+                                                {groupTitle}
+                                            </span>
+                                            <CopyPathButton path={group.directory} className="opacity-0 group-hover/project:opacity-100 transition-opacity duration-150" />
+                                            <ProjectDigestButton projectKey={group.key} title={group.displayName} className="opacity-50 md:opacity-0 md:group-hover/project:opacity-100 transition-opacity duration-150" />
+                                            {onNewSessionInDirectory && canStartInGroupDirectory ? (
+                                                <button
+                                                    type="button"
+                                                    onClick={(event) => {
+                                                        event.stopPropagation()
+                                                        onNewSessionInDirectory({
+                                                            machineId: group.machineId,
+                                                            directory: group.directory
+                                                        })
+                                                    }}
+                                                    className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[var(--app-hint)] opacity-70 transition-colors hover:bg-[var(--app-secondary-bg)] hover:text-[var(--app-link)] hover:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--app-link)]"
+                                                    title={t('sessions.group.new')}
+                                                    aria-label={t('sessions.group.new')}
+                                                >
+                                                    <PlusIcon className="h-3.5 w-3.5" />
+                                                </button>
+                                            ) : null}
+                                            <span className="text-[11px] tabular-nums text-[var(--app-hint)] shrink-0">
+                                                ({fullGroup.sessions.length})
+                                            </span>
+                                        </div>
+
+                                        {(() => {
+                                            const projectDigest = projectDigestByKey.get(group.key)
+                                            const text = projectDigest?.overview || projectDigest?.status
+                                            return projectDigest?.generatedAt && text ? (
+                                                <ProjectDigestLine projectKey={group.key} title={group.displayName} stage={projectDigest.stage} text={text} />
+                                            ) : null
+                                        })()}
+
+                                        {/* Sessions */}
+                                        <div className="collapsible-panel" data-open={!isCollapsed || undefined}>
+                                            <div className="collapsible-inner">
+                                                <div className="flex flex-col gap-0.5 ml-3 pl-1 py-1">
+                                                    {visibleGroupSessions.map((s) => (
+                                                        <SessionItem
+                                                            key={s.id}
+                                                            session={s}
+                                                            onSelect={selectSession}
+                                                            showPath={false}
+                                                            api={api}
+                                                            selected={s.id === selectedSessionId}
+                                                            showDetailedStatus={showDetailedStatus}
+                                                            completed={digestIndex[s.id]?.completed}
+                                                            digestLine={digestIndex[s.id]?.status}
+                                                        />
+                                                    ))}
+                                                    {group.sessions.length > sessionPreviewLimit && (hiddenSessionCount > 0 || canShowFewerSessions) ? (
+                                                        <div className="ml-2.5 mr-2 my-1 flex gap-1.5">
+                                                            {canShowFewerSessions ? (
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={() => showFewerSessions(group)}
+                                                                    className="flex min-w-0 flex-1 items-center justify-center gap-1 rounded-md border border-dashed border-[var(--app-border)] px-2 py-1 text-center text-xs text-[var(--app-hint)] transition-colors hover:bg-[var(--app-subtle-bg)] hover:text-[var(--app-fg)]"
+                                                                >
+                                                                    <SessionPreviewArrowIcon direction="up" className="h-3 w-3 shrink-0" />
+                                                                    {t('sessions.group.collapse', { n: collapseCount })}
+                                                                </button>
+                                                            ) : null}
+                                                            {hiddenSessionCount > 0 ? (
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={() => showMoreSessions(group)}
+                                                                    className="flex min-w-0 flex-1 items-center justify-center gap-1 rounded-md border border-dashed border-[var(--app-border)] px-2 py-1 text-center text-xs text-[var(--app-hint)] transition-colors hover:bg-[var(--app-subtle-bg)] hover:text-[var(--app-fg)]"
+                                                                >
+                                                                    <SessionPreviewArrowIcon direction="down" className="h-3 w-3 shrink-0" />
+                                                                    {t('sessions.group.expand', { n: expandCount })}
+                                                                </button>
+                                                            ) : null}
+                                                        </div>
+                                                    ) : null}
+                                                    {archivedInGroup.length > 0 ? (
+                                                        <>
+                                                            <button
+                                                                type="button"
+                                                                data-testid="archived-fold-row"
+                                                                aria-expanded={archivedExpanded}
+                                                                onClick={() => setExpandedArchivedGroups((current) => {
+                                                                    const next = new Set(current)
+                                                                    if (next.has(group.key)) next.delete(group.key)
+                                                                    else next.add(group.key)
+                                                                    return next
+                                                                })}
+                                                                className="ml-2.5 mr-2 my-0.5 flex items-center gap-1.5 rounded-md px-2 py-1 text-left text-xs text-[var(--app-hint)] transition-colors hover:bg-[var(--app-subtle-bg)] hover:text-[var(--app-fg)]"
+                                                            >
+                                                                <ChevronIcon className="h-3 w-3 shrink-0" collapsed={!archivedExpanded} />
+                                                                <ArchiveFoldIcon className="h-3.5 w-3.5 shrink-0" />
+                                                                {t('sessions.foldArchived.row', { n: archivedInGroup.length })}
+                                                            </button>
+                                                            {archivedExpanded ? archivedInGroup.map((s) => (
+                                                                <SessionItem
+                                                                    key={s.id}
+                                                                    session={s}
+                                                                    onSelect={selectSession}
+                                                                    showPath={false}
+                                                                    api={api}
+                                                                    selected={s.id === selectedSessionId}
+                                                                    showDetailedStatus={showDetailedStatus}
+                                                                    completed={digestIndex[s.id]?.completed}
+                                                                    digestLine={digestIndex[s.id]?.status}
+                                                                />
+                                                            )) : null}
+                                                        </>
+                                                    ) : null}
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                )
+                            })}
+                        </>}
+                    </div>
+                </div>
             </div>
         </div>
     )

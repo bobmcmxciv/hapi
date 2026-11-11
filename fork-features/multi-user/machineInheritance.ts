@@ -21,21 +21,21 @@ export type SessionPathResolver = (sessionId: string) => string | null
 const RANK: Record<AccessLevel, number> = { none: 0, viewer: 1, operator: 2, owner: 3 }
 
 export function createSessionMachineResolver(
-    getSyncEngine: () => SyncEngine | null
+ getSyncEngine: () => SyncEngine | null
 ): SessionMachineResolver {
-    return (sessionId) => {
-        const machineId = getSyncEngine()?.getSession(sessionId)?.metadata?.machineId
-        return typeof machineId === 'string' && machineId.length > 0 ? machineId : null
-    }
+ return (sessionId) => {
+  const machineId = getSyncEngine()?.getSession(sessionId)?.metadata?.machineId
+  return typeof machineId === 'string' && machineId.length > 0 ? machineId : null
+ }
 }
 
 export function createSessionPathResolver(
-    getSyncEngine: () => SyncEngine | null
+ getSyncEngine: () => SyncEngine | null
 ): SessionPathResolver {
-    return (sessionId) => {
-        const path = getSyncEngine()?.getSession(sessionId)?.metadata?.path
-        return typeof path === 'string' && path.length > 0 ? path : null
-    }
+ return (sessionId) => {
+  const path = getSyncEngine()?.getSession(sessionId)?.metadata?.path
+  return typeof path === 'string' && path.length > 0 ? path : null
+ }
 }
 
 const isWindowsPath = (value: string): boolean => /^[a-zA-Z]:[\\/]/.test(value)
@@ -44,29 +44,69 @@ const isWindowsPath = (value: string): boolean => /^[a-zA-Z]:[\\/]/.test(value)
  * 比较用归一化：分隔符统一成 `/`、去重、去尾。
  * 大小写敏感性按**路径自身形态**决定 —— Windows 盘符路径不区分大小写，POSIX 区分。
  * 两边形态不一致时归一化结果必然不等，即判越界（fail-closed）。
+ * scope 写入侧也用它做条目去重；对外导出名是 `normalizeScopePath`。
  */
 const normalizePath = (value: string): string => {
-    const unified = value.replace(/\\/g, '/').replace(/\/{2,}/g, '/').replace(/\/+$/, '')
-    return isWindowsPath(value) ? unified.toLowerCase() : unified
+ const unified = value.replace(/\\/g, '/').replace(/\/{2,}/g, '/').replace(/\/+$/, '')
+ if (isWindowsPath(value)) return /^[a-zA-Z]:$/.test(unified) ? `${unified.toLowerCase()}/` : unified.toLowerCase()
+ return unified || '/'
+}
+
+/** Reject ambiguous/relative paths rather than resolving them against the Hub host. */
+export function validScopePath(value: string): boolean {
+ if (!value || value !== value.trim() || /[\x00-\x1f]/.test(value)) return false
+ if (!isWindowsPath(value) && (!value.startsWith('/') || value.startsWith('//'))) return false
+ const parts = value.split(/[\\/]/)
+ if (parts.some(part => part === '..' || part === '.')) return false
+ return !isWindowsPath(value) || parts.slice(1).every(part => !/[<>:"|?*]|[. ]$/.test(part))
+}
+
+/** Canonical scope set; null alone means unrestricted, [] is an explicit deny-all. */
+export function normalizeMachineScope(scope: readonly string[] | string | null): string[] | null {
+ if (scope === null) return null
+ const paths = typeof scope === 'string' ? [scope] : scope
+ if (paths.length === 0 || paths.some(path => typeof path !== 'string' || !validScopePath(path))) {
+  throw new Error('Invalid machine directory scope')
+ }
+ return [...new Set(paths.map(normalizePath))]
 }
 
 /**
  * `candidate` 是否落在 `prefix` 限定的目录子树内。
  *
- * - `prefix` 为空 → 未限定，恒真（保持加此列之前的行为）
+ * - `prefix` 为空 → 未限定，恒真（保持加此列之前的行为；单值入口保留旧语义）
  * - `candidate` 取不到 → 假（**fail-closed**：证明不了在范围内就当越界）
  * - 含 `..` 段 → 假。不碰文件系统就解析不了它，只能拒
  * - 边界按整段比较，`…\peter` 不会匹配到 `…\peterX`
  */
-export function pathWithinScope(candidate: string | null | undefined, prefix: string | null | undefined): boolean {
-    if (prefix === null || prefix === undefined || prefix.trim() === '') return true
-    if (!candidate) return false
-    if (candidate.split(/[\\/]/).includes('..')) return false
-    const normalizedPrefix = normalizePath(prefix.trim())
-    if (normalizedPrefix === '') return true
-    const normalizedCandidate = normalizePath(candidate)
-    return normalizedCandidate === normalizedPrefix
-        || normalizedCandidate.startsWith(`${normalizedPrefix}/`)
+export function pathWithinScope(candidate: string | null | undefined, prefix: readonly string[] | string | null | undefined): boolean {
+ if (prefix === null || prefix === undefined || (typeof prefix === 'string' && prefix.trim() === '')) return true
+ return pathWithinScopes(candidate, typeof prefix === 'string' ? [prefix] : prefix)
+}
+
+/**
+ * `candidate` 是否落在 `scopes` 限定的**目录集合**（多个不相邻子树的并集）内。
+ *
+ * 这是目录限定的唯一判定入口：单目录授权等价于单元素集合，规则与
+ * `pathWithinScope` 完全一致；集合语义为 any-match（并集），**不会**把
+ * `{C:\A, C:\B}` 收缩成 `C:\`。
+ *
+ * - `scopes` 为 `null`/`undefined` → 未限定，恒真
+ * - `scopes` 为空数组 → **全拒**（fail-closed：空集合只能表示「一个目录
+ *   都不给」，绝不是「不限制」——空集合若放行等于把限定静默改成整机）
+ * - 集合内的空串/blank 条目直接跳过，不当成「未限定」
+ * - `candidate` 取不到或含 `..` 段 → 假
+ */
+export function pathWithinScopes(candidate: string | null | undefined, scopes: readonly string[] | null | undefined): boolean {
+ if (scopes === null || scopes === undefined) return true
+ if (scopes.length === 0 || scopes.some(prefix => !validScopePath(prefix))) return false
+ if (!candidate || !validScopePath(candidate)) return false
+ const normalizedCandidate = normalizePath(candidate)
+ return scopes.some((prefix) => {
+  const normalizedPrefix = normalizePath(prefix)
+  return normalizedCandidate === normalizedPrefix
+   || normalizedCandidate.startsWith(normalizedPrefix.endsWith('/') ? normalizedPrefix : `${normalizedPrefix}/`)
+ })
 }
 
 /**
@@ -78,16 +118,16 @@ export function pathWithinScope(candidate: string | null | undefined, prefix: st
  * 不继承任何档位。
  */
 export function machineInheritedLevel(
-    store: MultiUserGatewayStore,
-    machineId: string,
-    accountId: number,
-    resolvePath: () => string | null
+ store: MultiUserGatewayStore,
+ machineId: string,
+ accountId: number,
+ resolvePath: () => string | null
 ): AccessLevel {
-    const level = store.accessLevel('machine', machineId, accountId)
-    if (level === 'none' || level === 'owner') return level
-    const scope = store.machineGrantScope(machineId, accountId)
-    if (scope === null) return level
-    return pathWithinScope(resolvePath(), scope) ? level : 'none'
+ const level = store.accessLevel('machine', machineId, accountId)
+ if (level === 'none' || level === 'owner') return level
+ const scope = store.machineGrantScope(machineId, accountId)
+ if (scope === null) return level
+ return pathWithinScope(resolvePath(), scope) ? level : 'none'
 }
 
 /**
@@ -97,21 +137,21 @@ export function machineInheritedLevel(
  * 反之亦然。没有 resolver（或查不到机器）时行为与继承前完全一致。
  */
 export function sessionAccessLevel(
-    store: MultiUserGatewayStore,
-    accountId: number,
-    sessionId: string,
-    resolveMachineId?: SessionMachineResolver,
-    resolveSessionPath?: SessionPathResolver
+ store: MultiUserGatewayStore,
+ accountId: number,
+ sessionId: string,
+ resolveMachineId?: SessionMachineResolver,
+ resolveSessionPath?: SessionPathResolver
 ): AccessLevel {
-    const direct = store.accessLevel('session', sessionId, accountId)
-    if (direct === 'owner' || !resolveMachineId) return direct
-    const machineId = resolveMachineId(sessionId)
-    if (!machineId) return direct
-    const inherited = machineInheritedLevel(
-        store,
-        machineId,
-        accountId,
-        () => resolveSessionPath?.(sessionId) ?? null
-    )
-    return RANK[inherited] > RANK[direct] ? inherited : direct
+ const direct = store.accessLevel('session', sessionId, accountId)
+ if (direct === 'owner' || !resolveMachineId) return direct
+ const machineId = resolveMachineId(sessionId)
+ if (!machineId) return direct
+ const inherited = machineInheritedLevel(
+  store,
+  machineId,
+  accountId,
+  () => resolveSessionPath?.(sessionId) ?? null
+ )
+ return RANK[inherited] > RANK[direct] ? inherited : direct
 }

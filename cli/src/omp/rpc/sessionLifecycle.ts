@@ -1,3 +1,4 @@
+import { stat } from 'node:fs/promises';
 import type { OmpNativeSession } from '@hapi/protocol/types';
 export { parseOmpSessionMutation } from '@hapi/protocol/ompSessionMutation';
 import type { OmpRpcClient } from './OmpRpcClient';
@@ -45,20 +46,56 @@ export function nativeSessionSnapshotFromState(state: OmpSessionState): OmpNativ
     };
 }
 
+/** Only an idle, empty native state plus ENOENT proves a lazy journal never existed. */
+export async function nativeSessionSnapshotWithPersistence(
+    state: OmpSessionState,
+    previous?: OmpNativeSession | null
+): Promise<OmpNativeSession> {
+    const snapshot = nativeSessionSnapshotFromState(state);
+    const wasPersisted = previous?.id === snapshot.id && previous.persistence === 'persisted';
+    try {
+        const info = await stat(snapshot.file);
+        if (!info.isFile()) throw new Error(`OMP native journal is not a file: ${snapshot.file}`);
+        return { ...snapshot, persistence: 'persisted' };
+    } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        if (wasPersisted) return { ...snapshot, persistence: 'persisted' };
+        const knownFresh = previous?.id !== snapshot.id || previous.persistence === 'never-persisted';
+        if (knownFresh && state.messageCount === 0 && state.queuedMessageCount === 0
+            && !state.isStreaming && !state.isCompacting) {
+            return { ...snapshot, persistence: 'never-persisted' };
+        }
+        // Nonempty, still-active or unknown history must never authorize a fresh replacement.
+        return snapshot;
+    }
+}
+
 export async function reconcileOmpSessionState(
     client: OmpSessionRpc,
-    applySnapshot: (snapshot: OmpNativeSession) => void
+    applySnapshot: (snapshot: OmpNativeSession) => void,
+    previousSnapshot?: OmpNativeSession | null
 ): Promise<{ state: OmpSessionState; snapshot: OmpNativeSession }> {
     const state = await client.request({ type: 'get_state' });
-    const snapshot = nativeSessionSnapshotFromState(state);
+    const snapshot = await nativeSessionSnapshotWithPersistence(state, previousSnapshot);
     applySnapshot(snapshot);
     return { state, snapshot };
+}
+
+/** A successful switch means native loaded an existing journal; it is never a lazy-empty session. */
+function mutationSnapshotPersistence(
+    command: OmpSessionMutationCommand,
+    snapshot: OmpNativeSession
+): OmpNativeSession {
+    return command.type === 'switch_session' && snapshot.persistence !== 'persisted'
+        ? { ...snapshot, persistence: 'persisted' }
+        : snapshot;
 }
 
 export async function runOmpSessionMutation(
     client: OmpSessionRpc,
     command: OmpSessionMutationCommand,
-    applySnapshot: (snapshot: OmpNativeSession) => void
+    applySnapshot: (snapshot: OmpNativeSession) => void,
+    previousSnapshot?: OmpNativeSession | null
 ): Promise<OmpSessionMutationOutcome> {
     let response: OmpResponseData<OmpSessionMutationType>;
     let changed: boolean;
@@ -81,8 +118,16 @@ export async function runOmpSessionMutation(
     if (!changed) {
         return { status: 'unchanged', response };
     }
-    const { state, snapshot } = await reconcileOmpSessionState(client, applySnapshot);
-    return { status: 'applied', response, state, snapshot };
+    let finalSnapshot: OmpNativeSession | null = null;
+    const { state } = await reconcileOmpSessionState(
+        client,
+        (reconciled) => {
+            finalSnapshot = mutationSnapshotPersistence(command, reconciled);
+            applySnapshot(finalSnapshot);
+        },
+        previousSnapshot
+    );
+    return { status: 'applied', response, state, snapshot: finalSnapshot! };
 }
 
 export class OmpSessionStateReconciler {
@@ -90,11 +135,12 @@ export class OmpSessionStateReconciler {
 
     constructor(
         private readonly client: OmpSessionRpc,
-        private readonly applySnapshot: (snapshot: OmpNativeSession) => void
-    ) {}
+        private readonly applySnapshot: (snapshot: OmpNativeSession) => void,
+        private readonly readSnapshot?: () => OmpNativeSession | null
+    ) { }
 
     reconcile(): Promise<{ state: OmpSessionState; snapshot: OmpNativeSession }> {
-        const task = this.tail.then(() => reconcileOmpSessionState(this.client, this.applySnapshot));
+        const task = this.tail.then(() => reconcileOmpSessionState(this.client, this.applySnapshot, this.readSnapshot?.()));
         this.tail = task.then(() => undefined, () => undefined);
         return task;
     }

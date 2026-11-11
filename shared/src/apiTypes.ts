@@ -1,64 +1,67 @@
 import { z } from 'zod'
 import {
-    AttachmentMetadataSchema,
-    CodexCollaborationModeSchema,
-    CopilotAgentModeSchema,
-    DecryptedMessageSchema,
-    MachineSchema,
-    OmpInputModeSchema,
-    PermissionModeSchema,
-    SessionSchema
+ AttachmentMetadataSchema,
+ CodexCollaborationModeSchema,
+ CopilotAgentModeSchema,
+ DecryptedMessageSchema,
+ MachineSchema,
+ OmpInputModeSchema,
+ PermissionModeSchema,
+ SessionSchema
 } from './schemas'
 import { AgentFlavorSchema } from './modes'
 import type {
-    DecryptedMessage,
-    Machine,
-    Session
+ DecryptedMessage,
+ InputResolution,
+ MessageOrderPosition,
+ Machine,
+ Session
 } from './schemas'
 import type { SessionSummary } from './sessionSummary'
 import type { OmpConfiguredThinkingLevel, OmpEffort, OmpThinkingState } from './omp'
+import type { MessageTurnSegment, TurnPosition } from './messageTurns'
 
 export const CreateOrLoadMachineRequestSchema = z.object({
-    id: z.string().min(1),
-    metadata: z.unknown(),
-    runnerState: z.unknown().nullable().optional()
+ id: z.string().min(1),
+ metadata: z.unknown(),
+ runnerState: z.unknown().nullable().optional()
 })
 
 export type CreateOrLoadMachineRequest = z.infer<typeof CreateOrLoadMachineRequestSchema>
 
 export const CreateOrLoadSessionRequestSchema = z.object({
-    id: z.string().uuid().optional(),
-    tag: z.string().min(1),
-    metadata: z.unknown(),
-    agentState: z.unknown().nullable().optional(),
-    model: z.string().optional(),
-    modelReasoningEffort: z.string().optional(),
-    effort: z.string().optional(),
-    machine: CreateOrLoadMachineRequestSchema.optional()
+ id: z.string().uuid().optional(),
+ tag: z.string().min(1),
+ metadata: z.unknown(),
+ agentState: z.unknown().nullable().optional(),
+ model: z.string().optional(),
+ modelReasoningEffort: z.string().optional(),
+ effort: z.string().optional(),
+ machine: CreateOrLoadMachineRequestSchema.optional()
 })
 
 export type CreateOrLoadSessionRequest = z.infer<typeof CreateOrLoadSessionRequestSchema>
 
 export const CliMessagesResponseSchema = z.object({
-    messages: z.array(z.object({
-        id: z.string(),
-        seq: z.number(),
-        createdAt: z.number(),
-        localId: z.string().nullable().optional(),
-        content: z.unknown()
-    }))
+ messages: z.array(z.object({
+  id: z.string(),
+  seq: z.number(),
+  createdAt: z.number(),
+  localId: z.string().nullable().optional(),
+  content: z.unknown()
+ }))
 })
 
 export type CliMessagesResponse = z.infer<typeof CliMessagesResponseSchema>
 
 export const CreateSessionResponseSchema = z.object({
-    session: SessionSchema
+ session: SessionSchema
 })
 
 export type CreateSessionResponse = z.infer<typeof CreateSessionResponseSchema>
 
 export const CreateMachineResponseSchema = z.object({
-    machine: MachineSchema
+ machine: MachineSchema
 })
 
 export type CreateMachineResponse = z.infer<typeof CreateMachineResponseSchema>
@@ -67,137 +70,154 @@ export const GetSessionResponseSchema = CreateSessionResponseSchema
 export type GetSessionResponse = CreateSessionResponse
 
 export const ClearOpencodeSessionResponseSchema = z.object({
-    ok: z.literal(true),
-    sessionId: z.string()
+ ok: z.literal(true),
+ sessionId: z.string()
 })
 export type ClearOpencodeSessionResponse = z.infer<typeof ClearOpencodeSessionResponseSchema>
 
 export const ClearOpencodeSessionCallbackRequestSchema = z.object({
-    replacementSessionId: z.string()
+ replacementSessionId: z.string()
 })
 export type ClearOpencodeSessionCallbackRequest = z.infer<typeof ClearOpencodeSessionCallbackRequestSchema>
 
 export type AuthResponse = {
-    token: string
-    user: {
-        id: number
-        username?: string
-        firstName?: string
-        lastName?: string
-    }
+ token: string
+ user: {
+  id: number
+  username?: string
+  firstName?: string
+  lastName?: string
+ }
 }
 
 export type SessionsResponse = { sessions: SessionSummary[] }
 export type SessionResponse = { session: Session }
 export type MessagesResponse = {
-    messages: DecryptedMessage[]
-    page: {
-        direction: 'latest' | 'before' | 'after'
-        limit: number
-        epoch: number
-        reset: boolean
-        nextBeforeSeq: number | null
-        nextBeforeAt: number | null
-        nextAfterSeq: number | null
-        nextAfterAt: number | null
-        snapshotHeadSeq: number | null
-        snapshotHeadAt: number | null
-        hasMore: boolean
-    }
+ messages: DecryptedMessage[]
+ page: {
+  direction: 'latest' | 'before' | 'after'
+  limit: number
+  epoch: number
+  reset: boolean
+  nextBeforeSeq: number | null
+  nextBeforeAt: number | null
+  nextBeforeOrder?: number
+  nextBeforeEventOrder?: number
+  nextAfterSeq: number | null
+  nextAfterAt: number | null
+  nextAfterOrder?: number
+  nextAfterEventOrder?: number
+  snapshotHeadSeq: number | null
+  snapshotHeadAt: number | null
+  snapshotHeadOrder?: number
+  snapshotHeadEventOrder?: number
+  hasMore: boolean
+  /** Present for fenced single-turn collection outside the bounded UI cache. */
+  hasMoreAfter?: boolean
+  turns?: {
+   requested: number
+   rowLimit: number
+   segments: MessageTurnSegment[]
+  }
+ }
 }
 
 /**
  * fork：多用户 gateway 在 /api/machines 上给每台机器附加归属账号的用户名。
  * 单用户 hub（upstream 路由）不带该字段，故为可选。
  */
-export type MachineWithOwner = Machine & { ownerUsername?: string }
+export type MachineWithOwner = Machine & {
+ ownerUsername?: string
+ preferredForOmpUsage?: boolean
+ preferredUsageSource?: 'omp-native' | 'external'
+}
 
 export type MachinesResponse = { machines: MachineWithOwner[] }
 
 export type SpawnResponse =
-    | { type: 'success'; sessionId: string }
-    | { type: 'error'; message: string }
+ | { type: 'success'; sessionId: string }
+ | { type: 'error'; message: string }
 
 export const SessionPermissionModeRequestSchema = z.object({
-    mode: PermissionModeSchema
+ mode: PermissionModeSchema
 })
 
 export type SessionPermissionModeRequest = z.infer<typeof SessionPermissionModeRequestSchema>
 
 export const ResumeSessionRequestSchema = z.object({
-    permissionMode: PermissionModeSchema.optional()
+ permissionMode: PermissionModeSchema.optional()
 })
 
 export type ResumeSessionRequest = z.infer<typeof ResumeSessionRequestSchema>
 
 export const ReopenSessionResponseSchema = z.object({
-    ok: z.literal(true),
-    sessionId: z.string(),
-    resumed: z.boolean(),
-    cursorSessionProtocol: z.enum(['acp', 'stream-json']).optional()
+ ok: z.literal(true),
+ sessionId: z.string(),
+ resumed: z.boolean(),
+ cursorSessionProtocol: z.enum(['acp', 'stream-json']).optional()
 })
 
 export type ReopenSessionResponse = z.infer<typeof ReopenSessionResponseSchema>
 
 export const ReopenSessionMissingMetadataResponseSchema = z.object({
-    error: z.string(),
-    missing: z.array(z.string()).nonempty()
+ error: z.string(),
+ missing: z.array(z.string()).nonempty()
 })
 
 export type ReopenSessionMissingMetadataResponse = z.infer<typeof ReopenSessionMissingMetadataResponseSchema>
 
 export const CursorChatStoreStatusSchema = z.object({
-    onDisk: z.boolean(),
-    store: z.enum(['legacy', 'acp']).nullable()
+ onDisk: z.boolean(),
+ store: z.enum(['legacy', 'acp']).nullable()
 })
 
 export type CursorChatStoreStatus = z.infer<typeof CursorChatStoreStatusSchema>
 
 export const CodexImportedMessageSchema = z.union([
-    z.object({
-        role: z.literal('user'),
-        content: z.object({ type: z.literal('text'), text: z.string() }),
-        meta: z.object({ sentFrom: z.literal('cli') })
-    }),
-    z.object({
-        role: z.literal('agent'),
-        content: z.object({ type: z.literal('codex'), data: z.unknown() }),
-        meta: z.object({ sentFrom: z.literal('cli') })
-    })
+ z.object({
+  role: z.literal('user'),
+  content: z.object({ type: z.literal('text'), text: z.string() }),
+  meta: z.object({ sentFrom: z.literal('cli') })
+ }),
+ z.object({
+  role: z.literal('agent'),
+  content: z.object({ type: z.literal('codex'), data: z.unknown() }),
+  meta: z.object({ sentFrom: z.literal('cli') })
+ })
 ])
 
 export const CodexLocalSessionSummarySchema = z.object({
-    id: z.string().min(1),
-    title: z.string(),
-    lastUserMessage: z.string().nullable().optional(),
-    cwd: z.string().nullable().optional(),
-    file: z.string().min(1),
-    modifiedAt: z.number(),
-    originator: z.string().nullable().optional(),
-    cliVersion: z.string().nullable().optional(),
-    source: z.string().nullable().optional(),
-    threadSource: z.string().nullable().optional(),
-    forkedFromId: z.string().nullable().optional()
+ id: z.string().min(1),
+ title: z.string(),
+ lastUserMessage: z.string().nullable().optional(),
+ cwd: z.string().nullable().optional(),
+ file: z.string().min(1),
+ modifiedAt: z.number(),
+ originator: z.string().nullable().optional(),
+ cliVersion: z.string().nullable().optional(),
+ source: z.string().nullable().optional(),
+ threadSource: z.string().nullable().optional(),
+ forkedFromId: z.string().nullable().optional()
 })
 
 export const CodexLocalSessionWithMessagesSchema = CodexLocalSessionSummarySchema.extend({
-    messages: z.array(CodexImportedMessageSchema)
+ messages: z.array(CodexImportedMessageSchema)
 })
 
 export const ListCodexSessionsRpcRequestSchema = z.object({
-    cwd: z.string().nullable().optional(),
-    sessionIds: z.array(z.string().min(1)).optional()
+ cwd: z.string().nullable().optional(),
+ sessionIds: z.array(z.string().min(1)).optional()
 })
 
 export const ListCodexSessionsRpcResponseSchema = z.union([
-    z.object({ success: z.literal(true), sessions: z.array(z.union([CodexLocalSessionWithMessagesSchema, CodexLocalSessionSummarySchema])) }),
-    z.object({ success: z.literal(false), error: z.string() })
+ z.object({ success: z.literal(true), sessions: z.array(z.union([CodexLocalSessionWithMessagesSchema, CodexLocalSessionSummarySchema])) }),
+ z.object({ success: z.literal(false), error: z.string() })
 ])
 
 export const ArchiveCodexSessionRpcRequestSchema = z.object({ sessionId: z.string().min(1) })
 export const ArchiveCodexSessionRpcResponseSchema = z.union([
-    z.object({ success: z.literal(true), archivedPath: z.string() }),
-    z.object({ success: z.literal(false), error: z.string() })
+ z.object({ success: z.literal(true), archivedPath: z.string() }),
+ z.object({ success: z.literal(false), error: z.string() })
 ])
 
 export type ListCodexSessionsRpcRequest = z.infer<typeof ListCodexSessionsRpcRequestSchema>
@@ -208,39 +228,39 @@ export type ArchiveCodexSessionRpcResponse = z.infer<typeof ArchiveCodexSessionR
 export const PiImportedMessageContentSchema = CodexImportedMessageSchema
 
 export const PiImportedMessageSchema = z.object({
-    localId: z.string().min(1),
-    entryId: z.string().min(1),
-    parentEntryId: z.string().nullable().optional(),
-    createdAt: z.number(),
-    content: PiImportedMessageContentSchema
+ localId: z.string().min(1),
+ entryId: z.string().min(1),
+ parentEntryId: z.string().nullable().optional(),
+ createdAt: z.number(),
+ content: PiImportedMessageContentSchema
 })
 
 export const PiLocalSessionSummarySchema = z.object({
-    id: z.string().min(1),
-    title: z.string(),
-    lastUserMessage: z.string().nullable().optional(),
-    cwd: z.string().nullable().optional(),
-    file: z.string().min(1),
-    modifiedAt: z.number(),
-    model: z.string().nullable().optional(),
-    thinkingLevel: z.string().nullable().optional(),
-    leafEntryId: z.string().nullable().optional(),
-    messageCount: z.number().int().nonnegative()
+ id: z.string().min(1),
+ title: z.string(),
+ lastUserMessage: z.string().nullable().optional(),
+ cwd: z.string().nullable().optional(),
+ file: z.string().min(1),
+ modifiedAt: z.number(),
+ model: z.string().nullable().optional(),
+ thinkingLevel: z.string().nullable().optional(),
+ leafEntryId: z.string().nullable().optional(),
+ messageCount: z.number().int().nonnegative()
 })
 
 export const PiLocalSessionWithMessagesSchema = PiLocalSessionSummarySchema.extend({
-    messages: z.array(PiImportedMessageSchema),
-    activeEntryIds: z.array(z.string().min(1))
+ messages: z.array(PiImportedMessageSchema),
+ activeEntryIds: z.array(z.string().min(1))
 })
 
 export const ListPiSessionsRpcRequestSchema = z.object({
-    cwd: z.string().nullable().optional(),
-    sessionIds: z.array(z.string().min(1)).optional()
+ cwd: z.string().nullable().optional(),
+ sessionIds: z.array(z.string().min(1)).optional()
 })
 
 export const ListPiSessionsRpcResponseSchema = z.union([
-    z.object({ success: z.literal(true), sessions: z.array(z.union([PiLocalSessionWithMessagesSchema, PiLocalSessionSummarySchema])) }),
-    z.object({ success: z.literal(false), error: z.string() })
+ z.object({ success: z.literal(true), sessions: z.array(z.union([PiLocalSessionWithMessagesSchema, PiLocalSessionSummarySchema])) }),
+ z.object({ success: z.literal(false), error: z.string() })
 ])
 
 export type PiImportedMessageContent = z.infer<typeof PiImportedMessageContentSchema>
@@ -251,43 +271,43 @@ export type ListPiSessionsRpcRequest = z.infer<typeof ListPiSessionsRpcRequestSc
 export type ListPiSessionsRpcResponse = z.infer<typeof ListPiSessionsRpcResponseSchema>
 
 export const SessionCollaborationModeRequestSchema = z.object({
-    mode: CodexCollaborationModeSchema
+ mode: CodexCollaborationModeSchema
 })
 
 export type SessionCollaborationModeRequest = z.infer<typeof SessionCollaborationModeRequestSchema>
 
 export const SessionCopilotAgentModeRequestSchema = z.object({
-    mode: CopilotAgentModeSchema
+ mode: CopilotAgentModeSchema
 })
 
 export type SessionCopilotAgentModeRequest = z.infer<typeof SessionCopilotAgentModeRequestSchema>
 
 export const SessionModelRequestSchema = z.object({
-    model: z.union([
-        z.string().trim().min(1),
-        z.object({
-            provider: z.string().trim().min(1),
-            modelId: z.string().trim().min(1),
-        }),
-    ]).nullable()
+ model: z.union([
+  z.string().trim().min(1),
+  z.object({
+   provider: z.string().trim().min(1),
+   modelId: z.string().trim().min(1),
+  }),
+ ]).nullable()
 })
 
 export type SessionModelRequest = z.infer<typeof SessionModelRequestSchema>
 
 export const SessionResumeModelRequestSchema = z.object({
-    resumeWithSessionModel: z.boolean()
+ resumeWithSessionModel: z.boolean()
 })
 
 export type SessionResumeModelRequest = z.infer<typeof SessionResumeModelRequestSchema>
 
 export const SessionModelReasoningEffortRequestSchema = z.object({
-    modelReasoningEffort: z.string().trim().min(1).nullable()
+ modelReasoningEffort: z.string().trim().min(1).nullable()
 })
 
 export type SessionModelReasoningEffortRequest = z.infer<typeof SessionModelReasoningEffortRequestSchema>
 
 export const SessionEffortRequestSchema = z.object({
-    effort: z.string().trim().min(1).nullable()
+ effort: z.string().trim().min(1).nullable()
 })
 
 export type SessionEffortRequest = z.infer<typeof SessionEffortRequestSchema>
@@ -297,13 +317,13 @@ export type SessionEffortRequest = z.infer<typeof SessionEffortRequestSchema>
 // "untouched" and survives restart/resume. Reject anything else so stray tier
 // strings are never forwarded to the Codex app-server.
 export const SessionServiceTierRequestSchema = z.object({
-    serviceTier: z.enum(['fast', 'standard'])
+ serviceTier: z.enum(['fast', 'standard'])
 })
 
 export type SessionServiceTierRequest = z.infer<typeof SessionServiceTierRequestSchema>
 
 export const RenameSessionRequestSchema = z.object({
-    name: z.string().min(1).max(255)
+ name: z.string().min(1).max(255)
 })
 
 export type RenameSessionRequest = z.infer<typeof RenameSessionRequestSchema>
@@ -317,11 +337,11 @@ export type RenameSessionRequest = z.infer<typeof RenameSessionRequestSchema>
  * `icon` 为 null 或空串表示清掉、回落到按系统（platform）的图标。
  */
 export const RenameMachineRequestSchema = z.object({
-    displayName: z.string().optional(),
-    icon: z.string().nullable().optional()
+ displayName: z.string().optional(),
+ icon: z.string().nullable().optional()
 }).refine(
-    (body) => body.displayName !== undefined || body.icon !== undefined,
-    { message: 'displayName or icon is required' }
+ (body) => body.displayName !== undefined || body.icon !== undefined,
+ { message: 'displayName or icon is required' }
 )
 
 export type RenameMachineRequest = z.infer<typeof RenameMachineRequestSchema>
@@ -333,31 +353,31 @@ export const MACHINE_DISPLAY_NAME_MAX_LENGTH = 64
  * 读侧对不认识的值回落到系统图标，所以词表增删不需要迁移。
  */
 export const MACHINE_ICON_IDS = [
-    'rack-server',
-    'workstation',
-    'desktop',
-    'mini-pc',
-    'imac',
-    'mac-mini',
-    'laptop',
-    'gaming-laptop',
-    'macbook',
-    'tablet',
-    'ipad',
-    'phone',
-    'iphone',
-    'handheld',
-    'nas',
-    'router',
-    'dev-board',
-    'vm',
-    'cloud'
+ 'rack-server',
+ 'workstation',
+ 'desktop',
+ 'mini-pc',
+ 'imac',
+ 'mac-mini',
+ 'laptop',
+ 'gaming-laptop',
+ 'macbook',
+ 'tablet',
+ 'ipad',
+ 'phone',
+ 'iphone',
+ 'handheld',
+ 'nas',
+ 'router',
+ 'dev-board',
+ 'vm',
+ 'cloud'
 ] as const
 
 export type MachineIconId = typeof MACHINE_ICON_IDS[number]
 
 export function isMachineIconId(value: unknown): value is MachineIconId {
-    return typeof value === 'string' && (MACHINE_ICON_IDS as readonly string[]).includes(value)
+ return typeof value === 'string' && (MACHINE_ICON_IDS as readonly string[]).includes(value)
 }
 
 
@@ -390,310 +410,383 @@ export const SCRATCHLIST_MAX_ENTRY_ID_LENGTH = 128
 import { ScratchlistAttachmentsArraySchema } from './scratchlistAttachments'
 
 export const ScratchlistEntryCreateRequestSchema = z.object({
-    /**
-     * Optional client-supplied entry id. Lets the web client preserve its
-     * pre-v2 localStorage entry ids during migration so the optimistic-
-     * update path doesn't have to re-key entries already in the React
-     * tree. New entries created post-v2 can omit this and let the hub
-     * generate one.
-     */
-    entryId: z.string().min(1).max(SCRATCHLIST_MAX_ENTRY_ID_LENGTH).optional(),
-    text: z.string().max(SCRATCHLIST_MAX_TEXT_LENGTH).default(''),
-    attachments: ScratchlistAttachmentsArraySchema.optional().default([]),
-    /**
-     * Optional client-supplied createdAt. Used by the migration path to
-     * preserve the original timestamps from localStorage. New entries
-     * omit this and let the hub stamp `Date.now()`.
-     */
-    createdAt: z.number().int().nonnegative().optional()
+ /**
+  * Optional client-supplied entry id. Lets the web client preserve its
+  * pre-v2 localStorage entry ids during migration so the optimistic-
+  * update path doesn't have to re-key entries already in the React
+  * tree. New entries created post-v2 can omit this and let the hub
+  * generate one.
+  */
+ entryId: z.string().min(1).max(SCRATCHLIST_MAX_ENTRY_ID_LENGTH).optional(),
+ text: z.string().max(SCRATCHLIST_MAX_TEXT_LENGTH).default(''),
+ attachments: ScratchlistAttachmentsArraySchema.optional().default([]),
+ /**
+  * Optional client-supplied createdAt. Used by the migration path to
+  * preserve the original timestamps from localStorage. New entries
+  * omit this and let the hub stamp `Date.now()`.
+  */
+ createdAt: z.number().int().nonnegative().optional()
 }).refine(
-    (data) => data.text.trim().length > 0 || data.attachments.length > 0,
-    { message: 'Scratchlist entry requires text or attachments', path: ['text'] }
+ (data) => data.text.trim().length > 0 || data.attachments.length > 0,
+ { message: 'Scratchlist entry requires text or attachments', path: ['text'] }
 )
 
 export type ScratchlistEntryCreateRequest = z.infer<typeof ScratchlistEntryCreateRequestSchema>
 
 export const ScratchlistEntryUpdateRequestSchema = z.object({
-    text: z.string().max(SCRATCHLIST_MAX_TEXT_LENGTH).optional(),
-    attachments: ScratchlistAttachmentsArraySchema.optional(),
+ text: z.string().max(SCRATCHLIST_MAX_TEXT_LENGTH).optional(),
+ attachments: ScratchlistAttachmentsArraySchema.optional(),
 }).refine(
-    (data) => data.text !== undefined || data.attachments !== undefined,
-    { message: 'Update requires text and/or attachments', path: ['text'] }
+ (data) => data.text !== undefined || data.attachments !== undefined,
+ { message: 'Update requires text and/or attachments', path: ['text'] }
 ).refine(
-    (data) => {
-        // Attachments-only patch may clear the list (`[]`) while keeping text.
-        if (data.text === undefined && data.attachments !== undefined) {
-            return true
-        }
-        if (data.text !== undefined && data.attachments === undefined) {
-            return data.text.trim().length > 0
-        }
-        if (data.text !== undefined && data.attachments !== undefined) {
-            return data.text.trim().length > 0 || data.attachments.length > 0
-        }
-        return true
-    },
-    { message: 'Scratchlist entry requires non-empty text or attachments', path: ['text'] }
+ (data) => {
+  // Attachments-only patch may clear the list (`[]`) while keeping text.
+  if (data.text === undefined && data.attachments !== undefined) {
+   return true
+  }
+  if (data.text !== undefined && data.attachments === undefined) {
+   return data.text.trim().length > 0
+  }
+  if (data.text !== undefined && data.attachments !== undefined) {
+   return data.text.trim().length > 0 || data.attachments.length > 0
+  }
+  return true
+ },
+ { message: 'Scratchlist entry requires non-empty text or attachments', path: ['text'] }
 )
 
 export type ScratchlistEntryUpdateRequest = z.infer<typeof ScratchlistEntryUpdateRequestSchema>
 
 /** Per-session legacy stream-json → ACP migrator request. See tiann/hapi#824. */
 export const CursorMigrateToAcpRequestSchema = z.object({
-    /** Skip removing the legacy ~/.cursor/chats source store.db even after verify passes. */
-    keepSource: z.boolean().optional(),
-    /** Allow migrating a session whose lifecycleState === 'running' by archiving it first. */
-    forceArchiveRunning: z.boolean().optional(),
-    /** Skip the verify-by-prompt step (session/load alone is run). */
-    skipVerify: z.boolean().optional()
+ /** Skip removing the legacy ~/.cursor/chats source store.db even after verify passes. */
+ keepSource: z.boolean().optional(),
+ /** Allow migrating a session whose lifecycleState === 'running' by archiving it first. */
+ forceArchiveRunning: z.boolean().optional(),
+ /** Skip the verify-by-prompt step (session/load alone is run). */
+ skipVerify: z.boolean().optional()
 })
 
 export type CursorMigrateToAcpRequest = z.infer<typeof CursorMigrateToAcpRequestSchema>
 
 export type CursorMigrateOutcome =
-    | { ok: true; sessionId: string; acpSessionId: string; replayNotifications: number; durationMs: number; lastUsedModelPreserved: string | null; sourceRemoved: boolean }
-    | { ok: false; sessionId: string; reason: CursorMigrateRefusalReason; message: string; durationMs: number }
+ | { ok: true; sessionId: string; acpSessionId: string; replayNotifications: number; durationMs: number; lastUsedModelPreserved: string | null; sourceRemoved: boolean }
+ | { ok: false; sessionId: string; reason: CursorMigrateRefusalReason; message: string; durationMs: number }
 
 export type CursorMigrateRefusalReason =
-    | 'not_cursor_session'
-    | 'already_acp'
-    | 'running_refused'
-    | 'no_cursor_session_id'
-    | 'no_legacy_store_on_disk'
-    | 'target_already_exists'
-    | 'verify_load_failed'
-    | 'verify_prompt_failed'
-    | 'metadata_write_failed'
-    | 'archive_failed'
-    | 'lock_release_timeout'
-    | 'acp_transport_active'
-    | 'session_resumed_during_migrate'
-    | 'legacy_store_modified_during_migrate'
-    | 'cross_host_session'
-    | 'ambiguous_legacy_store'
-    | 'size_mismatch'
-    | 'internal_error'
+ | 'not_cursor_session'
+ | 'already_acp'
+ | 'running_refused'
+ | 'no_cursor_session_id'
+ | 'no_legacy_store_on_disk'
+ | 'target_already_exists'
+ | 'verify_load_failed'
+ | 'verify_prompt_failed'
+ | 'metadata_write_failed'
+ | 'archive_failed'
+ | 'lock_release_timeout'
+ | 'acp_transport_active'
+ | 'session_resumed_during_migrate'
+ | 'legacy_store_modified_during_migrate'
+ | 'cross_host_session'
+ | 'ambiguous_legacy_store'
+ | 'size_mismatch'
+ | 'internal_error'
 
 export const UploadFileRequestSchema = z.object({
-    filename: z.string().min(1).max(255),
-    content: z.string().min(1),
-    mimeType: z.string().min(1).max(255)
+ filename: z.string().min(1).max(255),
+ content: z.string().min(1),
+ mimeType: z.string().min(1).max(255)
 })
 
 export type UploadFileRequest = z.infer<typeof UploadFileRequestSchema>
 
 export const DeleteUploadRequestSchema = z.object({
-    path: z.string().min(1)
+ path: z.string().min(1)
 })
 
 export type DeleteUploadRequest = z.infer<typeof DeleteUploadRequestSchema>
 
 export const MessagesQuerySchema = z.object({
-    limit: z.coerce.number().int().min(1).max(200).optional(),
-    beforeSeq: z.coerce.number().int().min(1).optional(),
-    beforeAt: z.coerce.number().int().min(0).optional(),
-    afterSeq: z.coerce.number().int().min(1).optional(),
-    afterAt: z.coerce.number().int().min(0).optional(),
-    untilSeq: z.coerce.number().int().min(1).optional(),
-    untilAt: z.coerce.number().int().min(0).optional(),
-    epoch: z.coerce.number().int().min(0).optional(),
+ limit: z.coerce.number().int().min(1).max(200).optional(),
+ orderVersion: z.coerce.number().pipe(z.literal(1)).optional(),
+ turns: z.coerce.number().int().min(1).max(20).optional(),
+ turnId: z.string().min(1).max(200).optional(),
+ beforeSeq: z.coerce.number().int().min(1).optional(),
+ beforeAt: z.coerce.number().int().min(0).optional(),
+ beforeOrder: z.coerce.number().int().min(0).optional(),
+ beforeEventOrder: z.coerce.number().int().min(0).optional(),
+ afterSeq: z.coerce.number().int().min(1).optional(),
+ afterAt: z.coerce.number().int().min(0).optional(),
+ afterOrder: z.coerce.number().int().min(0).optional(),
+ afterEventOrder: z.coerce.number().int().min(0).optional(),
+ untilSeq: z.coerce.number().int().min(1).optional(),
+ untilAt: z.coerce.number().int().min(0).optional(),
+ untilOrder: z.coerce.number().int().min(0).optional(),
+ untilEventOrder: z.coerce.number().int().min(0).optional(),
+ epoch: z.coerce.number().int().min(0).optional(),
 })
-    .refine((data) => (data.beforeAt === undefined) === (data.beforeSeq === undefined), {
-        message: 'beforeAt and beforeSeq must be provided together',
-        path: ['beforeAt'],
-    })
-    .refine((data) => (data.afterAt === undefined) === (data.afterSeq === undefined), {
-        message: 'afterAt and afterSeq must be provided together',
-        path: ['afterAt'],
-    })
-    .refine((data) => (data.untilAt === undefined) === (data.untilSeq === undefined), {
-        message: 'untilAt and untilSeq must be provided together',
-        path: ['untilAt'],
-    })
-    .refine((data) => data.beforeAt === undefined || data.afterAt === undefined, {
-        message: 'before and after cursors are mutually exclusive',
-        path: ['afterAt'],
-    })
-    .refine((data) => data.untilAt === undefined || data.afterAt !== undefined, {
-        message: 'until cursor requires an after cursor',
-        path: ['untilAt'],
-    })
-    .refine((data) => data.epoch === undefined || data.afterAt !== undefined, {
-        message: 'epoch requires an after cursor',
-        path: ['epoch'],
-    })
+ .superRefine((data, context) => {
+  const modern = data.orderVersion === 1 || data.turns !== undefined || data.turnId !== undefined
+  for (const prefix of ['before', 'after', 'until'] as const) {
+   if (data[`${prefix}Order`] === undefined && data[`${prefix}EventOrder`] === undefined) continue
+   if (!modern || data[`${prefix}At`] === undefined || data[`${prefix}Seq`] === undefined) {
+    context.addIssue({ code: 'custom', path: [`${prefix}Order`], message: 'Native order coordinates require an explicit ordered cursor' })
+   }
+  }
+ })
+ .refine((data) => (data.beforeAt === undefined) === (data.beforeSeq === undefined), {
+  message: 'beforeAt and beforeSeq must be provided together',
+  path: ['beforeAt'],
+ })
+ .refine((data) => (data.afterAt === undefined) === (data.afterSeq === undefined), {
+  message: 'afterAt and afterSeq must be provided together',
+  path: ['afterAt'],
+ })
+ .refine((data) => (data.untilAt === undefined) === (data.untilSeq === undefined), {
+  message: 'untilAt and untilSeq must be provided together',
+  path: ['untilAt'],
+ })
+ .refine((data) => data.beforeAt === undefined || data.afterAt === undefined, {
+  message: 'before and after cursors are mutually exclusive',
+  path: ['afterAt'],
+ })
+ .refine((data) => data.untilAt === undefined || data.afterAt !== undefined, {
+  message: 'until cursor requires an after cursor',
+  path: ['untilAt'],
+ })
+ .refine((data) => data.epoch === undefined || data.afterAt !== undefined || data.turnId !== undefined || ((data.turns !== undefined || data.orderVersion === 1) && data.beforeAt !== undefined), {
+  message: 'epoch requires a cursor',
+  path: ['epoch'],
+ })
+ .refine((data) => data.turnId === undefined || data.beforeAt === undefined, {
+  message: 'selected turn uses forward pagination',
+  path: ['beforeAt'],
+ })
 
 export type MessagesQuery = z.infer<typeof MessagesQuerySchema>
+
+export function messageQueryPosition(query: MessagesQuery, prefix: 'before' | 'after' | 'until'): TurnPosition | null {
+ const at = query[`${prefix}At`]
+ const seq = query[`${prefix}Seq`]
+ if (at === undefined || seq === undefined) return null
+ const order = query[`${prefix}Order`]
+ const eventOrder = query[`${prefix}EventOrder`]
+ return { at, seq, ...(order !== undefined ? { order } : {}), ...(eventOrder !== undefined ? { eventOrder } : {}) }
+}
 
 export const MessageDeliveryModeSchema = z.enum(['queue', 'steer'])
 export type MessageDeliveryMode = z.infer<typeof MessageDeliveryModeSchema>
 
 export const SendMessageRequestSchema = z.object({
-    text: z.string(),
-    localId: z.string().min(1).optional(),
-    attachments: z.array(AttachmentMetadataSchema).optional(),
-    ompInputMode: OmpInputModeSchema.optional(),
-    scheduledAt: z.number().int().positive().nullable().optional(),
-    deliveryMode: MessageDeliveryModeSchema.optional()
+ text: z.string(),
+ localId: z.string().min(1).optional(),
+ attachments: z.array(AttachmentMetadataSchema).optional(),
+ ompInputMode: OmpInputModeSchema.optional(),
+ scheduledAt: z.number().int().positive().nullable().optional(),
+ deliveryMode: MessageDeliveryModeSchema.optional()
 }).refine(
-    (data) => data.scheduledAt == null || typeof data.localId === 'string',
-    { message: 'scheduledAt requires localId', path: ['localId'] }
+ (data) => data.scheduledAt == null || typeof data.localId === 'string',
+ { message: 'scheduledAt requires localId', path: ['localId'] }
 ).refine(
-    (data) => data.scheduledAt == null || data.scheduledAt <= Date.now() + 7 * 24 * 60 * 60 * 1000,
-    { message: 'scheduledAt must be within 7 days from now', path: ['scheduledAt'] }
+ (data) => data.scheduledAt == null || data.scheduledAt <= Date.now() + 7 * 24 * 60 * 60 * 1000,
+ { message: 'scheduledAt must be within 7 days from now', path: ['scheduledAt'] }
 ).refine(
-    (data) => data.scheduledAt == null || !data.attachments?.length,
-    { message: 'scheduled messages with attachments are not supported', path: ['attachments'] }
+ (data) => data.scheduledAt == null || !data.attachments?.length,
+ { message: 'scheduled messages with attachments are not supported', path: ['attachments'] }
 ).refine(
-    (data) => data.scheduledAt == null || data.deliveryMode !== 'steer',
-    { message: 'scheduled messages cannot use steer delivery', path: ['deliveryMode'] }
+ (data) => data.scheduledAt == null || data.deliveryMode !== 'steer',
+ { message: 'scheduled messages cannot use steer delivery', path: ['deliveryMode'] }
 )
 
 export type SendMessageRequest = z.infer<typeof SendMessageRequestSchema>
 
 export const ForkConversationRequestSchema = z.object({
-    messageLocalId: z.string().min(1).optional()
+ messageLocalId: z.string().min(1).optional()
 })
 
 export type ForkConversationRequest = z.infer<typeof ForkConversationRequestSchema>
 
 export type ForkConversationResponse = {
-    sessionId: string
+ sessionId: string
 }
 
 export const RewindConversationRequestSchema = z.object({
-    messageLocalId: z.string().min(1)
+ messageLocalId: z.string().min(1)
 })
 
 export type RewindConversationRequest = z.infer<typeof RewindConversationRequestSchema>
 
 export type RewindConversationResponse = {
-    success: true
+ success: true
 }
 
 /** CLI → hub RPC result for native fork (before HAPI child binding). */
 export type ForkConversationRpcResult = {
-    nativeSessionId: string
-    /** When true, hub must spawn with --fork-session (Claude). */
-    forkSession?: boolean
+ nativeSessionId: string
+ /** When true, hub must spawn with --fork-session (Claude). */
+ forkSession?: boolean
 }
 
 export type RewindConversationRpcResult = {
-    success: true
-    /** Truncate HAPI transcript at/after this localId, then accept rehydrated history. */
-    truncateFromLocalId: string
-    messages?: Array<{
-        content: unknown
-        localId?: string | null
-        createdAt?: number
-        invokedAt?: number | null
-    }>
+ success: true
+ /** Truncate HAPI transcript at/after this localId, then accept rehydrated history. */
+ truncateFromLocalId: string
+ messages?: Array<{
+  content: unknown
+  localId?: string | null
+  createdAt?: number
+  invokedAt?: number | null
+ }>
 } | {
-    success: false
-    error: string
-    /** Native state is unchanged, cancelled, or was restored exactly. */
-    outcome: 'rejected' | 'cancelled' | 'source_restored'
+ success: false
+ error: string
+ /** Native state is unchanged, cancelled, or was restored exactly. */
+ outcome: 'rejected' | 'cancelled' | 'source_restored'
 }
 
 export const QueuedStateRequestSchema = z.object({
-    localIds: z.array(z.string().min(1)).max(1000)
+ localIds: z.array(z.string().min(1)).max(1000)
 })
 
 export type QueuedStateRequest = z.infer<typeof QueuedStateRequestSchema>
 
 export type QueuedStateResponse = {
-    queuedLocalIds: string[]
-    invokedLocalMessages: Array<{
-        localId: string
-        invokedAt: number
-    }>
+ queuedLocalIds: string[]
+ invokedLocalMessages: Array<{
+  localId: string
+  invokedAt: number
+  position?: MessageOrderPosition
+ }>
+ resolvedLocalMessages?: Array<{
+  localId: string
+  resolution: InputResolution
+  position?: MessageOrderPosition
+ }>
+}
+
+// Force-send-all-queued: asks the hub to immediately dispatch/promote every
+// pending local input for the session. `localIds` omitted = snapshot ALL hub
+// pending rows for the session at request time; `includeScheduled` defaults to
+// false so future-scheduled rows are only forced when the caller opts in
+// explicitly. The request never sends an unsubmitted composer draft and never
+// aborts active work.
+export const ForceSendQueuedRequestSchema = z.object({
+ localIds: z.array(z.string().min(1)).max(1000).optional(),
+ includeScheduled: z.boolean().optional()
+})
+
+export type ForceSendQueuedRequest = z.infer<typeof ForceSendQueuedRequestSchema>
+
+// Per-row outcome of a force-send request.
+//  - dispatched: delivery or native promotion was requested for the row (the
+//    row is still queued until a real consumption receipt stamps invokedAt).
+//  - invoked:    the row already carries an invoked_at from a real receipt.
+//  - resolved:   the row settled without delivery (handled/cancelled input).
+//  - pending:    nothing could act on the row right now (CLI offline, gated,
+//    or unknown localId) — it remains durable and recoverable.
+//  - failed:     the runner answered but cannot deliver/promote this row
+//    (e.g. its queue transport does not support forcing); the row is still
+//    durable and may still deliver through the normal path.
+export type ForceSendResultStatus = 'dispatched' | 'invoked' | 'resolved' | 'pending' | 'failed'
+
+export type ForceSendResult = {
+ localId: string
+ status: ForceSendResultStatus
+ error?: string
+}
+
+export type ForceSendQueuedResponse = {
+ results: ForceSendResult[]
+ messages: DecryptedMessage[]
 }
 
 export const SpawnSessionRequestSchema = z.object({
-    directory: z.string().min(1),
-    agent: AgentFlavorSchema.optional(),
-    model: z.string().optional(),
-    effort: z.string().optional(),
-    modelReasoningEffort: z.string().optional(),
-    yolo: z.boolean().optional(),
-    permissionMode: PermissionModeSchema.optional(),
-    sessionType: z.enum(['simple', 'worktree']).optional(),
-    worktreeName: z.string().optional(),
-    serviceTier: z.enum(['fast', 'standard']).optional(),
-    collaborationMode: CodexCollaborationModeSchema.optional(),
-    copilotAgentMode: CopilotAgentModeSchema.optional(),
-    startingMode: z.enum(['remote', 'pty']).optional(),
-    // fork(claude-proxy-models)：为这一个 Claude 会话指定 cc-switch 供应商（runner 注入该供应商 env）。
-    ccSwitchProviderId: z.string().min(1).optional()
+ directory: z.string().min(1),
+ agent: AgentFlavorSchema.optional(),
+ model: z.string().optional(),
+ effort: z.string().optional(),
+ modelReasoningEffort: z.string().optional(),
+ yolo: z.boolean().optional(),
+ permissionMode: PermissionModeSchema.optional(),
+ sessionType: z.enum(['simple', 'worktree']).optional(),
+ worktreeName: z.string().optional(),
+ serviceTier: z.enum(['fast', 'standard']).optional(),
+ collaborationMode: CodexCollaborationModeSchema.optional(),
+ copilotAgentMode: CopilotAgentModeSchema.optional(),
+ startingMode: z.enum(['remote', 'pty']).optional(),
+ // fork(claude-proxy-models)：为这一个 Claude 会话指定 cc-switch 供应商（runner 注入该供应商 env）。
+ ccSwitchProviderId: z.string().min(1).optional()
 })
 
 export type SpawnSessionRequest = z.infer<typeof SpawnSessionRequestSchema>
 
 export const MachineListDirectoryRequestSchema = z.object({
-    path: z.string().min(1),
-    includeHidden: z.boolean().optional()
+ path: z.string().min(1),
+ includeHidden: z.boolean().optional()
 })
 
 export type MachineListDirectoryRequest = z.infer<typeof MachineListDirectoryRequestSchema>
 
 export const MachineCreateDirectoryRequestSchema = z.object({
-    parentPath: z.string().min(1),
-    name: z.string().min(1)
+ parentPath: z.string().min(1),
+ name: z.string().min(1)
 })
 
 export type MachineCreateDirectoryRequest = z.infer<typeof MachineCreateDirectoryRequestSchema>
 
 export const MachinePathsExistsRequestSchema = z.object({
-    paths: z.array(z.string().min(1)).max(1000)
+ paths: z.array(z.string().min(1)).max(1000)
 })
 
 export type MachinePathsExistsRequest = z.infer<typeof MachinePathsExistsRequestSchema>
 
 export const AuthRequestSchema = z.union([
-    z.object({ initData: z.string() }),
-    z.object({ accessToken: z.string() })
+ z.object({ initData: z.string() }),
+ z.object({ accessToken: z.string() })
 ])
 
 export type AuthRequest = z.infer<typeof AuthRequestSchema>
 
 export type CommandResponse = {
-    success: boolean
-    stdout?: string
-    stderr?: string
-    exitCode?: number
-    error?: string
+ success: boolean
+ stdout?: string
+ stderr?: string
+ exitCode?: number
+ error?: string
 }
 
 export type GitCommandResponse = CommandResponse
 
 export type FileReadResponse = {
-    success: boolean
-    content?: string
-    hash?: string
-    error?: string
+ success: boolean
+ content?: string
+ hash?: string
+ error?: string
 }
 
 export type FileWriteResponse = {
-    success: boolean
-    hash?: string
-    error?: string
+ success: boolean
+ hash?: string
+ error?: string
 }
 
 export type GeneratedImageResponse = {
-    success: boolean
-    content?: string
-    mimeType?: string
-    fileName?: string
-    error?: string
+ success: boolean
+ content?: string
+ mimeType?: string
+ fileName?: string
+ error?: string
 }
 
 export type GeneratedFileResponse = {
-    success: boolean
-    content?: string
-    mimeType?: string
-    fileName?: string
-    size?: number
-    error?: string
+ success: boolean
+ content?: string
+ mimeType?: string
+ fileName?: string
+ size?: number
+ error?: string
 }
 
 /** Which registry a chunked read addresses: sent files (disk snapshots) or
@@ -701,24 +794,24 @@ export type GeneratedFileResponse = {
 export type GeneratedBlobKind = 'file' | 'image'
 
 export type GeneratedBlobChunkRequest = {
-    kind: GeneratedBlobKind
-    id: string
-    offset: number
-    length: number
+ kind: GeneratedBlobKind
+ id: string
+ offset: number
+ length: number
 }
 
 export type GeneratedBlobChunkResponse = {
-    success: boolean
-    /** base64 of **this slice only** — not the whole blob. */
-    content?: string
-    /** Byte offset the slice starts at, echoed so the hub can detect a stale reply. */
-    offset?: number
-    /** Total byte length of the whole blob, so the hub can size the response and
-     *  plan the remaining slices from the very first round-trip. */
-    size?: number
-    mimeType?: string
-    fileName?: string
-    error?: string
+ success: boolean
+ /** base64 of **this slice only** — not the whole blob. */
+ content?: string
+ /** Byte offset the slice starts at, echoed so the hub can detect a stale reply. */
+ offset?: number
+ /** Total byte length of the whole blob, so the hub can size the response and
+  *  plan the remaining slices from the very first round-trip. */
+ size?: number
+ mimeType?: string
+ fileName?: string
+ error?: string
 }
 
 /**
@@ -734,433 +827,433 @@ export type GeneratedBlobTransferState = 'uploading' | 'fetching' | 'ready'
 /** Body of the `202 Accepted` a blob download answers while the bytes are still
  *  in transit. `retryAfterMs` is the poll interval the client should honour. */
 export type GeneratedBlobPendingResponse = {
-    success: false
-    state: Exclude<GeneratedBlobTransferState, 'ready'>
-    received: number
-    size: number | null
-    retryAfterMs: number
+ success: false
+ state: Exclude<GeneratedBlobTransferState, 'ready'>
+ received: number
+ size: number | null
+ retryAfterMs: number
 }
 
 /** Answer to `POST /api/sessions/:id/generated-(files|images)/:blobId/download-ticket`. */
 export type GeneratedBlobDownloadTicketResponse = {
-    success: true
-    state: 'ready'
-    ticket: string
-    downloadPath: string
-    expiresAt: number
-    fileName: string
-    mimeType: string
-    size: number
+ success: true
+ state: 'ready'
+ ticket: string
+ downloadPath: string
+ expiresAt: number
+ fileName: string
+ mimeType: string
+ size: number
 }
 
 /** Answer to a CLI upload slice (`PUT /cli/sessions/:id/blobs/:kind/:blobId`). */
 export type GeneratedBlobUploadResponse = {
-    success: boolean
-    state?: 'uploading' | 'ready'
-    /** Bytes the hub holds so far; on a `409` this is the offset to resume from. */
-    received?: number
-    size?: number
-    error?: string
-    reason?: 'offset-mismatch' | 'size-mismatch' | 'checksum-mismatch' | 'too-large' | 'insufficient-storage' | 'busy'
+ success: boolean
+ state?: 'uploading' | 'ready'
+ /** Bytes the hub holds so far; on a `409` this is the offset to resume from. */
+ received?: number
+ size?: number
+ error?: string
+ reason?: 'offset-mismatch' | 'size-mismatch' | 'checksum-mismatch' | 'too-large' | 'insufficient-storage' | 'busy'
 }
 
 export type P2pIceCandidateInit = {
-    candidate: string
-    sdpMid?: string | null
-    sdpMLineIndex?: number | null
+ candidate: string
+ sdpMid?: string | null
+ sdpMLineIndex?: number | null
 }
 
 export type P2pSessionDescriptionInit = {
-    type: 'offer' | 'answer'
-    sdp: string
+ type: 'offer' | 'answer'
+ sdp: string
 }
 
 export type P2pRouteCategory =
-    | 'lan-direct'
-    | 'wan-direct'
-    | 'p2p-unverified-route'
-    | 'hub-cache'
+ | 'lan-direct'
+ | 'wan-direct'
+ | 'p2p-unverified-route'
+ | 'hub-cache'
 
 export type P2pTransferManifest = {
-    transferId: string
-    kind: GeneratedBlobKind
-    blobId: string
-    fileName: string
-    mimeType: string
-    size: number
-    sha256: string
-    chunkBytes: number
+ transferId: string
+ kind: GeneratedBlobKind
+ blobId: string
+ fileName: string
+ mimeType: string
+ size: number
+ sha256: string
+ chunkBytes: number
 }
 
 export type PrepareP2pFileTransferRpcRequest = {
-    transferId: string
-    authToken: string
-    kind: GeneratedBlobKind
-    id: string
-    expiresAt: number
-    iceServers?: Array<{ urls: string | string[]; username?: string; credential?: string }>
+ transferId: string
+ authToken: string
+ kind: GeneratedBlobKind
+ id: string
+ expiresAt: number
+ iceServers?: Array<{ urls: string | string[]; username?: string; credential?: string }>
 }
 
 export type PrepareP2pFileTransferRpcResponse =
-    | {
-        success: true
-        offer: P2pSessionDescriptionInit
-        candidates: P2pIceCandidateInit[]
-        manifest: P2pTransferManifest
-        candidateTypes: string[]
-    }
-    | {
-        success: false
-        reason: 'snapshot-missing' | 'busy' | 'unsupported' | 'failed'
-        error: string
-    }
+ | {
+  success: true
+  offer: P2pSessionDescriptionInit
+  candidates: P2pIceCandidateInit[]
+  manifest: P2pTransferManifest
+  candidateTypes: string[]
+ }
+ | {
+  success: false
+  reason: 'snapshot-missing' | 'busy' | 'unsupported' | 'failed'
+  error: string
+ }
 
 export type SignalP2pFileTransferRpcRequest = {
-    transferId: string
-    action: 'signal' | 'cancel' | 'complete' | 'renew'
-    answer?: P2pSessionDescriptionInit
-    candidates?: P2pIceCandidateInit[]
-    expiresAt?: number
-    reason?: string
+ transferId: string
+ action: 'signal' | 'cancel' | 'complete' | 'renew'
+ answer?: P2pSessionDescriptionInit
+ candidates?: P2pIceCandidateInit[]
+ expiresAt?: number
+ reason?: string
 }
 
 export type SignalP2pFileTransferRpcResponse = {
-    success: boolean
-    candidates?: P2pIceCandidateInit[]
-    selectedRoute?: P2pRouteCategory
-    error?: string
+ success: boolean
+ candidates?: P2pIceCandidateInit[]
+ selectedRoute?: P2pRouteCategory
+ error?: string
 }
 
 export type CreateP2pFileTransferResponse =
-    | {
-        success: true
-        p2pAvailable: true
-        transferId: string
-        authToken: string
-        expiresAt: number
-        hubReady: boolean
-        offer: P2pSessionDescriptionInit
-        candidates: P2pIceCandidateInit[]
-        manifest: P2pTransferManifest
-        iceServers: Array<{ urls: string | string[] }>
-        candidateTypes: string[]
-    }
-    | {
-        success: false
-        p2pAvailable: false
-        reason: 'session-offline' | 'snapshot-missing' | 'busy' | 'unsupported' | 'failed'
-        error: string
-        hubReady: boolean
-    }
+ | {
+  success: true
+  p2pAvailable: true
+  transferId: string
+  authToken: string
+  expiresAt: number
+  hubReady: boolean
+  offer: P2pSessionDescriptionInit
+  candidates: P2pIceCandidateInit[]
+  manifest: P2pTransferManifest
+  iceServers: Array<{ urls: string | string[] }>
+  candidateTypes: string[]
+ }
+ | {
+  success: false
+  p2pAvailable: false
+  reason: 'session-offline' | 'snapshot-missing' | 'busy' | 'unsupported' | 'failed'
+  error: string
+  hubReady: boolean
+ }
 
 export type UploadFileResponse = {
-    success: boolean
-    path?: string
-    error?: string
+ success: boolean
+ path?: string
+ error?: string
 }
 
 export type DeleteUploadResponse = {
-    success: boolean
-    error?: string
+ success: boolean
+ error?: string
 }
 
 export type DirectoryEntry = {
-    name: string
-    type: 'file' | 'directory' | 'other'
-    size?: number
-    modified?: number
+ name: string
+ type: 'file' | 'directory' | 'other'
+ size?: number
+ modified?: number
 }
 
 export type ListDirectoryResponse = {
-    success: boolean
-    entries?: DirectoryEntry[]
-    error?: string
+ success: boolean
+ entries?: DirectoryEntry[]
+ error?: string
 }
 
 export type RpcListDirectoryResponse = ListDirectoryResponse
 
 export type FileMetadataEntry = {
-    path: string
-    size?: number
-    modified?: number
+ path: string
+ size?: number
+ modified?: number
 }
 
 export type StatFilesResponse = {
-    success: boolean
-    entries?: FileMetadataEntry[]
-    error?: string
+ success: boolean
+ entries?: FileMetadataEntry[]
+ error?: string
 }
 
 export type MachineDirectoryEntry = DirectoryEntry & {
-    isGitRepo?: boolean
+ isGitRepo?: boolean
 }
 
 export type MachineListDirectoryResponse = {
-    success: boolean
-    entries?: MachineDirectoryEntry[]
-    error?: string
+ success: boolean
+ entries?: MachineDirectoryEntry[]
+ error?: string
 }
 
 export type MachineCreateDirectoryResponse = {
-    success: boolean
-    path?: string
-    error?: string
+ success: boolean
+ path?: string
+ error?: string
 }
 
 export type PathExistsResponse = {
-    exists: Record<string, boolean>
+ exists: Record<string, boolean>
 }
 
 export type MachinePathsExistsResponse = PathExistsResponse
 
 export type CodexModelSummary = {
-    id: string
-    displayName: string
-    isDefault: boolean
-    defaultReasoningEffort?: string | null
-    defaultServiceTier?: string | null
-    supportedReasoningEfforts?: string[]
-    /** Service tier ids advertised for this model in the current auth/plan context (e.g. 'fast'). */
-    serviceTiers?: string[]
+ id: string
+ displayName: string
+ isDefault: boolean
+ defaultReasoningEffort?: string | null
+ defaultServiceTier?: string | null
+ supportedReasoningEfforts?: string[]
+ /** Service tier ids advertised for this model in the current auth/plan context (e.g. 'fast'). */
+ serviceTiers?: string[]
 }
 
 export type CodexModelsResponse = {
-    success: boolean
-    models?: CodexModelSummary[]
-    error?: string
+ success: boolean
+ models?: CodexModelSummary[]
+ error?: string
 }
 
 export type ListCodexModelsResponse = CodexModelsResponse
 
 export type OpencodeModelSummary = {
-    modelId: string
-    name?: string
+ modelId: string
+ name?: string
 }
 
 export type OpencodeModelsResponse = {
-    success: boolean
-    availableModels?: OpencodeModelSummary[]
-    /** CLI `agent --list-models` skus grouped under ACP wire bases for variant pickers. */
-    cliModelSkus?: OpencodeModelSummary[]
-    currentModelId?: string | null
-    error?: string
+ success: boolean
+ availableModels?: OpencodeModelSummary[]
+ /** CLI `agent --list-models` skus grouped under ACP wire bases for variant pickers. */
+ cliModelSkus?: OpencodeModelSummary[]
+ currentModelId?: string | null
+ error?: string
 }
 
 export type ListOpencodeModelsResponse = OpencodeModelsResponse
 
 export type OmpModelSummary = {
-    provider: string
-    modelId: string
-    name: string
-    reasoning: boolean
-    contextWindow: number | null
-    maxTokens: number | null
-    thinkingLevels: OmpEffort[]
+ provider: string
+ modelId: string
+ name: string
+ reasoning: boolean
+ contextWindow: number | null
+ maxTokens: number | null
+ thinkingLevels: OmpEffort[]
 }
 
 export type OmpModelsResponse = {
-    success: boolean
-    availableModels?: OmpModelSummary[]
-    currentModel?: { provider: string; modelId: string } | null
-    error?: string
+ success: boolean
+ availableModels?: OmpModelSummary[]
+ currentModel?: { provider: string; modelId: string } | null
+ error?: string
 }
 
 export type ListOmpModelsResponse = OmpModelsResponse
 
 export type CycleOmpModelResponse = {
-    success: boolean
-    currentModel?: { provider: string; modelId: string } | null
-    error?: string
+ success: boolean
+ currentModel?: { provider: string; modelId: string } | null
+ error?: string
 }
 
 export type OmpThinkingOption = {
-    value: OmpConfiguredThinkingLevel
-    name: string
+ value: OmpConfiguredThinkingLevel
+ name: string
 }
 
 export type OmpThinkingOptionsResponse = {
-    success: boolean
-    options?: OmpThinkingOption[]
-    state?: OmpThinkingState
-    error?: string
+ success: boolean
+ options?: OmpThinkingOption[]
+ state?: OmpThinkingState
+ error?: string
 }
 
 export type ListOmpThinkingOptionsResponse = OmpThinkingOptionsResponse
 
 export type OmpLoginProviderSummary = {
-    id: string
-    name: string
-    available: boolean
-    authenticated: boolean
+ id: string
+ name: string
+ available: boolean
+ authenticated: boolean
 }
 
 export type OmpLoginFlow =
-    | {
-        flowId: string
-        providerId: string
-        providerName: string
-        status: 'waiting_for_callback'
-        url: string
-        launchUrl?: string
-        instructions?: string
-    }
-    | {
-        flowId: string
-        providerId: string
-        providerName: string
-        status: 'waiting_for_input'
-        title: string
-        placeholder?: string
-    }
-    | {
-        flowId: string
-        providerId: string
-        providerName: string
-        status: 'authenticating' | 'authenticated'
-    }
-    | {
-        flowId: string
-        providerId: string
-        providerName: string
-        status: 'failed'
-        error: string
-    }
+ | {
+  flowId: string
+  providerId: string
+  providerName: string
+  status: 'waiting_for_callback'
+  url: string
+  launchUrl?: string
+  instructions?: string
+ }
+ | {
+  flowId: string
+  providerId: string
+  providerName: string
+  status: 'waiting_for_input'
+  title: string
+  placeholder?: string
+ }
+ | {
+  flowId: string
+  providerId: string
+  providerName: string
+  status: 'authenticating' | 'authenticated'
+ }
+ | {
+  flowId: string
+  providerId: string
+  providerName: string
+  status: 'failed'
+  error: string
+ }
 
 export type OmpLoginProvidersResponse =
-    | {
-        success: true
-        providers: OmpLoginProviderSummary[]
-        flow: OmpLoginFlow | null
-    }
-    | {
-        success: false
-        error: string
-    }
+ | {
+  success: true
+  providers: OmpLoginProviderSummary[]
+  flow: OmpLoginFlow | null
+ }
+ | {
+  success: false
+  error: string
+ }
 
 export type StartOmpLoginRequest = {
-    providerId: string
+ providerId: string
 }
 
 export type StartOmpLoginResponse =
-    | {
-        success: true
-        flow: OmpLoginFlow
-    }
-    | {
-        success: false
-        error: string
-    }
+ | {
+  success: true
+  flow: OmpLoginFlow
+ }
+ | {
+  success: false
+  error: string
+ }
 
 export type RespondOmpLoginInputRequest = {
-    flowId: string
-    value: string
+ flowId: string
+ value: string
 }
 
 export type RespondOmpLoginInputResponse =
-    | {
-        success: true
-        flow: OmpLoginFlow
-    }
-    | {
-        success: false
-        error: string
-    }
+ | {
+  success: true
+  flow: OmpLoginFlow
+ }
+ | {
+  success: false
+  error: string
+ }
 
 export type OmpExtensionUiInput = {
-    url?: string
-    questions: Array<{
-        id: string
-        question: string
-        required: boolean
-        multiple: boolean
-        options: Array<{
-            label: string
-            description: string | null
-        }>
-        placeholder?: string | null
-        initialValue?: string
-        multiline?: boolean
-    }>
+ url?: string
+ questions: Array<{
+  id: string
+  question: string
+  required: boolean
+  multiple: boolean
+  options: Array<{
+   label: string
+   description: string | null
+  }>
+  placeholder?: string | null
+  initialValue?: string
+  multiline?: boolean
+ }>
 }
 
 export type GetOmpExtensionUiRequest = {
-    requestId: string
+ requestId: string
 }
 
 export type GetOmpExtensionUiResponse =
-    | {
-        success: true
-        input: OmpExtensionUiInput
-    }
-    | {
-        success: false
-        error: string
-    }
+ | {
+  success: true
+  input: OmpExtensionUiInput
+ }
+ | {
+  success: false
+  error: string
+ }
 
 export type GrokModelSummary = {
-    modelId: string
-    name?: string
-    reasoningEfforts?: GrokReasoningEffortOption[]
+ modelId: string
+ name?: string
+ reasoningEfforts?: GrokReasoningEffortOption[]
 }
 
 export type GrokReasoningEffortOption = {
-    value: string
-    name?: string
-    isDefault?: boolean
+ value: string
+ name?: string
+ isDefault?: boolean
 }
 
 export type GrokModelsResponse = {
-    success: boolean
-    availableModels?: GrokModelSummary[]
-    currentModelId?: string | null
-    autoPermissionModeSupported?: boolean
-    error?: string
+ success: boolean
+ availableModels?: GrokModelSummary[]
+ currentModelId?: string | null
+ autoPermissionModeSupported?: boolean
+ error?: string
 }
 export type ListGrokModelsResponse = GrokModelsResponse
 
 export type CopilotModelSummary = {
-    modelId: string
-    name?: string
+ modelId: string
+ name?: string
 }
 
 export type CopilotModelsResponse = {
-    success: boolean
-    availableModels?: CopilotModelSummary[]
-    currentModelId?: string | null
-    error?: string
+ success: boolean
+ availableModels?: CopilotModelSummary[]
+ currentModelId?: string | null
+ error?: string
 }
 
 export type ListCopilotModelsResponse = CopilotModelsResponse
 
 export type GrokReasoningEffortResponse = {
-    success: boolean
-    options?: GrokReasoningEffortOption[]
-    currentValue?: string | null
-    error?: string
+ success: boolean
+ options?: GrokReasoningEffortOption[]
+ currentValue?: string | null
+ error?: string
 }
 
 export type OpencodeReasoningEffortOption = {
-    value: string
-    name?: string
+ value: string
+ name?: string
 }
 
 export type OpencodeReasoningEffortResponse = {
-    success: boolean
-    options?: OpencodeReasoningEffortOption[]
-    currentValue?: string | null
-    error?: string
+ success: boolean
+ options?: OpencodeReasoningEffortOption[]
+ currentValue?: string | null
+ error?: string
 }
 
 export type AgyModelSummary = {
-    modelId: string
-    name?: string
+ modelId: string
+ name?: string
 }
 
 export type AgyModelsResponse = {
-    success: boolean
-    availableModels?: AgyModelSummary[]
-    currentModelId?: string | null
-    error?: string
+ success: boolean
+ availableModels?: AgyModelSummary[]
+ currentModelId?: string | null
+ error?: string
 }
 
 export type ListAgyModelsResponse = AgyModelsResponse
@@ -1172,18 +1265,18 @@ export type CursorModelsResponse = OpencodeModelsResponse
 export type ListCursorModelsResponse = CursorModelsResponse
 
 export type CcSwitchProviderSummary = {
-    id: string
-    name: string
-    category: string | null
-    websiteUrl: string | null
-    isCurrent: boolean
+ id: string
+ name: string
+ category: string | null
+ websiteUrl: string | null
+ isCurrent: boolean
 }
 
 export type ListCcSwitchProvidersResponse = {
-    success: boolean
-    providers?: CcSwitchProviderSummary[]
-    available?: boolean
-    error?: string
+ success: boolean
+ providers?: CcSwitchProviderSummary[]
+ available?: boolean
+ error?: string
 }
 
 export type ValidateCcSwitchProviderResponse = { success: boolean; error?: string }
@@ -1192,128 +1285,128 @@ export type ValidateCcSwitchProviderResponse = { success: boolean; error?: strin
 export type PiThinkingLevelMap = Partial<Record<string, string | null>>
 
 export type PiModelSummary = {
-    provider: string
-    modelId: string
-    name?: string
-    contextWindow?: number
-    /** Whether the model supports reasoning/thinking */
-    reasoning?: boolean
-    /** Maps Pi thinking levels to provider values; null = unsupported level */
-    thinkingLevelMap?: PiThinkingLevelMap
+ provider: string
+ modelId: string
+ name?: string
+ contextWindow?: number
+ /** Whether the model supports reasoning/thinking */
+ reasoning?: boolean
+ /** Maps Pi thinking levels to provider values; null = unsupported level */
+ thinkingLevelMap?: PiThinkingLevelMap
 }
 
 export type PiModelsResponse = {
-    success: boolean
-    availableModels?: PiModelSummary[]
-    currentModelId?: string | null
-    error?: string
+ success: boolean
+ availableModels?: PiModelSummary[]
+ currentModelId?: string | null
+ error?: string
 }
 
 export type ListPiModelsResponse = PiModelsResponse
 
 export type PiCommandSummary = {
-    name: string
-    description?: string
-    source: 'extension' | 'prompt' | 'skill'
+ name: string
+ description?: string
+ source: 'extension' | 'prompt' | 'skill'
 }
 
 export type PiCommandsResponse = {
-    success: boolean
-    commands?: PiCommandSummary[]
-    error?: string
+ success: boolean
+ commands?: PiCommandSummary[]
+ error?: string
 }
 
 export type SlashCommand = {
-    name: string
-    description?: string
-    source: 'builtin' | 'user' | 'plugin' | 'project'
-    content?: string
-    pluginName?: string
+ name: string
+ description?: string
+ source: 'builtin' | 'user' | 'plugin' | 'project'
+ content?: string
+ pluginName?: string
 }
 
 export type SlashCommandsResponse = {
-    success: boolean
-    commands?: SlashCommand[]
-    error?: string
+ success: boolean
+ commands?: SlashCommand[]
+ error?: string
 }
 
 export type SqliteStorageUsageResponse = {
-    path: string
-    databaseBytes: number
-    walBytes: number
-    shmBytes: number
-    totalBytes: number
+ path: string
+ databaseBytes: number
+ walBytes: number
+ shmBytes: number
+ totalBytes: number
 }
 export type ImportableSessionProvider = 'claude' | 'codex'
 
 export type ImportableSessionSummary = {
-    provider: ImportableSessionProvider
-    externalSessionId: string
-    cwd: string
-    title: string
-    preview: string | null
-    updatedAt: number
+ provider: ImportableSessionProvider
+ externalSessionId: string
+ cwd: string
+ title: string
+ preview: string | null
+ updatedAt: number
 }
 
 export type ListImportableSessionsRequest = {
-    provider: ImportableSessionProvider
-    cursor?: string
-    cwd?: string
-    query?: string
+ provider: ImportableSessionProvider
+ cursor?: string
+ cwd?: string
+ query?: string
 }
 
 export type ListImportableSessionsResponse = {
-    sessions: ImportableSessionSummary[]
-    nextCursor: string | null
+ sessions: ImportableSessionSummary[]
+ nextCursor: string | null
 }
 
 export type ImportProviderSessionRequest = {
-    provider: ImportableSessionProvider
-    externalSessionId: string
+ provider: ImportableSessionProvider
+ externalSessionId: string
 }
 
 export type ImportProviderSessionResponse =
-    | { type: 'success'; sessionId: string; messageCount: number }
-    | { type: 'not-found' }
-    | { type: 'error'; error: string; sessionId?: string }
+ | { type: 'success'; sessionId: string; messageCount: number }
+ | { type: 'not-found' }
+ | { type: 'error'; error: string; sessionId?: string }
 
 export type ImportableSessionsPage = {
-    sessions: Array<ImportableSessionSummary & { importedHapiSessionId: string | null }>
-    nextCursor: string | null
+ sessions: Array<ImportableSessionSummary & { importedHapiSessionId: string | null }>
+ nextCursor: string | null
 }
 
 export type ImportExistingSessionResponse =
-    | { type: 'success'; sessionId: string; alreadyImported: boolean }
-    | { type: 'error'; error: string }
+ | { type: 'success'; sessionId: string; alreadyImported: boolean }
+ | { type: 'error'; error: string }
 
 export type UsageSummaryBucket = {
-    key: string
-    inputTokens: number
-    outputTokens: number
-    cacheReadTokens: number
-    cacheCreationTokens: number
-    totalTokens: number
-    uncachedTokens: number
-    requests: number
+ key: string
+ inputTokens: number
+ outputTokens: number
+ cacheReadTokens: number
+ cacheCreationTokens: number
+ totalTokens: number
+ uncachedTokens: number
+ requests: number
 }
 
 export type UsageSummaryResponse = {
-    range: {
-        from: number | null
-        to: number | null
-    }
-    totals: {
-        inputTokens: number
-        outputTokens: number
-        cacheReadTokens: number
-        cacheCreationTokens: number
-        totalTokens: number
-        uncachedTokens: number
-        requests: number
-        sessions: number
-    }
-    daily: Array<UsageSummaryBucket & { key: string }>
-    byAgent: UsageSummaryBucket[]
-    byModel: UsageSummaryBucket[]
-    updatedAt: number
+ range: {
+  from: number | null
+  to: number | null
+ }
+ totals: {
+  inputTokens: number
+  outputTokens: number
+  cacheReadTokens: number
+  cacheCreationTokens: number
+  totalTokens: number
+  uncachedTokens: number
+  requests: number
+  sessions: number
+ }
+ daily: Array<UsageSummaryBucket & { key: string }>
+ byAgent: UsageSummaryBucket[]
+ byModel: UsageSummaryBucket[]
+ updatedAt: number
 }

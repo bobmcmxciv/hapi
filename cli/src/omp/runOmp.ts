@@ -16,6 +16,8 @@ import { OmpInputQueue } from './OmpInputQueue';
 import { loadOmpEventAllowlist } from './rpc/eventAllowlist';
 import { createOmpUsageMonitor, ensureOmpUsageExtension } from './utils/ompUsageMonitor';
 import { notifyRunnerSessionCleanupVerified } from '@/runner/controlClient';
+import { ensureCx2ccUsageExtension } from '../../../fork-features/omp-host-integration/cx2ccUsageExtension';
+import { prepareOmpSessionResume } from './utils/ompSessionScanner';
 import {
     OMP_THINKING_LEVELS,
     type OmpConfiguredThinkingLevel
@@ -88,6 +90,13 @@ export async function runOmp(opts: {
             effort: configuredThinking
         });
     const { api, session } = bootstrap;
+    const restoring = Boolean(opts.existingSessionId || opts.resumeSessionId);
+    const restoredModel = opts.model !== undefined
+        ? runtimeConfig.model
+        : restoring ? bootstrap.sessionInfo?.model ?? undefined : persistedModel;
+    configuredThinking ??= bootstrap.metadata.ompThinking?.configured ?? undefined;
+    let resumeSessionId = opts.resumeSessionId ?? bootstrap.metadata.ompSession?.id;
+    let nativeSession = bootstrap.metadata.ompSession;
 
     const startingMode: 'local' | 'remote' = opts.startingMode
         ?? (startedBy === 'runner' ? 'remote' : 'local');
@@ -102,8 +111,8 @@ export async function runOmp(opts: {
 
     const sessionWrapperRef: { current: OmpSession | null } = { current: null };
     let currentPermissionMode: PermissionMode = opts.permissionMode ?? 'default';
-    let sessionModel: string | null = persistedModel ?? null;
-    let resolvedModel = sessionModel ?? machineDefault;
+    let sessionModel: string | null = restoredModel ?? null;
+    let resolvedModel = sessionModel ?? (restoring ? undefined : machineDefault);
     const usageMonitor = createOmpUsageMonitor({
         sessionId: session.sessionId,
         getPrimarySessionFile: () => sessionWrapperRef.current?.getNativeSession()?.file
@@ -150,22 +159,30 @@ export async function runOmp(opts: {
     session.onUserMessage((message, localId) => {
         const mode: OmpMode = {
             permissionMode: currentPermissionMode,
-            model: resolvedModel,
-            effort: configuredThinking
+            model: sessionWrapperRef.current?.getModel() ?? resolvedModel,
+            effort: sessionWrapperRef.current?.getEffort() ?? configuredThinking
         };
         messageQueue.push({
+            forced: session.consumeForceMark?.(localId) ?? false,
             text: message.content.text,
             attachments: message.content.attachments,
-            inputMode: message.meta?.ompInputMode ?? 'prompt',
+            inputMode: message.meta?.ompInputMode ?? (message.meta?.deliveryMode === 'steer' ? 'steer' : 'prompt'),
             mode,
             localId
         });
     });
 
-    session.onCancelQueuedMessage((localId) => {
-        const removed = messageQueue.cancelByLocalId(localId);
-        logger.debug(`[omp] cancelByLocalId(${localId}): ${removed ? 'removed' : 'not found (best-effort)'}`);
+    session.onCancelQueuedMessage(async (localId) => {
+        const wrapper = sessionWrapperRef.current;
+        const removed = wrapper ? await wrapper.cancelQueuedInput(localId) : messageQueue.cancelByLocalId(localId);
+        logger.debug(`[omp] cancelByLocalId(${localId}): ${removed ? 'removed' : 'not confirmed'}`);
         return removed;
+    });
+
+    session.onForceQueuedMessages?.(async localIds => {
+        const wrapper = sessionWrapperRef.current;
+        if (wrapper) return await wrapper.forceQueuedInputs(localIds);
+        return localIds.map(localId => ({ localId, status: messageQueue.markForced(localId) ? 'accepted' as const : 'not-found' as const }));
     });
 
     const resolvePermissionMode = (value: unknown): PermissionMode => {
@@ -260,7 +277,25 @@ export async function runOmp(opts: {
     let crashed = false;
 
     try {
+        if (configuredThinking === undefined && bootstrap.sessionInfo?.effort) {
+            configuredThinking = parseConfiguredThinking(bootstrap.sessionInfo.effort);
+        }
+        if (nativeSession && resumeSessionId !== nativeSession.id) {
+            throw new Error('Requested OMP native session does not match the existing HAPI row');
+        }
+        if (resumeSessionId) {
+            const resume = await prepareOmpSessionResume(resumeSessionId, nativeSession, workingDirectory);
+            if (resume.kind === 'empty') {
+                resumeSessionId = undefined;
+                nativeSession = undefined;
+            }
+        }
         await ensureOmpUsageExtension();
+        try {
+            await ensureCx2ccUsageExtension();
+        } catch (error) {
+            logger.debug('[OMP] Unable to install cx2cc usage extension', error);
+        }
         await usageMonitor.start();
         await ompLoop({
             path: workingDirectory,
@@ -270,12 +305,10 @@ export async function runOmp(opts: {
             session,
             api,
             permissionMode: currentPermissionMode,
-            model: machineDefault,
+            model: restoredModel,
             effort: configuredThinking,
-            resumeSessionId: opts.resumeSessionId,
-            nativeSession: bootstrap.metadata.ompSession?.id === opts.resumeSessionId
-                ? bootstrap.metadata.ompSession
-                : undefined,
+            resumeSessionId,
+            nativeSession,
             onModeChange: createModeChangeHandler(session),
             onSessionReady: (instance) => {
                 sessionWrapperRef.current = instance;

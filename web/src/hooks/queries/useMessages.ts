@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useLayoutEffect, useSyncExternalStore } from 'react'
 import type { ApiClient } from '@/api/client'
 import type { DecryptedMessage } from '@/types/api'
+import type { MessageTurnSegment } from '@hapi/protocol/messageTurns'
 import {
     activateMessageWindow,
     cancelOlderMessageLoad,
+    configureMessageWindowTurns,
     fetchOlderMessages,
     getMessageWindowState,
     setMessageViewMode,
@@ -27,9 +29,10 @@ export const EMPTY_STATE: MessageWindowState = {
     viewMode: 'tail',
     messagesVersion: 0,
     historyVersion: 0,
+    turnSegments: [],
 }
 
-export function useMessages(api: ApiClient | null, sessionId: string | null): {
+export function useMessages(api: ApiClient | null, sessionId: string | null, options: { turns?: number } = {}): {
     messages: DecryptedMessage[]
     warning: string | null
     isSyncingTail: boolean
@@ -38,6 +41,7 @@ export function useMessages(api: ApiClient | null, sessionId: string | null): {
     viewMode: MessageViewMode
     messagesVersion: number
     historyVersion: number
+    turnSegments: MessageTurnSegment[]
     loadMore: (onBeforeApply?: (historyVersion: number) => boolean) => Promise<OlderLoadOutcome>
     cancelLoadMore: () => void
     refetch: () => Promise<void>
@@ -45,7 +49,7 @@ export function useMessages(api: ApiClient | null, sessionId: string | null): {
 } {
     const state = useSyncExternalStore(
         useCallback((listener) => {
-            if (!sessionId) return () => {}
+            if (!sessionId) return () => { }
             return subscribeMessageWindow(sessionId, listener)
         }, [sessionId]),
         useCallback(() => sessionId ? getMessageWindowState(sessionId) : EMPTY_STATE, [sessionId]),
@@ -54,15 +58,16 @@ export function useMessages(api: ApiClient | null, sessionId: string | null): {
 
     useLayoutEffect(() => {
         if (sessionId) {
+            configureMessageWindowTurns(sessionId, options.turns)
             activateMessageWindow(sessionId)
         }
-    }, [sessionId])
+    }, [sessionId, options.turns])
 
     useEffect(() => {
         if (api && sessionId) {
             void syncTailMessages(api, sessionId)
         }
-    }, [api, sessionId])
+    }, [api, sessionId, options.turns])
 
     const loadMore = useCallback(async (onBeforeApply?: (historyVersion: number) => boolean) => {
         if (!api || !sessionId) {
@@ -100,6 +105,7 @@ export function useMessages(api: ApiClient | null, sessionId: string | null): {
         viewMode: state.viewMode,
         messagesVersion: state.messagesVersion,
         historyVersion: state.historyVersion,
+        turnSegments: state.turnSegments,
         loadMore,
         cancelLoadMore,
         refetch,

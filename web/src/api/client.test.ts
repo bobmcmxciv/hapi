@@ -93,6 +93,44 @@ describe('ApiClient error mapping', () => {
         expect(fetchMock.mock.calls[0]?.[0]).toBe('/api/sessions/session%20cursor/cursor-chat-store')
     })
 
+    it('always sends orderVersion=1 and serializes optional turn paging and 4-tuple fenced sharing cursors', async () => {
+        fetchMock.mockImplementation(async () => new Response(JSON.stringify({ messages: [], page: { hasMoreAfter: false } }), { status: 200 }))
+        const api = new ApiClient('test-token')
+        await api.getMessages('session turn', { limit: 200, turns: 8 })
+        const pageUrl = new URL(fetchMock.mock.calls[0]?.[0] as string, 'https://test.invalid')
+        expect(pageUrl.pathname).toBe('/api/sessions/session%20turn/messages')
+        expect(pageUrl.searchParams.get('orderVersion')).toBe('1')
+        expect(pageUrl.searchParams.get('turns')).toBe('8')
+        await api.getMessages('session turn', {
+            turnId: 'user-id',
+            afterAt: 1000,
+            afterOrder: 6,
+            afterEventOrder: 2,
+            afterSeq: 7,
+            untilAt: 2000,
+            untilOrder: 8,
+            untilEventOrder: 3,
+            untilSeq: 9,
+            epoch: 2
+        })
+        const turnUrl = new URL(fetchMock.mock.calls[1]?.[0] as string, 'https://test.invalid')
+        expect(Object.fromEntries(turnUrl.searchParams)).toEqual({
+            orderVersion: '1',
+            turnId: 'user-id',
+            afterAt: '1000',
+            afterOrder: '6',
+            afterEventOrder: '2',
+            afterSeq: '7',
+            untilAt: '2000',
+            untilOrder: '8',
+            untilEventOrder: '3',
+            untilSeq: '9',
+            epoch: '2'
+        })
+        await api.getMessages('session turn', { limit: 50 })
+        expect(fetchMock.mock.calls[2]?.[0]).toBe('/api/sessions/session%20turn/messages?orderVersion=1&limit=50')
+    })
+
     it('lists and imports Pi sessions through the selected machine', async () => {
         fetchMock
             .mockResolvedValueOnce(new Response(JSON.stringify({ success: true, sessions: [], machineId: 'machine-1' }), { status: 200 }))

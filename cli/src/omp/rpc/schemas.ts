@@ -5,6 +5,7 @@ import type {
     OmpAgentMessage,
     OmpCommandType,
     OmpInboundEvent,
+    OmpInputReceipt,
     OmpModel,
     OmpResponseData,
     OmpRpcRawResponse,
@@ -99,7 +100,31 @@ const AvailableCommandSchema = z.object({
     source: z.string()
 });
 
+const NativeOrderSchema = z.object({
+    sessionId: z.string().min(1), entryId: z.string().min(1),
+    entryOrder: z.number().int().positive().safe(), eventOrder: z.number().int().nonnegative().safe()
+});
+
+const InputReceiptSchema = z.object({
+    token: z.string().min(1),
+    sessionId: z.string().min(1),
+    admitted: z.boolean(),
+    delivered: z.boolean(),
+    entryId: z.string().min(1).optional(),
+    deliveredAt: z.string().datetime({ offset: true }).optional(),
+    deliveredOrder: z.number().int().positive().safe().optional(),
+    channel: z.enum(['prompt', 'steer', 'follow_up', 'abort_and_prompt']).optional(),
+    admittedAt: z.string().optional(),
+    nativeOrder: NativeOrderSchema.optional(),
+    outcome: z.enum(['local', 'builtin-agent', 'cancelled']).optional()
+});
+
+export function parseOmpInputReceipt(value: unknown): OmpInputReceipt {
+    return InputReceiptSchema.parse(value);
+}
+
 const SessionStateSchema = z.object({
+    capabilities: z.object({ inputReceipts: z.boolean(), nativeOrder: z.boolean().optional(), queuePromotion: z.boolean().optional() }).optional(),
     model: ModelSchema.optional(),
     thinkingLevel: ThinkingLevelSchema.optional(),
     isStreaming: z.boolean(),
@@ -136,7 +161,8 @@ const SubagentSnapshotSchema = z.object({
     sessionFile: z.string().optional(),
     lastUpdate: z.number(),
     progress: JsonObjectSchema.optional(),
-    parentToolCallId: z.string().optional()
+    parentToolCallId: z.string().optional(),
+    nativeOrder: NativeOrderSchema.optional()
 });
 
 const AgentMessageSchema = JsonObjectSchema.superRefine((message, context) => {
@@ -208,7 +234,8 @@ const RawResponseSchema = z.discriminatedUnion('success', [
         id: z.string().optional(),
         command: z.string(),
         success: z.literal(false),
-        error: z.string()
+        error: z.string(),
+        code: z.string().optional()
     })
 ]);
 
@@ -261,12 +288,30 @@ export function parseOmpResponseData<C extends OmpCommandType>(
         case 'prompt':
             parsed = data === undefined
                 ? undefined
-                : z.object({ agentInvoked: z.boolean() }).parse(data);
+                : z.object({ agentInvoked: z.boolean().optional(), receipt: InputReceiptSchema.optional() }).parse(data);
             break;
         case 'steer':
         case 'follow_up':
-        case 'abort':
         case 'abort_and_prompt':
+            parsed = data === undefined ? undefined : z.object({ receipt: InputReceiptSchema.optional() }).parse(data);
+            break;
+        case 'recover_inputs':
+        case 'get_input_receipts':
+            parsed = requiredData(command, data, z.object({ receipts: z.array(InputReceiptSchema) }));
+            break;
+        case 'remove_queued_message':
+            parsed = requiredData(command, data, z.object({ removed: z.boolean(), images: z.array(z.object({ type: z.literal('image'), data: z.string(), mimeType: z.string() })).optional() }));
+            break;
+        case 'promote_queued_message':
+            parsed = requiredData(command, data, z.object({
+                promoted: z.boolean(),
+                results: z.array(z.object({
+                    token: z.string().min(1),
+                    status: z.enum(['promoted', 'already-priority', 'not-found'])
+                })).optional()
+            }));
+            break;
+        case 'abort':
         case 'set_thinking_level':
         case 'set_steering_mode':
         case 'set_follow_up_mode':

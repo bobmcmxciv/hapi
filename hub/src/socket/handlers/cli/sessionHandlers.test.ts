@@ -3,9 +3,15 @@ import { Store, type StoredSession } from '../../../store'
 import type { SyncEvent } from '../../../sync/syncEngine'
 import type { CliSocketWithData } from '../../socketTypes'
 import { registerSessionHandlers } from './sessionHandlers'
+import { SessionCache } from '../../../sync/sessionCache'
+import type { EventPublisher } from '../../../sync/eventPublisher'
+import { RpcRegistry } from '../../rpcRegistry'
 
 class FakeSocket {
+    readonly data = { cliTrusted: true }
+    readonly handshake: { auth: { sessionId?: string; ompResumeAttemptId?: string } } = { auth: {} }
     readonly roomEvents: Array<{ room: string; event: string; data: unknown }> = []
+    readonly emitted: Array<{ event: string; data: unknown }> = []
     private readonly handlers = new Map<string, (data: unknown, ack?: (response: unknown) => void) => void>()
 
     on(event: string, handler: (data: unknown, ack?: (response: unknown) => void) => void): this {
@@ -19,6 +25,11 @@ class FakeSocket {
                 this.roomEvents.push({ room, event, data })
             }
         }
+    }
+
+    emit(event: string, data: unknown): this {
+        this.emitted.push({ event, data })
+        return this
     }
 
     trigger(event: string, data: unknown, ack?: (response: unknown) => void): void {
@@ -38,20 +49,112 @@ function redundantGoalStatusContent(message: string): unknown {
 }
 
 describe('cli session handlers', () => {
+    it.each(['old', 'current', 'revoked', 'superseded'] as const)('fences OMP lifecycle and consumed acknowledgements (%s)', (source) => {
+        const store = new Store(':memory:')
+        try {
+            const session = store.sessions.getOrCreateSession('omp-generation', {
+                path: '/tmp', host: 'h', flavor: 'omp', ompRuntimeAttemptId: 'current'
+            }, null, 'default')
+            store.messages.addMessage(session.id, { text: 'pending' }, 'pending')
+            const socket = new FakeSocket()
+            socket.handshake.auth = { sessionId: session.id, ompResumeAttemptId: source === 'old' ? 'old' : 'current' }
+            const events: string[] = []
+            registerSessionHandlers(socket as unknown as CliSocketWithData, {
+                store,
+                resolveSessionAccess: () => ({ ok: true, value: session as StoredSession }),
+                emitAccessError: () => { },
+                authorizeSessionPublication: () => source !== 'revoked',
+                isCurrentSessionSource: () => source !== 'superseded',
+                onSessionAlive: () => { events.push('alive') },
+                onSessionReady: () => { events.push('ready') },
+                onSessionEnd: () => { events.push('end') },
+            })
+            const payload = { sid: session.id, time: Date.now() }
+            socket.trigger('session-alive', payload)
+            socket.trigger('session-ready', payload)
+            socket.trigger('messages-consumed', { sid: session.id, localIds: ['pending'] })
+            socket.trigger('session-end', payload)
+            expect(events).toEqual(source === 'current' ? ['alive', 'ready', 'end'] : [])
+            expect(store.messages.getAllMessages(session.id)[0]?.invokedAt === null).toBe(source !== 'current')
+        } finally { store.close() }
+    })
+
+    it('ends only the current OMP source under skewed client clocks', () => {
+        const store = new Store(':memory:')
+        const events: SyncEvent[] = []
+        let now = Date.now()
+        const cache = new SessionCache(store, { emit: (event: SyncEvent) => events.push(event) } as unknown as EventPublisher, () => now)
+        const registry = new RpcRegistry()
+        try {
+            const session = cache.getOrCreateSession('omp-source-clock', {
+                path: '/tmp', host: 'h', flavor: 'omp', ompRuntimeAttemptId: 'current'
+            }, null, 'default')
+            const method = `${session.id}:killSession`
+            const connect = (id: string): FakeSocket => {
+                const socket = new FakeSocket()
+                socket.handshake.auth = { sessionId: session.id, ompResumeAttemptId: 'current' }
+                registry.register({ id } as never, method)
+                registerSessionHandlers(socket as unknown as CliSocketWithData, {
+                    store,
+                    resolveSessionAccess: () => ({ ok: true, value: store.sessions.getSession(session.id)! }),
+                    emitAccessError: () => { },
+                    isCurrentSessionSource: () => registry.getSocketIdForMethod(method) === id,
+                    onSessionAlive: (payload) => cache.handleSessionAlive(payload),
+                    onSessionEnd: (payload) => cache.handleSessionEnd(payload)
+                })
+                return socket
+            }
+            const old = connect('old-socket')
+            old.trigger('session-alive', { sid: session.id, time: now, thinking: true })
+            const replacement = connect('replacement-socket')
+            now += 1_000
+            replacement.trigger('session-alive', { sid: session.id, time: now - 60_000, thinking: true })
+            events.length = 0
+
+            old.trigger('session-end', { sid: session.id, time: now + 60_000 })
+            expect(cache.getSession(session.id)?.active).toBe(true)
+            expect(cache.getSession(session.id)?.thinking).toBe(true)
+            expect(events).toEqual([])
+
+            replacement.trigger('session-end', { sid: session.id, time: now - 59_000 })
+            expect(cache.getSession(session.id)?.active).toBe(false)
+            expect(store.sessions.getSession(session.id)?.active).toBe(false)
+            expect(events).toContainEqual(expect.objectContaining({
+                type: 'session-updated', data: expect.objectContaining({ active: false, thinking: false })
+            }))
+        } finally { store.close() }
+    })
+
+    it('preserves unconsumed OMP work after an accepted session end', () => {
+        const store = new Store(':memory:')
+        try {
+            const session = store.sessions.getOrCreateSession('omp-end-pending', { path: '/tmp', host: 'h', flavor: 'omp' }, null, 'default')
+            store.messages.addMessage(session.id, { text: 'not consumed' }, 'pending')
+            const socket = new FakeSocket()
+            socket.handshake.auth.sessionId = session.id
+            let ended = false
+            registerSessionHandlers(socket as unknown as CliSocketWithData, {
+                store, resolveSessionAccess: () => ({ ok: true, value: session as StoredSession }),
+                emitAccessError: () => { }, isCurrentSessionSource: () => true,
+                onSessionEnd: () => { ended = true },
+            })
+            socket.trigger('session-end', { sid: session.id, time: Date.now(), reason: 'error' })
+            expect(ended).toBe(true)
+            expect(store.messages.getAllMessages(session.id)[0]?.invokedAt).toBeNull()
+        } finally { store.close() }
+    })
+
     it('preserves immediate queued rows for cleared handoff transfer', () => {
         const store = new Store(':memory:')
         const session = store.sessions.getOrCreateSession('clear-end', {}, null, 'default')
         store.messages.addMessage(session.id, { text: 'held' }, 'held-local')
         const socket = new FakeSocket()
-        let swept = false
         registerSessionHandlers(socket as unknown as CliSocketWithData, {
             store,
             resolveSessionAccess: () => ({ ok: true, value: session as StoredSession }),
-            emitAccessError: () => {},
-            onSweepImmediateQueued: () => { swept = true }
+            emitAccessError: () => { },
         })
         socket.trigger('session-end', { sid: session.id, time: Date.now(), reason: 'cleared' })
-        expect(swept).toBe(false)
         expect(store.messages.getAllMessages(session.id)).toEqual([
             expect.objectContaining({ localId: 'held-local', invokedAt: null })
         ])
@@ -149,36 +252,50 @@ describe('cli session handlers', () => {
         try {
             const session = store.sessions.getOrCreateSession('omp-todos', { path: '/tmp', host: 'h', flavor: 'omp' }, null, 'default')
             const socket = new FakeSocket()
+            socket.handshake.auth.sessionId = session.id
             const events: SyncEvent[] = []
             registerSessionHandlers(socket as unknown as CliSocketWithData, {
                 store,
                 resolveSessionAccess: () => ({ ok: true, value: session as StoredSession }),
+                isCurrentSessionSource: () => true,
                 emitAccessError: () => { throw new Error('unexpected access error') },
                 onWebappEvent: (event) => { events.push(event) }
             })
             const send = (phases: unknown[], isError = false) => {
                 const output = { toolName: 'todo', content: [], details: { op: 'view', phases } }
-                socket.trigger('message', { sid: session.id, message: { role: 'agent', content: {
-                    type: 'output', data: { type: 'user', toolUseResult: output, message: { content: [
-                        { type: 'tool_result', content: output, is_error: isError }
-                    ] } }
-                } } })
+                socket.trigger('message', {
+                    sid: session.id, message: {
+                        role: 'agent', content: {
+                            type: 'output', data: {
+                                type: 'user', toolUseResult: output, message: {
+                                    content: [
+                                        { type: 'tool_result', content: output, is_error: isError }
+                                    ]
+                                }
+                            }
+                        }
+                    }
+                })
             }
             send([{ name: 'Repair', tasks: [{ id: '1', content: 'Implement', status: 'blocked' }] }])
             const expected = [{ id: '1', content: 'Implement', status: 'pending', priority: 'medium' }]
             expect(store.sessions.getSession(session.id)?.todos).toEqual(expected)
-            expect(events).toContainEqual(expect.objectContaining({ type: 'session-updated', data: expect.objectContaining({
-                todos: expect.objectContaining({ value: expected })
-            }) }))
+            expect(events).toContainEqual(expect.objectContaining({
+                type: 'session-updated', data: expect.objectContaining({
+                    todos: expect.objectContaining({ value: expected })
+                })
+            }))
             events.length = 0
             send([], true)
             expect(store.sessions.getSession(session.id)?.todos).toEqual(expected)
             expect(events.some((event) => event.type === 'session-updated')).toBe(false)
             send([])
             expect(store.sessions.getSession(session.id)?.todos).toEqual([])
-            expect(events).toContainEqual(expect.objectContaining({ type: 'session-updated', data: expect.objectContaining({
-                todos: expect.objectContaining({ value: [] })
-            }) }))
+            expect(events).toContainEqual(expect.objectContaining({
+                type: 'session-updated', data: expect.objectContaining({
+                    todos: expect.objectContaining({ value: [] })
+                })
+            }))
         } finally {
             store.close()
         }
@@ -213,7 +330,7 @@ describe('cli session handlers', () => {
                 expectedVersion: session.metadataVersion,
                 metadata: { lifecycleState: 'archived' }
             },
-            () => {}
+            () => { }
         )
 
         const sessionUpdated = webEvents.find((e) => e.type === 'session-updated')
@@ -261,7 +378,7 @@ describe('cli session handlers', () => {
                 expectedVersion: session.agentStateVersion,
                 agentState: { controlledByUser: true }
             },
-            () => {}
+            () => { }
         )
 
         const sessionUpdated = webEvents.find((e) => e.type === 'session-updated')
@@ -395,7 +512,7 @@ describe('cli session handlers', () => {
                         ? 'foreign-session'
                         : { replacementSessionId: 'foreign-session', state: 'reserved', updatedAt: Date.now() }
                 }
-            }, () => {})
+            }, () => { })
             expect(store.sessions.getSessionByNamespace(session.id, 'default')?.metadata).not.toHaveProperty(field)
         }
     )
@@ -420,7 +537,7 @@ describe('cli session handlers', () => {
                 supersededBySessionId: 'forged-target',
                 opencodeClearOperation: { replacementSessionId: 'forged-target', state: 'reserved', updatedAt: 0 }
             }
-        }, () => {})
+        }, () => { })
         expect(store.sessions.getSessionByNamespace(session.id, 'default')?.metadata).toMatchObject({
             supersededBySessionId: 'owned-target', opencodeClearOperation: operation, lifecycleState: 'archived'
         })
@@ -434,23 +551,31 @@ describe('cli session handlers', () => {
             ompSession: { id: 'native-original', file: '/tmp/native-original.jsonl' },
             cursorSessionId: 'legacy-cursor', cursorSessionProtocol: 'stream-json',
             lifecycleState: 'archived', archivedAt: 100, reopenArchiveSnapshot: checkpoint,
+            ompResumeAttempt: { attemptId: 'current', state: 'resuming', machineId: 'original-target', startedAt: 101 },
+            ompRuntimeAttemptId: 'current',
         }, null, 'default')
         const socket = new FakeSocket()
+        socket.handshake.auth = { sessionId: session.id, ompResumeAttemptId: 'current' }
         registerSessionHandlers(socket as unknown as CliSocketWithData, {
             store,
             resolveSessionAccess: () => ({ ok: true, value: store.sessions.getSession(session.id)! }),
             emitAccessError: () => { throw new Error('unexpected access error') },
+            authorizeSessionPublication: () => true,
+            isCurrentSessionSource: () => true,
         })
         socket.trigger('update-metadata', {
             sid: session.id, expectedVersion: session.metadataVersion,
             metadata: {
                 path: '/tmp/project', host: 'example', lifecycleState: 'running', lifecycleStateSince: 200,
                 name: 'User renamed while resuming', reopenArchiveSnapshot: incomingCheckpoint,
+                ompResumeAttempt: null, ompRuntimeAttemptId: 'forged', flavor: 'claude', machineId: 'foreign',
             },
-        }, () => {})
+        }, () => { })
         const metadata = store.sessions.getSession(session.id)?.metadata
         expect(metadata).toMatchObject({
             reopenArchiveSnapshot: checkpoint, name: 'User renamed while resuming', lifecycleState: 'running',
+            flavor: 'omp', ompRuntimeAttemptId: 'current',
+            ompResumeAttempt: { attemptId: 'current', state: 'resuming', machineId: 'original-target', startedAt: 101 },
             ompSession: { id: 'native-original', file: '/tmp/native-original.jsonl' },
             cursorSessionId: 'legacy-cursor', cursorSessionProtocol: 'stream-json',
         })
@@ -461,12 +586,12 @@ describe('cli session handlers', () => {
         const session = store.sessions.getOrCreateSession('forged-reopen-checkpoint', { path: '/tmp/project' }, null, 'default')
         const socket = new FakeSocket()
         registerSessionHandlers(socket as unknown as CliSocketWithData, {
-            store, resolveSessionAccess: () => ({ ok: true, value: session }), emitAccessError: () => {},
+            store, resolveSessionAccess: () => ({ ok: true, value: session }), emitAccessError: () => { },
         })
         socket.trigger('update-metadata', {
             sid: session.id, expectedVersion: session.metadataVersion,
             metadata: { path: '/tmp/project', reopenArchiveSnapshot: { machineId: 'foreign', archivedAt: 100 } },
-        }, () => {})
+        }, () => { })
         expect(store.sessions.getSession(session.id)?.metadata).not.toHaveProperty('reopenArchiveSnapshot')
     })
 
@@ -510,5 +635,121 @@ describe('cli session handlers', () => {
         expect(ack.result).toBe('success')
         expect(ack.metadata.summary).toBeUndefined()
         expect(store.sessions.getSession(session.id)?.metadata).not.toHaveProperty('summary')
+    })
+    it.each(['old', 'current', 'revoked', 'superseded'] as const)('accepts terminal receipts only from authenticated current OMP generation (%s)', (source) => {
+        const store = new Store(':memory:')
+        try {
+            const session = store.sessions.getOrCreateSession('terminal-generation', {
+                path: '/tmp', host: 'h', flavor: 'omp', ompRuntimeAttemptId: 'current'
+            }, null, 'default')
+            store.messages.addMessage(session.id, { role: 'user', content: '/local' }, 'terminal')
+            const socket = new FakeSocket()
+            socket.handshake.auth = { sessionId: session.id, ompResumeAttemptId: source === 'old' ? 'old' : 'current' }
+            const events: SyncEvent[] = []
+            registerSessionHandlers(socket as unknown as CliSocketWithData, {
+                store, resolveSessionAccess: () => ({ ok: true, value: session }), emitAccessError: () => { },
+                authorizeSessionPublication: () => source !== 'revoked', isCurrentSessionSource: () => source !== 'superseded',
+                onWebappEvent: event => events.push(event)
+            })
+            socket.trigger('messages-resolved', { sid: session.id, resolutions: [{ localId: 'terminal', outcome: 'failed' }] })
+            expect(events).toEqual([])
+            expect(socket.emitted.map(event => event.event)).toEqual(['error'])
+            const payload = { sid: session.id, resolutions: [{ localId: 'terminal', outcome: 'handled' }] }
+            socket.trigger('messages-resolved', payload)
+            socket.trigger('messages-resolved', { ...payload, resolutions: [{ localId: 'terminal', outcome: 'cancelled' }] })
+            socket.trigger('messages-consumed', { sid: session.id, localIds: ['terminal'] })
+            const row = store.messages.getAllMessages(session.id)[0]
+            expect(row.invokedAt).toBeNull()
+            if (source === 'current') {
+                if (!row.resolution) throw new Error('expected durable terminal resolution')
+                expect(row.resolution?.outcome).toBe('handled')
+                expect(events).toHaveLength(2)
+                expect(events[1]).toEqual(events[0])
+                expect(events[0]).toEqual({
+                    type: 'messages-resolved', sessionId: session.id,
+                    resolutions: [{ localId: 'terminal', resolution: row.resolution }]
+                })
+            } else {
+                expect(row.resolution).toBeUndefined()
+                expect(events).toEqual([])
+            }
+        } finally { store.close() }
+    })
+
+    it('does not emit terminal state when consumed evidence won or session access is denied', () => {
+        const store = new Store(':memory:')
+        try {
+            const session = store.sessions.getOrCreateSession('terminal-access', {}, null, 'default')
+            store.messages.addMessage(session.id, { role: 'user', content: 'executed' }, 'executed')
+            store.messages.markMessagesInvoked(session.id, ['executed'], 100)
+            const socket = new FakeSocket()
+            const events: SyncEvent[] = []
+            let allowed = true
+            registerSessionHandlers(socket as unknown as CliSocketWithData, {
+                store, resolveSessionAccess: () => allowed ? { ok: true, value: session } : { ok: false, reason: 'access-denied' },
+                emitAccessError: () => { }, onWebappEvent: event => events.push(event)
+            })
+            socket.trigger('messages-resolved', { sid: session.id, resolutions: [{ localId: 'executed', outcome: 'handled' }] })
+            allowed = false
+            socket.trigger('messages-resolved', { sid: session.id, resolutions: [{ localId: 'executed', outcome: 'cancelled' }] })
+            expect(events).toEqual([])
+            expect(store.messages.getAllMessages(session.id)[0].invokedAt).toBe(100)
+        } finally { store.close() }
+    })
+    it.each(['current', 'initializing', 'superseded', 'unowned-without-proof'] as const)('fences metadata/state while preserving native routing (%s)', source => {
+        const store = new Store(':memory:')
+        try {
+            const session = store.sessions.getOrCreateSession('metadata-source', {
+                path: '/allowed/project', host: 'h', flavor: 'omp', machineId: 'owned', ompRuntimeAttemptId: 'current'
+            }, null, 'default')
+            const socket = new FakeSocket()
+            socket.handshake.auth = { sessionId: session.id, ompResumeAttemptId: 'current' }
+            const replies: unknown[] = []
+            registerSessionHandlers(socket as unknown as CliSocketWithData, {
+                store, resolveSessionAccess: () => ({ ok: true, value: store.sessions.getSession(session.id)! }),
+                emitAccessError: () => { }, authorizeSessionPublication: () => true,
+                isCurrentSessionSource: () => source === 'current',
+                canInitializeSessionSource: () => source === 'initializing'
+            })
+            socket.trigger('update-metadata', {
+                sid: session.id, expectedVersion: session.metadataVersion,
+                metadata: { flavor: null, machineId: 'foreign', path: '/outside', name: 'native initialized', archivedAt: 100 }
+            }, reply => replies.push(reply))
+            socket.trigger('update-state', {
+                sid: session.id, expectedVersion: session.agentStateVersion,
+                agentState: { controlledByUser: false, requests: {}, completedRequests: {} }
+            }, reply => replies.push(reply))
+            const allowed = source === 'current' || source === 'initializing'
+            expect(replies).toEqual(allowed ? [expect.objectContaining({ result: 'success' }), expect.objectContaining({ result: 'success' })]
+                : [{ result: 'error', reason: 'access-denied' }, { result: 'error', reason: 'access-denied' }])
+            const stored = store.sessions.getSession(session.id)!
+            expect(stored.metadata).toMatchObject({ flavor: 'omp', machineId: 'owned', path: '/allowed/project', ompRuntimeAttemptId: 'current' })
+            expect(stored.metadataVersion).toBe(session.metadataVersion + (allowed ? 1 : 0))
+            expect(stored.agentStateVersion).toBe(session.agentStateVersion + (allowed ? 1 : 0))
+            if (!allowed) expect(stored.metadata).not.toHaveProperty('archivedAt')
+            else {
+                socket.trigger('update-metadata', { sid: session.id, expectedVersion: stored.metadataVersion, metadata: null }, () => { })
+                expect(store.sessions.getSession(session.id)?.metadata).toMatchObject({ flavor: 'omp', machineId: 'owned', path: '/allowed/project' })
+            }
+        } finally { store.close() }
+    })
+
+    it('rechecks principal permission even when metadata flavor is not OMP', () => {
+        const store = new Store(':memory:')
+        try {
+            const session = store.sessions.getOrCreateSession('revoked-non-omp', { path: '/tmp', host: 'h', flavor: 'claude' }, null, 'default')
+            const socket = new FakeSocket()
+            const replies: unknown[] = []
+            registerSessionHandlers(socket as unknown as CliSocketWithData, {
+                store, resolveSessionAccess: () => ({ ok: true, value: session }), emitAccessError: () => { },
+                authorizeSessionPublication: () => false
+            })
+            socket.trigger('message', { sid: session.id, message: { role: 'agent', content: 'denied' } })
+            socket.trigger('update-metadata', { sid: session.id, expectedVersion: session.metadataVersion, metadata: { archivedAt: 1 } }, reply => replies.push(reply))
+            socket.trigger('update-state', { sid: session.id, expectedVersion: session.agentStateVersion, agentState: {} }, reply => replies.push(reply))
+            expect(replies).toEqual([{ result: 'error', reason: 'access-denied' }, { result: 'error', reason: 'access-denied' }])
+            expect(store.messages.getAllMessages(session.id)).toEqual([])
+            expect(store.sessions.getSession(session.id)?.metadataVersion).toBe(session.metadataVersion)
+        } finally { store.close() }
     })
 })

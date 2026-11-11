@@ -23,10 +23,10 @@ import {
  * v1: `localStorage` was canonical, persisted on every mutation, read on
  * mount. v2: hub becomes canonical (durable + cross-device); localStorage
  * is demoted to an offline cache. This hook fetches via TanStack Query
- * keyed by `queryKeys.scratchlist(sessionId)`; the SSE handler in
- * `useSSE.ts` invalidates that key when a `session-updated` patch
- * carries `scratchlistUpdatedAt`, so a write in tab A surfaces in tab B
- * within ~1 SSE round-trip.
+ * keyed by `queryKeys.scratchlist(sessionId)`; the SSE cache projector in
+ * `query-cache-projector.ts` (driven by `useSSE.ts`) invalidates that key
+ * when a `session-updated` patch carries `scratchlistUpdatedAt`, so a write
+ * in tab A surfaces in tab B within ~1 SSE round-trip.
  *
  * Optimistic mutations
  * --------------------

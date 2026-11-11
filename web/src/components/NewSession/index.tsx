@@ -634,14 +634,15 @@ export function NewSession(props: {
             cwdExists: deferredDirectoryExists,
         })
     })
+    const ompCatalogTargetReady = selectedMachine !== null
+        && trimmedDirectory !== ''
+        && trimmedDirectory === deferredDirectory
+        && deferredDirectoryExists === true
     const ompModelsState = useOmpModelsForCwd({
         api: props.api,
         machineId,
-        cwd: deferredDirectory,
-        enabled: agent === 'omp'
-            && selectedMachine !== null
-            && Boolean(deferredDirectory)
-            && deferredDirectoryExists === true
+        cwd: trimmedDirectory,
+        enabled: agent === 'omp' && ompCatalogTargetReady
     })
     const ompModelOptions = useMemo(() => {
         const current = ompModelsState.currentModel
@@ -660,10 +661,29 @@ export function NewSession(props: {
             },
             ...ompModelsState.availableModels.map((candidate) => ({
                 value: `${candidate.provider}/${candidate.modelId}`,
-                label: `${candidate.name} (${candidate.provider})`
+                label: `${candidate.name} (${candidate.provider}/${candidate.modelId})`
             }))
         ]
     }, [ompModelsState.availableModels, ompModelsState.currentModel])
+    const ompSelectedModel = ompModelsState.availableModels.find((candidate) => (
+        `${candidate.provider}/${candidate.modelId}` === (model === 'auto'
+            ? `${ompModelsState.currentModel?.provider}/${ompModelsState.currentModel?.modelId}`
+            : model)
+    ))
+    const ompExplicitSelectionError = agent !== 'omp' || model === 'auto'
+        ? null
+        : !ompCatalogTargetReady
+            ? t('newSession.model.ompDirectoryRequired')
+            : ompModelsState.error
+                ? `${t('newSession.model.loadFailed')}: ${ompModelsState.error}`
+                : !ompModelsState.isReady
+                    ? t('newSession.model.ompValidationPending')
+                    : !ompSelectedModel
+                        ? t('newSession.model.ompUnlisted', { model })
+                        : null
+    const ompVisibleModelOptions = model !== 'auto' && !ompModelOptions.some((option) => option.value === model)
+        ? [...ompModelOptions, { value: model, label: model }]
+        : ompModelOptions
     const copilotModelsState = useCopilotModelsForCwd({
         api: props.api,
         machineId,
@@ -846,7 +866,7 @@ export function NewSession(props: {
         const staticProxyIds = new Set<string>(CLAUDE_PROXY_MODEL_IDS)
         const listed = dynamicOptions
             ? MODEL_OPTIONS.claude.some((option) => option.value === model && !staticProxyIds.has(option.value))
-                || dynamicOptions.some((option) => option.value === model)
+            || dynamicOptions.some((option) => option.value === model)
             : MODEL_OPTIONS.claude.some((option) => option.value === model)
         if (!listed) {
             setClaudeModelNotice(t('newSession.model.proxyCatalogUnlisted', { model }))
@@ -1447,6 +1467,10 @@ export function NewSession(props: {
 
     async function handleCreate() {
         if (!machineId || !trimmedDirectory || createInFlightRef.current) return
+        if (ompExplicitSelectionError) {
+            setError(ompExplicitSelectionError)
+            return
+        }
 
         createInFlightRef.current = true
         setIsCreating(true)
@@ -1652,6 +1676,7 @@ export function NewSession(props: {
                 deferredDirectoryExists === undefined
                 || (deferredDirectoryExists === true && copilotModelsState.isLoading)
             ))
+        || (agent === 'omp' && model !== 'auto' && !ompModelsState.isReady)
     const fastModeSelectionPending = agent === 'codex'
         && serviceTier === 'fast'
         && codexModelsState.isLoading
@@ -1660,6 +1685,7 @@ export function NewSession(props: {
     // a probe never answers, the wait used to keep Create grey indefinitely; after
     // LAUNCH_VALIDATION_WAIT_MS the form launches with the selection unvalidated.
     const launchValidationTimedOut = useHeldTrueFor(launchValidationPending, LAUNCH_VALIDATION_WAIT_MS)
+    const effectiveLaunchValidationTimedOut = agent !== 'omp' && launchValidationTimedOut
     const selectedMachineOffline = selectedMachine !== null && !isMachineOnline(selectedMachine)
     const canCreate = Boolean(
         selectedMachine
@@ -1667,7 +1693,8 @@ export function NewSession(props: {
         && trimmedDirectory
         && !isFormDisabled
         && !missingWorktreeDirectory
-        && (!launchValidationPending || launchValidationTimedOut)
+        && !ompExplicitSelectionError
+        && (!launchValidationPending || effectiveLaunchValidationTimedOut)
     )
     const createStatus = describeCreateStatus({
         canCreate,
@@ -1680,7 +1707,7 @@ export function NewSession(props: {
         directoryEntered: trimmedDirectory !== '',
         directoryProblemShown: missingWorktreeDirectory,
         validationPending: launchValidationPending,
-        validationTimedOut: launchValidationTimedOut,
+        validationTimedOut: effectiveLaunchValidationTimedOut,
         ompOnly: agent === 'omp'
     })
 
@@ -1818,68 +1845,87 @@ export function NewSession(props: {
                     </>
                 ) : (
                     <>
-                    <ModelSelector
-                        agent={agent}
-                        model={model}
-                        options={
-                            agent === 'codex'
-                                ? codexModelOptions
-                                : agent === 'claude'
-                                    ? claudeModelOptions
-                                : agent === 'grok'
-                                    ? grokModelOptions
-                                : agent === 'omp'
-                                    ? ompModelOptions
-                                    : agent === 'copilot'
-                                        ? copilotModelOptions
-                                : undefined
-                        }
-                        isDisabled={
-                            isFormDisabled
-                            || (agent === 'codex' && Boolean(codexModelsState.error))
-                            || (agent === 'grok' && Boolean(grokModelsState.error))
-                            || (agent === 'omp' && Boolean(ompModelsState.error))
-                            || (agent === 'copilot' && Boolean(copilotModelsState.error))
-                        }
-                        isLoading={(agent === 'codex' && codexModelsState.isLoading)
-                            || (agent === 'claude' && claudeProxyModelsState.isLoading)
-                            || (agent === 'grok' && grokModelsState.isLoading)
-                            || (agent === 'omp' && ompModelsState.isLoading)
-                            || (agent === 'copilot' && copilotModelsState.isLoading)}
-                        error={agent === 'codex' && codexModelsState.error
-                            ? `${t('newSession.model.loadFailed')}: ${codexModelsState.error}`
-                            : agent === 'grok' && grokModelsState.error
-                                ? `${t('newSession.model.loadFailed')}: ${grokModelsState.error}`
-                                : agent === 'omp' && ompModelsState.error
-                                    ? `${t('newSession.model.loadFailed')}: ${ompModelsState.error}`
-                                    : agent === 'copilot' && copilotModelsState.error
-                                        ? `${t('newSession.model.loadFailed')}: ${copilotModelsState.error}`
-                                        : null}
-                        onModelChange={(value) => {
-                            setClaudeModelNotice(null)
-                            setModel(value)
-                        }}
-                    />
-                    {agent === 'claude' ? (
-                        <ClaudeProxyCatalogHint
-                            state={claudeProxyModelsState}
-                            notice={claudeModelNotice}
-                            isDisabled={isFormDisabled}
-                        />
-                    ) : null}
-                    {agent === 'claude' && ccSwitchProvidersState.available && machineId ? (
-                        <CcSwitchProviderSelector
-                            providers={ccSwitchProvidersState.providers}
-                            currentProviderId={ccSwitchProvidersState.currentProviderId}
-                            value={ccSwitchProviderId}
-                            isLoading={ccSwitchProvidersState.isLoading}
-                            isDisabled={isFormDisabled}
-                            onChange={(providerId) => {
-                                setCcSwitchProviderId(providerId)
-                                savePreferredCcSwitchProvider(machineId, providerId)
+                        <ModelSelector
+                            agent={agent}
+                            model={model}
+                            options={
+                                agent === 'codex'
+                                    ? codexModelOptions
+                                    : agent === 'claude'
+                                        ? claudeModelOptions
+                                        : agent === 'grok'
+                                            ? grokModelOptions
+                                            : agent === 'omp'
+                                                ? ompVisibleModelOptions
+                                                : agent === 'copilot'
+                                                    ? copilotModelOptions
+                                                    : undefined
+                            }
+                            isDisabled={
+                                isFormDisabled
+                                || (agent === 'codex' && Boolean(codexModelsState.error))
+                                || (agent === 'grok' && Boolean(grokModelsState.error))
+                                || (agent === 'copilot' && Boolean(copilotModelsState.error))
+                            }
+                            isLoading={(agent === 'codex' && codexModelsState.isLoading)
+                                || (agent === 'claude' && claudeProxyModelsState.isLoading)
+                                || (agent === 'grok' && grokModelsState.isLoading)
+                                || (agent === 'omp' && ompModelsState.isLoading)
+                                || (agent === 'copilot' && copilotModelsState.isLoading)}
+                            error={agent === 'codex' && codexModelsState.error
+                                ? `${t('newSession.model.loadFailed')}: ${codexModelsState.error}`
+                                : agent === 'grok' && grokModelsState.error
+                                    ? `${t('newSession.model.loadFailed')}: ${grokModelsState.error}`
+                                    : agent === 'omp'
+                                        ? ompExplicitSelectionError ?? (ompModelsState.error
+                                            ? `${t('newSession.model.loadFailed')}: ${ompModelsState.error}`
+                                            : null)
+                                        : agent === 'copilot' && copilotModelsState.error
+                                            ? `${t('newSession.model.loadFailed')}: ${copilotModelsState.error}`
+                                            : null}
+                            onModelChange={(value) => {
+                                setClaudeModelNotice(null)
+                                setModel(value)
                             }}
                         />
-                    ) : null}
+                        {agent === 'omp' ? (
+                            <div className="px-3 pb-3 text-xs text-[var(--app-hint)]">
+                                <p>{t('settings.fork.omp.nativeScope')}</p>
+                                {ompSelectedModel?.thinkingLevels.length ? (
+                                    <p className="mt-1">{t('newSession.model.ompThinkingCapabilities', {
+                                        levels: ompSelectedModel.thinkingLevels.join(', ')
+                                    })}</p>
+                                ) : null}
+                                <button
+                                    type="button"
+                                    className="mt-2 text-[var(--app-link)] hover:underline disabled:opacity-50"
+                                    disabled={isFormDisabled || !ompCatalogTargetReady || ompModelsState.isLoading}
+                                    onClick={() => void ompModelsState.refreshCatalogs()}
+                                >
+                                    {t('settings.fork.omp.refresh')}
+                                </button>
+                            </div>
+                        ) : null}
+                        {agent === 'claude' ? (
+                            <ClaudeProxyCatalogHint
+                                state={claudeProxyModelsState}
+                                notice={claudeModelNotice}
+                                isDisabled={isFormDisabled}
+                            />
+                        ) : null}
+                        {agent === 'claude' && ccSwitchProvidersState.available && machineId ? (
+                            <CcSwitchProviderSelector
+                                providers={ccSwitchProvidersState.providers}
+                                currentProviderId={ccSwitchProvidersState.currentProviderId}
+                                value={ccSwitchProviderId}
+                                isLoading={ccSwitchProvidersState.isLoading}
+                                isDisabled={isFormDisabled}
+                                onChange={(providerId) => {
+                                    setCcSwitchProviderId(providerId)
+                                    savePreferredCcSwitchProvider(machineId, providerId)
+                                }}
+                            />
+                        ) : null}
                     </>
                 )
             )}

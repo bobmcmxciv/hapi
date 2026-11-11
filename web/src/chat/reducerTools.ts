@@ -1,5 +1,6 @@
 import type { AgentState } from '@/types/api'
 import type { ChatBlock, ChatToolCall, NormalizedMessage, ToolCallBlock, ToolPermission, UsageData } from '@/chat/types'
+import { isObject } from '@hapi/protocol'
 
 export type PermissionEntry = {
     toolName: string
@@ -113,6 +114,12 @@ export function ensureToolBlock(
         }
         if (seed.progress !== undefined && existing.tool.state === 'running') {
             existing.tool = { ...existing.tool, result: seed.progress }
+        }
+        // A progress/permission record can create the card before its canonical tool_use arrives.
+        if (seed.meta !== undefined && existing.meta !== seed.meta) {
+            existing.meta = isObject(existing.meta) && isObject(seed.meta)
+                ? { ...existing.meta, ...seed.meta }
+                : existing.meta ?? seed.meta
         }
         // The first call (tool_use) records when the tool was invoked. The
         // second call (tool_result) carries the result message's invokedAt,

@@ -13,10 +13,12 @@ import { SOCKET_MAX_HTTP_BUFFER_SIZE } from './socketLimits'
 import type { SyncEvent } from '../sync/syncEngine'
 import { TerminalRegistry } from './terminalRegistry'
 import { clearUserTerminalBuffer } from './userTerminalBuffer'
-import type { CliSocketWithData, SocketData, SocketServer } from './socketTypes'
+import type { CliSocketWithData, SocketData, SocketServer, SocketWithData } from './socketTypes'
 import type { RuntimeTimelineRegistry } from '../sync/runtimeTimeline'
 import type { MultiUserGatewayStore } from '../../../fork-features/multi-user/gatewayStore'
+import type { Capability } from '../../../fork-features/multi-user/domain'
 import type { SessionMachineResolver, SessionPathResolver } from '../../../fork-features/multi-user/machineInheritance'
+import { gatewayCredentialIdentity } from '../../../fork-features/multi-user/socketAdapter'
 
 const jwtPayloadSchema = z.object({
     uid: z.number(),
@@ -47,13 +49,15 @@ export type SocketServerDeps = {
     onMachineAlive?: (payload: { machineId: string; time: number; health?: unknown }) => void
     onBackgroundTaskDelta?: (sessionId: string, delta: { started: number; completed: number }) => void
     onSessionActivity?: (sessionId: string, updatedAt: number) => void
-    onSweepImmediateQueued?: (sessionId: string, now: number) => void
     onMessagesConsumed?: (sessionId: string) => void
-    resolveTerminalNamespace?: (accountId: number, sessionId: string) => string | null
+    resolveTerminalNamespace?: (accountId: number, sessionId: string, capability?: Capability) => string | null
     resolveCliNamespace?: (token: string) => string | null
     sanitizeSessionMetadata?: (metadata: unknown) => unknown
+    /** Live runtime timeline registry (beta); wired through to CLI session-runtime handler. */
     runtimeRegistry?: RuntimeTimelineRegistry
+    /** Resolves a gateway API token to its principal (account + token row), not just namespace. */
     resolveCliIdentity?: (token: string) => { accountId: number; tokenId: number; namespace: string } | null
+    /** Multi-user authorization context for runtime publisher checks. */
     gatewayStore?: MultiUserGatewayStore
     resolveSessionMachineId?: SessionMachineResolver
     resolveSessionPath?: SessionPathResolver
@@ -162,13 +166,13 @@ export function createSocketServer(deps: SocketServerDeps): {
         onWebappEvent: deps.onWebappEvent,
         onBackgroundTaskDelta: deps.onBackgroundTaskDelta,
         onSessionActivity: deps.onSessionActivity,
-        onSweepImmediateQueued: deps.onSweepImmediateQueued,
         onMessagesConsumed: deps.onMessagesConsumed,
         sanitizeSessionMetadata: deps.sanitizeSessionMetadata,
         runtimeRegistry: deps.runtimeRegistry,
         gatewayStore: deps.gatewayStore,
         resolveSessionMachineId: deps.resolveSessionMachineId,
-        resolveSessionPath: deps.resolveSessionPath
+        resolveSessionPath: deps.resolveSessionPath,
+        resolveTerminalNamespace: deps.resolveTerminalNamespace
     }))
 
     terminalNs.use(async (socket, next) => {
@@ -186,25 +190,55 @@ export function createSocketServer(deps: SocketServerDeps): {
             }
             socket.data.userId = parsed.data.uid
             socket.data.namespace = parsed.data.ns
-            socket.data.gatewayAccountId = typeof verified.payload.gaid === 'number' ? verified.payload.gaid : undefined
+            // A gateway-issued token must still be backed by the live account/
+            // API-token inventory — a valid signature alone must not reconnect
+            // a disabled account or a revoked token. Fail closed when no
+            // gateway store exists to answer the check.
+            if (typeof verified.payload.gaid === 'number') {
+                const identity = deps.gatewayStore
+                    ? gatewayCredentialIdentity(deps.gatewayStore, { gaid: verified.payload.gaid, tid: verified.payload.tid })
+                    : null
+                if (!identity) {
+                    return next(new Error('Invalid token'))
+                }
+                socket.data.gatewayAccountId = identity.accountId
+                socket.data.gatewayTokenId = identity.tokenId
+            }
             next()
             return
         } catch {
             return next(new Error('Invalid token'))
         }
     })
+    const getSessionForTerminal = (sessionId: string) => {
+        return deps.getSession?.(sessionId) ?? deps.store.sessions.getSession(sessionId)
+    }
+    // Authoritative per-account ACL for everything a /terminal socket may do to
+    // a session. A configured gateway resolver's denial is final: there is no
+    // same-namespace fallback that would let a denied account back in. Legacy
+    // (non-gateway) sockets keep the same-namespace rule. `read` covers
+    // subscribe/replay/output; `operate` is required to spawn or drive a PTY.
+    const authorizeTerminalSocket = (
+        terminalSocket: SocketWithData,
+        sessionId: string,
+        capability: Capability
+    ): string | null => {
+        const accountId = terminalSocket.data.gatewayAccountId
+        if (typeof accountId !== 'number') {
+            const session = getSessionForTerminal(sessionId)
+            const namespace = terminalSocket.data.namespace
+            return typeof namespace === 'string' && session?.namespace === namespace ? namespace : null
+        }
+        return deps.resolveTerminalNamespace?.(accountId, sessionId, capability) ?? null
+    }
     terminalNs.on('connection', (socket) => registerTerminalHandlers(socket, {
         io,
-        getSession: (sessionId) => {
-            return deps.getSession?.(sessionId) ?? deps.store.sessions.getSession(sessionId)
-        },
+        getSession: getSessionForTerminal,
         terminalRegistry,
         maxTerminalsPerSocket,
         maxTerminalsPerSession,
-        resolveNamespaceForSession: (socket, sessionId) => {
-            const accountId = socket.data.gatewayAccountId
-            return typeof accountId === 'number' ? deps.resolveTerminalNamespace?.(accountId, sessionId) ?? null : socket.data.namespace ?? null
-        }
+        resolveNamespaceForSession: (s, sessionId, capability) =>
+            authorizeTerminalSocket(s, sessionId, capability ?? 'operate')
     }))
 
     return { io, engine, rpcRegistry }

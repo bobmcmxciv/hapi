@@ -28,7 +28,7 @@ CLI_API_TOKEN="your-base-token:alice"
 ## Limitations and gotchas
 
 - Hub-side `CLI_API_TOKEN` must not include `:<namespace>`. The hub validates the token from both the environment variable and `settings.json`, and refuses to start with an error if a suffix is present.
-- Namespaces are isolated: sessions, machines, and users are not visible across namespaces.
+- Namespaces are isolated for ordinary accounts. In the multi-user gateway, explicit ownership/grants (including machine inheritance) can share resources across namespaces; administrators can list and read all hub sessions and machines, including unbound records, without taking ownership.
 - One machine ID cannot be reused across namespaces.
   - To run multiple namespaces on one machine, use a separate `HAPI_HOME` per namespace, or clear the machine ID with `hapi auth logout` before switching.
 - Remote spawn is namespace-scoped. If you need remote spawning for multiple namespaces on the same machine, run a separate runner per namespace (use separate `HAPI_HOME`).

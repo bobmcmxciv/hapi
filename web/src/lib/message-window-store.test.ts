@@ -7,6 +7,7 @@ import {
     activateMessageWindow,
     appendOptimisticMessage,
     clearMessageWindow,
+    configureMessageWindowTurns,
     fetchOlderMessages,
     getMessageWindowState,
     getQueuedReconcileCandidateLocalIds,
@@ -1379,5 +1380,179 @@ describe('V2 persistence boundary', () => {
 
         expect(getMessageWindowState(id).messages[0]?.status).toBe('queued')
         expect(getQueuedReconcileCandidateLocalIds(id)).toEqual(['local-1'])
+    })
+})
+
+describe('Beta turn-oriented message windows', () => {
+    it('requests turn units, keeps an entire >400-row page, and merges a huge-turn continuation without repeating edges', async () => {
+        const id = sessionId('turn-page-continuation')
+        configureMessageWindowTurns(id, 8)
+        const user = makeUserMessage({ id: 'user', seq: 1, createdAt: 1000, invokedAt: 1000 })
+        const agents = Array.from({ length: 699 }, (_, index) => makeAgentMessage({ id: `agent-${index}`, seq: index + 2, at: index + 1001 }))
+        const latest = latestResponse(agents.slice(100), { hasMore: true, nextBeforeAt: 1101, nextBeforeSeq: 102 })
+        latest.page.turns = {
+            requested: 8, rowLimit: 2000, segments: [{
+                turnId: user.id, from: { at: 1101, seq: 102 }, to: { at: 1699, seq: 700 }, completeBefore: false, completeAfter: true
+            }]
+        }
+        const older = beforeResponse([user, ...agents.slice(0, 100)], { nextBeforeAt: 1000, nextBeforeSeq: 1 })
+        older.page.turns = {
+            requested: 8, rowLimit: 2000, segments: [{
+                turnId: user.id, from: { at: 1000, seq: 1 }, to: { at: 1100, seq: 101 }, completeBefore: true, completeAfter: false
+            }]
+        }
+        const getMessages = vi.fn().mockResolvedValueOnce(latest).mockResolvedValueOnce(older)
+        const api = createApi(getMessages)
+        await syncTailMessages(api, id)
+        expect(getMessages.mock.calls[0]?.[1]).toMatchObject({ turns: 8 })
+        expect(getMessageWindowState(id).messages).toHaveLength(599)
+        await fetchOlderMessages(api, id)
+        expect(getMessages.mock.calls[1]?.[1]).toMatchObject({ turns: 8, beforeAt: 1101, beforeSeq: 102 })
+        const state = getMessageWindowState(id)
+        expect(state.messages.map((row) => row.id)).toEqual([user, ...agents].map((row) => row.id))
+        expect(state.turnSegments).toEqual([{
+            turnId: user.id, from: { at: 1000, seq: 1 }, to: { at: 1699, seq: 700 }, completeBefore: true, completeAfter: true
+        }])
+    })
+
+    it('keeps a stable giant-turn identity after bounded live-window eviction and never claims complete sharing', async () => {
+        const id = sessionId('turn-page-bounded-live')
+        configureMessageWindowTurns(id, 8)
+        const user = makeUserMessage({ id: 'huge-user', seq: 1, createdAt: 1000, invokedAt: 1000 })
+        const page = latestResponse([user], { nextBeforeAt: 1000, nextBeforeSeq: 1 })
+        page.page.turns = {
+            requested: 8, rowLimit: 2000, segments: [{
+                turnId: user.id, from: { at: 1000, seq: 1 }, to: { at: 1000, seq: 1 }, completeBefore: true, completeAfter: true
+            }]
+        }
+        await syncTailMessages(createApi(vi.fn().mockResolvedValueOnce(page)), id)
+        ingestIncomingMessages(id, Array.from({ length: 8001 }, (_, index) => makeAgentMessage({ id: `huge-${index}`, seq: index + 2, at: index + 1001 })))
+        const state = getMessageWindowState(id)
+        expect(state.messages).toHaveLength(8000)
+        expect(state.messages.some((row) => row.id === user.id)).toBe(false)
+        expect(state.turnSegments[0]).toMatchObject({ turnId: user.id, completeBefore: false, completeAfter: false })
+        expect(state.hasMore).toBe(true)
+    })
+
+    it('leaves legacy row paging opt-out unchanged', async () => {
+        const id = sessionId('turn-page-legacy')
+        const getMessages = vi.fn().mockResolvedValueOnce(latestResponse([]))
+        await syncTailMessages(createApi(getMessages), id)
+        expect(getMessages.mock.calls[0]?.[1]).toEqual({ limit: 200 })
+        expect(getMessageWindowState(id).turnSegments).toEqual([])
+    })
+})
+
+describe('Beta queue cursor isolation', () => {
+    it('does not advance an execution cursor to out-of-band queued prompts from latest pages or SSE', async () => {
+        const id = sessionId('turn-page-queued-cursor')
+        configureMessageWindowTurns(id, 8)
+        const user = makeUserMessage({ id: 'invoked', seq: 1, createdAt: 1000, invokedAt: 1000 })
+        const answer = makeAgentMessage({ id: 'answer', seq: 2, at: 2000 })
+        const queued = makeUserMessage({ id: 'queued', localId: 'queued-local', seq: 3, createdAt: 10000, invokedAt: null })
+        const latest = latestResponse([user, answer, queued], {
+            nextBeforeAt: 1000, nextBeforeSeq: 1, snapshotHeadAt: 2000, snapshotHeadSeq: 2
+        })
+        latest.page.turns = {
+            requested: 8, rowLimit: 2000, segments: [{
+                turnId: user.id, from: { at: 1000, seq: 1 }, to: { at: 2000, seq: 2 }, completeBefore: true, completeAfter: true
+            }]
+        }
+        const delta = afterResponse([], { nextAfterAt: 2000, nextAfterSeq: 2, snapshotHeadAt: 2000, snapshotHeadSeq: 2 })
+        const getMessages = vi.fn().mockResolvedValueOnce(latest).mockResolvedValueOnce(delta)
+        const api = createApi(getMessages)
+        await syncTailMessages(api, id)
+        ingestIncomingMessages(id, [makeUserMessage({ id: 'queued-new', localId: 'queued-new-local', seq: 4, createdAt: 20000, invokedAt: null })])
+        await syncTailMessages(api, id)
+        expect(getMessages.mock.calls[1]?.[1]).toMatchObject({ afterAt: 2000, afterSeq: 2, turns: 8 })
+        expect(getMessageWindowState(id).messages.map((row) => row.id)).toContain(queued.id)
+        expect(getMessageWindowState(id).turnSegments).toHaveLength(1)
+        expect(getMessageWindowState(id).turnSegments[0]?.turnId).toBe(user.id)
+    })
+
+    it('propagates 4-tuple cursors across tail sync, history prepend, and delayed-ACK same-ms turns', async () => {
+        const id = sessionId('turn-page-4tuple-cursors')
+        configureMessageWindowTurns(id, 8)
+        const epochAt = 50_000
+        const u1: DecryptedMessage = {
+            ...makeUserMessage({ id: 'u1', localId: 'l-u1', seq: 2, createdAt: 10_000, invokedAt: null, status: 'queued' }),
+        }
+        const a1: DecryptedMessage = {
+            ...makeAgentMessage({ id: 'a1', seq: 1, at: 20_000, invokedAt: 20_000 }),
+            position: { at: epochAt, order: 2, eventOrder: 1 },
+        }
+        const u2: DecryptedMessage = {
+            ...makeUserMessage({ id: 'u2', localId: 'l-u2', seq: 3, createdAt: 20_000, invokedAt: 20_000, status: 'sent' }),
+            position: { at: epochAt, order: 3, eventOrder: 0 },
+        }
+        const latest = latestResponse([a1, u1, u2], {
+            epoch: 4,
+            hasMore: true,
+            nextBeforeAt: epochAt,
+            nextBeforeSeq: 1,
+            snapshotHeadAt: epochAt,
+            snapshotHeadSeq: 3,
+        })
+        latest.page.nextBeforeOrder = 2
+        latest.page.nextBeforeEventOrder = 1
+        latest.page.snapshotHeadOrder = 3
+        latest.page.snapshotHeadEventOrder = 0
+
+        const olderRow: DecryptedMessage = {
+            ...makeAgentMessage({ id: 'a0', seq: 9, at: 5_000, invokedAt: 5_000 }),
+            position: { at: epochAt, order: 1, eventOrder: 2 },
+        }
+        const older = beforeResponse([olderRow], {
+            epoch: 4,
+            hasMore: false,
+            nextBeforeAt: epochAt,
+            nextBeforeSeq: 9,
+        })
+        older.page.nextBeforeOrder = 1
+        older.page.nextBeforeEventOrder = 2
+
+        const tailDelta = afterResponse([], {
+            epoch: 4,
+            nextAfterAt: epochAt,
+            nextAfterSeq: 3,
+            snapshotHeadAt: epochAt,
+            snapshotHeadSeq: 3,
+        })
+        tailDelta.page.nextAfterOrder = 3
+        tailDelta.page.nextAfterEventOrder = 0
+        tailDelta.page.snapshotHeadOrder = 3
+        tailDelta.page.snapshotHeadEventOrder = 0
+
+        const getMessages = vi.fn()
+            .mockResolvedValueOnce(latest)
+            .mockResolvedValueOnce(older)
+            .mockResolvedValueOnce(tailDelta)
+        const api = createApi(getMessages)
+
+        await syncTailMessages(api, id)
+        // Late ACK for u1 arrives with deliveredAt skewed +60s ahead of a1, but native entryOrder=1 < a1 order=2
+        markMessagesConsumed(id, ['l-u1'], 80_000, [
+            { localId: 'l-u1', position: { at: epochAt, order: 1, eventOrder: 0 } },
+        ])
+        expect(getMessageWindowState(id).messages.map((m) => m.id)).toEqual(['u1', 'a1', 'u2'])
+
+        await fetchOlderMessages(api, id)
+        expect(getMessages.mock.calls[1]?.[1]).toMatchObject({
+            beforeAt: epochAt,
+            beforeOrder: 2,
+            beforeEventOrder: 1,
+            beforeSeq: 1,
+            turns: 8,
+        })
+        expect(getMessageWindowState(id).messages.map((m) => m.id)).toEqual(['u1', 'a0', 'a1', 'u2'])
+
+        await syncTailMessages(api, id)
+        expect(getMessages.mock.calls[2]?.[1]).toMatchObject({
+            afterAt: epochAt,
+            afterOrder: 3,
+            afterSeq: 3,
+            epoch: 4,
+            turns: 8,
+        })
     })
 })

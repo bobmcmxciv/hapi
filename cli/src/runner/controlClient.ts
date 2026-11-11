@@ -10,122 +10,125 @@ import packageJson from '../../package.json';
 import { existsSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { isBunCompiled, projectPath } from '@/projectPath';
-import { getProcessStartMarker, isProcessAlive, isHapiRunnerProcess, killProcess } from '@/utils/process';
+import { getProcessStartMarkerAsync, isProcessAlive, isHapiRunnerProcessAsync, killProcess } from '@/utils/process';
 import { configuration } from '@/configuration';
 import { hashRunnerCliApiToken, hashRunnerExtraHeaders, isRunnerStateCompatibleWithIdentity } from './runnerIdentity';
+import { SessionCleanupReceiptStore } from './cleanupReceipt';
 
 export function getInstalledCliMtimeMs(): number | undefined {
-  if (isBunCompiled()) {
-    try {
-      return statSync(process.execPath).mtimeMs;
-    } catch {
-      return undefined;
-    }
-  }
-
-  const packageJsonPath = join(projectPath(), 'package.json');
-  if (!existsSync(packageJsonPath)) {
-    return undefined;
-  }
-
+ if (isBunCompiled()) {
   try {
-    return statSync(packageJsonPath).mtimeMs;
+   return statSync(process.execPath).mtimeMs;
   } catch {
-    return undefined;
+   return undefined;
   }
+ }
+
+ const packageJsonPath = join(projectPath(), 'package.json');
+ if (!existsSync(packageJsonPath)) {
+  return undefined;
+ }
+
+ try {
+  return statSync(packageJsonPath).mtimeMs;
+ } catch {
+  return undefined;
+ }
 }
 
 async function runnerPost(path: string, body?: any): Promise<{ error?: string } | any> {
-  const state = await readRunnerState();
-  if (!state?.httpPort) {
-    const errorMessage = 'No runner running, no state file found';
-    logger.debug(`[CONTROL CLIENT] ${errorMessage}`);
-    return {
-      error: errorMessage
-    };
+ const state = await readRunnerState();
+ if (!state?.httpPort) {
+  const errorMessage = 'No runner running, no state file found';
+  logger.debug(`[CONTROL CLIENT] ${errorMessage}`);
+  return {
+   error: errorMessage
+  };
+ }
+
+ if (!isProcessAlive(state.pid)) {
+  const errorMessage = 'Runner is not running, file is stale';
+  logger.debug(`[CONTROL CLIENT] ${errorMessage}`);
+  return {
+   error: errorMessage
+  };
+ }
+
+ try {
+  const timeout = process.env.HAPI_RUNNER_HTTP_TIMEOUT ? parseInt(process.env.HAPI_RUNNER_HTTP_TIMEOUT) : 10_000;
+  const response = await fetch(`http://127.0.0.1:${state.httpPort}${path}`, {
+   method: 'POST',
+   headers: { 'Content-Type': 'application/json' },
+   body: JSON.stringify(body || {}),
+   // Mostly increased for stress test
+   signal: AbortSignal.timeout(timeout)
+  });
+
+  if (!response.ok) {
+   const errorMessage = `Request failed: ${path}, HTTP ${response.status}`;
+   logger.debug(`[CONTROL CLIENT] ${errorMessage}`);
+   return {
+    error: errorMessage
+   };
   }
 
-  if (!isProcessAlive(state.pid)) {
-    const errorMessage = 'Runner is not running, file is stale';
-    logger.debug(`[CONTROL CLIENT] ${errorMessage}`);
-    return {
-      error: errorMessage
-    };
+  return await response.json();
+ } catch (error) {
+  const errorMessage = `Request failed: ${path}, ${error instanceof Error ? error.message : 'Unknown error'}`;
+  logger.debug(`[CONTROL CLIENT] ${errorMessage}`);
+  return {
+   error: errorMessage
   }
-
-  try {
-    const timeout = process.env.HAPI_RUNNER_HTTP_TIMEOUT ? parseInt(process.env.HAPI_RUNNER_HTTP_TIMEOUT) : 10_000;
-    const response = await fetch(`http://127.0.0.1:${state.httpPort}${path}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body || {}),
-      // Mostly increased for stress test
-      signal: AbortSignal.timeout(timeout)
-    });
-    
-    if (!response.ok) {
-      const errorMessage = `Request failed: ${path}, HTTP ${response.status}`;
-      logger.debug(`[CONTROL CLIENT] ${errorMessage}`);
-      return {
-        error: errorMessage
-      };
-    }
-    
-    return await response.json();
-  } catch (error) {
-    const errorMessage = `Request failed: ${path}, ${error instanceof Error ? error.message : 'Unknown error'}`;
-    logger.debug(`[CONTROL CLIENT] ${errorMessage}`);
-    return {
-      error: errorMessage
-    }
-  }
+ }
 }
 
 export async function notifyRunnerSessionStarted(
-  sessionId: string,
-  metadata: Metadata
+ sessionId: string,
+ metadata: Metadata
 ): Promise<{ error?: string } | any> {
-  return await runnerPost('/session-started', {
-    sessionId,
-    metadata
-  });
+ return await runnerPost('/session-started', {
+  sessionId,
+  metadata
+ });
 }
 
-/** Sent only after the native session has acknowledged disposal of its resources. */
+/** Sent only after native disposal; durable proof survives runner downtime. */
 export async function notifyRunnerSessionCleanupVerified(sessionId: string): Promise<void> {
-  const state = await readRunnerState();
-  if (!state || !isProcessAlive(state.pid)) return;
-  const processStartMarker = getProcessStartMarker(process.pid);
-  if (!processStartMarker) throw new Error('Cannot verify session process generation during cleanup');
-  const result = await runnerPost('/session-cleanup-verified', {
-    sessionId,
-    pid: process.pid,
-    processStartMarker
-  });
-  if (result.status !== 'ok') {
-    throw new Error(result.error ?? 'Runner did not acknowledge native session cleanup');
-  }
+ const processStartMarker = await getProcessStartMarkerAsync(process.pid) ?? '';
+ const ompResumeAttemptId = process.env.HAPI_OMP_RESUME_ATTEMPT_ID || undefined;
+ if (!processStartMarker && !ompResumeAttemptId) throw new Error('Cannot verify session process generation during cleanup');
+ const receipt = { sessionId, pid: process.pid, processStartMarker, ompResumeAttemptId };
+ new SessionCleanupReceiptStore(configuration.runnerStateFile).write(receipt);
+ // HTTP delivery accelerates acknowledgement, but is not the durability boundary.
+ // The recovering runner reads the same generation-bound proof before releasing
+ // ownership. A failed/offline delivery must not erase successful native cleanup.
+ const state = await readRunnerState();
+ if (!state || !isProcessAlive(state.pid)) return;
+ const result = await runnerPost('/session-cleanup-verified', receipt);
+ if (result.status !== 'ok') {
+  logger.debug('[CONTROL CLIENT] Native cleanup proof persisted for runner recovery:', result.error);
+ }
 }
 
 export async function listRunnerSessions(): Promise<any[]> {
-  const result = await runnerPost('/list');
-  return result.children || [];
+ const result = await runnerPost('/list');
+ return result.children || [];
 }
 
 export async function stopRunnerSession(sessionId: string): Promise<'stopped' | 'already_gone' | 'still_alive'> {
-  const result = await runnerPost('/stop-session', { sessionId });
-  return result.status === 'stopped' || result.status === 'already_gone' || result.status === 'still_alive'
-    ? result.status
-    : 'still_alive';
+ const result = await runnerPost('/stop-session', { sessionId });
+ return result.status === 'stopped' || result.status === 'already_gone' || result.status === 'still_alive'
+  ? result.status
+  : 'still_alive';
 }
 
 export async function spawnRunnerSession(directory: string, sessionId?: string): Promise<any> {
-  const result = await runnerPost('/spawn-session', { directory, sessionId });
-  return result;
+ const result = await runnerPost('/spawn-session', { directory, sessionId });
+ return result;
 }
 
 export async function stopRunnerHttp(): Promise<void> {
-  await runnerPost('/stop');
+ await runnerPost('/stop');
 }
 
 /**
@@ -156,19 +159,19 @@ export async function stopRunnerHttp(): Promise<void> {
  * For instance when running `hapi runner status` we can show more information.
  */
 export async function checkIfRunnerRunningAndCleanupStaleState(): Promise<boolean> {
-  const state = await readRunnerState();
-  if (!state) {
-    return false;
-  }
-
-  // Verify PID is alive AND belongs to hapi (not a reused PID from another process)
-  if (isHapiRunnerProcess(state.pid)) {
-    return true;
-  }
-
-  logger.debug('[RUNNER RUN] Runner PID not running or not a hapi process, cleaning up state');
-  await cleanupRunnerState();
+ const state = await readRunnerState();
+ if (!state) {
   return false;
+ }
+
+ // Verify PID is alive AND belongs to hapi (not a reused PID from another process)
+ if (await isHapiRunnerProcessAsync(state.pid)) {
+  return true;
+ }
+
+ logger.debug('[RUNNER RUN] Runner PID not running or not a hapi process, cleaning up state');
+ await cleanupRunnerState();
+ return false;
 }
 
 /**
@@ -179,78 +182,78 @@ export async function checkIfRunnerRunningAndCleanupStaleState(): Promise<boolea
  * @returns true if versions match, false if versions differ or no runner running
  */
 export async function isRunnerRunningCurrentlyInstalledHappyVersion(): Promise<boolean> {
-  logger.debug('[RUNNER CONTROL] Checking if runner is running same version');
-  const runningRunner = await checkIfRunnerRunningAndCleanupStaleState();
-  if (!runningRunner) {
-    logger.debug('[RUNNER CONTROL] No runner running, returning false');
-    return false;
-  }
+ logger.debug('[RUNNER CONTROL] Checking if runner is running same version');
+ const runningRunner = await checkIfRunnerRunningAndCleanupStaleState();
+ if (!runningRunner) {
+  logger.debug('[RUNNER CONTROL] No runner running, returning false');
+  return false;
+ }
 
-  const state = await readRunnerState();
-  if (!state) {
-    logger.debug('[RUNNER CONTROL] No runner state found, returning false');
-    return false;
-  }
+ const state = await readRunnerState();
+ if (!state) {
+  logger.debug('[RUNNER CONTROL] No runner state found, returning false');
+  return false;
+ }
 
-  const settings = await readSettings();
-  const currentApiUrl = process.env.HAPI_API_URL
-    || settings.apiUrl
-    || settings.serverUrl
-    || configuration.apiUrl;
-  const currentCliApiToken = process.env.CLI_API_TOKEN
-    || settings.cliApiToken
-    || configuration.cliApiToken;
-  const currentMachineId = settings.machineId;
-  
-  try {
-    // When HAPI_DISABLE_VERSION_HANDOFF=1 is set on the live runner (operator
-    // owns supervision via systemd/tmux/custom rebuild pipelines), a fresh CLI invocation must NOT
-    // treat the running runner as stale just because source mtimes shifted.
-    // Otherwise `hapi runner start` would kill the live runner mid-rebuild.
-    //
-    // Per Codex review #814 [Major]: the env var is commonly only set on the
-    // supervising service (systemd unit file), NOT on the operator's
-    // interactive shell. To honour the running runner's opt-out from any
-    // caller, OR the live env-var check with the persisted-at-start snapshot
-    // in state.startedWithVersionHandoffDisabled.
-    if (
-      process.env.HAPI_DISABLE_VERSION_HANDOFF === '1'
-      || state.startedWithVersionHandoffDisabled === true
-    ) {
-      logger.debug('[RUNNER CONTROL] Version handoff disabled (env or persisted state), skipping mtime/version drift check');
-    } else {
-      const currentCliMtimeMs = getInstalledCliMtimeMs();
-      if (typeof currentCliMtimeMs === 'number' && typeof state.startedWithCliMtimeMs === 'number') {
-        logger.debug(`[RUNNER CONTROL] Current CLI mtime: ${currentCliMtimeMs}, Runner started with mtime: ${state.startedWithCliMtimeMs}`);
-        if (currentCliMtimeMs !== state.startedWithCliMtimeMs) {
-          return false;
-        }
-      } else {
-        const currentCliVersion = packageJson.version;
-        logger.debug(`[RUNNER CONTROL] Current CLI version: ${currentCliVersion}, Runner started with version: ${state.startedWithCliVersion}`);
-        if (currentCliVersion !== state.startedWithCliVersion) {
-          return false;
-        }
-      }
+ const settings = await readSettings();
+ const currentApiUrl = process.env.HAPI_API_URL
+  || settings.apiUrl
+  || settings.serverUrl
+  || configuration.apiUrl;
+ const currentCliApiToken = process.env.CLI_API_TOKEN
+  || settings.cliApiToken
+  || configuration.cliApiToken;
+ const currentMachineId = settings.machineId;
+
+ try {
+  // When HAPI_DISABLE_VERSION_HANDOFF=1 is set on the live runner (operator
+  // owns supervision via systemd/tmux/custom rebuild pipelines), a fresh CLI invocation must NOT
+  // treat the running runner as stale just because source mtimes shifted.
+  // Otherwise `hapi runner start` would kill the live runner mid-rebuild.
+  //
+  // Per Codex review #814 [Major]: the env var is commonly only set on the
+  // supervising service (systemd unit file), NOT on the operator's
+  // interactive shell. To honour the running runner's opt-out from any
+  // caller, OR the live env-var check with the persisted-at-start snapshot
+  // in state.startedWithVersionHandoffDisabled.
+  if (
+   process.env.HAPI_DISABLE_VERSION_HANDOFF === '1'
+   || state.startedWithVersionHandoffDisabled === true
+  ) {
+   logger.debug('[RUNNER CONTROL] Version handoff disabled (env or persisted state), skipping mtime/version drift check');
+  } else {
+   const currentCliMtimeMs = getInstalledCliMtimeMs();
+   if (typeof currentCliMtimeMs === 'number' && typeof state.startedWithCliMtimeMs === 'number') {
+    logger.debug(`[RUNNER CONTROL] Current CLI mtime: ${currentCliMtimeMs}, Runner started with mtime: ${state.startedWithCliMtimeMs}`);
+    if (currentCliMtimeMs !== state.startedWithCliMtimeMs) {
+     return false;
     }
-
-    const currentIdentityMatches = isRunnerStateCompatibleWithIdentity(state, {
-      apiUrl: currentApiUrl,
-      machineId: currentMachineId,
-      cliApiTokenHash: hashRunnerCliApiToken(currentCliApiToken),
-      extraHeadersHash: hashRunnerExtraHeaders(configuration.extraHeaders)
-    });
-    logger.debug(`[RUNNER CONTROL] Runner identity match: ${currentIdentityMatches}`, {
-      currentApiUrl,
-      currentMachineId,
-      runnerStartedWithApiUrl: state.startedWithApiUrl,
-      runnerStartedWithMachineId: state.startedWithMachineId
-    });
-    return currentIdentityMatches;
-  } catch (error) {
-    logger.debug('[RUNNER CONTROL] Error checking runner version', error);
-    return false;
+   } else {
+    const currentCliVersion = packageJson.version;
+    logger.debug(`[RUNNER CONTROL] Current CLI version: ${currentCliVersion}, Runner started with version: ${state.startedWithCliVersion}`);
+    if (currentCliVersion !== state.startedWithCliVersion) {
+     return false;
+    }
+   }
   }
+
+  const currentIdentityMatches = isRunnerStateCompatibleWithIdentity(state, {
+   apiUrl: currentApiUrl,
+   machineId: currentMachineId,
+   cliApiTokenHash: hashRunnerCliApiToken(currentCliApiToken),
+   extraHeadersHash: hashRunnerExtraHeaders(configuration.extraHeaders)
+  });
+  logger.debug(`[RUNNER CONTROL] Runner identity match: ${currentIdentityMatches}`, {
+   currentApiUrl,
+   currentMachineId,
+   runnerStartedWithApiUrl: state.startedWithApiUrl,
+   runnerStartedWithMachineId: state.startedWithMachineId
+  });
+  return currentIdentityMatches;
+ } catch (error) {
+  logger.debug('[RUNNER CONTROL] Error checking runner version', error);
+  return false;
+ }
 }
 
 /**
@@ -262,80 +265,80 @@ export async function isRunnerRunningCurrentlyInstalledHappyVersion(): Promise<b
  * `oldPid`, false on timeout.
  */
 export async function waitForRunnerHandoff(
-  oldPid: number,
-  options: { timeoutMs?: number; pollIntervalMs?: number } = {}
+ oldPid: number,
+ options: { timeoutMs?: number; pollIntervalMs?: number } = {}
 ): Promise<boolean> {
-  const timeoutMs = options.timeoutMs ?? 30_000;
-  const pollIntervalMs = options.pollIntervalMs ?? 500;
-  const deadline = Date.now() + timeoutMs;
+ const timeoutMs = options.timeoutMs ?? 30_000;
+ const pollIntervalMs = options.pollIntervalMs ?? 500;
+ const deadline = Date.now() + timeoutMs;
 
-  while (Date.now() < deadline) {
-    try {
-      const state = await readRunnerState();
-      if (state && state.pid !== oldPid && isProcessAlive(state.pid)) {
-        logger.debug(`[RUNNER CONTROL] Handoff confirmed: new runner PID ${state.pid} replaced ${oldPid}`);
-        return true;
-      }
-    } catch (error) {
-      logger.debug('[RUNNER CONTROL] Error polling runner state during handoff wait', error);
-    }
-    await new Promise(resolve => setTimeout(resolve, pollIntervalMs));
+ while (Date.now() < deadline) {
+  try {
+   const state = await readRunnerState();
+   if (state && state.pid !== oldPid && isProcessAlive(state.pid)) {
+    logger.debug(`[RUNNER CONTROL] Handoff confirmed: new runner PID ${state.pid} replaced ${oldPid}`);
+    return true;
+   }
+  } catch (error) {
+   logger.debug('[RUNNER CONTROL] Error polling runner state during handoff wait', error);
   }
-  logger.debug(`[RUNNER CONTROL] Handoff timeout: no replacement runner registered within ${timeoutMs}ms`);
-  return false;
+  await new Promise(resolve => setTimeout(resolve, pollIntervalMs));
+ }
+ logger.debug(`[RUNNER CONTROL] Handoff timeout: no replacement runner registered within ${timeoutMs}ms`);
+ return false;
 }
 
 export async function cleanupRunnerState(): Promise<void> {
-  try {
-    await clearRunnerState();
-    logger.debug('[RUNNER RUN] Runner state file removed');
-  } catch (error) {
-    logger.debug('[RUNNER RUN] Error cleaning up runner metadata', error);
-  }
+ try {
+  await clearRunnerState();
+  logger.debug('[RUNNER RUN] Runner state file removed');
+ } catch (error) {
+  logger.debug('[RUNNER RUN] Error cleaning up runner metadata', error);
+ }
 }
 
 export async function stopRunner() {
-  try {
-    const state = await readRunnerState();
-    if (!state) {
-      logger.debug('No runner state found');
-      return;
-    }
-
-    logger.debug(`Stopping runner with PID ${state.pid}`);
-
-    // Try HTTP graceful stop
-    try {
-      await stopRunnerHttp();
-
-      // Wait for runner to die
-      await waitForProcessDeath(state.pid, 2000);
-      logger.debug('Runner stopped gracefully via HTTP');
-      return;
-    } catch (error) {
-      logger.debug('HTTP stop failed, will force kill', error);
-    }
-
-    // Force kill
-    const killed = await killProcess(state.pid, true);
-    if (killed) {
-      logger.debug('Force killed runner');
-    } else {
-      logger.debug('Runner already dead or could not be killed');
-    }
-  } catch (error) {
-    logger.debug('Error stopping runner', error);
+ try {
+  const state = await readRunnerState();
+  if (!state) {
+   logger.debug('No runner state found');
+   return;
   }
+
+  logger.debug(`Stopping runner with PID ${state.pid}`);
+
+  // Try HTTP graceful stop
+  try {
+   await stopRunnerHttp();
+
+   // Wait for runner to die
+   await waitForProcessDeath(state.pid, 2000);
+   logger.debug('Runner stopped gracefully via HTTP');
+   return;
+  } catch (error) {
+   logger.debug('HTTP stop failed, will force kill', error);
+  }
+
+  // Force kill
+  const killed = await killProcess(state.pid, true);
+  if (killed) {
+   logger.debug('Force killed runner');
+  } else {
+   logger.debug('Runner already dead or could not be killed');
+  }
+ } catch (error) {
+  logger.debug('Error stopping runner', error);
+ }
 }
 
 async function waitForProcessDeath(pid: number, timeout: number): Promise<void> {
-  const start = Date.now();
-  while (Date.now() - start < timeout) {
-    if (isProcessAlive(pid)) {
-      await new Promise(resolve => setTimeout(resolve, 100));
-      continue;
-    }
-    return; // Process is dead
+ const start = Date.now();
+ while (Date.now() - start < timeout) {
+  if (isProcessAlive(pid)) {
+   await new Promise(resolve => setTimeout(resolve, 100));
+   continue;
   }
-  throw new Error('Process did not die within timeout');
+  return; // Process is dead
+ }
+ throw new Error('Process did not die within timeout');
 }

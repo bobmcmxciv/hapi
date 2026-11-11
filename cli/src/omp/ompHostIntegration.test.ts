@@ -106,16 +106,22 @@ describe('OMP host presentation policy', () => {
             },
             onFatal
         });
-        integration.handle({ type: 'host_tool_call', raw: {
-            type: 'host_tool_call', id: 'title-call', toolCallId: 'title-tool',
-            toolName: 'change_title', arguments: { title: 'Hidden title' }
-        } });
-        integration.handle({ type: 'extension_ui_request', raw: {
-            type: 'extension_ui_request', id: 'notice', method: 'notify', message: 'Hidden notice'
-        } });
-        integration.handle({ type: 'extension_ui_request', raw: {
-            type: 'extension_ui_request', id: 'input', method: 'input', title: 'Required input'
-        } });
+        integration.handle({
+            type: 'host_tool_call', raw: {
+                type: 'host_tool_call', id: 'title-call', toolCallId: 'title-tool',
+                toolName: 'change_title', arguments: { title: 'Hidden title' }
+            }
+        });
+        integration.handle({
+            type: 'extension_ui_request', raw: {
+                type: 'extension_ui_request', id: 'notice', method: 'notify', message: 'Hidden notice'
+            }
+        });
+        integration.handle({
+            type: 'extension_ui_request', raw: {
+                type: 'extension_ui_request', id: 'input', method: 'input', title: 'Required input'
+            }
+        });
         expect(state.requests?.input).toBeDefined();
         await rpcHandlerManager.handleRequest({
             method: `policy-test:${RPC_METHODS.Permission}`,
@@ -129,9 +135,11 @@ describe('OMP host presentation policy', () => {
         });
         expect(fake.frames).toContainEqual({ type: 'extension_ui_response', id: 'input', value: 'accepted' });
         expect(metadata.summary?.text).toBe('Hidden title');
-        integration.handle({ type: 'extension_ui_request', raw: {
-            type: 'extension_ui_request', id: 'native-title', method: 'setTitle', title: 'Native hidden title'
-        } });
+        integration.handle({
+            type: 'extension_ui_request', raw: {
+                type: 'extension_ui_request', id: 'native-title', method: 'setTitle', title: 'Native hidden title'
+            }
+        });
         expect(metadata.summary?.text).toBe('Hidden title');
         expect(state.requests).toEqual({});
         expect(sendAgentMessage).not.toHaveBeenCalled();
@@ -162,13 +170,17 @@ describe('OMP host presentation policy', () => {
             },
             onFatal: vi.fn()
         });
-        integration.handle({ type: 'host_tool_call', raw: {
-            type: 'host_tool_call', id: 'title-call', toolCallId: 'title-tool',
-            toolName: 'change_title', arguments: { title: 'Selected title' }
-        } });
-        integration.handle({ type: 'extension_ui_request', raw: {
-            type: 'extension_ui_request', id: 'notice', method: 'notify', message: 'Hidden notice'
-        } });
+        integration.handle({
+            type: 'host_tool_call', raw: {
+                type: 'host_tool_call', id: 'title-call', toolCallId: 'title-tool',
+                toolName: 'change_title', arguments: { title: 'Selected title' }
+            }
+        });
+        integration.handle({
+            type: 'extension_ui_request', raw: {
+                type: 'extension_ui_request', id: 'notice', method: 'notify', message: 'Hidden notice'
+            }
+        });
         gate.resolve();
         await vi.waitFor(() => {
             expect(sendClaudeSessionMessage).toHaveBeenCalledWith(expect.objectContaining({
@@ -185,12 +197,17 @@ describe('OMP host tool bridge', () => {
 
     beforeEach(async () => {
         sourceDir = await mkdtemp(join(tmpdir(), 'hapi-omp-host-'));
+        vi.stubEnv('HAPI_SENT_FILES_DIR', join(sourceDir, 'snapshots'));
     });
 
     afterEach(async () => {
-        clearGeneratedFiles();
-        clearGeneratedImages();
-        await rm(sourceDir, { recursive: true, force: true });
+        try {
+            clearGeneratedFiles();
+            clearGeneratedImages();
+            await rm(sourceDir, { recursive: true, force: true });
+        } finally {
+            vi.unstubAllEnvs();
+        }
     });
 
     it('registers native tools, streams first, snapshots media/files, and rejects a missing file', async () => {

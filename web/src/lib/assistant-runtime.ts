@@ -5,8 +5,8 @@ import { fromThreadMessageLike, useExternalMessageConverter, useExternalStoreRun
 import type { PendingSchedule } from '@/components/AssistantChat/ScheduleTimePicker'
 import { resolvePendingSchedule } from '@/components/AssistantChat/ScheduleTimePicker'
 import {
-    consumeComposerSendIntent,
-    type ComposerSendIntent,
+ consumeComposerSendIntent,
+ type ComposerSendIntent,
 } from '@/lib/messageDelivery'
 import { safeStringify } from '@hapi/protocol'
 import { renderEventLabel } from '@/chat/presentation'
@@ -15,7 +15,7 @@ import type { ChatBlock, CliOutputBlock, CodexReview, UsageData } from '@/chat/t
 import type { AgentEvent, ToolCallBlock } from '@/chat/types'
 import type { ToolGroupBlock, VisibleChatBlock } from '@/chat/toolGroups'
 import { visibleBlockRole } from '@/chat/toolGroups'
-import type { AttachmentMetadata, MessageStatus as HappyMessageStatus, Session } from '@/types/api'
+import type { AttachmentMetadata, DecryptedMessage, MessageStatus as HappyMessageStatus, Session } from '@/types/api'
 import { buildShareHiddenByMessageId } from '@/lib/shareTurnAvailability'
 
 /**
@@ -24,89 +24,90 @@ import { buildShareHiddenByMessageId } from '@/lib/shareTurnAvailability'
  * preserves it after joining adjacent assistant messages.
  */
 export type AggregatedAssistantMeta = {
-    usage?: UsageData
-    model: string | null
-    invokedAt: number | null
-    durationMs: undefined
-    turnCount: number
+ usage?: UsageData
+ model: string | null
+ invokedAt: number | null
+ durationMs: undefined
+ turnCount: number
 }
 
 export type HappyChatMessageMetadata = {
-    kind: 'user' | 'assistant' | 'tool' | 'event' | 'cli-output' | 'codex-review'
-    status?: HappyMessageStatus
-    localId?: string | null
-    originalText?: string
-    toolCallId?: string
-    event?: AgentEvent
-    source?: CliOutputBlock['source']
-    attachments?: AttachmentMetadata[]
-    invokedAt?: number | null
-    durationMs?: number
-    usage?: UsageData
-    model?: string | null
-    review?: CodexReview
-    /**
-     * Raw hub-DB message id (unprefixed) for user-text blocks. The
-     * assistant-ui `message.id` is the composed threadMessageId
-     * `${kind}:${block.id}` (see `assignThreadMessageIdsWithStableWrappers`),
-     * which cannot be used against hub's `/api/sessions/:id/fork`
-     * because that endpoint matches on the raw hub messageId. Callers
-     * that need to talk to hub about a specific stored message (rewind
-     * / fork-at-message) MUST read this field, not `message.id`.
-     */
-    hubMessageId?: string
-    /**
-     * Distinct turn count when this block carries an aggregated response
-     * group footer. Single-turn blocks omit this field so the existing
-     * per-message footer is rendered unchanged.
-     */
-    turnCount?: number
+ kind: 'user' | 'assistant' | 'tool' | 'event' | 'cli-output' | 'codex-review'
+ status?: HappyMessageStatus
+ localId?: string | null
+ originalText?: string
+ toolCallId?: string
+ event?: AgentEvent
+ source?: CliOutputBlock['source']
+ attachments?: AttachmentMetadata[]
+ invokedAt?: number | null
+ resolution?: DecryptedMessage['resolution']
+ durationMs?: number
+ usage?: UsageData
+ model?: string | null
+ review?: CodexReview
+ /**
+  * Raw hub-DB message id (unprefixed) for user-text blocks. The
+  * assistant-ui `message.id` is the composed threadMessageId
+  * `${kind}:${block.id}` (see `assignThreadMessageIdsWithStableWrappers`),
+  * which cannot be used against hub's `/api/sessions/:id/fork`
+  * because that endpoint matches on the raw hub messageId. Callers
+  * that need to talk to hub about a specific stored message (rewind
+  * / fork-at-message) MUST read this field, not `message.id`.
+  */
+ hubMessageId?: string
+ /**
+  * Distinct turn count when this block carries an aggregated response
+  * group footer. Single-turn blocks omit this field so the existing
+  * per-message footer is rendered unchanged.
+  */
+ turnCount?: number
 }
 
 export type HappyRuntimeExtras = Readonly<{
-    messagesVersion: number
-    historyVersion: number
-    runningSince: number
-    shareHiddenByMessageId: ReadonlySet<string>
+ messagesVersion: number
+ historyVersion: number
+ runningSince: number
+ shareHiddenByMessageId: ReadonlySet<string>
 }>
 
 function formatCodexReviewText(review: CodexReview): string {
-    const lines = ['Codex review']
-    if (review.overallCorrectness) {
-        lines.push(`Overall: ${review.overallCorrectness}`)
-    }
-    if (review.overallExplanation) {
-        lines.push('', review.overallExplanation)
-    }
-    if (review.findings.length > 0) {
-        lines.push('', 'Findings:')
-        for (const finding of review.findings) {
-            const priority = finding.priority === null ? '' : `[P${finding.priority}] `
-            const location = finding.filePath
-                ? ` (${finding.filePath}${finding.lineStart === null ? '' : `:${finding.lineStart}${finding.lineEnd !== null && finding.lineEnd !== finding.lineStart ? `-${finding.lineEnd}` : ''}`})`
-                : ''
-            lines.push(`- ${priority}${finding.title}${location}`)
-            lines.push(`  ${finding.body}`)
-        }
-    }
-    return lines.join('\n')
+ const lines = ['Codex review']
+ if (review.overallCorrectness) {
+  lines.push(`Overall: ${review.overallCorrectness}`)
+ }
+ if (review.overallExplanation) {
+  lines.push('', review.overallExplanation)
+ }
+ if (review.findings.length > 0) {
+  lines.push('', 'Findings:')
+  for (const finding of review.findings) {
+   const priority = finding.priority === null ? '' : `[P${finding.priority}] `
+   const location = finding.filePath
+    ? ` (${finding.filePath}${finding.lineStart === null ? '' : `:${finding.lineStart}${finding.lineEnd !== null && finding.lineEnd !== finding.lineStart ? `-${finding.lineEnd}` : ''}`})`
+    : ''
+   lines.push(`- ${priority}${finding.title}${location}`)
+   lines.push(`  ${finding.body}`)
+  }
+ }
+ return lines.join('\n')
 }
 
 
 export function getBlockPresentationTimestamp(block: VisibleChatBlock): number {
-    if (visibleBlockRole(block) === 'user') {
-        return block.invokedAt ?? block.createdAt
-    }
-    if (block.kind === 'tool-group') {
-        return block.tools.reduce(
-            (latest, tool) => Math.max(latest, tool.tool.completedAt ?? tool.createdAt),
-            block.createdAt
-        )
-    }
-    if (block.kind === 'tool-call') {
-        return Math.max(block.createdAt, block.tool.completedAt ?? block.createdAt)
-    }
-    return block.createdAt
+ if (visibleBlockRole(block) === 'user') {
+  return block.invokedAt ?? block.createdAt
+ }
+ if (block.kind === 'tool-group') {
+  return block.tools.reduce(
+   (latest, tool) => Math.max(latest, tool.tool.completedAt ?? tool.createdAt),
+   block.createdAt
+  )
+ }
+ if (block.kind === 'tool-call') {
+  return Math.max(block.createdAt, block.tool.completedAt ?? block.createdAt)
+ }
+ return block.createdAt
 }
 
 /**
@@ -115,41 +116,41 @@ export function getBlockPresentationTimestamp(block: VisibleChatBlock): number {
  * time so prepending an older page cannot change an existing card's timestamp.
  */
 export function getResponseGroupTimestamps(
-    blocks: readonly VisibleChatBlock[]
+ blocks: readonly VisibleChatBlock[]
 ): Map<VisibleChatBlock, number> {
-    const timestamps = new Map<VisibleChatBlock, number>()
-    let first: VisibleChatBlock | null = null
-    let latestTimestamp = 0
+ const timestamps = new Map<VisibleChatBlock, number>()
+ let first: VisibleChatBlock | null = null
+ let latestTimestamp = 0
 
-    const flush = () => {
-        if (first) timestamps.set(first, latestTimestamp)
-        first = null
-    }
+ const flush = () => {
+  if (first) timestamps.set(first, latestTimestamp)
+  first = null
+ }
 
-    for (const block of blocks) {
-        if (visibleBlockRole(block) !== 'assistant') {
-            flush()
-            continue
-        }
-        const timestamp = getBlockPresentationTimestamp(block)
-        if (!first) {
-            first = block
-            latestTimestamp = timestamp
-        } else {
-            latestTimestamp = Math.max(latestTimestamp, timestamp)
-        }
-    }
-    flush()
-    return timestamps
+ for (const block of blocks) {
+  if (visibleBlockRole(block) !== 'assistant') {
+   flush()
+   continue
+  }
+  const timestamp = getBlockPresentationTimestamp(block)
+  if (!first) {
+   first = block
+   latestTimestamp = timestamp
+  } else {
+   latestTimestamp = Math.max(latestTimestamp, timestamp)
+  }
+ }
+ flush()
+ return timestamps
 }
 
 type TurnSource = {
-    localId: string | null
-    invokedAt: number | null
-    durationMs: number | undefined
-    model: string | null
-    usage: UsageData | undefined
-    createdAt: number
+ localId: string | null
+ invokedAt: number | null
+ durationMs: number | undefined
+ model: string | null
+ usage: UsageData | undefined
+ createdAt: number
 }
 
 // Return one turn source per claude-SDK message that the visible block
@@ -158,32 +159,32 @@ type TurnSource = {
 // each underlying tool-call contributes its own source. Other assistant-role
 // kinds map to a single source.
 function turnSourcesFromBlock(block: VisibleChatBlock): TurnSource[] {
-    if (block.kind === 'tool-group') {
-        return block.tools.map((tool) => ({
-            localId: tool.localId,
-            invokedAt: tool.invokedAt ?? null,
-            durationMs: tool.durationMs,
-            model: tool.model ?? null,
-            usage: tool.usage,
-            createdAt: tool.createdAt
-        }))
-    }
-    if (
-        block.kind === 'agent-text'
-        || block.kind === 'agent-reasoning'
-        || block.kind === 'cli-output'
-        || block.kind === 'tool-call'
-    ) {
-        return [{
-            localId: block.localId,
-            invokedAt: block.invokedAt ?? null,
-            durationMs: block.durationMs,
-            model: block.model ?? null,
-            usage: block.usage,
-            createdAt: block.createdAt
-        }]
-    }
-    return []
+ if (block.kind === 'tool-group') {
+  return block.tools.map((tool) => ({
+   localId: tool.localId,
+   invokedAt: tool.invokedAt ?? null,
+   durationMs: tool.durationMs,
+   model: tool.model ?? null,
+   usage: tool.usage,
+   createdAt: tool.createdAt
+  }))
+ }
+ if (
+  block.kind === 'agent-text'
+  || block.kind === 'agent-reasoning'
+  || block.kind === 'cli-output'
+  || block.kind === 'tool-call'
+ ) {
+  return [{
+   localId: block.localId,
+   invokedAt: block.invokedAt ?? null,
+   durationMs: block.durationMs,
+   model: block.model ?? null,
+   usage: block.usage,
+   createdAt: block.createdAt
+  }]
+ }
+ return []
 }
 
 /**
@@ -198,21 +199,21 @@ function turnSourcesFromBlock(block: VisibleChatBlock): TurnSource[] {
  * collide, but the hub stamp resolution makes that vanishingly rare.
  */
 function turnFingerprint(
-    model: string | null,
-    usage: UsageData | undefined,
-    createdAt: number
+ model: string | null,
+ usage: UsageData | undefined,
+ createdAt: number
 ): string {
-    if (!usage) return `m=${model ?? ''}|u=|c=${createdAt}`
-    return [
-        `m=${model ?? ''}`,
-        `i=${usage.input_tokens}`,
-        `o=${usage.output_tokens}`,
-        `r=${usage.reasoning_output_tokens ?? ''}`,
-        `cc=${usage.cache_creation_input_tokens ?? ''}`,
-        `cr=${usage.cache_read_input_tokens ?? ''}`,
-        `t=${usage.service_tier ?? ''}`,
-        `c=${createdAt}`
-    ].join('|')
+ if (!usage) return `m=${model ?? ''}|u=|c=${createdAt}`
+ return [
+  `m=${model ?? ''}`,
+  `i=${usage.input_tokens}`,
+  `o=${usage.output_tokens}`,
+  `r=${usage.reasoning_output_tokens ?? ''}`,
+  `cc=${usage.cache_creation_input_tokens ?? ''}`,
+  `cr=${usage.cache_read_input_tokens ?? ''}`,
+  `t=${usage.service_tier ?? ''}`,
+  `c=${createdAt}`
+ ].join('|')
 }
 
 /**
@@ -222,32 +223,32 @@ function turnFingerprint(
  * `undefined` via JavaScript's falsy `||`).
  */
 function sumOptional(a: number | undefined, b: number | undefined): number | undefined {
-    if (a === undefined && b === undefined) return undefined
-    return (a ?? 0) + (b ?? 0)
+ if (a === undefined && b === undefined) return undefined
+ return (a ?? 0) + (b ?? 0)
 }
 
 function addUsage(target: UsageData, addend: UsageData): UsageData {
-    return {
-        input_tokens: target.input_tokens + addend.input_tokens,
-        output_tokens: target.output_tokens + addend.output_tokens,
-        reasoning_output_tokens: sumOptional(
-            target.reasoning_output_tokens,
-            addend.reasoning_output_tokens
-        ),
-        cache_creation_input_tokens: sumOptional(
-            target.cache_creation_input_tokens,
-            addend.cache_creation_input_tokens
-        ),
-        cache_read_input_tokens: sumOptional(
-            target.cache_read_input_tokens,
-            addend.cache_read_input_tokens
-        ),
-        cost_usd: sumOptional(target.cost_usd, addend.cost_usd),
-        // service_tier dedup follows the rule documented in the plan: pick
-        // the first turn's tier when the group is mixed. We keep it on the
-        // target so downstream label logic sees a stable value.
-        service_tier: target.service_tier
-    }
+ return {
+  input_tokens: target.input_tokens + addend.input_tokens,
+  output_tokens: target.output_tokens + addend.output_tokens,
+  reasoning_output_tokens: sumOptional(
+   target.reasoning_output_tokens,
+   addend.reasoning_output_tokens
+  ),
+  cache_creation_input_tokens: sumOptional(
+   target.cache_creation_input_tokens,
+   addend.cache_creation_input_tokens
+  ),
+  cache_read_input_tokens: sumOptional(
+   target.cache_read_input_tokens,
+   addend.cache_read_input_tokens
+  ),
+  cost_usd: sumOptional(target.cost_usd, addend.cost_usd),
+  // service_tier dedup follows the rule documented in the plan: pick
+  // the first turn's tier when the group is mixed. We keep it on the
+  // target so downstream label logic sees a stable value.
+  service_tier: target.service_tier
+ }
 }
 
 /**
@@ -260,91 +261,91 @@ function addUsage(target: UsageData, addend: UsageData): UsageData {
  * unchanged at the call site.
  */
 export function aggregateResponseGroups(
-    blocks: readonly VisibleChatBlock[]
+ blocks: readonly VisibleChatBlock[]
 ): Map<string, AggregatedAssistantMeta> {
-    const aggregates = new Map<string, AggregatedAssistantMeta>()
-    let groupFirstBlockId: string | null = null
-    // Ordering-based turn dedup: we compare each block's turn key against
-    // the immediately previous turn's key. A `Set` of all seen keys would
-    // collapse a third turn whose `(model, usage)` fingerprint happens to
-    // match a non-adjacent earlier turn — claude code spawn sessions
-    // legitimately produce repeated fingerprints when token totals
-    // coincide, and merging them under-counts the visible turn count.
-    let prevTurnKey: string | null = null
-    const seenModels: string[] = []
-    let groupInvokedAt: number | null = null
-    let groupUsage: UsageData | undefined
-    let groupTurnCount = 0
+ const aggregates = new Map<string, AggregatedAssistantMeta>()
+ let groupFirstBlockId: string | null = null
+ // Ordering-based turn dedup: we compare each block's turn key against
+ // the immediately previous turn's key. A `Set` of all seen keys would
+ // collapse a third turn whose `(model, usage)` fingerprint happens to
+ // match a non-adjacent earlier turn — claude code spawn sessions
+ // legitimately produce repeated fingerprints when token totals
+ // coincide, and merging them under-counts the visible turn count.
+ let prevTurnKey: string | null = null
+ const seenModels: string[] = []
+ let groupInvokedAt: number | null = null
+ let groupUsage: UsageData | undefined
+ let groupTurnCount = 0
 
-    const flush = () => {
-        if (groupFirstBlockId !== null && groupTurnCount >= 2) {
-            const joinedModel = seenModels.length > 0 ? seenModels.join(', ') : null
-            aggregates.set(groupFirstBlockId, {
-                usage: groupUsage,
-                model: joinedModel,
-                invokedAt: groupInvokedAt,
-                durationMs: undefined,
-                turnCount: groupTurnCount
-            })
-        }
-        groupFirstBlockId = null
-        prevTurnKey = null
-        seenModels.length = 0
-        groupInvokedAt = null
-        groupUsage = undefined
-        groupTurnCount = 0
-    }
+ const flush = () => {
+  if (groupFirstBlockId !== null && groupTurnCount >= 2) {
+   const joinedModel = seenModels.length > 0 ? seenModels.join(', ') : null
+   aggregates.set(groupFirstBlockId, {
+    usage: groupUsage,
+    model: joinedModel,
+    invokedAt: groupInvokedAt,
+    durationMs: undefined,
+    turnCount: groupTurnCount
+   })
+  }
+  groupFirstBlockId = null
+  prevTurnKey = null
+  seenModels.length = 0
+  groupInvokedAt = null
+  groupUsage = undefined
+  groupTurnCount = 0
+ }
 
-    for (const block of blocks) {
-        const role = visibleBlockRole(block)
-        if (role !== 'assistant') {
-            // Boundary: close the open group, if any.
-            flush()
-            continue
-        }
+ for (const block of blocks) {
+  const role = visibleBlockRole(block)
+  if (role !== 'assistant') {
+   // Boundary: close the open group, if any.
+   flush()
+   continue
+  }
 
-        if (groupFirstBlockId === null) {
-            groupFirstBlockId = block.id
-        }
+  if (groupFirstBlockId === null) {
+   groupFirstBlockId = block.id
+  }
 
-        for (const turn of turnSourcesFromBlock(block)) {
-            // Prefer the CLI-stamped `localId` when present. When it is null
-            // (today's claude code spawn flow) fall back to a fingerprint
-            // built from `(model, usage totals, createdAt)` — see
-            // `turnFingerprint` for the createdAt rationale.
-            const turnKey = turn.localId !== null
-                ? `id:${turn.localId}`
-                : `fp:${turnFingerprint(turn.model, turn.usage, turn.createdAt)}`
+  for (const turn of turnSourcesFromBlock(block)) {
+   // Prefer the CLI-stamped `localId` when present. When it is null
+   // (today's claude code spawn flow) fall back to a fingerprint
+   // built from `(model, usage totals, createdAt)` — see
+   // `turnFingerprint` for the createdAt rationale.
+   const turnKey = turn.localId !== null
+    ? `id:${turn.localId}`
+    : `fp:${turnFingerprint(turn.model, turn.usage, turn.createdAt)}`
 
-            // Skip blocks with no turn signal at all (no localId, no usage,
-            // no model) so they don't inflate the turn count.
-            if (turn.localId === null && !turn.usage && !turn.model) continue
+   // Skip blocks with no turn signal at all (no localId, no usage,
+   // no model) so they don't inflate the turn count.
+   if (turn.localId === null && !turn.usage && !turn.model) continue
 
-            // Only the immediately previous turn's key dedups — see prevTurnKey
-            // comment above. Non-adjacent matches keep their separate counts.
-            if (turnKey === prevTurnKey) continue
-            prevTurnKey = turnKey
+   // Only the immediately previous turn's key dedups — see prevTurnKey
+   // comment above. Non-adjacent matches keep their separate counts.
+   if (turnKey === prevTurnKey) continue
+   prevTurnKey = turnKey
 
-            groupTurnCount += 1
-            if (turn.invokedAt != null && (groupInvokedAt === null || turn.invokedAt < groupInvokedAt)) {
-                groupInvokedAt = turn.invokedAt
-            }
-            if (turn.model && !seenModels.includes(turn.model)) {
-                seenModels.push(turn.model)
-            }
-            if (turn.usage) {
-                groupUsage = groupUsage ? addUsage(groupUsage, turn.usage) : { ...turn.usage }
-            }
-        }
-    }
+   groupTurnCount += 1
+   if (turn.invokedAt != null && (groupInvokedAt === null || turn.invokedAt < groupInvokedAt)) {
+    groupInvokedAt = turn.invokedAt
+   }
+   if (turn.model && !seenModels.includes(turn.model)) {
+    seenModels.push(turn.model)
+   }
+   if (turn.usage) {
+    groupUsage = groupUsage ? addUsage(groupUsage, turn.usage) : { ...turn.usage }
+   }
+  }
+ }
 
-    flush()
-    return aggregates
+ flush()
+ return aggregates
 }
 
 export type BlockWithThreadMessageId = {
-    block: VisibleChatBlock
-    threadMessageId: string
+ block: VisibleChatBlock
+ threadMessageId: string
 }
 
 /**
@@ -359,29 +360,29 @@ export type BlockWithThreadMessageId = {
  * appends (see PR review).
  */
 export function assignThreadMessageIdsWithStableWrappers(
-    blocks: readonly VisibleChatBlock[],
-    wrapperCache: WeakMap<VisibleChatBlock, BlockWithThreadMessageId>
+ blocks: readonly VisibleChatBlock[],
+ wrapperCache: WeakMap<VisibleChatBlock, BlockWithThreadMessageId>
 ): BlockWithThreadMessageId[] {
-    const seen = new Map<string, number>()
-    return blocks.map((block) => {
-        const base = `${block.kind}:${block.id}`
-        const occurrence = seen.get(base) ?? 0
-        seen.set(base, occurrence + 1)
-        const threadMessageId = occurrence === 0 ? base : `${base}~${occurrence}`
-        const cached = wrapperCache.get(block)
-        if (cached?.threadMessageId === threadMessageId) {
-            return cached
-        }
-        const next: BlockWithThreadMessageId = { block, threadMessageId }
-        wrapperCache.set(block, next)
-        return next
-    })
+ const seen = new Map<string, number>()
+ return blocks.map((block) => {
+  const base = `${block.kind}:${block.id}`
+  const occurrence = seen.get(base) ?? 0
+  seen.set(base, occurrence + 1)
+  const threadMessageId = occurrence === 0 ? base : `${base}~${occurrence}`
+  const cached = wrapperCache.get(block)
+  if (cached?.threadMessageId === threadMessageId) {
+   return cached
+  }
+  const next: BlockWithThreadMessageId = { block, threadMessageId }
+  wrapperCache.set(block, next)
+  return next
+ })
 }
 
 export function assignThreadMessageIds(
-    blocks: readonly VisibleChatBlock[]
+ blocks: readonly VisibleChatBlock[]
 ): BlockWithThreadMessageId[] {
-    return assignThreadMessageIdsWithStableWrappers(blocks, new WeakMap())
+ return assignThreadMessageIdsWithStableWrappers(blocks, new WeakMap())
 }
 
 /**
@@ -391,50 +392,50 @@ export function assignThreadMessageIds(
  * "completed" boundary as streaming events reshape the visible block list.
  */
 export function findLatestCompletedBoundaryId(
-    blocks: readonly VisibleChatBlock[],
-    isRunning: boolean,
-    activeTurnStartedAt: number | null
+ blocks: readonly VisibleChatBlock[],
+ isRunning: boolean,
+ activeTurnStartedAt: number | null
 ): string | null {
-    const assigned = assignThreadMessageIds(blocks)
-    let limit = assigned.length
+ const assigned = assignThreadMessageIds(blocks)
+ let limit = assigned.length
 
-    if (isRunning) {
-        const activeTurnStart = activeTurnStartedAt === null
-            ? assigned.findLastIndex(({ block }) => (
-                visibleBlockRole(block) === 'user' && block.invokedAt != null
-            ))
-            : assigned.findIndex(({ block }) => (
-                visibleBlockRole(block) === 'user'
-                && (block.invokedAt ?? block.createdAt) >= activeTurnStartedAt
-            ))
-        if (activeTurnStart >= 0) {
-            limit = activeTurnStart
-        } else if (activeTurnStartedAt === null) {
-            return null
-        } else {
-            const firstActiveBlock = assigned.findIndex(({ block }) => (
-                (block.invokedAt ?? block.createdAt) >= activeTurnStartedAt
-            ))
-            if (firstActiveBlock >= 0) {
-                limit = firstActiveBlock
-            }
-        }
-    }
+ if (isRunning) {
+  const activeTurnStart = activeTurnStartedAt === null
+   ? assigned.findLastIndex(({ block }) => (
+    visibleBlockRole(block) === 'user' && block.invokedAt != null
+   ))
+   : assigned.findIndex(({ block }) => (
+    visibleBlockRole(block) === 'user'
+    && (block.invokedAt ?? block.createdAt) >= activeTurnStartedAt
+   ))
+  if (activeTurnStart >= 0) {
+   limit = activeTurnStart
+  } else if (activeTurnStartedAt === null) {
+   return null
+  } else {
+   const firstActiveBlock = assigned.findIndex(({ block }) => (
+    (block.invokedAt ?? block.createdAt) >= activeTurnStartedAt
+   ))
+   if (firstActiveBlock >= 0) {
+    limit = firstActiveBlock
+   }
+  }
+ }
 
-    let candidate: string | null = null
-    let previousRole: ReturnType<typeof visibleBlockRole> | null = null
-    for (let index = 0; index < limit; index += 1) {
-        const { block, threadMessageId } = assigned[index]
-        const role = visibleBlockRole(block)
-        if (
-            (role === 'user' && block.invokedAt != null)
-            || (role === 'assistant' && previousRole !== 'assistant')
-        ) {
-            candidate = threadMessageId
-        }
-        previousRole = role
-    }
-    return candidate
+ let candidate: string | null = null
+ let previousRole: ReturnType<typeof visibleBlockRole> | null = null
+ for (let index = 0; index < limit; index += 1) {
+  const { block, threadMessageId } = assigned[index]
+  const role = visibleBlockRole(block)
+  if (
+   (role === 'user' && block.invokedAt != null)
+   || (role === 'assistant' && previousRole !== 'assistant')
+  ) {
+   candidate = threadMessageId
+  }
+  previousRole = role
+ }
+ return candidate
 }
 
 /**
@@ -447,457 +448,458 @@ export function findLatestCompletedBoundaryId(
  * keeps its identity stable for the lifetime of the turn.
  */
 export function buildRunningPlaceholder(
-    sessionId: string,
-    activeTurnStartedAt: number | null | undefined
+ sessionId: string,
+ activeTurnStartedAt: number | null | undefined
 ): ThreadMessage {
-    const id = `pending-turn:${sessionId}:${activeTurnStartedAt ?? 'unknown'}`
-    return fromThreadMessageLike({
-        id,
-        role: 'assistant',
-        content: [],
-        createdAt: new Date(activeTurnStartedAt ?? 0),
-        metadata: {
-            isOptimistic: true,
-            custom: { kind: 'assistant' } satisfies HappyChatMessageMetadata
-        }
-    }, id, { type: 'running' })
+ const id = `pending-turn:${sessionId}:${activeTurnStartedAt ?? 'unknown'}`
+ return fromThreadMessageLike({
+  id,
+  role: 'assistant',
+  content: [],
+  createdAt: new Date(activeTurnStartedAt ?? 0),
+  metadata: {
+   isOptimistic: true,
+   custom: { kind: 'assistant' } satisfies HappyChatMessageMetadata
+  }
+ }, id, { type: 'running' })
 }
 
 export function withRunningPlaceholder(
-    messages: ThreadMessage[],
-    isRunning: boolean,
-    sessionId: string,
-    activeTurnStartedAt: number | null | undefined
+ messages: ThreadMessage[],
+ isRunning: boolean,
+ sessionId: string,
+ activeTurnStartedAt: number | null | undefined
 ): ThreadMessage[] {
-    if (!isRunning) return messages
-    const last = messages[messages.length - 1]
-    if (last?.role === 'assistant') return messages
-    return [...messages, buildRunningPlaceholder(sessionId, activeTurnStartedAt)]
+ if (!isRunning) return messages
+ const last = messages[messages.length - 1]
+ if (last?.role === 'assistant') return messages
+ return [...messages, buildRunningPlaceholder(sessionId, activeTurnStartedAt)]
 }
 
 function toThreadMessageLike(
-    block: VisibleChatBlock,
-    threadMessageId: string,
-    timestamp: number
+ block: VisibleChatBlock,
+ threadMessageId: string,
+ timestamp: number
 ): ThreadMessageLike {
-    if (block.kind === 'user-text') {
-        return {
-            role: 'user',
-            id: threadMessageId,
-            createdAt: new Date(timestamp),
-            content: [{ type: 'text', text: block.text }],
-            metadata: {
-                custom: {
-                    kind: 'user',
-                    status: block.status,
-                    localId: block.localId,
-                    originalText: block.originalText,
-                    attachments: block.attachments,
-                    invokedAt: block.invokedAt,
-                    hubMessageId: block.id
-                } satisfies HappyChatMessageMetadata
-            }
-        }
-    }
+ if (block.kind === 'user-text') {
+  return {
+   role: 'user',
+   id: threadMessageId,
+   createdAt: new Date(timestamp),
+   content: [{ type: 'text', text: block.text }],
+   metadata: {
+    custom: {
+     kind: 'user',
+     status: block.status,
+     localId: block.localId,
+     originalText: block.originalText,
+     attachments: block.attachments,
+     invokedAt: block.invokedAt,
+     resolution: block.resolution,
+     hubMessageId: block.id
+    } satisfies HappyChatMessageMetadata
+   }
+  }
+ }
 
-    if (block.kind === 'agent-text') {
-        return {
-            role: 'assistant',
-            id: threadMessageId,
-            createdAt: new Date(timestamp),
-            content: [{ type: 'text', text: block.text }],
-            metadata: {
-                custom: {
-                    kind: 'assistant',
-                    invokedAt: block.invokedAt,
-                    durationMs: block.durationMs,
-                    usage: block.usage,
-                    model: block.model
-                } satisfies HappyChatMessageMetadata
-            }
-        }
-    }
+ if (block.kind === 'agent-text') {
+  return {
+   role: 'assistant',
+   id: threadMessageId,
+   createdAt: new Date(timestamp),
+   content: [{ type: 'text', text: block.text }],
+   metadata: {
+    custom: {
+     kind: 'assistant',
+     invokedAt: block.invokedAt,
+     durationMs: block.durationMs,
+     usage: block.usage,
+     model: block.model
+    } satisfies HappyChatMessageMetadata
+   }
+  }
+ }
 
-    if (block.kind === 'generated-image') {
-        return {
-            role: 'assistant',
-            id: threadMessageId,
-            createdAt: new Date(timestamp),
-            content: [{
-                type: 'tool-call',
-                toolCallId: block.id,
-                toolName: 'GeneratedImage',
-                argsText: '',
-                artifact: block
-            }],
-            metadata: {
-                custom: {
-                    kind: 'tool',
-                    toolCallId: block.id,
-                    invokedAt: block.invokedAt ?? null
-                } satisfies HappyChatMessageMetadata
-            }
-        }
-    }
+ if (block.kind === 'generated-image') {
+  return {
+   role: 'assistant',
+   id: threadMessageId,
+   createdAt: new Date(timestamp),
+   content: [{
+    type: 'tool-call',
+    toolCallId: block.id,
+    toolName: 'GeneratedImage',
+    argsText: '',
+    artifact: block
+   }],
+   metadata: {
+    custom: {
+     kind: 'tool',
+     toolCallId: block.id,
+     invokedAt: block.invokedAt ?? null
+    } satisfies HappyChatMessageMetadata
+   }
+  }
+ }
 
-    if (block.kind === 'generated-file') {
-        return {
-            role: 'assistant',
-            id: threadMessageId,
-            createdAt: new Date(block.createdAt),
-            content: [{
-                type: 'tool-call',
-                toolCallId: block.id,
-                toolName: 'GeneratedFile',
-                argsText: '',
-                artifact: block
-            }],
-            metadata: {
-                custom: {
-                    kind: 'tool',
-                    toolCallId: block.id,
-                    invokedAt: block.invokedAt ?? null
-                } satisfies HappyChatMessageMetadata
-            }
-        }
-    }
+ if (block.kind === 'generated-file') {
+  return {
+   role: 'assistant',
+   id: threadMessageId,
+   createdAt: new Date(block.createdAt),
+   content: [{
+    type: 'tool-call',
+    toolCallId: block.id,
+    toolName: 'GeneratedFile',
+    argsText: '',
+    artifact: block
+   }],
+   metadata: {
+    custom: {
+     kind: 'tool',
+     toolCallId: block.id,
+     invokedAt: block.invokedAt ?? null
+    } satisfies HappyChatMessageMetadata
+   }
+  }
+ }
 
-    if (block.kind === 'agent-reasoning') {
-        return {
-            role: 'assistant',
-            id: threadMessageId,
-            createdAt: new Date(timestamp),
-            content: [{ type: 'reasoning', text: block.text }],
-            metadata: {
-                custom: {
-                    kind: 'assistant',
-                    invokedAt: block.invokedAt,
-                    durationMs: block.durationMs,
-                    usage: block.usage,
-                    model: block.model
-                } satisfies HappyChatMessageMetadata
-            }
-        }
-    }
+ if (block.kind === 'agent-reasoning') {
+  return {
+   role: 'assistant',
+   id: threadMessageId,
+   createdAt: new Date(timestamp),
+   content: [{ type: 'reasoning', text: block.text }],
+   metadata: {
+    custom: {
+     kind: 'assistant',
+     invokedAt: block.invokedAt,
+     durationMs: block.durationMs,
+     usage: block.usage,
+     model: block.model
+    } satisfies HappyChatMessageMetadata
+   }
+  }
+ }
 
-    if (block.kind === 'codex-review') {
-        return {
-            role: 'assistant',
-            id: threadMessageId,
-            createdAt: new Date(timestamp),
-            content: [{ type: 'text', text: formatCodexReviewText(block.review) }],
-            metadata: {
-                custom: {
-                    kind: 'codex-review',
-                    invokedAt: block.invokedAt,
-                    durationMs: block.durationMs,
-                    usage: block.usage,
-                    model: block.model,
-                    review: block.review
-                } satisfies HappyChatMessageMetadata
-            }
-        }
-    }
+ if (block.kind === 'codex-review') {
+  return {
+   role: 'assistant',
+   id: threadMessageId,
+   createdAt: new Date(timestamp),
+   content: [{ type: 'text', text: formatCodexReviewText(block.review) }],
+   metadata: {
+    custom: {
+     kind: 'codex-review',
+     invokedAt: block.invokedAt,
+     durationMs: block.durationMs,
+     usage: block.usage,
+     model: block.model,
+     review: block.review
+    } satisfies HappyChatMessageMetadata
+   }
+  }
+ }
 
-    if (block.kind === 'agent-event') {
-        return {
-            role: 'system',
-            id: threadMessageId,
-            createdAt: new Date(timestamp),
-            content: [{ type: 'text', text: renderEventLabel(block.event) }],
-            metadata: {
-                custom: {
-                    kind: 'event',
-                    event: block.event,
-                    invokedAt: block.invokedAt,
-                    model: block.model
-                } satisfies HappyChatMessageMetadata
-            }
-        }
-    }
+ if (block.kind === 'agent-event') {
+  return {
+   role: 'system',
+   id: threadMessageId,
+   createdAt: new Date(timestamp),
+   content: [{ type: 'text', text: renderEventLabel(block.event) }],
+   metadata: {
+    custom: {
+     kind: 'event',
+     event: block.event,
+     invokedAt: block.invokedAt,
+     model: block.model
+    } satisfies HappyChatMessageMetadata
+   }
+  }
+ }
 
-    if (block.kind === 'cli-output') {
-        return {
-            role: block.source === 'user' ? 'user' : 'assistant',
-            id: threadMessageId,
-            createdAt: new Date(timestamp),
-            content: [{ type: 'text', text: block.text }],
-            metadata: {
-                custom: {
-                    kind: 'cli-output',
-                    source: block.source,
-                    invokedAt: block.invokedAt,
-                    durationMs: block.durationMs,
-                    usage: block.usage,
-                    model: block.model
-                } satisfies HappyChatMessageMetadata
-            }
-        }
-    }
+ if (block.kind === 'cli-output') {
+  return {
+   role: block.source === 'user' ? 'user' : 'assistant',
+   id: threadMessageId,
+   createdAt: new Date(timestamp),
+   content: [{ type: 'text', text: block.text }],
+   metadata: {
+    custom: {
+     kind: 'cli-output',
+     source: block.source,
+     invokedAt: block.invokedAt,
+     durationMs: block.durationMs,
+     usage: block.usage,
+     model: block.model
+    } satisfies HappyChatMessageMetadata
+   }
+  }
+ }
 
-    if (block.kind === 'tool-group') {
-        const groupBlock: ToolGroupBlock = block
-        return {
-            role: 'assistant',
-            id: threadMessageId,
-            createdAt: new Date(timestamp),
-            content: [{
-                type: 'tool-call',
-                toolCallId: groupBlock.id,
-                toolName: 'ToolGroup',
-                argsText: '',
-                artifact: groupBlock
-            }],
-            metadata: {
-                custom: {
-                    kind: 'tool',
-                    toolCallId: groupBlock.id,
-                    invokedAt: groupBlock.invokedAt ?? null
-                } satisfies HappyChatMessageMetadata
-            }
-        }
-    }
+ if (block.kind === 'tool-group') {
+  const groupBlock: ToolGroupBlock = block
+  return {
+   role: 'assistant',
+   id: threadMessageId,
+   createdAt: new Date(timestamp),
+   content: [{
+    type: 'tool-call',
+    toolCallId: groupBlock.id,
+    toolName: 'ToolGroup',
+    argsText: '',
+    artifact: groupBlock
+   }],
+   metadata: {
+    custom: {
+     kind: 'tool',
+     toolCallId: groupBlock.id,
+     invokedAt: groupBlock.invokedAt ?? null
+    } satisfies HappyChatMessageMetadata
+   }
+  }
+ }
 
-    const toolBlock: ToolCallBlock = block
-    const inputText = safeStringify(toolBlock.tool.input)
+ const toolBlock: ToolCallBlock = block
+ const inputText = safeStringify(toolBlock.tool.input)
 
-    return {
-        role: 'assistant',
-        id: threadMessageId,
-        createdAt: new Date(timestamp),
-        content: [{
-            type: 'tool-call',
-            toolCallId: toolBlock.id,
-            toolName: toolBlock.tool.name,
-            argsText: inputText,
-            result: toolBlock.tool.result,
-            isError: toolBlock.tool.state === 'error',
-            artifact: toolBlock
-        }],
-        metadata: {
-            custom: {
-                kind: 'tool',
-                toolCallId: toolBlock.id,
-                invokedAt: toolBlock.invokedAt,
-                durationMs: toolBlock.durationMs,
-                usage: toolBlock.usage,
-                model: toolBlock.model
-            } satisfies HappyChatMessageMetadata
-        }
-    }
+ return {
+  role: 'assistant',
+  id: threadMessageId,
+  createdAt: new Date(timestamp),
+  content: [{
+   type: 'tool-call',
+   toolCallId: toolBlock.id,
+   toolName: toolBlock.tool.name,
+   argsText: inputText,
+   result: toolBlock.tool.result,
+   isError: toolBlock.tool.state === 'error',
+   artifact: toolBlock
+  }],
+  metadata: {
+   custom: {
+    kind: 'tool',
+    toolCallId: toolBlock.id,
+    invokedAt: toolBlock.invokedAt,
+    durationMs: toolBlock.durationMs,
+    usage: toolBlock.usage,
+    model: toolBlock.model
+   } satisfies HappyChatMessageMetadata
+  }
+ }
 }
 
 type TextMessagePart = { type: 'text'; text: string }
 
 function getTextFromParts(parts: readonly { type: string }[] | undefined): string {
-    if (!parts) return ''
+ if (!parts) return ''
 
-    return parts
-        .filter((part): part is TextMessagePart => part.type === 'text' && typeof (part as TextMessagePart).text === 'string')
-        .map((part) => part.text)
-        .join('\n')
-        .trim()
+ return parts
+  .filter((part): part is TextMessagePart => part.type === 'text' && typeof (part as TextMessagePart).text === 'string')
+  .map((part) => part.text)
+  .join('\n')
+  .trim()
 }
 
 type ExtractedAttachmentMetadata = { __attachmentMetadata: AttachmentMetadata }
 
 function isAttachmentMetadataJson(text: string): ExtractedAttachmentMetadata | null {
-    try {
-        const parsed = JSON.parse(text) as unknown
-        if (parsed && typeof parsed === 'object' && '__attachmentMetadata' in parsed) {
-            return parsed as ExtractedAttachmentMetadata
-        }
-        return null
-    } catch {
-        return null
-    }
+ try {
+  const parsed = JSON.parse(text) as unknown
+  if (parsed && typeof parsed === 'object' && '__attachmentMetadata' in parsed) {
+   return parsed as ExtractedAttachmentMetadata
+  }
+  return null
+ } catch {
+  return null
+ }
 }
 
 function extractMessageContent(message: AppendMessage): { text: string; attachments: AttachmentMetadata[] } {
-    if (message.role !== 'user') return { text: '', attachments: [] }
+ if (message.role !== 'user') return { text: '', attachments: [] }
 
-    // Extract attachments from attachment content
-    const attachments: AttachmentMetadata[] = []
-    const otherAttachmentTexts: string[] = []
+ // Extract attachments from attachment content
+ const attachments: AttachmentMetadata[] = []
+ const otherAttachmentTexts: string[] = []
 
-    const attachmentParts = message.attachments?.flatMap((attachment) => attachment.content ?? []) ?? []
-    for (const part of attachmentParts) {
-        if (part.type === 'text' && typeof (part as TextMessagePart).text === 'string') {
-            const textPart = part as TextMessagePart
-            const extracted = isAttachmentMetadataJson(textPart.text)
-            if (extracted) {
-                attachments.push(extracted.__attachmentMetadata)
-            } else {
-                otherAttachmentTexts.push(textPart.text)
-            }
-        }
-    }
+ const attachmentParts = message.attachments?.flatMap((attachment) => attachment.content ?? []) ?? []
+ for (const part of attachmentParts) {
+  if (part.type === 'text' && typeof (part as TextMessagePart).text === 'string') {
+   const textPart = part as TextMessagePart
+   const extracted = isAttachmentMetadataJson(textPart.text)
+   if (extracted) {
+    attachments.push(extracted.__attachmentMetadata)
+   } else {
+    otherAttachmentTexts.push(textPart.text)
+   }
+  }
+ }
 
-    const contentText = getTextFromParts(message.content)
-    const text = [otherAttachmentTexts.join('\n'), contentText]
-        .filter((value) => value.length > 0)
-        .join('\n\n')
-        .trim()
+ const contentText = getTextFromParts(message.content)
+ const text = [otherAttachmentTexts.join('\n'), contentText]
+  .filter((value) => value.length > 0)
+  .join('\n\n')
+  .trim()
 
-    return { text, attachments }
+ return { text, attachments }
 }
 
 export function useHappyRuntime(props: {
-    session: Session
-    blocks: readonly VisibleChatBlock[]
-    messagesVersion: number
-    historyVersion: number
-    isSending: boolean
-    isRunning?: boolean
-    onSendMessage: (
-        text: string,
-        attachments?: AttachmentMetadata[],
-        scheduledAt?: number | null,
-        intent?: ComposerSendIntent,
-    ) => void
-    onAbort: () => Promise<void>
-    attachmentAdapter?: AttachmentAdapter
-    allowSendWhenInactive?: boolean
-    pendingScheduleRef?: React.RefObject<PendingSchedule | null>
-    /**
-     * Shared one-shot ref with HappyComposer. The composer marks the next
-     * `api.composer().send()`; this adapter consumes and resets the mark as
-     * soon as assistant-ui emits the corresponding AppendMessage.
-     */
-    pendingSendIntentRef?: React.MutableRefObject<ComposerSendIntent>
+ session: Session
+ blocks: readonly VisibleChatBlock[]
+ messagesVersion: number
+ historyVersion: number
+ isSending: boolean
+ isRunning?: boolean
+ onSendMessage: (
+  text: string,
+  attachments?: AttachmentMetadata[],
+  scheduledAt?: number | null,
+  intent?: ComposerSendIntent,
+ ) => void
+ onAbort: () => Promise<void>
+ attachmentAdapter?: AttachmentAdapter
+ allowSendWhenInactive?: boolean
+ pendingScheduleRef?: React.RefObject<PendingSchedule | null>
+ /**
+  * Shared one-shot ref with HappyComposer. The composer marks the next
+  * `api.composer().send()`; this adapter consumes and resets the mark as
+  * soon as assistant-ui emits the corresponding AppendMessage.
+  */
+ pendingSendIntentRef?: React.MutableRefObject<ComposerSendIntent>
 }) {
-    const isRunning = props.isRunning ?? props.session.thinking
-    const flavor = props.session.metadata?.flavor
+ const isRunning = props.isRunning ?? props.session.thinking
+ const flavor = props.session.metadata?.flavor
 
-    const visibleBlocks = useMemo(
-        () => filterVisibleBlocksForFlavor(props.blocks, flavor),
-        [flavor, props.blocks]
-    )
+ const visibleBlocks = useMemo(
+  () => filterVisibleBlocksForFlavor(props.blocks, flavor),
+  [flavor, props.blocks]
+ )
 
-    // Compute response-group aggregates once per block list so we can
-    // inject the summed metadata onto each group's first visible block.
-    // The library's `joinExternalMessages` only preserves
-    // `metadata.custom` from the first block of a joined chunk, so this
-    // is the surface that survives the join.
-    const threadIdWrapperCacheRef = useRef(
-        new WeakMap<VisibleChatBlock, BlockWithThreadMessageId>()
-    )
-    const blocksWithThreadIds = useMemo(
-        () => assignThreadMessageIdsWithStableWrappers(
-            visibleBlocks,
-            threadIdWrapperCacheRef.current
-        ),
-        [visibleBlocks]
-    )
+ // Compute response-group aggregates once per block list so we can
+ // inject the summed metadata onto each group's first visible block.
+ // The library's `joinExternalMessages` only preserves
+ // `metadata.custom` from the first block of a joined chunk, so this
+ // is the surface that survives the join.
+ const threadIdWrapperCacheRef = useRef(
+  new WeakMap<VisibleChatBlock, BlockWithThreadMessageId>()
+ )
+ const blocksWithThreadIds = useMemo(
+  () => assignThreadMessageIdsWithStableWrappers(
+   visibleBlocks,
+   threadIdWrapperCacheRef.current
+  ),
+  [visibleBlocks]
+ )
 
-    const aggregates = useMemo(
-        () => aggregateResponseGroups(visibleBlocks),
-        [visibleBlocks]
-    )
-    const responseGroupTimestamps = useMemo(
-        () => getResponseGroupTimestamps(props.blocks),
-        [props.blocks]
-    )
+ const aggregates = useMemo(
+  () => aggregateResponseGroups(visibleBlocks),
+  [visibleBlocks]
+ )
+ const responseGroupTimestamps = useMemo(
+  () => getResponseGroupTimestamps(props.blocks),
+  [props.blocks]
+ )
 
-    const convertBlock = useCallback(
-        ({ block, threadMessageId }: BlockWithThreadMessageId): ThreadMessageLike => {
-            const message = toThreadMessageLike(
-                block,
-                threadMessageId,
-                responseGroupTimestamps.get(block) ?? getBlockPresentationTimestamp(block)
-            )
-            const aggregate = aggregates.get(block.id)
-            if (!aggregate) return message
-            const existing = message.metadata?.custom as HappyChatMessageMetadata | undefined
-            return {
-                ...message,
-                metadata: {
-                    ...message.metadata,
-                    custom: {
-                        ...(existing ?? { kind: 'assistant' }),
-                        usage: aggregate.usage,
-                        model: aggregate.model,
-                        invokedAt: aggregate.invokedAt,
-                        durationMs: aggregate.durationMs,
-                        turnCount: aggregate.turnCount
-                    } satisfies HappyChatMessageMetadata
-                }
-            }
-        },
-        [aggregates, responseGroupTimestamps]
-    )
+ const convertBlock = useCallback(
+  ({ block, threadMessageId }: BlockWithThreadMessageId): ThreadMessageLike => {
+   const message = toThreadMessageLike(
+    block,
+    threadMessageId,
+    responseGroupTimestamps.get(block) ?? getBlockPresentationTimestamp(block)
+   )
+   const aggregate = aggregates.get(block.id)
+   if (!aggregate) return message
+   const existing = message.metadata?.custom as HappyChatMessageMetadata | undefined
+   return {
+    ...message,
+    metadata: {
+     ...message.metadata,
+     custom: {
+      ...(existing ?? { kind: 'assistant' }),
+      usage: aggregate.usage,
+      model: aggregate.model,
+      invokedAt: aggregate.invokedAt,
+      durationMs: aggregate.durationMs,
+      turnCount: aggregate.turnCount
+     } satisfies HappyChatMessageMetadata
+    }
+   }
+  },
+  [aggregates, responseGroupTimestamps]
+ )
 
-    // Use cached message converter for performance optimization
-    // This prevents re-converting all messages on every render
-    const convertedMessages = useExternalMessageConverter<BlockWithThreadMessageId>({
-        callback: convertBlock,
-        messages: blocksWithThreadIds,
-        isRunning,
-    })
+ // Use cached message converter for performance optimization
+ // This prevents re-converting all messages on every render
+ const convertedMessages = useExternalMessageConverter<BlockWithThreadMessageId>({
+  callback: convertBlock,
+  messages: blocksWithThreadIds,
+  isRunning,
+ })
 
-    const onNew = useCallback(async (message: AppendMessage) => {
-        const intent = consumeComposerSendIntent(props.pendingSendIntentRef)
-        // Reset before any early return so an empty submission, extraction
-        // failure, or downstream exception cannot leak an explicit queue
-        // gesture into the next ordinary send.
-        const { text, attachments } = extractMessageContent(message)
-        if (!text && attachments.length === 0) return
-        // Resolve pendingSchedule at send time (Date.now()) so preset-type schedules
-        // ("5 minutes from now") are relative to the actual send action, not the
-        // moment the user clicked the preset button.
-        const sendNow = Date.now()
-        const scheduledAt = resolvePendingSchedule(props.pendingScheduleRef?.current ?? null, sendNow)
-        props.onSendMessage(text, attachments.length > 0 ? attachments : undefined, scheduledAt, intent)
-    }, [props.onSendMessage, props.pendingScheduleRef, props.pendingSendIntentRef])
+ const onNew = useCallback(async (message: AppendMessage) => {
+  const intent = consumeComposerSendIntent(props.pendingSendIntentRef)
+  // Reset before any early return so an empty submission, extraction
+  // failure, or downstream exception cannot leak an explicit queue
+  // gesture into the next ordinary send.
+  const { text, attachments } = extractMessageContent(message)
+  if (!text && attachments.length === 0) return
+  // Resolve pendingSchedule at send time (Date.now()) so preset-type schedules
+  // ("5 minutes from now") are relative to the actual send action, not the
+  // moment the user clicked the preset button.
+  const sendNow = Date.now()
+  const scheduledAt = resolvePendingSchedule(props.pendingScheduleRef?.current ?? null, sendNow)
+  props.onSendMessage(text, attachments.length > 0 ? attachments : undefined, scheduledAt, intent)
+ }, [props.onSendMessage, props.pendingScheduleRef, props.pendingSendIntentRef])
 
-    const onCancel = useCallback(async () => {
-        await props.onAbort()
-    }, [props.onAbort])
+ const onCancel = useCallback(async () => {
+  await props.onAbort()
+ }, [props.onAbort])
 
-    const runningSince = props.session.activeTurnStartedAt ?? 0
-    const activeTurnStartedAt = props.session.activeTurnStartedAt
-    const sessionId = props.session.id
-    const runtimeMessages = useMemo(
-        () => withRunningPlaceholder(convertedMessages, isRunning, sessionId, activeTurnStartedAt),
-        [activeTurnStartedAt, convertedMessages, isRunning, sessionId]
-    )
-    const shareHiddenByMessageId = useMemo(
-        () => buildShareHiddenByMessageId(runtimeMessages, isRunning, runningSince),
-        [runtimeMessages, isRunning, runningSince]
-    )
-    const extras = useMemo<HappyRuntimeExtras>(() => ({
-        messagesVersion: props.messagesVersion,
-        historyVersion: props.historyVersion,
-        runningSince,
-        shareHiddenByMessageId
-    }), [props.messagesVersion, props.historyVersion, runningSince, shareHiddenByMessageId])
+ const runningSince = props.session.activeTurnStartedAt ?? 0
+ const activeTurnStartedAt = props.session.activeTurnStartedAt
+ const sessionId = props.session.id
+ const runtimeMessages = useMemo(
+  () => withRunningPlaceholder(convertedMessages, isRunning, sessionId, activeTurnStartedAt),
+  [activeTurnStartedAt, convertedMessages, isRunning, sessionId]
+ )
+ const shareHiddenByMessageId = useMemo(
+  () => buildShareHiddenByMessageId(runtimeMessages, isRunning, runningSince),
+  [runtimeMessages, isRunning, runningSince]
+ )
+ const extras = useMemo<HappyRuntimeExtras>(() => ({
+  messagesVersion: props.messagesVersion,
+  historyVersion: props.historyVersion,
+  runningSince,
+  shareHiddenByMessageId
+ }), [props.messagesVersion, props.historyVersion, runningSince, shareHiddenByMessageId])
 
-    // Memoize the adapter to avoid recreating on every render
-    // useExternalStoreRuntime may use adapter identity for subscriptions
-    const adapter = useMemo(() => ({
-        isDisabled: props.isSending || (!props.session.active && !props.allowSendWhenInactive),
-        isRunning,
-        messages: runtimeMessages,
-        extras,
-        onNew,
-        onCancel,
-        adapters: props.attachmentAdapter ? { attachments: props.attachmentAdapter } : undefined,
-        unstable_capabilities: { copy: true }
-    }), [
-        props.session.active,
-        props.isSending,
-        props.allowSendWhenInactive,
-        isRunning,
-        runtimeMessages,
-        extras,
-        onNew,
-        onCancel,
-        props.attachmentAdapter
-    ])
+ // Memoize the adapter to avoid recreating on every render
+ // useExternalStoreRuntime may use adapter identity for subscriptions
+ const adapter = useMemo(() => ({
+  isDisabled: props.isSending || (!props.session.active && !props.allowSendWhenInactive),
+  isRunning,
+  messages: runtimeMessages,
+  extras,
+  onNew,
+  onCancel,
+  adapters: props.attachmentAdapter ? { attachments: props.attachmentAdapter } : undefined,
+  unstable_capabilities: { copy: true }
+ }), [
+  props.session.active,
+  props.isSending,
+  props.allowSendWhenInactive,
+  isRunning,
+  runtimeMessages,
+  extras,
+  onNew,
+  onCancel,
+  props.attachmentAdapter
+ ])
 
-    // Note: pendingScheduleRef is intentionally not in the deps above.
-    // The ref is read at send time inside onNew (not at render time), so changes
-    // to pendingSchedule do not need to invalidate the adapter or re-run onNew.
+ // Note: pendingScheduleRef is intentionally not in the deps above.
+ // The ref is read at send time inside onNew (not at render time), so changes
+ // to pendingSchedule do not need to invalidate the adapter or re-run onNew.
 
-    return useExternalStoreRuntime(adapter)
+ return useExternalStoreRuntime(adapter)
 }

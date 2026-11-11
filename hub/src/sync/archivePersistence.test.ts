@@ -21,11 +21,11 @@ function createEngine(store: Store): SyncEngine {
         store,
         {} as never,
         new RpcRegistry(),
-        { broadcast() {} } as never
+        { broadcast() { } } as never
     )
     // archiveSession calls rpcGateway.killSession; the gateway is stubbed in
     // this harness, so provide a no-op.
-    gatewayForTest(engine).killSession = async () => {}
+    gatewayForTest(engine).killSession = async () => { }
     engine.stop()
     return engine
 }
@@ -100,7 +100,7 @@ describe('archive persistence', () => {
         engine.handleSessionAlive({ sid: session.id, time: Date.now() })
         const cached = engine.getSession(session.id)!
         cached.activeAt = Date.now() - 60_000
-        ;(engine as any).sessionCache.expireInactive(Date.now())
+            ; (engine as any).sessionCache.expireInactive(Date.now())
 
         const after = engine.getSession(session.id)
         expect(after?.active).toBe(false)
@@ -220,5 +220,91 @@ describe('archive persistence', () => {
                 expect(await engine.reopenSession(session.id, 'default')).toMatchObject({ type: 'error', code: 'no_machine_online' })
             } finally { writes.mockRestore() }
         } finally { failure.mockRestore(); engine.stop() }
+    })
+
+    it.each(['stopped', 'already_gone', 'still_alive'] as const)('requires positive runner disposal proof after the wrapper rejects shutdown metadata (%s)', async status => {
+        const store = new Store(':memory:')
+        const engine = createEngine(store)
+        try {
+            const session = engine.getOrCreateSession(`metadata-cleanup-${status}`, {
+                path: '/tmp/project', host: 'localhost', flavor: 'omp', machineId: 'machine-1'
+            }, null, 'default')
+            engine.handleSessionAlive({ sid: session.id, time: Date.now() })
+            const gateway = gatewayForTest(engine)
+            gateway.killSession = async () => { throw new Error('Shutdown metadata was denied') }
+            gateway.stopRunnerSession = async () => status
+            const result = await engine.archiveSession(session.id)
+            if (status === 'stopped') {
+                expect(result.type).toBe('success')
+                expect(engine.getSession(session.id)?.active).toBe(false)
+                expect(engine.getSession(session.id)?.metadata?.lifecycleState).toBe('archived')
+            } else {
+                expect(result.type).toBe('error')
+                expect(engine.getSession(session.id)?.active).toBe(true)
+                expect(engine.getSession(session.id)?.metadata?.archivedAt).toBeUndefined()
+            }
+        } finally { engine.stop(); store.close() }
+    })
+
+    it.each(['archive', 'stop', 'restart'] as const)('clears a verified quarantined attempt centrally before %s continues', async operation => {
+        const store = new Store(':memory:')
+        const engine = createEngine(store)
+        try {
+            const session = engine.getOrCreateSession(`quarantined-${operation}`, {
+                path: '/tmp/project', host: 'localhost', flavor: 'omp', machineId: 'machine-1',
+                archivedAt: 1, lifecycleState: 'archived',
+                ompSession: { id: 'original-native', file: '/tmp/original-native.jsonl' },
+                ompResumeAttempt: { state: 'quarantined', attemptId: 'failed-attempt', machineId: 'machine-1', startedAt: 1 }
+            }, null, 'default')
+            store.messages.addMessage(session.id, { role: 'user', content: 'original history' }, 'original-input')
+            let kills = 0
+            let stops = 0
+            const gateway = gatewayForTest(engine)
+            gateway.killSession = async () => { kills += 1; throw new Error('Shutdown metadata was denied') }
+            gateway.stopRunnerSession = async () => { stops += 1; return stops === 1 ? 'stopped' : 'already_gone' }
+            if (operation === 'archive') {
+                expect(await engine.archiveSession(session.id)).toMatchObject({ type: 'success', alreadyArchived: true })
+            } else if (operation === 'stop') {
+                await engine.stopSessionOnMachine('machine-1', session.id)
+            } else {
+                // No online machine: restart must reach target resolution, not
+                // re-enter cleanup on an attempt that has already been cleared.
+                expect(await engine.restartSession(session.id, 'default')).toMatchObject({ type: 'error', code: 'no_machine_online' })
+            }
+            expect(kills).toBe(1)
+            expect(stops).toBe(1)
+            const retained = engine.getSession(session.id)!
+            expect(retained.metadata).not.toHaveProperty('ompResumeAttempt')
+            expect(retained.metadata?.ompSession).toEqual({ id: 'original-native', file: '/tmp/original-native.jsonl' })
+            expect(retained.metadata?.archivedAt).toBe(1)
+            expect(store.messages.getAllMessages(session.id)).toHaveLength(1)
+        } finally { engine.stop(); store.close() }
+    })
+
+    it.each(['archive', 'stop', 'restart'] as const)('does not reuse native readiness after unverified %s cleanup', async operation => {
+        const store = new Store(':memory:')
+        const engine = createEngine(store)
+        try {
+            const session = engine.getOrCreateSession(`ready-before-${operation}`, {
+                path: '/tmp/project', host: 'localhost', flavor: 'omp', machineId: 'machine-1',
+                ompSession: { id: 'original-native', file: '/tmp/original-native.jsonl' }
+            }, null, 'default')
+            engine.handleSessionAlive({ sid: session.id, time: Date.now() })
+            engine.handleSessionReady({ sid: session.id, time: Date.now() })
+            expect(await engine.waitForSessionReady(session.id, 1)).toBe('ready')
+            // Native disposal may have succeeded even though runner ownership
+            // cleanup cannot yet be proved. Its old ready event is now stale.
+            gatewayForTest(engine).stopRunnerSession = async () => 'still_alive'
+            if (operation === 'stop') {
+                await expect(engine.stopSessionOnMachine('machine-1', session.id)).rejects.toThrow('still alive')
+            } else if (operation === 'archive') {
+                expect(await engine.archiveSession(session.id)).toMatchObject({ type: 'error' })
+            } else {
+                expect(await engine.restartSession(session.id, 'default')).toMatchObject({ type: 'error' })
+            }
+            expect(await engine.waitForSessionReady(session.id, 1)).toBe('timeout')
+            expect(engine.getSession(session.id)?.metadata?.ompSession?.id).toBe('original-native')
+            expect(engine.getSession(session.id)?.metadata?.archivedAt).toBeUndefined()
+        } finally { engine.stop(); store.close() }
     })
 })

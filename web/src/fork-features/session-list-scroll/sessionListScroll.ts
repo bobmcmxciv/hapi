@@ -15,7 +15,7 @@ const ANCHOR_WINDOW_MS = 900
 
 type Anchor = {
     sessionId: string
-    offset: number
+    contentTop: number
     expiresAt: number
 }
 
@@ -135,15 +135,17 @@ export function useSessionListScrollStability(
 
     const beforeSelect = useCallback((sessionId: string) => {
         clearAnchor()
-        if (!anchor || !container) return
+        if (!container) return
+        if (preserve) desiredTopRef.current = container.scrollTop
+        if (!anchor) return
         const offset = rowOffset(container, sessionId)
         if (offset === null) return
         anchorRef.current = {
             sessionId,
-            offset,
+            contentTop: offset + container.scrollTop,
             expiresAt: Date.now() + ANCHOR_WINDOW_MS,
         }
-    }, [anchor, clearAnchor, container])
+    }, [anchor, clearAnchor, container, preserve])
 
     useLayoutEffect(() => {
         const captured = anchorRef.current
@@ -154,8 +156,12 @@ export function useSessionListScrollStability(
         }
         const current = rowOffset(container, captured.sessionId)
         if (current === null) return
-        const delta = current - captured.offset
+        // Viewport offsets also change when the user scrolls. Only a change in
+        // the row's content coordinate is layout movement that needs correction.
+        const contentTop = current + container.scrollTop
+        const delta = contentTop - captured.contentTop
         if (Math.abs(delta) <= 1) return
+        captured.contentTop = contentTop
         container.scrollTop += delta
         if (preserve) {
             desiredTopRef.current = container.scrollTop

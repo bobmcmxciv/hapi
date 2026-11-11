@@ -180,6 +180,13 @@ followed immediately by `get_state`. Per-message rewind is implemented by the
 fork-owned OMP provider under `fork-features/session-fork/providers/`, using a
 short-lived resume RPC so the source session is never mutated in place.
 
+### Attachment delivery fix (2026-11-07)
+
+- PDF and other non-image uploads now reach OMP as local file references, including attachment-only messages; images retain native image content transport.
+- `cli/src/omp/ompInputContent.ts` reuses the shared attachment formatter; the launcher no longer drops non-image files or emits an image-only warning.
+- Verified with launcher regression tests and installed OMP RPC reading PDF/text attachments with Chinese and spaced paths and returning their exact contents.
+
+
 Upstream exposes no flavor-provider, launch-policy, metadata-product, or
 resume-projection registration surface for the remaining closed registries.
 
@@ -299,6 +306,25 @@ because the hub and web app do not expose registration APIs for these seams.
 | `web/src/api/client.ts` | Send the gateway login shape and expose gateway administration requests. |
 | `web/src/hooks/useAuth.ts`, `web/src/hooks/useAuthSource.ts`, `web/src/lib/app-context.tsx` | Preserve gateway account identity and refresh it through the existing auth context. |
 | `package.json`, `bun.lock` | Make the fork-owned root modules' Hono dependency resolvable. |
+
+Admin visibility is hub-wide, not limited to the account's default namespace or
+the gateway binding inventory. `collectVisibleSessions` includes every core
+session (bound or unbound) for admin, so session lists, peer discovery, usage,
+digests, voice material, and the work overview's shared session queries use the
+same coverage. Admin machine lists include offline and unbound core machines.
+Read dispatch resolves an unbound resource's actual core namespace without
+creating an owner row; runtime snapshot/stream authorization uses the same rule.
+Ordinary accounts still require ownership, grants, or machine inheritance.
+Existing bind-on-view behavior is unchanged: own-namespace orphans may be claimed,
+machine-inherited sessions bind to the machine owner, and global admin visibility
+never claims foreign orphan resources merely to make them readable.
+
+Admin `/api/events` uses one server-authorized `allNamespaces` subscription in
+`hub/src/sse/sseManager.ts`, including namespaces first seen after connection and
+cross-namespace toasts. Ordinary subscriptions retain exact namespace matching
+plus the existing per-account event predicate; client query parameters cannot
+enable this global scope. Regression coverage is in `executionMount.test.ts`,
+`executionDispatcher.test.ts`, `sseVisibility.test.ts`, and `runtimeTimeline.test.ts`.
 
 Each upstream synchronization must remove a hook if upstream gains an
 equivalent registration seam or native multi-user gateway.
@@ -858,6 +884,25 @@ grant 无需回填）。判定收敛到一个纯函数 `pathWithinScope`：分�
 但旧二进制**不认识**这一列：一旦回滚，所有带 `path_prefix` 的机器授权都退化成**整机授权**，
 被授权者会静默拿回整机可见与整机可写。回滚前必须先决定这些 grant 是撤掉还是留着。
 
+### 多目录范围授权（2026-11-09）
+
+机器授权支持 `pathScopes: string[] | null`，整组原子替换；例如
+`["C:\\Users\\Tadokoro", "C:\\Peter"]` 是两个目录子树的并集，不会放宽到 `C:\\`。
+空数组、相对路径、点路径段和含混 Windows 路径拒绝写入。旧 `pathPrefix`
+输入转换为单元素集合，不能与 `pathScopes` 同时提交；省略或 null 仍表示整机授权。
+授权设置页支持逐行输入多个目录，并在授权列表回显完整范围。
+
+存储增加 `path_scopes`；旧单目录值惰性读取，不批量改写现有授权。多目录同时写入
+旧列的拒绝标记，使已支持单目录的旧 Hub 回滚后拒绝这些目录，而不是恢复整机权限。
+更早、完全不识别目录范围的二进制仍不安全，不可作为这种授权的回滚目标。
+
+目录范围同时约束 HTTP 路由、SSE 事件、通知受众与 `/terminal` WebSocket（用户终端及
+Agent 终端流）：同 namespace 不再绕过会话判权，权限收紧、账号停用或 API Token
+吊销后将拒绝连接并断开越界终端，但不会终止受保护会话本身的 Agent 进程。该限制仍属于
+HAPI 授权边界，**不是 OS 文件系统沙箱**；已获准会话中的 Agent/终端仍使用 Runner 的系统
+账号权限。会话所有权和独立会话授权不受机器范围覆盖，收紧前必须一并审计。
+
+
 ### 删账号：名下有资源时回 409，不再 500 (2026-08-11)
 
 `gateway_resources.owner_account_id` 的外键**没有** `ON DELETE CASCADE`（`gateway_grants` /
@@ -1063,3 +1108,43 @@ localStorage，按 hub 地址 + 账号分区，**所有账号都可用**（不�
 | `hub/src/startHub.ts`, `fork-features/multi-user/executionMount.ts` | No service bootstrap registry; route resolver lacks identity | The store needs the data dir; enrollment routes need the gateway account | hub start → `initVoiceprintStore`; `/api/voice/speaker/*` | Hub log `[SpeakerGate] voiceprint gate: {...}`; status/enroll/clear from the settings page |
 | `web/src/realtime/QwenVoiceSession.tsx`, `RealtimeSession.ts`, `types.ts`, `index.ts`, `web/src/components/AssistantChat/ComposerButtons.tsx` | No turn-taking hook or composer slot for a talk button | Mic muting, barge-in and the composer voice slot are inline in upstream code | `speech_started` → sustained-speech timer / immediate stop when `hapi_verified`; talk button → mute/unmute, `input_audio_buffer.commit` + `response.create` | Real browser: hands-free reply is not cut by a short cough; push-to-talk answers only while held; with the gate on, a verified interruption stops the reply at once |
 | `web/src/routes/settings/voice.tsx`, `web/src/api/client.ts`, locale files | No settings slot registry | Settings rows are upstream-owned | Settings → 收音方式、我的声纹 | Pick each mode and reconnect; enroll by reading the passage and see the recent similarity list fill in |
+
+## 独立事件驱动 Beta 聊天界面 (2026-11-07)
+
+`/beta/` 提供独立前端入口，保留 `/` 的生产界面与同一套账号、权限、模型、MCP、文件媒体、语音及业务 API。原生会话通过快照和有序增量更新实体；聊天行独立订阅，长会话使用实测高度的窗口渲染。未升级的 CLI 明确显示历史兼容模式，不伪装成原生实时连接。
+
+运行事件保留消息身份、工具生命周期和 `stop` / `length` / `toolUse` / `error` / `aborted` 语义；断线重连按权威快照恢复。事件发布校验生产者身份，读取与持续推送重新检查会话授权及令牌撤销。草稿、排队、中止、历史加载、完整轮次分享与既有媒体卡片复用现有交互。
+
+代码入口：`shared/src/runtimeTimeline.ts`、CLI OMP runtime producer、Hub runtime registry/routes、`web/src/fork-features/beta-timeline/`。部署与无重启资源切换见 `docs/guide/deployment.md`；不复制生产数据库、不重启已有会话。机群 CLI 升级应另行协调。
+
+## 完整 Beta 与原生恢复链路（待协调上线，2026-11-08）
+
+完整轮次分页保留稳定用户轮次 ID，超大轮次显式续载；结果与产物优先展示，审批、提问和错误保留可达入口。大型侧栏使用有界窗口与独立行更新，发送、排队、消费、失败恢复和草稿分开处理。移动端附件操作提供中文标签和 44px 触控区域。
+
+| Files | Missing upstream seam | Why it cannot move out | Runtime path | Sync verification |
+|---|---|---|---|---|
+| `shared/src/apiTypes.ts`, message/turn helpers, `hub/src/store/message*`, `hub/src/sync/messageService.ts`, Web message-window/API modules | No turn-page or native ordering extension point | Native journal positions and complete-turn cursors cross the existing durable store and message protocol | native receipt → persisted position → fenced turn pages → bounded viewport / complete-turn share | Delayed acknowledgments, clock skew, same-millisecond turns and giant-turn continuation must retain identity and exact coverage |
+| `cli/src/api/apiMachine.ts`, `apiSession.ts`, OMP launcher/input receipt modules | No native generation/admission transport hook | The existing machine and session adapters own spawn options, socket readiness and delivery acknowledgments | server resume attempt → Runner environment → authenticated native source; committed receipt → consumed / terminal resolution | Same HAPI row and journal across archive and concurrent wake; pending input is recovered once; disconnected ready follows registration and alive |
+| Hub socket registry/handlers, `store/ompSources.ts`, `syncEngine.ts`, CLI runner/process utilities | No source-ownership or native disposal coordinator | Publication fencing, process-generation evidence and lifecycle serialization must share the authoritative session/Runner records | quarantine → authorized cleanup-only route → native disposal receipt → verified Runner stop → source retirement → quarantine clear | Reject stale/retired publishers and unproven disposal; permit a new owner before old socket disconnect; exercise concurrent real OS process startup and handoff |
+| `SessionList.tsx`, `SessionChat.tsx`, composer modules, `web/src/fork-features/beta-*`, SSE transport/projectors | No replacement UI or subscription registry | Existing routes and business controls own navigation, drafts and interaction state | per-session projection → row selectors / virtual windows → existing menus, files, voice and business pages | Real desktop/mobile typing, scrolling, attachments and navigation; bounded large-sidebar DOM; same-device/session performance comparison |
+
+这是源码与发布契约，不是生产部署回执。上线需同时准备新 Hub、支持恢复代次的 Runner、声明 `inputReceipts` 与 `nativeOrder` 的 OMP，以及保留旧布局的新协议兼容前端。原 `web/dist` 留作备份；不得只替换前端后宣称完整链路已上线。新全局消息位置索引的首次构建须先在一致性备份副本上测量；正式 Hub 重启和 Runner 交接仍需协调窗口。回滚不能恢复旧数据库或重新执行已终结的输入。
+
+## OMP 原生用量与模型控制（集成候选，2026-11-08）
+
+用量页可直接读取所选机器的 OMP 原生订阅额度，无须为已支持来源另设采集器；保留外部余额来源、真实零额度、过期隐藏和共享池去重。
+
+OMP 新建与现有会话使用原生模型目录和思考能力；保留完整 provider/model 选择，登录或手动刷新会更新相关目录，不再把 OMP 的选择清回静态 auto，也不借用 Claude Code 的配置规则。
+
+本集成以正式 `77b00654` 为基线，组合持久归档 checkpoint 与 OMP 恢复代次、输入终态和发布源隔离。源码与隔离验收不等于生产发布；部署仍需另行协调 Hub、Runner 和原生能力，禁止用旧 Beta 制品覆盖正式修复。
+
+操作与替代边界见 `docs/guide/omp.md`；原生模型列表是候选目录，不是每个历史模型 ID 的实时调用保证。上游拒绝及 OMP 原生回退必须保留真实 provider/model，不能把其他提供商的回复算成所选模型成功。
+
+## 长会话分页与滚动缓存（2026-11-09）
+
+超大轮次现在同时受记录数与约 1 MiB 序列化内容预算限制，首屏不再一次传送整段多 MB 工具历史。普通轮次保持完整；单个超大轮次通过已有双向游标继续加载，完整轮次分享沿用相同续载机制。单条超大消息仍完整返回，保证游标前进，不截断用户输入。排队输入不被历史预算丢弃。
+
+仅视图、加载标记变化不再重写 `sessionStorage` 历史缓存；消息、消费状态、游标或 epoch 变化仍更新恢复检查点。入口为 `hub/src/sync/messageService.ts` 与 `web/src/lib/message-window-store.ts`。
+
+本地真实 SQLite/MessageService 回放 2,000 条已归档记录：首包从 9,384,000 降至 1,033,784 字节，10 页精确恢复全部记录。实际浏览器中 6 次历史/最新切换，未变化的大缓存序列化从 11 次降至 0 次。以上为源码运行与浏览器候选验证，不替代线上部署回执；根入口与 `/beta` 当前均使用 Beta 时间线，不应将两者差异误记为旧渲染器到新渲染器的收益。
+

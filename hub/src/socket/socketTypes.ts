@@ -4,9 +4,11 @@ import type { DefaultEventsMap, Server, Socket } from 'socket.io'
 export type SocketData = {
     namespace?: string
     userId?: number
+    /** Gateway account id when the CLI authenticated with a gateway API token. */
     gatewayAccountId?: number
-    /** Server-resolved API-token row; rechecked for each runtime publication. */
+    /** Gateway API-token row id; lets runtime paths re-check revocation per frame. */
     gatewayTokenId?: number
+    /** True when authenticated via the trusted runner/master CLI_API_TOKEN. */
     cliTrusted?: boolean
 }
 

@@ -77,7 +77,7 @@ async function runCodexResumeScenario(
         store,
         {} as never,
         new RpcRegistry(),
-        { broadcast() {} } as never
+        { broadcast() { } } as never
     )
     const session = engine.getOrCreateSession(
         'session-codex-resume-from-messages',
@@ -123,11 +123,11 @@ async function runCodexResumeScenario(
     }
     const before = store.sessions.getSession(session.id)!
     const capturedResumeSessionIds: Array<string | undefined> = []
-    ;(engine as any).rpcGateway.spawnSession = async (...args: Parameters<SyncEngine['spawnSession']>) => {
-        capturedResumeSessionIds.push(args[8])
-        return { type: 'success', sessionId: session.id }
-    }
-    ;(engine as any).waitForSessionActive = async () => true
+        ; (engine as any).rpcGateway.spawnSession = async (...args: Parameters<SyncEngine['spawnSession']>) => {
+            capturedResumeSessionIds.push(args[8])
+            return { type: 'success', sessionId: session.id }
+        }
+        ; (engine as any).waitForSessionActive = async () => true
 
     try {
         const result = options?.archived
@@ -398,7 +398,7 @@ describe('session model', () => {
             store,
             {} as never,
             new RpcRegistry(),
-            { broadcast() {} } as never
+            { broadcast() { } } as never
         )
 
         try {
@@ -411,15 +411,15 @@ describe('session model', () => {
             engine.handleMachineAlive({ machineId: 'machine-cursor', time: Date.now() })
 
             let capturedModel: string | undefined
-            ;(engine as any).rpcGateway.spawnSession = async (
-                _machineId: string,
-                _directory: string,
-                agent: string,
-                model?: string
-            ) => {
-                capturedModel = model
-                return { type: 'success', sessionId: 'spawned-cursor-session' }
-            }
+                ; (engine as any).rpcGateway.spawnSession = async (
+                    _machineId: string,
+                    _directory: string,
+                    agent: string,
+                    model?: string
+                ) => {
+                    capturedModel = model
+                    return { type: 'success', sessionId: 'spawned-cursor-session' }
+                }
 
             const result = await engine.spawnSession(
                 'machine-cursor',
@@ -643,9 +643,9 @@ describe('session model', () => {
         const store = new Store(':memory:')
         const engine = new SyncEngine(
             store,
-            { of: () => ({ to: () => ({ emit() {} }) }) } as never,
+            { of: () => ({ to: () => ({ emit() { } }) }) } as never,
             new RpcRegistry(),
-            { broadcast() {} } as never
+            { broadcast() { } } as never
         )
 
         try {
@@ -656,7 +656,7 @@ describe('session model', () => {
                 'default'
             )
             engine.handleSessionAlive({ sid: session.id, time: Date.now() })
-            ;(engine as any).rpcGateway.requestSessionConfig = async () => ({ applied: {} })
+                ; (engine as any).rpcGateway.requestSessionConfig = async () => ({ applied: {} })
 
             await expect(
                 engine.applySessionConfig(session.id, { modelReasoningEffort: 'high' })
@@ -671,9 +671,9 @@ describe('session model', () => {
         const store = new Store(':memory:')
         const engine = new SyncEngine(
             store,
-            { of: () => ({ to: () => ({ emit() {} }) }) } as never,
+            { of: () => ({ to: () => ({ emit() { } }) }) } as never,
             new RpcRegistry(),
-            { broadcast() {} } as never
+            { broadcast() { } } as never
         )
 
         try {
@@ -686,18 +686,18 @@ describe('session model', () => {
             )
             engine.handleSessionAlive({ sid: session.id, time: Date.now() })
 
-            ;(engine as any).rpcGateway.cycleOmpModelForSession = async () => ({
-                success: true,
-                currentModel: { provider: 'openai-codex', modelId: 'gpt-5.4-nano' }
-            })
+                ; (engine as any).rpcGateway.cycleOmpModelForSession = async () => ({
+                    success: true,
+                    currentModel: { provider: 'openai-codex', modelId: 'gpt-5.4-nano' }
+                })
             const configRequests: unknown[] = []
-            ;(engine as any).rpcGateway.requestSessionConfig = async (
-                _sessionId: string,
-                config: unknown
-            ) => {
-                configRequests.push(config)
-                return { applied: config }
-            }
+                ; (engine as any).rpcGateway.requestSessionConfig = async (
+                    _sessionId: string,
+                    config: unknown
+                ) => {
+                    configRequests.push(config)
+                    return { applied: config }
+                }
 
             await expect(engine.cycleOmpModelForSession(session.id)).resolves.toEqual({
                 success: true,
@@ -716,9 +716,9 @@ describe('session model', () => {
         const store = new Store(':memory:')
         const engine = new SyncEngine(
             store,
-            { of: () => ({ to: () => ({ emit() {} }) }) } as never,
+            { of: () => ({ to: () => ({ emit() { } }) }) } as never,
             new RpcRegistry(),
-            { broadcast() {} } as never
+            { broadcast() { } } as never
         )
 
         try {
@@ -766,7 +766,7 @@ describe('session model', () => {
                 const stored = store.sessions.getSessionByNamespace(sessionId, 'default')
                 return stored ? { ok: true, value: stored } : { ok: false, reason: 'not-found' }
             },
-            emitAccessError: () => {},
+            emitAccessError: () => { },
             onSessionActivity: (sessionId, updatedAt) => {
                 activity.push({ sessionId, updatedAt })
             }
@@ -822,14 +822,14 @@ describe('session model', () => {
                 on: (event: string, handler: (payload: unknown) => void) => {
                     handlers.set(event, handler)
                 },
-                to: () => ({ emit() {} })
+                to: () => ({ emit() { } })
             } as never, {
                 store,
                 resolveSessionAccess: (sessionId) => {
                     const stored = store.sessions.getSessionByNamespace(sessionId, 'default')
                     return stored ? { ok: true, value: stored } : { ok: false, reason: 'not-found' }
                 },
-                emitAccessError: () => {},
+                emitAccessError: () => { },
                 onSessionActivity: (sessionId, updatedAt) => {
                     activity.push({ sessionId, updatedAt })
                     cache.recordSessionActivity(sessionId, updatedAt)
@@ -869,7 +869,7 @@ describe('session model', () => {
         const originalConsoleError = console.error
         let now = 1_000
         Date.now = () => now
-        console.error = () => {}
+        console.error = () => { }
         try {
             const store = new Store(':memory:')
             const session = store.sessions.getOrCreateSession(
@@ -892,14 +892,14 @@ describe('session model', () => {
                 on: (event: string, handler: (payload: unknown) => void) => {
                     handlers.set(event, handler)
                 },
-                to: () => ({ emit() {} })
+                to: () => ({ emit() { } })
             } as never, {
                 store,
                 resolveSessionAccess: (sessionId) => {
                     const stored = store.sessions.getSessionByNamespace(sessionId, 'default')
                     return stored ? { ok: true, value: stored } : { ok: false, reason: 'not-found' }
                 },
-                emitAccessError: () => {},
+                emitAccessError: () => { },
                 onSessionActivity: (sessionId, updatedAt) => {
                     if (failActivity) throw new Error('activity callback failed')
                     activity.push({ sessionId, updatedAt })
@@ -948,14 +948,14 @@ describe('session model', () => {
                 on: (event: string, handler: (payload: unknown) => void) => {
                     handlers.set(event, handler)
                 },
-                to: () => ({ emit() {} })
+                to: () => ({ emit() { } })
             } as never, {
                 store,
                 resolveSessionAccess: (sessionId) => {
                     const stored = store.sessions.getSessionByNamespace(sessionId, 'default')
                     return stored ? { ok: true, value: stored } : { ok: false, reason: 'not-found' }
                 },
-                emitAccessError: () => {},
+                emitAccessError: () => { },
                 onSessionActivity: (sessionId, updatedAt) => activity.push({ sessionId, updatedAt }),
                 onWebappEvent: (event) => webEvents.push(event)
             })
@@ -1010,14 +1010,14 @@ describe('session model', () => {
                 on: (event: string, handler: (payload: unknown) => void) => {
                     handlers.set(event, handler)
                 },
-                to: () => ({ emit() {} })
+                to: () => ({ emit() { } })
             } as never, {
                 store,
                 resolveSessionAccess: (sessionId) => {
                     const stored = store.sessions.getSessionByNamespace(sessionId, 'default')
                     return stored ? { ok: true, value: stored } : { ok: false, reason: 'not-found' }
                 },
-                emitAccessError: () => {},
+                emitAccessError: () => { },
                 onSessionActivity: (sessionId, updatedAt) => {
                     activity.push({ sessionId, updatedAt })
                     cache.recordSessionActivity(sessionId, updatedAt)
@@ -1067,14 +1067,14 @@ describe('session model', () => {
                 on: (event: string, handler: (payload: unknown) => void) => {
                     handlers.set(event, handler)
                 },
-                to: () => ({ emit() {} })
+                to: () => ({ emit() { } })
             } as never, {
                 store,
                 resolveSessionAccess: (sessionId) => {
                     const stored = store.sessions.getSessionByNamespace(sessionId, 'default')
                     return stored ? { ok: true, value: stored } : { ok: false, reason: 'not-found' }
                 },
-                emitAccessError: () => {},
+                emitAccessError: () => { },
                 onWebappEvent: (event) => webEvents.push(event)
             })
 
@@ -1105,14 +1105,14 @@ describe('session model', () => {
             on: (event: string, handler: (payload: unknown) => void) => {
                 handlers.set(event, handler)
             },
-            to: () => ({ emit() {} })
+            to: () => ({ emit() { } })
         } as never, {
             store,
             resolveSessionAccess: (sessionId) => {
                 const stored = store.sessions.getSessionByNamespace(sessionId, 'default')
                 return stored ? { ok: true, value: stored } : { ok: false, reason: 'not-found' }
             },
-            emitAccessError: () => {},
+            emitAccessError: () => { },
             onSessionActivity: (sessionId, updatedAt) => {
                 activity.push({ sessionId, updatedAt })
             }
@@ -1157,7 +1157,7 @@ describe('session model', () => {
             store,
             {} as never,
             new RpcRegistry(),
-            { broadcast() {} } as never
+            { broadcast() { } } as never
         )
 
         try {
@@ -1185,24 +1185,24 @@ describe('session model', () => {
             let capturedModel: string | undefined
             let capturedModelReasoningEffort: string | undefined
             let capturedEffort: string | undefined
-            ;(engine as any).rpcGateway.spawnSession = async (
-                _machineId: string,
-                _directory: string,
-                _agent: string,
-                model?: string,
-                modelReasoningEffort?: string,
-                _yolo?: boolean,
-                _sessionType?: string,
-                _worktreeName?: string,
-                _resumeSessionId?: string,
-                effort?: string
-            ) => {
-                capturedModel = model
-                capturedModelReasoningEffort = modelReasoningEffort
-                capturedEffort = effort
-                return { type: 'success', sessionId: session.id }
-            }
-            ;(engine as any).waitForSessionActive = async () => true
+                ; (engine as any).rpcGateway.spawnSession = async (
+                    _machineId: string,
+                    _directory: string,
+                    _agent: string,
+                    model?: string,
+                    modelReasoningEffort?: string,
+                    _yolo?: boolean,
+                    _sessionType?: string,
+                    _worktreeName?: string,
+                    _resumeSessionId?: string,
+                    effort?: string
+                ) => {
+                    capturedModel = model
+                    capturedModelReasoningEffort = modelReasoningEffort
+                    capturedEffort = effort
+                    return { type: 'success', sessionId: session.id }
+                }
+                ; (engine as any).waitForSessionActive = async () => true
 
             const result = await engine.resumeSession(session.id, 'default')
 
@@ -1221,7 +1221,7 @@ describe('session model', () => {
             store,
             {} as never,
             new RpcRegistry(),
-            { broadcast() {} } as never
+            { broadcast() { } } as never
         )
 
         try {
@@ -1249,17 +1249,17 @@ describe('session model', () => {
             engine.handleMachineAlive({ machineId: 'machine-1', time: Date.now() })
 
             let capturedModelReasoningEffort: string | undefined
-            ;(engine as any).rpcGateway.spawnSession = async (
-                _machineId: string,
-                _directory: string,
-                _agent: string,
-                _model?: string,
-                modelReasoningEffort?: string
-            ) => {
-                capturedModelReasoningEffort = modelReasoningEffort
-                return { type: 'success', sessionId: session.id }
-            }
-            ;(engine as any).waitForSessionActive = async () => true
+                ; (engine as any).rpcGateway.spawnSession = async (
+                    _machineId: string,
+                    _directory: string,
+                    _agent: string,
+                    _model?: string,
+                    modelReasoningEffort?: string
+                ) => {
+                    capturedModelReasoningEffort = modelReasoningEffort
+                    return { type: 'success', sessionId: session.id }
+                }
+                ; (engine as any).waitForSessionActive = async () => true
 
             const result = await engine.resumeSession(session.id, 'default')
 
@@ -1276,7 +1276,7 @@ describe('session model', () => {
             store,
             {} as never,
             new RpcRegistry(),
-            { broadcast() {} } as never
+            { broadcast() { } } as never
         )
 
         try {
@@ -1304,23 +1304,23 @@ describe('session model', () => {
 
             let capturedModel: string | undefined
             let capturedEffort: string | undefined
-            ;(engine as any).rpcGateway.spawnSession = async (
-                _machineId: string,
-                _directory: string,
-                _agent: string,
-                model?: string,
-                _modelReasoningEffort?: string,
-                _yolo?: boolean,
-                _sessionType?: 'simple' | 'worktree',
-                _worktreeName?: string,
-                _resumeSessionId?: string,
-                effort?: string
-            ) => {
-                capturedModel = model
-                capturedEffort = effort
-                return { type: 'success', sessionId: session.id }
-            }
-            ;(engine as any).waitForSessionActive = async () => true
+                ; (engine as any).rpcGateway.spawnSession = async (
+                    _machineId: string,
+                    _directory: string,
+                    _agent: string,
+                    model?: string,
+                    _modelReasoningEffort?: string,
+                    _yolo?: boolean,
+                    _sessionType?: 'simple' | 'worktree',
+                    _worktreeName?: string,
+                    _resumeSessionId?: string,
+                    effort?: string
+                ) => {
+                    capturedModel = model
+                    capturedEffort = effort
+                    return { type: 'success', sessionId: session.id }
+                }
+                ; (engine as any).waitForSessionActive = async () => true
 
             const result = await engine.resumeSession(session.id, 'default')
 
@@ -1338,7 +1338,7 @@ describe('session model', () => {
             store,
             {} as never,
             new RpcRegistry(),
-            { broadcast() {} } as never
+            { broadcast() { } } as never
         )
 
         try {
@@ -1367,23 +1367,23 @@ describe('session model', () => {
 
             let capturedModel: string | undefined
             let capturedEffort: string | undefined
-            ;(engine as any).rpcGateway.spawnSession = async (
-                _machineId: string,
-                _directory: string,
-                _agent: string,
-                model?: string,
-                _modelReasoningEffort?: string,
-                _yolo?: boolean,
-                _sessionType?: 'simple' | 'worktree',
-                _worktreeName?: string,
-                _resumeSessionId?: string,
-                effort?: string
-            ) => {
-                capturedModel = model
-                capturedEffort = effort
-                return { type: 'success', sessionId: session.id }
-            }
-            ;(engine as any).waitForSessionActive = async () => true
+                ; (engine as any).rpcGateway.spawnSession = async (
+                    _machineId: string,
+                    _directory: string,
+                    _agent: string,
+                    model?: string,
+                    _modelReasoningEffort?: string,
+                    _yolo?: boolean,
+                    _sessionType?: 'simple' | 'worktree',
+                    _worktreeName?: string,
+                    _resumeSessionId?: string,
+                    effort?: string
+                ) => {
+                    capturedModel = model
+                    capturedEffort = effort
+                    return { type: 'success', sessionId: session.id }
+                }
+                ; (engine as any).waitForSessionActive = async () => true
 
             const result = await engine.resumeSession(session.id, 'default')
 
@@ -1401,7 +1401,7 @@ describe('session model', () => {
             store,
             {} as never,
             new RpcRegistry(),
-            { broadcast() {} } as never
+            { broadcast() { } } as never
         )
 
         try {
@@ -1449,7 +1449,7 @@ describe('session model', () => {
             store,
             {} as never,
             new RpcRegistry(),
-            { broadcast() {} } as never
+            { broadcast() { } } as never
         )
 
         try {
@@ -1475,21 +1475,21 @@ describe('session model', () => {
             engine.handleMachineAlive({ machineId: 'machine-1', time: Date.now() })
 
             let capturedResumeSessionId: string | undefined
-            ;(engine as any).rpcGateway.spawnSession = async (
-                _machineId: string,
-                _directory: string,
-                _agent: string,
-                _model?: string,
-                _modelReasoningEffort?: string,
-                _yolo?: boolean,
-                _sessionType?: 'simple' | 'worktree',
-                _worktreeName?: string,
-                resumeSessionId?: string
-            ) => {
-                capturedResumeSessionId = resumeSessionId
-                return { type: 'success', sessionId: session.id }
-            }
-            ;(engine as any).waitForSessionActive = async () => true
+                ; (engine as any).rpcGateway.spawnSession = async (
+                    _machineId: string,
+                    _directory: string,
+                    _agent: string,
+                    _model?: string,
+                    _modelReasoningEffort?: string,
+                    _yolo?: boolean,
+                    _sessionType?: 'simple' | 'worktree',
+                    _worktreeName?: string,
+                    resumeSessionId?: string
+                ) => {
+                    capturedResumeSessionId = resumeSessionId
+                    return { type: 'success', sessionId: session.id }
+                }
+                ; (engine as any).waitForSessionActive = async () => true
 
             const result = await engine.resumeSession(session.id, 'default')
 
@@ -1506,7 +1506,7 @@ describe('session model', () => {
             store,
             {} as never,
             new RpcRegistry(),
-            { broadcast() {} } as never
+            { broadcast() { } } as never
         )
 
         try {
@@ -1548,12 +1548,12 @@ describe('session model', () => {
 
             let capturedResumeSessionId: string | undefined
             let capturedClaudeLaunch: unknown
-            ;(engine as any).rpcGateway.spawnSession = async (...args: unknown[]) => {
-                capturedResumeSessionId = args[8] as string | undefined
-                capturedClaudeLaunch = args[12]
-                return { type: 'success', sessionId: session.id }
-            }
-            ;(engine as any).waitForSessionActive = async () => true
+                ; (engine as any).rpcGateway.spawnSession = async (...args: unknown[]) => {
+                    capturedResumeSessionId = args[8] as string | undefined
+                    capturedClaudeLaunch = args[12]
+                    return { type: 'success', sessionId: session.id }
+                }
+                ; (engine as any).waitForSessionActive = async () => true
 
             const result = await engine.resumeSession(session.id, 'default')
 
@@ -1574,7 +1574,7 @@ describe('session model', () => {
             store,
             {} as never,
             new RpcRegistry(),
-            { broadcast() {} } as never
+            { broadcast() { } } as never
         )
 
         try {
@@ -1609,21 +1609,21 @@ describe('session model', () => {
             engine.handleMachineAlive({ machineId: 'machine-1', time: Date.now() })
 
             let capturedResumeSessionId: string | undefined
-            ;(engine as any).rpcGateway.spawnSession = async (
-                _machineId: string,
-                _directory: string,
-                _agent: string,
-                _model?: string,
-                _modelReasoningEffort?: string,
-                _yolo?: boolean,
-                _sessionType?: 'simple' | 'worktree',
-                _worktreeName?: string,
-                resumeSessionId?: string
-            ) => {
-                capturedResumeSessionId = resumeSessionId
-                return { type: 'success', sessionId: session.id }
-            }
-            ;(engine as any).waitForSessionActive = async () => true
+                ; (engine as any).rpcGateway.spawnSession = async (
+                    _machineId: string,
+                    _directory: string,
+                    _agent: string,
+                    _model?: string,
+                    _modelReasoningEffort?: string,
+                    _yolo?: boolean,
+                    _sessionType?: 'simple' | 'worktree',
+                    _worktreeName?: string,
+                    resumeSessionId?: string
+                ) => {
+                    capturedResumeSessionId = resumeSessionId
+                    return { type: 'success', sessionId: session.id }
+                }
+                ; (engine as any).waitForSessionActive = async () => true
 
             const result = await engine.resumeSession(session.id, 'default')
 
@@ -1644,7 +1644,7 @@ describe('session model', () => {
             store,
             {} as never,
             new RpcRegistry(),
-            { broadcast() {} } as never
+            { broadcast() { } } as never
         )
 
         try {
@@ -1689,21 +1689,21 @@ describe('session model', () => {
             engine.handleMachineAlive({ machineId: 'machine-1', time: Date.now() })
 
             let capturedResumeSessionId: string | undefined
-            ;(engine as any).rpcGateway.spawnSession = async (
-                _machineId: string,
-                _directory: string,
-                _agent: string,
-                _model?: string,
-                _modelReasoningEffort?: string,
-                _yolo?: boolean,
-                _sessionType?: 'simple' | 'worktree',
-                _worktreeName?: string,
-                resumeSessionId?: string
-            ) => {
-                capturedResumeSessionId = resumeSessionId
-                return { type: 'success', sessionId: session.id }
-            }
-            ;(engine as any).waitForSessionActive = async () => true
+                ; (engine as any).rpcGateway.spawnSession = async (
+                    _machineId: string,
+                    _directory: string,
+                    _agent: string,
+                    _model?: string,
+                    _modelReasoningEffort?: string,
+                    _yolo?: boolean,
+                    _sessionType?: 'simple' | 'worktree',
+                    _worktreeName?: string,
+                    resumeSessionId?: string
+                ) => {
+                    capturedResumeSessionId = resumeSessionId
+                    return { type: 'success', sessionId: session.id }
+                }
+                ; (engine as any).waitForSessionActive = async () => true
 
             const result = await engine.resumeSession(session.id, 'default')
 
@@ -1723,7 +1723,7 @@ describe('session model', () => {
             store,
             {} as never,
             new RpcRegistry(),
-            { broadcast() {} } as never
+            { broadcast() { } } as never
         )
 
         try {
@@ -1952,7 +1952,7 @@ describe('session model', () => {
             store,
             {} as never,
             new RpcRegistry(),
-            { broadcast() {} } as never
+            { broadcast() { } } as never
         )
 
         try {
@@ -1979,23 +1979,23 @@ describe('session model', () => {
             engine.handleMachineAlive({ machineId: 'machine-1', time: Date.now() })
 
             let capturedPermissionMode: string | undefined
-            ;(engine as any).rpcGateway.spawnSession = async (
-                _machineId: string,
-                _directory: string,
-                _agent: string,
-                _model?: string,
-                _modelReasoningEffort?: string,
-                _yolo?: boolean,
-                _sessionType?: string,
-                _worktreeName?: string,
-                _resumeSessionId?: string,
-                _effort?: string,
-                permissionMode?: string
-            ) => {
-                capturedPermissionMode = permissionMode
-                return { type: 'success', sessionId: session.id }
-            }
-            ;(engine as any).waitForSessionActive = async () => true
+                ; (engine as any).rpcGateway.spawnSession = async (
+                    _machineId: string,
+                    _directory: string,
+                    _agent: string,
+                    _model?: string,
+                    _modelReasoningEffort?: string,
+                    _yolo?: boolean,
+                    _sessionType?: string,
+                    _worktreeName?: string,
+                    _resumeSessionId?: string,
+                    _effort?: string,
+                    permissionMode?: string
+                ) => {
+                    capturedPermissionMode = permissionMode
+                    return { type: 'success', sessionId: session.id }
+                }
+                ; (engine as any).waitForSessionActive = async () => true
 
             const result = await engine.resumeSession(session.id, 'default', { permissionMode: 'default' })
 
@@ -2012,7 +2012,7 @@ describe('session model', () => {
             store,
             {} as never,
             new RpcRegistry(),
-            { broadcast() {} } as never
+            { broadcast() { } } as never
         )
 
         try {
@@ -2039,29 +2039,29 @@ describe('session model', () => {
             engine.handleMachineAlive({ machineId: 'machine-1', time: Date.now() })
 
             let capturedCopilotAgentMode: string | undefined
-            ;(engine as any).rpcGateway.spawnSession = async (
-                _machineId: string,
-                _directory: string,
-                _agent: string,
-                _model?: string,
-                _modelReasoningEffort?: string,
-                _yolo?: boolean,
-                _sessionType?: string,
-                _worktreeName?: string,
-                _resumeSessionId?: string,
-                _effort?: string,
-                _permissionMode?: string,
-                _serviceTier?: string,
-                _claudeLaunch?: unknown,
-                _ccSwitchProviderId?: string,
-                _existingSessionId?: string,
-                _collaborationMode?: string,
-                copilotAgentMode?: string
-            ) => {
-                capturedCopilotAgentMode = copilotAgentMode
-                return { type: 'success', sessionId: session.id }
-            }
-            ;(engine as any).waitForSessionActive = async () => true
+                ; (engine as any).rpcGateway.spawnSession = async (
+                    _machineId: string,
+                    _directory: string,
+                    _agent: string,
+                    _model?: string,
+                    _modelReasoningEffort?: string,
+                    _yolo?: boolean,
+                    _sessionType?: string,
+                    _worktreeName?: string,
+                    _resumeSessionId?: string,
+                    _effort?: string,
+                    _permissionMode?: string,
+                    _serviceTier?: string,
+                    _claudeLaunch?: unknown,
+                    _ccSwitchProviderId?: string,
+                    _existingSessionId?: string,
+                    _collaborationMode?: string,
+                    copilotAgentMode?: string
+                ) => {
+                    capturedCopilotAgentMode = copilotAgentMode
+                    return { type: 'success', sessionId: session.id }
+                }
+                ; (engine as any).waitForSessionActive = async () => true
 
             const result = await engine.resumeSession(session.id, 'default')
 
@@ -2078,7 +2078,7 @@ describe('session model', () => {
             store,
             {} as never,
             new RpcRegistry(),
-            { broadcast() {} } as never
+            { broadcast() { } } as never
         )
         const session = firstEngine.getOrCreateSession(
             'session-copilot-agent-mode-restart',
@@ -2098,7 +2098,7 @@ describe('session model', () => {
             store,
             {} as never,
             new RpcRegistry(),
-            { broadcast() {} } as never
+            { broadcast() { } } as never
         )
         try {
             expect(restartedEngine.getSession(session.id)?.copilotAgentMode).toBe('autopilot')
@@ -2115,7 +2115,7 @@ describe('session model', () => {
             store,
             {} as never,
             new RpcRegistry(),
-            { broadcast() {} } as never
+            { broadcast() { } } as never
         )
 
         try {
@@ -2148,23 +2148,23 @@ describe('session model', () => {
             engine.handleSessionEnd({ sid: session.id, time: Date.now() })
 
             let capturedPermissionMode: string | undefined
-            ;(engine as any).rpcGateway.spawnSession = async (
-                _machineId: string,
-                _directory: string,
-                _agent: string,
-                _model?: string,
-                _modelReasoningEffort?: string,
-                _yolo?: boolean,
-                _sessionType?: string,
-                _worktreeName?: string,
-                _resumeSessionId?: string,
-                _effort?: string,
-                permissionMode?: string
-            ) => {
-                capturedPermissionMode = permissionMode
-                return { type: 'success', sessionId: session.id }
-            }
-            ;(engine as any).waitForSessionActive = async () => true
+                ; (engine as any).rpcGateway.spawnSession = async (
+                    _machineId: string,
+                    _directory: string,
+                    _agent: string,
+                    _model?: string,
+                    _modelReasoningEffort?: string,
+                    _yolo?: boolean,
+                    _sessionType?: string,
+                    _worktreeName?: string,
+                    _resumeSessionId?: string,
+                    _effort?: string,
+                    permissionMode?: string
+                ) => {
+                    capturedPermissionMode = permissionMode
+                    return { type: 'success', sessionId: session.id }
+                }
+                ; (engine as any).waitForSessionActive = async () => true
 
             const result = await engine.resumeSession(session.id, 'default')
 
@@ -2181,7 +2181,7 @@ describe('session model', () => {
             store,
             {} as never,
             new RpcRegistry(),
-            { broadcast() {} } as never
+            { broadcast() { } } as never
         )
 
         try {
@@ -2234,31 +2234,31 @@ describe('session model', () => {
                 mergeCalls += 1
                 return mergeSessions(oldSessionId, newSessionId, namespace)
             }
-            ;(engine as any).rpcGateway.spawnSession = async (
-                _machineId: string,
-                _directory: string,
-                _agent: string,
-                _model?: string,
-                _modelReasoningEffort?: string,
-                _yolo?: boolean,
-                _sessionType?: string,
-                _worktreeName?: string,
-                _resumeSessionId?: string,
-                _effort?: string,
-                permissionMode?: string
-            ) => {
-                engine.handleSessionAlive({
-                    sid: spawnedSessionId,
-                    time: Date.now(),
-                    permissionMode: permissionMode as never
-                })
-                return { type: 'success', sessionId: spawnedSessionId }
-            }
-            ;(engine as any).rpcGateway.requestSessionConfig = async () => {
-                configRpcCalls += 1
-                throw new Error('RPC handler not registered')
-            }
-            ;(engine as any).waitForSessionActive = async () => true
+                ; (engine as any).rpcGateway.spawnSession = async (
+                    _machineId: string,
+                    _directory: string,
+                    _agent: string,
+                    _model?: string,
+                    _modelReasoningEffort?: string,
+                    _yolo?: boolean,
+                    _sessionType?: string,
+                    _worktreeName?: string,
+                    _resumeSessionId?: string,
+                    _effort?: string,
+                    permissionMode?: string
+                ) => {
+                    engine.handleSessionAlive({
+                        sid: spawnedSessionId,
+                        time: Date.now(),
+                        permissionMode: permissionMode as never
+                    })
+                    return { type: 'success', sessionId: spawnedSessionId }
+                }
+                ; (engine as any).rpcGateway.requestSessionConfig = async () => {
+                    configRpcCalls += 1
+                    throw new Error('RPC handler not registered')
+                }
+                ; (engine as any).waitForSessionActive = async () => true
 
             const result = await engine.resumeSession(oldSession.id, 'default')
 
@@ -2278,7 +2278,7 @@ describe('session model', () => {
             store,
             {} as never,
             new RpcRegistry(),
-            { broadcast() {} } as never
+            { broadcast() { } } as never
         )
 
         try {
@@ -2314,33 +2314,33 @@ describe('session model', () => {
                 return mergeSessions(oldSessionId, newSessionId, namespace)
             }
 
-            ;(engine as any).rpcGateway.spawnSession = async (
-                _machineId: string,
-                _directory: string,
-                _agent: string,
-                _model?: string,
-                _modelReasoningEffort?: string,
-                _yolo?: boolean,
-                _sessionType?: string,
-                _worktreeName?: string,
-                _resumeSessionId?: string,
-                _effort?: string,
-                _permissionMode?: string,
-                _serviceTier?: string,
-                _claudeLaunch?: unknown,
-                _ccSwitchProviderId?: string,
-                existingSessionId?: string
-            ) => {
-                capturedExistingSessionId = existingSessionId
-                engine.handleSessionAlive({ sid: oldSession.id, time: Date.now() })
-                return { type: 'success', sessionId: oldSession.id }
-            }
-            ;(engine as any).rpcGateway.getCursorChatStoreStatus = async () => ({ onDisk: true, store: 'acp' })
-            ;(engine as any).waitForSessionActive = async () => true
-            ;(engine as any).waitForSessionReady = async () => {
-                waitForSessionReadyCalls += 1
-                return 'timeout'
-            }
+                ; (engine as any).rpcGateway.spawnSession = async (
+                    _machineId: string,
+                    _directory: string,
+                    _agent: string,
+                    _model?: string,
+                    _modelReasoningEffort?: string,
+                    _yolo?: boolean,
+                    _sessionType?: string,
+                    _worktreeName?: string,
+                    _resumeSessionId?: string,
+                    _effort?: string,
+                    _permissionMode?: string,
+                    _serviceTier?: string,
+                    _claudeLaunch?: unknown,
+                    _ccSwitchProviderId?: string,
+                    existingSessionId?: string
+                ) => {
+                    capturedExistingSessionId = existingSessionId
+                    engine.handleSessionAlive({ sid: oldSession.id, time: Date.now() })
+                    return { type: 'success', sessionId: oldSession.id }
+                }
+                ; (engine as any).rpcGateway.getCursorChatStoreStatus = async () => ({ onDisk: true, store: 'acp' })
+                ; (engine as any).waitForSessionActive = async () => true
+                ; (engine as any).waitForSessionReady = async () => {
+                    waitForSessionReadyCalls += 1
+                    return 'timeout'
+                }
 
             const result = await engine.resumeSession(oldSession.id, 'default')
 
@@ -2360,7 +2360,7 @@ describe('session model', () => {
             store,
             {} as never,
             new RpcRegistry(),
-            { broadcast() {} } as never
+            { broadcast() { } } as never
         )
 
         try {
@@ -2394,29 +2394,29 @@ describe('session model', () => {
                 return mergeSessions(oldSessionId, newSessionId, namespace)
             }
 
-            ;(engine as any).rpcGateway.spawnSession = async (
-                _machineId: string,
-                _directory: string,
-                _agent: string,
-                _model?: string,
-                _modelReasoningEffort?: string,
-                _yolo?: boolean,
-                _sessionType?: string,
-                _worktreeName?: string,
-                _resumeSessionId?: string,
-                _effort?: string,
-                _permissionMode?: string,
-                _serviceTier?: string,
-                _claudeLaunch?: unknown,
-                _ccSwitchProviderId?: string,
-                existingSessionId?: string
-            ) => {
-                expect(existingSessionId).toBe(oldSession.id)
-                engine.handleSessionAlive({ sid: oldSession.id, time: Date.now() })
-                return { type: 'success', sessionId: oldSession.id }
-            }
-            ;(engine as any).rpcGateway.getCursorChatStoreStatus = async () => ({ onDisk: true, store: 'acp' })
-            ;(engine as any).waitForSessionActive = async () => true
+                ; (engine as any).rpcGateway.spawnSession = async (
+                    _machineId: string,
+                    _directory: string,
+                    _agent: string,
+                    _model?: string,
+                    _modelReasoningEffort?: string,
+                    _yolo?: boolean,
+                    _sessionType?: string,
+                    _worktreeName?: string,
+                    _resumeSessionId?: string,
+                    _effort?: string,
+                    _permissionMode?: string,
+                    _serviceTier?: string,
+                    _claudeLaunch?: unknown,
+                    _ccSwitchProviderId?: string,
+                    existingSessionId?: string
+                ) => {
+                    expect(existingSessionId).toBe(oldSession.id)
+                    engine.handleSessionAlive({ sid: oldSession.id, time: Date.now() })
+                    return { type: 'success', sessionId: oldSession.id }
+                }
+                ; (engine as any).rpcGateway.getCursorChatStoreStatus = async () => ({ onDisk: true, store: 'acp' })
+                ; (engine as any).waitForSessionActive = async () => true
 
             const result = await engine.resumeSession(oldSession.id, 'default')
 
@@ -2430,7 +2430,7 @@ describe('session model', () => {
 
     it('reopens Pi in place only after native-ready, preserving its id and history', async () => {
         const store = new Store(':memory:')
-        const engine = new SyncEngine(store, {} as never, new RpcRegistry(), { broadcast() {} } as never)
+        const engine = new SyncEngine(store, {} as never, new RpcRegistry(), { broadcast() { } } as never)
         try {
             const session = engine.getOrCreateSession('pi-in-place', {
                 path: '/tmp/project', host: 'localhost', machineId: 'machine-1', flavor: 'pi', piSessionId: 'pi-native-1',
@@ -2442,13 +2442,13 @@ describe('session model', () => {
             engine.handleSessionEnd({ sid: session.id, time: Date.now() })
             let existing: string | undefined
             let merges = 0
-            ;(engine as any).sessionCache.mergeSessions = async () => { merges += 1 }
-            ;(engine as any).rpcGateway.spawnSession = async (...args: Parameters<SyncEngine['spawnSession']>) => {
-                existing = args[14]
-                engine.handleSessionAlive({ sid: session.id, time: Date.now() })
-                engine.handleSessionReady({ sid: session.id, time: Date.now() })
-                return { type: 'success', sessionId: session.id }
-            }
+                ; (engine as any).sessionCache.mergeSessions = async () => { merges += 1 }
+                ; (engine as any).rpcGateway.spawnSession = async (...args: Parameters<SyncEngine['spawnSession']>) => {
+                    existing = args[14]
+                    engine.handleSessionAlive({ sid: session.id, time: Date.now() })
+                    engine.handleSessionReady({ sid: session.id, time: Date.now() })
+                    return { type: 'success', sessionId: session.id }
+                }
             const result = await engine.reopenSession(session.id, 'default')
             expect(result).toEqual({ type: 'success', sessionId: session.id, resumed: true })
             expect(existing).toBe(session.id)
@@ -2459,7 +2459,7 @@ describe('session model', () => {
 
     it('kills and deletes an unexpected legacy Pi temp without touching the original row', async () => {
         const store = new Store(':memory:')
-        const engine = new SyncEngine(store, {} as never, new RpcRegistry(), { broadcast() {} } as never)
+        const engine = new SyncEngine(store, {} as never, new RpcRegistry(), { broadcast() { } } as never)
         try {
             const original = engine.getOrCreateSession('pi-original', {
                 path: '/tmp/project', host: 'localhost', machineId: 'machine-1', flavor: 'pi', piSessionId: 'pi-native-old',
@@ -2469,11 +2469,11 @@ describe('session model', () => {
             engine.getOrCreateMachine('machine-1', { host: 'localhost', platform: 'linux', happyCliVersion: '0.1.0' }, { status: 'running', capabilities: { piExistingSessionResume: true } }, 'default')
             engine.handleMachineAlive({ machineId: 'machine-1', time: Date.now() })
             engine.handleSessionEnd({ sid: original.id, time: Date.now() })
-            ;(engine as any).rpcGateway.spawnSession = async () => ({ type: 'success', sessionId: unexpected.id })
-            ;(engine as any).rpcGateway.stopRunnerSession = async (_machineId: string, sid: string) => {
-                engine.handleSessionEnd({ sid, time: Date.now(), reason: 'error' })
-                return 'stopped'
-            }
+                ; (engine as any).rpcGateway.spawnSession = async () => ({ type: 'success', sessionId: unexpected.id })
+                ; (engine as any).rpcGateway.stopRunnerSession = async (_machineId: string, sid: string) => {
+                    engine.handleSessionEnd({ sid, time: Date.now(), reason: 'error' })
+                    return 'stopped'
+                }
             const result = await engine.reopenSession(original.id, 'default')
             expect(result).toMatchObject({ type: 'error', code: 'resume_failed', message: expect.stringContaining('upgrade') })
             expect(store.sessions.getSession(unexpected.id)).toBeNull()
@@ -2484,7 +2484,7 @@ describe('session model', () => {
 
     it('does not restore archive metadata over a live Pi child after kill failure', async () => {
         const store = new Store(':memory:')
-        const engine = new SyncEngine(store, {} as never, new RpcRegistry(), { broadcast() {} } as never)
+        const engine = new SyncEngine(store, {} as never, new RpcRegistry(), { broadcast() { } } as never)
         try {
             const session = engine.getOrCreateSession('pi-live-failure', {
                 path: '/tmp/project', host: 'localhost', machineId: 'machine-1', flavor: 'pi', piSessionId: 'pi-native-live',
@@ -2493,12 +2493,12 @@ describe('session model', () => {
             engine.getOrCreateMachine('machine-1', { host: 'localhost', platform: 'linux', happyCliVersion: '0.1.0' }, { status: 'running', capabilities: { piExistingSessionResume: true } }, 'default')
             engine.handleMachineAlive({ machineId: 'machine-1', time: Date.now() })
             engine.handleSessionEnd({ sid: session.id, time: Date.now() })
-            ;(engine as any).rpcGateway.spawnSession = async () => {
-                engine.handleSessionAlive({ sid: session.id, time: Date.now() })
-                return { type: 'success', sessionId: session.id }
-            }
-            ;(engine as any).waitForSessionReady = async () => 'timeout'
-            ;(engine as any).rpcGateway.stopRunnerSession = async () => 'still_alive'
+                ; (engine as any).rpcGateway.spawnSession = async () => {
+                    engine.handleSessionAlive({ sid: session.id, time: Date.now() })
+                    return { type: 'success', sessionId: session.id }
+                }
+                ; (engine as any).waitForSessionReady = async () => 'timeout'
+                ; (engine as any).rpcGateway.stopRunnerSession = async () => 'still_alive'
             const result = await engine.reopenSession(session.id, 'default')
             expect(result).toMatchObject({ type: 'error', message: expect.stringContaining('still active') })
             expect(engine.getSessionByNamespace(session.id, 'default')?.active).toBe(true)
@@ -2516,7 +2516,7 @@ describe('session model', () => {
 
     it('rejects Pi resume before spawn when the runner lacks in-place capability', async () => {
         const store = new Store(':memory:')
-        const engine = new SyncEngine(store, {} as never, new RpcRegistry(), { broadcast() {} } as never)
+        const engine = new SyncEngine(store, {} as never, new RpcRegistry(), { broadcast() { } } as never)
         try {
             const session = engine.getOrCreateSession('pi-old-runner', {
                 path: '/tmp/project', host: 'localhost', machineId: 'machine-1', flavor: 'pi', piSessionId: 'pi-native-old-runner',
@@ -2526,7 +2526,7 @@ describe('session model', () => {
             engine.handleMachineAlive({ machineId: 'machine-1', time: Date.now() })
             engine.handleSessionEnd({ sid: session.id, time: Date.now() })
             let spawnCalls = 0
-            ;(engine as any).rpcGateway.spawnSession = async () => { spawnCalls += 1; return { type: 'error', message: 'unexpected' } }
+                ; (engine as any).rpcGateway.spawnSession = async () => { spawnCalls += 1; return { type: 'error', message: 'unexpected' } }
 
             const result = await engine.reopenSession(session.id, 'default')
             expect(result).toMatchObject({ type: 'error', message: 'Pi resume requires an upgraded runner' })
@@ -2538,7 +2538,7 @@ describe('session model', () => {
 
     it('quarantines a Pi attempt when runner spawn fails before process termination is confirmed', async () => {
         const store = new Store(':memory:')
-        const engine = new SyncEngine(store, {} as never, new RpcRegistry(), { broadcast() {} } as never)
+        const engine = new SyncEngine(store, {} as never, new RpcRegistry(), { broadcast() { } } as never)
         try {
             const session = engine.getOrCreateSession('pi-spawn-error-live-child', {
                 path: '/tmp/project', host: 'localhost', machineId: 'machine-1', flavor: 'pi', piSessionId: 'pi-native-spawn-error',
@@ -2549,8 +2549,8 @@ describe('session model', () => {
             }, 'default')
             engine.handleMachineAlive({ machineId: 'machine-1', time: Date.now() })
             engine.handleSessionEnd({ sid: session.id, time: Date.now() })
-            ;(engine as any).rpcGateway.spawnSession = async () => ({ type: 'error', message: 'webhook timeout' })
-            ;(engine as any).rpcGateway.stopRunnerSession = async () => 'still_alive'
+                ; (engine as any).rpcGateway.spawnSession = async () => ({ type: 'error', message: 'webhook timeout' })
+                ; (engine as any).rpcGateway.stopRunnerSession = async () => 'still_alive'
 
             expect(await engine.reopenSession(session.id, 'default')).toMatchObject({
                 type: 'error', message: 'webhook timeout'
@@ -2565,7 +2565,7 @@ describe('session model', () => {
 
     it('keeps persisted Pi quarantine across SyncEngine restart and clears it on end', async () => {
         const store = new Store(':memory:')
-        const first = new SyncEngine(store, {} as never, new RpcRegistry(), { broadcast() {} } as never)
+        const first = new SyncEngine(store, {} as never, new RpcRegistry(), { broadcast() { } } as never)
         const persisted = first.getOrCreateSession('pi-persisted-attempt', {
             path: '/tmp/project', host: 'localhost', machineId: 'machine-1', flavor: 'pi', piSessionId: 'pi-native-persisted',
             lifecycleState: 'archived', archivedBy: 'cli', archiveReason: 'Pi exited',
@@ -2573,7 +2573,7 @@ describe('session model', () => {
         }, null, 'default')
         first.stop()
 
-        const restarted = new SyncEngine(store, {} as never, new RpcRegistry(), { broadcast() {} } as never)
+        const restarted = new SyncEngine(store, {} as never, new RpcRegistry(), { broadcast() { } } as never)
         try {
             expect(await restarted.reopenSession(persisted.id, 'default')).toMatchObject({
                 type: 'error', message: 'Pi resume is already in progress'
@@ -2586,12 +2586,16 @@ describe('session model', () => {
 
     it('clears a persisted Pi attempt when native-ready arrives after Hub restart', async () => {
         const store = new Store(':memory:')
-        const engine = new SyncEngine(store, {} as never, new RpcRegistry(), { broadcast() {} } as never)
+        const engine = new SyncEngine(store, {} as never, new RpcRegistry(), { broadcast() { } } as never)
         try {
             const session = engine.getOrCreateSession('pi-ready-after-restart', {
                 path: '/tmp/project', host: 'localhost', machineId: 'machine-1', flavor: 'pi', piSessionId: 'pi-native-ready',
                 piResumeAttempt: { state: 'resuming', machineId: 'machine-1', startedAt: 1 },
             }, null, 'default')
+            engine.handleSessionReady({ sid: session.id, time: Date.now() })
+            await flushAsyncWork()
+            expect(engine.getSessionByNamespace(session.id, 'default')?.metadata?.piResumeAttempt?.state).toBe('resuming')
+            engine.handleSessionAlive({ sid: session.id, time: Date.now() })
             engine.handleSessionReady({ sid: session.id, time: Date.now() })
             await flushAsyncWork()
             expect(engine.getSessionByNamespace(session.id, 'default')?.metadata?.piResumeAttempt).toBeUndefined()
@@ -2600,13 +2604,17 @@ describe('session model', () => {
 
     it('clears same-process Pi quarantine when a late validated ready arrives', async () => {
         const store = new Store(':memory:')
-        const engine = new SyncEngine(store, {} as never, new RpcRegistry(), { broadcast() {} } as never)
+        const engine = new SyncEngine(store, {} as never, new RpcRegistry(), { broadcast() { } } as never)
         try {
             const session = engine.getOrCreateSession('pi-late-ready', {
                 path: '/tmp/project', host: 'localhost', machineId: 'machine-1', flavor: 'pi', piSessionId: 'pi-native-late-ready',
                 piResumeAttempt: { state: 'quarantined', machineId: 'machine-1', startedAt: 1 },
             }, null, 'default')
-            ;(engine as any).piResumeQuarantinedIds.add(session.id)
+                ; (engine as any).piResumeQuarantinedIds.add(session.id)
+            engine.handleSessionReady({ sid: session.id, time: Date.now() })
+            await flushAsyncWork()
+            expect(engine.getSessionByNamespace(session.id, 'default')?.metadata?.piResumeAttempt?.state).toBe('quarantined')
+            engine.handleSessionAlive({ sid: session.id, time: Date.now() })
             engine.handleSessionReady({ sid: session.id, time: Date.now() })
             await flushAsyncWork()
             expect(engine.getSessionByNamespace(session.id, 'default')?.metadata?.piResumeAttempt).toBeUndefined()
@@ -2617,7 +2625,7 @@ describe('session model', () => {
     it('does not report active Pi attempts as reopened before validated ready', async () => {
         for (const state of ['resuming', 'terminating'] as const) {
             const store = new Store(':memory:')
-            const engine = new SyncEngine(store, {} as never, new RpcRegistry(), { broadcast() {} } as never)
+            const engine = new SyncEngine(store, {} as never, new RpcRegistry(), { broadcast() { } } as never)
             try {
                 const session = engine.getOrCreateSession(`pi-active-${state}`, {
                     path: '/tmp/project', host: 'localhost', machineId: 'machine-1', flavor: 'pi', piSessionId: `pi-native-${state}`,
@@ -2633,14 +2641,14 @@ describe('session model', () => {
 
     it('reconciles persisted quarantined Pi state when the runner reports the child already gone', async () => {
         const store = new Store(':memory:')
-        const engine = new SyncEngine(store, {} as never, new RpcRegistry(), { broadcast() {} } as never)
+        const engine = new SyncEngine(store, {} as never, new RpcRegistry(), { broadcast() { } } as never)
         try {
             const session = engine.getOrCreateSession('pi-stale-quarantine', {
                 path: '/tmp/project', host: 'localhost', machineId: 'machine-1', flavor: 'pi', piSessionId: 'pi-native-stale-quarantine',
                 lifecycleState: 'archived', archivedBy: 'cli', archiveReason: 'Pi exited',
                 piResumeAttempt: { state: 'quarantined', machineId: 'machine-1', startedAt: 1 },
             }, null, 'default')
-            ;(engine as any).rpcGateway.stopRunnerSession = async () => 'already_gone'
+                ; (engine as any).rpcGateway.stopRunnerSession = async () => 'already_gone'
             expect(await engine.reopenSession(session.id, 'default')).toMatchObject({
                 type: 'error', message: 'Previous Pi resume attempt was cleaned up; retry'
             })
@@ -2650,7 +2658,7 @@ describe('session model', () => {
 
     it('reconciles a persisted Pi attempt with an already-gone runner child without clearing archive state', async () => {
         const store = new Store(':memory:')
-        const engine = new SyncEngine(store, {} as never, new RpcRegistry(), { broadcast() {} } as never)
+        const engine = new SyncEngine(store, {} as never, new RpcRegistry(), { broadcast() { } } as never)
         try {
             const session = engine.getOrCreateSession('pi-stale-resume-attempt', {
                 path: '/tmp/project', host: 'localhost', machineId: 'machine-1', flavor: 'pi', piSessionId: 'pi-native-stale',
@@ -2666,7 +2674,7 @@ describe('session model', () => {
                     },
                 },
             }, null, 'default')
-            ;(engine as any).rpcGateway.stopRunnerSession = async () => 'already_gone'
+                ; (engine as any).rpcGateway.stopRunnerSession = async () => 'already_gone'
 
             expect(await engine.reopenSession(session.id, 'default')).toMatchObject({
                 type: 'error', message: 'Previous Pi resume attempt was cleaned up; retry'
@@ -2681,7 +2689,7 @@ describe('session model', () => {
 
     it.each([1000, undefined])('restores durable Pi archive markers after Hub restart (snapshot archivedAt=%s)', async (archivedAt) => {
         const store = new Store(':memory:')
-        const first = new SyncEngine(store, {} as never, new RpcRegistry(), { broadcast() {} } as never)
+        const first = new SyncEngine(store, {} as never, new RpcRegistry(), { broadcast() { } } as never)
         const session = first.getOrCreateSession('pi-archive-durable', {
             path: '/tmp/project', host: 'localhost', machineId: 'machine-1', flavor: 'pi', piSessionId: 'pi-native-durable',
             lifecycleState: 'archived', lifecycleStateSince: 90, archivedAt,
@@ -2706,7 +2714,7 @@ describe('session model', () => {
             expect(await first.reopenSession(session.id, 'default')).toMatchObject({ type: 'error', rollbackSafe: false })
         } finally { first.stop() }
 
-        const restarted = new SyncEngine(store, {} as never, new RpcRegistry(), { broadcast() {} } as never)
+        const restarted = new SyncEngine(store, {} as never, new RpcRegistry(), { broadcast() { } } as never)
         try {
             // Replace the runner RPC only; this new engine reloads the persisted attempt.
             const internals = restarted as unknown as { rpcGateway: RpcGateway }
@@ -2728,7 +2736,7 @@ describe('session model', () => {
 
     it('keeps an existing archive marker when reconciling a legacy Pi snapshot without archivedAt', async () => {
         const store = new Store(':memory:')
-        const engine = new SyncEngine(store, {} as never, new RpcRegistry(), { broadcast() {} } as never)
+        const engine = new SyncEngine(store, {} as never, new RpcRegistry(), { broadcast() { } } as never)
         try {
             const session = engine.getOrCreateSession('pi-old-snapshot-marker', {
                 path: '/tmp/project', host: 'localhost', machineId: 'machine-1', flavor: 'pi', piSessionId: 'pi-legacy',
@@ -2749,17 +2757,17 @@ describe('session model', () => {
 
     it('does not quarantine an in-place Pi row when session-end wins the stop response race', async () => {
         const store = new Store(':memory:')
-        const engine = new SyncEngine(store, {} as never, new RpcRegistry(), { broadcast() {} } as never)
+        const engine = new SyncEngine(store, {} as never, new RpcRegistry(), { broadcast() { } } as never)
         try {
             const session = engine.getOrCreateSession('pi-stop-end-race', {
                 path: '/tmp/project', host: 'localhost', machineId: 'machine-1', flavor: 'pi', piSessionId: 'pi-native-race',
                 piResumeAttempt: { state: 'resuming', machineId: 'machine-1', startedAt: 1 },
             }, null, 'default')
             engine.handleSessionAlive({ sid: session.id, time: Date.now() })
-            ;(engine as any).rpcGateway.stopRunnerSession = async () => {
-                engine.handleSessionEnd({ sid: session.id, time: Date.now(), reason: 'error' })
-                return 'still_alive'
-            }
+                ; (engine as any).rpcGateway.stopRunnerSession = async () => {
+                    engine.handleSessionEnd({ sid: session.id, time: Date.now(), reason: 'error' })
+                    return 'still_alive'
+                }
 
             expect(await (engine as any).terminateInPlacePiResume('machine-1', session.id, 'default', true)).toBe(true)
             await flushAsyncWork()
@@ -2770,7 +2778,7 @@ describe('session model', () => {
 
     it('does not persist an unexpected-child quarantine when child end wins the stop response race', async () => {
         const store = new Store(':memory:')
-        const engine = new SyncEngine(store, {} as never, new RpcRegistry(), { broadcast() {} } as never)
+        const engine = new SyncEngine(store, {} as never, new RpcRegistry(), { broadcast() { } } as never)
         try {
             const original = engine.getOrCreateSession('pi-original-stop-race', {
                 path: '/tmp/project', host: 'localhost', machineId: 'machine-1', flavor: 'pi', piSessionId: 'pi-native-race',
@@ -2781,10 +2789,10 @@ describe('session model', () => {
                 path: '/tmp/project', host: 'localhost', machineId: 'machine-1', flavor: 'pi',
             }, null, 'default')
             engine.handleSessionAlive({ sid: temp.id, time: Date.now() })
-            ;(engine as any).rpcGateway.stopRunnerSession = async () => {
-                engine.handleSessionEnd({ sid: temp.id, time: Date.now(), reason: 'error' })
-                return 'still_alive'
-            }
+                ; (engine as any).rpcGateway.stopRunnerSession = async () => {
+                    engine.handleSessionEnd({ sid: temp.id, time: Date.now(), reason: 'error' })
+                    return 'still_alive'
+                }
 
             expect(await (engine as any).terminateUnexpectedPiTemp('machine-1', temp.id, original.id, 'default')).toBe(true)
             await flushAsyncWork()
@@ -2795,13 +2803,13 @@ describe('session model', () => {
 
     it('keeps still-alive Pi children quarantined even when Hub cache is inactive', async () => {
         const store = new Store(':memory:')
-        const engine = new SyncEngine(store, {} as never, new RpcRegistry(), { broadcast() {} } as never)
+        const engine = new SyncEngine(store, {} as never, new RpcRegistry(), { broadcast() { } } as never)
         try {
             const original = engine.getOrCreateSession('pi-still-alive-inactive', {
                 path: '/tmp/project', host: 'localhost', machineId: 'machine-1', flavor: 'pi', piSessionId: 'pi-native-still-alive',
                 piResumeAttempt: { state: 'resuming', machineId: 'machine-1', startedAt: 1 },
             }, null, 'default')
-            ;(engine as any).rpcGateway.stopRunnerSession = async () => 'still_alive'
+                ; (engine as any).rpcGateway.stopRunnerSession = async () => 'still_alive'
             expect(await (engine as any).terminateInPlacePiResume('machine-1', original.id, 'default')).toBe(false)
 
             const temp = engine.getOrCreateSession('pi-temp-still-alive-inactive', {
@@ -2817,7 +2825,7 @@ describe('session model', () => {
 
     it('blocks dedup for a persisted unexpected Pi child and clears the original attempt on child end', async () => {
         const store = new Store(':memory:')
-        const engine = new SyncEngine(store, {} as never, new RpcRegistry(), { broadcast() {} } as never)
+        const engine = new SyncEngine(store, {} as never, new RpcRegistry(), { broadcast() { } } as never)
         try {
             const temp = engine.getOrCreateSession('pi-temp-mapped', {
                 path: '/tmp/project', host: 'localhost', machineId: 'machine-1', flavor: 'pi', piSessionId: 'pi-native-mapped',
@@ -2828,8 +2836,8 @@ describe('session model', () => {
                 piResumeAttempt: { state: 'quarantined', machineId: 'machine-1', startedAt: 1, childSessionId: temp.id },
             }, null, 'default')
             let dedupCalls = 0
-            ;(engine as any).sessionCache.deduplicateByAgentSessionId = async () => { dedupCalls += 1 }
-            ;(engine as any).triggerDedupIfNeeded(temp.id)
+                ; (engine as any).sessionCache.deduplicateByAgentSessionId = async () => { dedupCalls += 1 }
+                ; (engine as any).triggerDedupIfNeeded(temp.id)
             await flushAsyncWork()
             expect(dedupCalls).toBe(0)
             expect(store.sessions.getSession(original.id)).not.toBeNull()
@@ -2844,7 +2852,7 @@ describe('session model', () => {
 
     it('blocks Pi dedup before an unexpected child ID is attached to the persisted attempt', async () => {
         const store = new Store(':memory:')
-        const engine = new SyncEngine(store, {} as never, new RpcRegistry(), { broadcast() {} } as never)
+        const engine = new SyncEngine(store, {} as never, new RpcRegistry(), { broadcast() { } } as never)
         try {
             const original = engine.getOrCreateSession('pi-original-pre-mapping', {
                 path: '/tmp/project', host: 'localhost', machineId: 'machine-1', flavor: 'pi', piSessionId: 'pi-native-pre-mapping',
@@ -2856,9 +2864,9 @@ describe('session model', () => {
             }, null, 'default')
             engine.handleSessionAlive({ sid: temp.id, time: Date.now() })
             let dedupCalls = 0
-            ;(engine as any).sessionCache.deduplicateByAgentSessionId = async () => { dedupCalls += 1 }
+                ; (engine as any).sessionCache.deduplicateByAgentSessionId = async () => { dedupCalls += 1 }
 
-            ;(engine as any).triggerDedupIfNeeded(temp.id)
+                ; (engine as any).triggerDedupIfNeeded(temp.id)
             await flushAsyncWork()
             expect(dedupCalls).toBe(0)
             expect(store.sessions.getSession(original.id)).not.toBeNull()
@@ -2871,7 +2879,7 @@ describe('session model', () => {
             store,
             {} as never,
             new RpcRegistry(),
-            { broadcast() {} } as never
+            { broadcast() { } } as never
         )
 
         try {
@@ -2920,13 +2928,13 @@ describe('session model', () => {
                 return mergeSessions(oldSessionId, newSessionId, namespace)
             }
 
-            ;(engine as any).rpcGateway.spawnSession = async () => {
-                engine.handleSessionAlive({ sid: spawnedSessionId, time: Date.now() })
-                return { type: 'success', sessionId: spawnedSessionId }
-            }
-            ;(engine as any).rpcGateway.getCursorChatStoreStatus = async () => ({ onDisk: true, store: 'acp' })
-            ;(engine as any).waitForSessionActive = async () => true
-            ;(engine as any).waitForSessionReady = async () => 'ended'
+                ; (engine as any).rpcGateway.spawnSession = async () => {
+                    engine.handleSessionAlive({ sid: spawnedSessionId, time: Date.now() })
+                    return { type: 'success', sessionId: spawnedSessionId }
+                }
+                ; (engine as any).rpcGateway.getCursorChatStoreStatus = async () => ({ onDisk: true, store: 'acp' })
+                ; (engine as any).waitForSessionActive = async () => true
+                ; (engine as any).waitForSessionReady = async () => 'ended'
 
             const result = await engine.resumeSession(oldSession.id, 'default')
 
@@ -2948,7 +2956,7 @@ describe('session model', () => {
             store,
             {} as never,
             new RpcRegistry(),
-            { broadcast() {} } as never
+            { broadcast() { } } as never
         )
 
         try {
@@ -3003,7 +3011,7 @@ describe('session model', () => {
             store,
             {} as never,
             new RpcRegistry(),
-            { broadcast() {} } as never
+            { broadcast() { } } as never
         )
 
         try {
@@ -3052,13 +3060,13 @@ describe('session model', () => {
                 return mergeSessions(oldSessionId, newSessionId, namespace)
             }
 
-            ;(engine as any).rpcGateway.spawnSession = async () => {
-                engine.handleSessionAlive({ sid: spawnedSessionId, time: Date.now() })
-                engine.handleSessionReady({ sid: spawnedSessionId, time: Date.now() })
-                return { type: 'success', sessionId: spawnedSessionId }
-            }
-            ;(engine as any).rpcGateway.getCursorChatStoreStatus = async () => ({ onDisk: true, store: 'acp' })
-            ;(engine as any).waitForSessionActive = async () => true
+                ; (engine as any).rpcGateway.spawnSession = async () => {
+                    engine.handleSessionAlive({ sid: spawnedSessionId, time: Date.now() })
+                    engine.handleSessionReady({ sid: spawnedSessionId, time: Date.now() })
+                    return { type: 'success', sessionId: spawnedSessionId }
+                }
+                ; (engine as any).rpcGateway.getCursorChatStoreStatus = async () => ({ onDisk: true, store: 'acp' })
+                ; (engine as any).waitForSessionActive = async () => true
 
             const result = await engine.resumeSession(oldSession.id, 'default')
 
@@ -3076,7 +3084,7 @@ describe('session model', () => {
             store,
             {} as never,
             new RpcRegistry(),
-            { broadcast() {} } as never
+            { broadcast() { } } as never
         )
 
         try {
@@ -3118,16 +3126,16 @@ describe('session model', () => {
             const spawnedSessionId = spawnedSession.id
 
             let waitForSessionReadyCalls = 0
-            ;(engine as any).waitForSessionReady = async () => {
-                waitForSessionReadyCalls += 1
-                return 'timeout'
-            }
-            ;(engine as any).rpcGateway.spawnSession = async () => {
-                engine.handleSessionAlive({ sid: spawnedSessionId, time: Date.now() })
-                return { type: 'success', sessionId: spawnedSessionId }
-            }
-            ;(engine as any).rpcGateway.getCursorChatStoreStatus = async () => ({ onDisk: true, store: 'legacy' })
-            ;(engine as any).waitForSessionActive = async () => true
+                ; (engine as any).waitForSessionReady = async () => {
+                    waitForSessionReadyCalls += 1
+                    return 'timeout'
+                }
+                ; (engine as any).rpcGateway.spawnSession = async () => {
+                    engine.handleSessionAlive({ sid: spawnedSessionId, time: Date.now() })
+                    return { type: 'success', sessionId: spawnedSessionId }
+                }
+                ; (engine as any).rpcGateway.getCursorChatStoreStatus = async () => ({ onDisk: true, store: 'legacy' })
+                ; (engine as any).waitForSessionActive = async () => true
 
             const result = await engine.resumeSession(oldSession.id, 'default')
 
@@ -3144,7 +3152,7 @@ describe('session model', () => {
             store,
             {} as never,
             new RpcRegistry(),
-            { broadcast() {} } as never
+            { broadcast() { } } as never
         )
 
         try {
@@ -3196,7 +3204,7 @@ describe('session model', () => {
             store,
             {} as never,
             new RpcRegistry(),
-            { broadcast() {} } as never
+            { broadcast() { } } as never
         )
 
         try {
@@ -3235,7 +3243,7 @@ describe('session model', () => {
             store,
             {} as never,
             new RpcRegistry(),
-            { broadcast() {} } as never
+            { broadcast() { } } as never
         )
 
         try {
@@ -3276,7 +3284,7 @@ describe('session model', () => {
             store,
             {} as never,
             new RpcRegistry(),
-            { broadcast() {} } as never
+            { broadcast() { } } as never
         )
 
         try {
@@ -3319,7 +3327,7 @@ describe('session model', () => {
             store,
             {} as never,
             new RpcRegistry(),
-            { broadcast() {} } as never
+            { broadcast() { } } as never
         )
 
         try {
@@ -3351,7 +3359,7 @@ describe('session model', () => {
             store,
             {} as never,
             new RpcRegistry(),
-            { broadcast() {} } as never
+            { broadcast() { } } as never
         )
 
         try {
@@ -3383,7 +3391,7 @@ describe('session model', () => {
             store,
             {} as never,
             new RpcRegistry(),
-            { broadcast() {} } as never
+            { broadcast() { } } as never
         )
 
         try {
@@ -3411,14 +3419,14 @@ describe('session model', () => {
 
             let spawnCalled = false
             let probeArgs: unknown[] | null = null
-            ;(engine as any).rpcGateway.getCursorChatStoreStatus = async (...args: unknown[]) => {
-                probeArgs = args
-                return { onDisk: false, store: null }
-            }
-            ;(engine as any).rpcGateway.spawnSession = async () => {
-                spawnCalled = true
-                return { type: 'success', sessionId: session.id }
-            }
+                ; (engine as any).rpcGateway.getCursorChatStoreStatus = async (...args: unknown[]) => {
+                    probeArgs = args
+                    return { onDisk: false, store: null }
+                }
+                ; (engine as any).rpcGateway.spawnSession = async () => {
+                    spawnCalled = true
+                    return { type: 'success', sessionId: session.id }
+                }
 
             const result = await engine.resumeSession(session.id, 'default')
 
@@ -3445,7 +3453,7 @@ describe('session model', () => {
             store,
             {} as never,
             new RpcRegistry(),
-            { broadcast() {} } as never
+            { broadcast() { } } as never
         )
 
         try {
@@ -3474,10 +3482,10 @@ describe('session model', () => {
             }
 
             let captured: unknown[] | null = null
-            ;(engine as any).rpcGateway.getCursorChatStoreStatus = async (...args: unknown[]) => {
-                captured = args
-                return { onDisk: true, store: 'acp' }
-            }
+                ; (engine as any).rpcGateway.getCursorChatStoreStatus = async (...args: unknown[]) => {
+                    captured = args
+                    return { onDisk: true, store: 'acp' }
+                }
 
             const result = await engine.getCursorChatStoreStatus(session.id, 'default')
 
@@ -3502,7 +3510,7 @@ describe('session model', () => {
             store,
             {} as never,
             new RpcRegistry(),
-            { broadcast() {} } as never
+            { broadcast() { } } as never
         )
 
         try {
@@ -3534,10 +3542,10 @@ describe('session model', () => {
             engine.handleMachineAlive({ machineId: 'wrong-same-host-machine', time: Date.now() })
 
             let probeCalled = false
-            ;(engine as any).rpcGateway.getCursorChatStoreStatus = async () => {
-                probeCalled = true
-                return { onDisk: true, store: 'acp' }
-            }
+                ; (engine as any).rpcGateway.getCursorChatStoreStatus = async () => {
+                    probeCalled = true
+                    return { onDisk: true, store: 'acp' }
+                }
 
             expect(await engine.getCursorChatStoreStatus(session.id, 'default')).toEqual({
                 type: 'error',
@@ -3556,7 +3564,7 @@ describe('session model', () => {
             store,
             {} as never,
             new RpcRegistry(),
-            { broadcast() {} } as never
+            { broadcast() { } } as never
         )
 
         try {
@@ -3589,15 +3597,15 @@ describe('session model', () => {
 
             let probeCalled = false
             let spawnCalled = false
-            ;(engine as any).rpcGateway.getCursorChatStoreStatus = async () => {
-                probeCalled = true
-                return { onDisk: true, store: 'acp' }
-            }
-            ;(engine as any).rpcGateway.spawnSession = async () => {
-                spawnCalled = true
-                return { type: 'success', sessionId: session.id }
-            }
-            ;(engine as any).waitForSessionActive = async () => true
+                ; (engine as any).rpcGateway.getCursorChatStoreStatus = async () => {
+                    probeCalled = true
+                    return { onDisk: true, store: 'acp' }
+                }
+                ; (engine as any).rpcGateway.spawnSession = async () => {
+                    spawnCalled = true
+                    return { type: 'success', sessionId: session.id }
+                }
+                ; (engine as any).waitForSessionActive = async () => true
 
             expect(await engine.resumeSession(session.id, 'default')).toEqual({
                 type: 'error',
@@ -3617,7 +3625,7 @@ describe('session model', () => {
             store,
             {} as never,
             new RpcRegistry(),
-            { broadcast() {} } as never
+            { broadcast() { } } as never
         )
 
         try {
@@ -3649,10 +3657,10 @@ describe('session model', () => {
             engine.handleMachineAlive({ machineId: 'wrong-same-host-machine', time: Date.now() })
 
             let spawnCalled = false
-            ;(engine as any).rpcGateway.spawnSession = async () => {
-                spawnCalled = true
-                return { type: 'success', sessionId: session.id }
-            }
+                ; (engine as any).rpcGateway.spawnSession = async () => {
+                    spawnCalled = true
+                    return { type: 'success', sessionId: session.id }
+                }
 
             expect(await engine.reopenSession(session.id, 'default')).toEqual({
                 type: 'error',
@@ -3672,7 +3680,7 @@ describe('session model', () => {
             store,
             {} as never,
             new RpcRegistry(),
-            { broadcast() {} } as never
+            { broadcast() { } } as never
         )
 
         try {
@@ -3696,21 +3704,21 @@ describe('session model', () => {
             engine.handleMachineAlive({ machineId: 'machine-1', time: Date.now() })
 
             let capturedResumeSessionId: string | undefined = 'unset'
-            ;(engine as any).rpcGateway.spawnSession = async (
-                _machineId: string,
-                _directory: string,
-                _agent: string,
-                _model?: string,
-                _modelReasoningEffort?: string,
-                _yolo?: boolean,
-                _sessionType?: string,
-                _worktreeName?: string,
-                resumeSessionId?: string
-            ) => {
-                capturedResumeSessionId = resumeSessionId
-                return { type: 'success', sessionId: session.id }
-            }
-            ;(engine as any).waitForSessionActive = async () => true
+                ; (engine as any).rpcGateway.spawnSession = async (
+                    _machineId: string,
+                    _directory: string,
+                    _agent: string,
+                    _model?: string,
+                    _modelReasoningEffort?: string,
+                    _yolo?: boolean,
+                    _sessionType?: string,
+                    _worktreeName?: string,
+                    resumeSessionId?: string
+                ) => {
+                    capturedResumeSessionId = resumeSessionId
+                    return { type: 'success', sessionId: session.id }
+                }
+                ; (engine as any).waitForSessionActive = async () => true
 
             const result = await engine.resumeSession(session.id, 'default')
 
@@ -3727,7 +3735,7 @@ describe('session model', () => {
             store,
             {} as never,
             new RpcRegistry(),
-            { broadcast() {} } as never
+            { broadcast() { } } as never
         )
 
         try {
@@ -3770,7 +3778,7 @@ describe('session model', () => {
             store,
             {} as never,
             new RpcRegistry(),
-            { broadcast() {} } as never
+            { broadcast() { } } as never
         )
 
         try {
@@ -3818,7 +3826,7 @@ describe('session model', () => {
             store,
             {} as never,
             new RpcRegistry(),
-            { broadcast() {} } as never
+            { broadcast() { } } as never
         )
 
         try {
@@ -3850,7 +3858,7 @@ describe('session model', () => {
             store,
             {} as never,
             new RpcRegistry(),
-            { broadcast() {} } as never
+            { broadcast() { } } as never
         )
 
         try {
@@ -4148,7 +4156,7 @@ describe('session model', () => {
                 store,
                 {} as never,
                 new RpcRegistry(),
-                { broadcast() {} } as never
+                { broadcast() { } } as never
             )
 
             try {
@@ -4454,9 +4462,113 @@ describe('session model', () => {
     })
 
     describe('reopenSession rollback', () => {
+        it.each(['', 'unowned-child'] as const)('reconstructs an OMP checkpoint and commits only authenticated native-ready for a known same-id child (%s)', async unverifiedChildSessionId => {
+            const store = new Store(':memory:')
+            const first = new SyncEngine(store, {} as never, new RpcRegistry(), { broadcast() { } } as never)
+            const session = first.getOrCreateSession('omp-reconstructed-generation', {
+                path: '/tmp/project', host: 'localhost', machineId: 'machine-1', flavor: 'omp',
+                lifecycleState: 'archived', archivedAt: 100, archiveReason: 'User exited',
+                ompSession: { id: 'native-id', file: '/tmp/native-id.jsonl' }, ompRuntimeAttemptId: 'previous-runtime',
+                reopenArchiveSnapshot: { machineId: 'machine-1', lifecycleState: 'archived', archivedAt: 100, archiveReason: 'User exited', unverifiedChildSessionId },
+                ompResumeAttempt: { state: 'resuming', attemptId: 'current-attempt', machineId: 'machine-1', startedAt: 1 }
+            }, { startingMode: 'remote' }, 'default')
+            store.messages.addMessage(session.id, { role: 'user', content: 'unfinished original work' }, 'original-work')
+            first.stop()
+            const registry = new RpcRegistry()
+            const emissions: { namespace: string; room: string; event: string; payload: unknown }[] = []
+            const io = {
+                of(namespace: string) {
+                    return {
+                        to(room: string) {
+                            return {
+                                emit(event: string, payload: unknown) {
+                                    emissions.push({ namespace, room, event, payload })
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            const engine = new SyncEngine(store, io as never, registry, { broadcast() { } } as never)
+            const internals = engine as unknown as { rpcGateway: RpcGateway }
+            const cleanupOrSpawn: string[] = []
+            internals.rpcGateway.killSession = async () => { cleanupOrSpawn.push('kill') }
+            internals.rpcGateway.stopRunnerSession = async () => { cleanupOrSpawn.push('stop'); return 'already_gone' }
+            internals.rpcGateway.spawnSession = async () => { cleanupOrSpawn.push('spawn'); return { type: 'success', sessionId: session.id } }
+            const accepted: string[] = []
+            const connect = (socketId: string, processId: string, attemptId: string) => {
+                const handlers = new Map<string, (payload: unknown) => void>()
+                const socket = {
+                    id: socketId, data: { cliTrusted: true },
+                    handshake: { auth: { sessionId: session.id, ompResumeAttemptId: attemptId } },
+                    on: (event: string, handler: (payload: unknown) => void) => { handlers.set(event, handler) },
+                    to: () => ({ emit() { } }), emit() { }
+                }
+                expect(registry.claimSessionSource(socket as never, session.id, processId, attemptId, registry.nextSourceConnectionOrder())).toBe(true)
+                registry.register(socket as never, `${session.id}:killSession`)
+                registerSessionHandlers(socket as never, {
+                    store,
+                    resolveSessionAccess: () => ({ ok: true, value: store.sessions.getSession(session.id)! }),
+                    emitAccessError() { },
+                    isCurrentSessionSource: () => registry.isClaimedSessionSource(session.id, socketId),
+                    onSessionAlive: payload => { accepted.push('alive'); engine.handleSessionAlive(payload) },
+                    onSessionReady: payload => { accepted.push('ready'); engine.handleSessionReady(payload) },
+                    onSessionEnd: payload => { accepted.push('end'); engine.handleSessionEnd(payload) }
+                })
+                return (event: string) => handlers.get(event)?.({ sid: session.id, time: Date.now() })
+            }
+            try {
+                const stale = connect('old-socket', 'old-process', 'previous-runtime')
+                stale('session-alive')
+                stale('session-ready')
+                stale('session-end')
+                expect(accepted).toEqual([])
+                expect(engine.getSession(session.id)?.metadata?.archivedAt).toBe(100)
+                const superseded = connect('current-before-reconnect', 'current-process', 'current-attempt')
+                const current = connect('current-reconnected', 'current-process', 'current-attempt')
+                superseded('session-alive')
+                superseded('session-ready')
+                superseded('session-end')
+                expect(accepted).toEqual([])
+                current('session-alive')
+                current('session-ready')
+                expect(accepted).toEqual(['alive', 'ready'])
+                expect(engine.getSession(session.id)?.active).toBe(true)
+                expect(emissions).toEqual([])
+                const result = await engine.reopenSession(session.id, 'default')
+                expect(cleanupOrSpawn).toEqual([])
+                if (unverifiedChildSessionId) {
+                    expect(result).toMatchObject({ type: 'error', rollbackSafe: false })
+                    expect(engine.getSession(session.id)?.metadata).toMatchObject({
+                        archivedAt: 100, reopenArchiveSnapshot: { unverifiedChildSessionId },
+                        ompResumeAttempt: { attemptId: 'current-attempt' }, ompRuntimeAttemptId: 'previous-runtime'
+                    })
+                    expect(emissions).toEqual([])
+                } else {
+                    expect(result).toMatchObject({ type: 'success', sessionId: session.id })
+                    const metadata = engine.getSession(session.id)?.metadata
+                    expect(metadata?.archivedAt).toBeUndefined()
+                    expect(metadata?.reopenArchiveSnapshot).toBeUndefined()
+                    expect(metadata?.ompResumeAttempt).toBeUndefined()
+                    expect(metadata?.ompRuntimeAttemptId).toBe('current-attempt')
+                    expect(emissions).toEqual([{
+                        namespace: '/cli', room: `session:${session.id}`, event: 'update', payload: expect.objectContaining({
+                            body: expect.objectContaining({ t: 'new-message', sid: session.id, message: expect.objectContaining({ localId: 'original-work' }) })
+                        })
+                    }])
+                }
+                superseded('session-end')
+                expect(engine.getSession(session.id)?.active).toBe(true)
+                expect(store.messages.getAllMessages(session.id).map(message => ({ content: message.content, invokedAt: message.invokedAt })))
+                    .toEqual([{ content: { role: 'user', content: 'unfinished original work' }, invokedAt: null }])
+                expect(engine.getSession(session.id)?.metadata?.ompSession).toEqual({ id: 'native-id', file: '/tmp/native-id.jsonl' })
+                expect(engine.getQueuedState(session.id, ['original-work']).queuedLocalIds).toContain('original-work')
+            } finally { engine.stop(); store.close() }
+        })
+
         it('keeps a nonnative archive durable during spawn and retries with its original configuration', async () => {
             const store = new Store(':memory:')
-            const engine = new SyncEngine(store, {} as never, new RpcRegistry(), { broadcast() {} } as never)
+            const engine = new SyncEngine(store, {} as never, new RpcRegistry(), { broadcast() { } } as never)
             const session = engine.getOrCreateSession('codex-durable-reopen', {
                 path: '/tmp/project', host: 'localhost', machineId: 'machine-1', flavor: 'codex', codexSessionId: 'codex-native',
                 lifecycleState: 'archived', archivedAt: 100, lifecycleStateSince: 90, archivedBy: 'hub', archiveReason: 'User exited',
@@ -4476,7 +4588,7 @@ describe('session model', () => {
                 const reopening = engine.reopenSession(session.id, 'default')
                 await spawned
                 // A fresh Hub cache at this boundary must still see the archive.
-                const restarted = new SyncEngine(store, {} as never, new RpcRegistry(), { broadcast() {} } as never)
+                const restarted = new SyncEngine(store, {} as never, new RpcRegistry(), { broadcast() { } } as never)
                 try { expect(restarted.getSession(session.id)?.metadata).toMatchObject(archive) }
                 finally { restarted.stop() }
                 finishSpawn({ type: 'error', message: 'runner refused spawn' })
@@ -4500,7 +4612,7 @@ describe('session model', () => {
 
         it('returns the final Cursor protocol instead of the pre-bootstrap archive protocol', async () => {
             const store = new Store(':memory:')
-            const engine = new SyncEngine(store, {} as never, new RpcRegistry(), { broadcast() {} } as never)
+            const engine = new SyncEngine(store, {} as never, new RpcRegistry(), { broadcast() { } } as never)
             const session = engine.getOrCreateSession('cursor-final-reopen-protocol', {
                 path: '/tmp/project', host: 'localhost', machineId: 'machine-1', flavor: 'cursor', cursorSessionId: 'cursor-native',
                 cursorSessionProtocol: 'stream-json', lifecycleState: 'archived', archivedAt: 100,
@@ -4531,7 +4643,7 @@ describe('session model', () => {
                 store,
                 {} as never,
                 new RpcRegistry(),
-                { broadcast() {} } as never
+                { broadcast() { } } as never
             )
 
             try {
@@ -4575,7 +4687,7 @@ describe('session model', () => {
                 store,
                 {} as never,
                 new RpcRegistry(),
-                { broadcast() {} } as never
+                { broadcast() { } } as never
             )
 
             try {
@@ -4602,8 +4714,8 @@ describe('session model', () => {
                 )
                 engine.handleMachineAlive({ machineId: 'machine-1', time: Date.now() })
 
-                ;(engine as any).rpcGateway.spawnSession = async () => ({ type: 'success', sessionId: session.id })
-                ;(engine as any).waitForSessionActive = async () => true
+                    ; (engine as any).rpcGateway.spawnSession = async () => ({ type: 'success', sessionId: session.id })
+                    ; (engine as any).waitForSessionActive = async () => true
 
                 const result = await engine.reopenSession(session.id, 'default')
 
@@ -4985,7 +5097,7 @@ describe('session model', () => {
                 new Store(':memory:'),
                 {} as never,
                 new RpcRegistry(),
-                { broadcast() {} } as never
+                { broadcast() { } } as never
             )
             Object.defineProperty(engine, 'rpcGateway', {
                 value: { stopRunnerSession: async () => 'still_alive' }
@@ -5000,7 +5112,7 @@ describe('session model', () => {
                 new Store(':memory:'),
                 {} as never,
                 new RpcRegistry(),
-                { broadcast() {} } as never
+                { broadcast() { } } as never
             )
             const session = engine.getOrCreateSession(
                 'session-restart-still-alive',

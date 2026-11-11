@@ -1,16 +1,41 @@
-import { describe, expect, it } from 'vitest'
-import type { SessionSummary } from '@/types/api'
-import type { Machine, MachineWithOwner, Session } from '@/types/api'
-import {
-    applySessionDetailPatch,
-    canApplyVersionedSummaryPatch,
-    isGlobalScopedMessageStreamEvent,
-    isNewerVersionedPatch,
-    isRenderIrrelevantPatch,
-    isRenderIrrelevantSessionPatch,
-    mergeCachedMachine,
-    shouldInvalidateSessionListForEvent
-} from './useSSE'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { renderHook, act, cleanup } from '@testing-library/react'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { createElement, type ReactNode } from 'react'
+import type { SessionSummary, SyncEvent } from '@/types/api'
+import { clearMessageWindow, getMessageWindowState, ingestIncomingMessages, setMessageWindowScope } from '@/lib/message-window-store'
+import { queryKeys } from '@/lib/query-keys'
+import { useSSE } from './useSSE'
+
+class FakeEventSource {
+    static instances: FakeEventSource[] = []
+
+    readonly url: string
+    readyState = 0
+    onmessage: ((event: MessageEvent<string>) => void) | null = null
+    onopen: ((event: Event) => void) | null = null
+    onerror: ((event: Event) => void) | null = null
+    closed = false
+
+    constructor(url: string) {
+        this.url = url
+        FakeEventSource.instances.push(this)
+    }
+
+    close(): void {
+        this.closed = true
+        this.readyState = 2
+    }
+
+    open(): void {
+        this.readyState = 1
+        this.onopen?.({} as Event)
+    }
+
+    frame(data: unknown, lastEventId = ''): void {
+        this.onmessage?.({ data: JSON.stringify(data), lastEventId } as MessageEvent<string>)
+    }
+}
 
 function makeSummary(overrides: Partial<SessionSummary> = {}): SessionSummary {
     return {
@@ -36,307 +61,304 @@ function makeSummary(overrides: Partial<SessionSummary> = {}): SessionSummary {
     } as SessionSummary
 }
 
-describe('canApplyVersionedSummaryPatch (PR #897 review, HAPI Bot 2026-07-23 Major)', () => {
-    it('allows non-versioned patches without a detail cache', () => {
-        expect(canApplyVersionedSummaryPatch({}, false)).toBe(true)
-        expect(canApplyVersionedSummaryPatch({ metadata: undefined, agentState: undefined }, false)).toBe(true)
-    })
+function makeWrapper(queryClient: QueryClient) {
+    return ({ children }: { children: ReactNode }) => (
+        createElement(QueryClientProvider, { client: queryClient }, children)
+    )
+}
 
-    it('refuses metadata/agentState/todos summary patches when detail version source is missing', () => {
-        expect(
-            canApplyVersionedSummaryPatch(
-                { metadata: { version: 1, value: null } },
-                false
-            )
-        ).toBe(false)
-        expect(
-            canApplyVersionedSummaryPatch(
-                { agentState: { version: 1, value: null } },
-                false
-            )
-        ).toBe(false)
-        expect(
-            canApplyVersionedSummaryPatch(
-                { todos: { version: 1, value: [] } },
-                false
-            )
-        ).toBe(false)
-    })
+function mount(options: {
+    subscription?: { all?: boolean; sessionId?: string; machineId?: string }
+    scope?: 'global' | 'full'
+    sessions?: SessionSummary[]
+    onEvent?: (event: SyncEvent) => void
+}) {
+    const queryClient = new QueryClient()
+    if (options.sessions) {
+        queryClient.setQueryData(queryKeys.sessions, { sessions: options.sessions })
+    }
+    const onEvent = vi.fn(options.onEvent ?? (() => { }))
+    const onConnect = vi.fn()
+    const onToast = vi.fn()
+    const view = renderHook(
+        () => useSSE({
+            enabled: true,
+            token: 'tok',
+            baseUrl: 'https://hub.example.test',
+            subscription: options.subscription,
+            scope: options.scope,
+            onEvent,
+            onConnect,
+            onToast
+        }),
+        { wrapper: makeWrapper(queryClient) }
+    )
+    return { view, queryClient, onEvent, onConnect, onToast }
+}
 
-    it('allows teamState-only patches without detail (summary no-op)', () => {
-        expect(
-            canApplyVersionedSummaryPatch(
-                { teamState: { version: 1, value: null } },
-                false
-            )
-        ).toBe(true)
-    })
+const ORIGINAL_EVENT_SOURCE = globalThis.EventSource
+const ORIGINAL_VISIBILITY = Object.getOwnPropertyDescriptor(document, 'visibilityState')
 
-    it('allows versioned summary patches when detail is present', () => {
-        expect(
-            canApplyVersionedSummaryPatch(
-                { metadata: { version: 2, value: null } },
-                true
-            )
-        ).toBe(true)
-        expect(
-            canApplyVersionedSummaryPatch(
-                { todos: { version: 2, value: [] } },
-                true
-            )
-        ).toBe(true)
-    })
+beforeEach(() => {
+    FakeEventSource.instances = []
 })
 
-describe('isNewerVersionedPatch (PR #897 review, HAPI Bot 2026-06-16 Major)', () => {
-    // Pin the version-monotonicity contract for structured metadata /
-    // agentState patches. Without this gate, an SSE reconnect that replays
-    // a buffered older patch after a fresh REST refetch would regress the
-    // cache (e.g. drop a newer resume id / pending request). Mirrors the
-    // hub's CLI room handler check (`incoming.version > currentVersion`).
-    it('accepts a strictly newer patch', () => {
-        expect(isNewerVersionedPatch(5, 4)).toBe(true)
-    })
+function stubEventSource(): void {
+    globalThis.EventSource = FakeEventSource as unknown as typeof EventSource
+}
 
-    it('rejects an older patch (the bug case: stale buffered patch on reconnect)', () => {
-        expect(isNewerVersionedPatch(4, 5)).toBe(false)
-    })
-
-    it('rejects a same-version patch (idempotent / duplicate replay)', () => {
-        expect(isNewerVersionedPatch(5, 5)).toBe(false)
-    })
-
-    it('accepts the first write into a freshly-cached session (currentVersion=0)', () => {
-        expect(isNewerVersionedPatch(1, 0)).toBe(true)
-    })
+afterEach(() => {
+    cleanup()
+    clearMessageWindow('compose-session')
+    setMessageWindowScope('')
+    if (ORIGINAL_VISIBILITY) {
+        Object.defineProperty(document, 'visibilityState', ORIGINAL_VISIBILITY)
+    } else {
+        Reflect.deleteProperty(document, 'visibilityState')
+    }
+    globalThis.EventSource = ORIGINAL_EVENT_SOURCE
+    vi.useRealTimers()
 })
 
-describe('useSSE scope handling', () => {
-    it('invalidates the global session list when message ownership changes', () => {
-        expect(shouldInvalidateSessionListForEvent('global', 'messages-invalidated')).toBe(true)
-        expect(shouldInvalidateSessionListForEvent('full', 'messages-invalidated')).toBe(false)
-    })
-
-    it('treats message stream events as global-scoped skips', () => {
-        expect(isGlobalScopedMessageStreamEvent('global', 'message-received')).toBe(true)
-        expect(isGlobalScopedMessageStreamEvent('global', 'messages-consumed')).toBe(true)
-        expect(isGlobalScopedMessageStreamEvent('global', 'message-cancelled')).toBe(true)
-        expect(isGlobalScopedMessageStreamEvent('global', 'scheduled-matured')).toBe(true)
-    })
-
-    it('does not skip session lifecycle events on the global connection', () => {
-        expect(isGlobalScopedMessageStreamEvent('global', 'session-updated')).toBe(false)
-        expect(isGlobalScopedMessageStreamEvent('global', 'session-added')).toBe(false)
-        expect(isGlobalScopedMessageStreamEvent('global', 'session-removed')).toBe(false)
-    })
-
-    it('processes message stream events on full-scoped connections', () => {
-        expect(isGlobalScopedMessageStreamEvent('full', 'message-received')).toBe(false)
-    })
-})
-
-describe('isRenderIrrelevantPatch', () => {
-    it('treats a keep-alive that only moves activeAt as irrelevant', () => {
-        const current = makeSummary({ activeAt: 1_000 })
-        const next = makeSummary({ activeAt: 11_000 })
-
-        expect(isRenderIrrelevantPatch(current, next)).toBe(true)
-    })
-
-    it('treats an identical summary as irrelevant', () => {
-        expect(isRenderIrrelevantPatch(makeSummary(), makeSummary())).toBe(true)
-    })
-
-    it.each([
-        ['active', { active: false }],
-        ['thinking', { thinking: true }],
-        ['updatedAt', { updatedAt: 9_999 }],
-        ['backgroundTaskCount', { backgroundTaskCount: 3 }],
-        ['model', { model: 'opus' }],
-        ['modelReasoningEffort', { modelReasoningEffort: 'high' }],
-        ['effort', { effort: 'medium' }],
-        ['pendingRequestsCount', { pendingRequestsCount: 2 }],
-        ['metadata.path', { metadata: { path: '/other', name: undefined } }],
-        ['metadata.flavor', { metadata: { path: '/tmp', flavor: 'claude' as const } }],
-        ['metadata.machineId', { metadata: { path: '/tmp', machineId: 'Teemo' } }],
-        ['metadata.worktree.branch', {
-            metadata: {
-                path: '/tmp',
-                worktree: {
-                    basePath: '/tmp',
-                    branch: 'feat/x',
-                    name: 'x',
-                    worktreePath: '/tmp/x'
-                }
-            }
-        }]
-    ] as Array<[string, Partial<SessionSummary>]>)('reports %s changes as relevant', (_field, change) => {
-        const current = makeSummary()
-        const next = makeSummary({ ...change, activeAt: 11_000 })
-
-        expect(isRenderIrrelevantPatch(current, next)).toBe(false)
-    })
-})
-
-describe('isRenderIrrelevantSessionPatch', () => {
-    const session = {
-        id: 'session-1',
-        active: true,
-        thinking: false,
-        activeAt: 1_000,
-        updatedAt: 2_000,
-        model: 'opus',
-        effort: null,
-        permissionMode: 'default',
-        serviceTier: null
-    } as unknown as Session
-
-    it('treats a sub-minute activeAt keep-alive as irrelevant', () => {
-        // Relative age stays in the `just now` bucket until 60s; accepting
-        // every ~10s heartbeat would thrash the full chat tree for no visible change.
-        expect(isRenderIrrelevantSessionPatch(session, {
-            active: true,
-            thinking: false,
-            activeAt: 11_000,
-            model: 'opus',
-            effort: null,
-            permissionMode: 'default',
-            serviceTier: null
-        })).toBe(true)
-    })
-
-    it('treats an activeAt move of at least one minute as render-relevant', () => {
-        // Live sessions need the cached stamp to advance so the header does
-        // not flip from `just now` to `1m ago` while keep-alives continue.
-        expect(isRenderIrrelevantSessionPatch(session, {
-            active: true,
-            thinking: false,
-            activeAt: 1_000 + 60_000,
-            model: 'opus',
-            effort: null,
-            permissionMode: 'default',
-            serviceTier: null
-        })).toBe(false)
-    })
-
-    it('reports a changed field as relevant even alongside a new activeAt', () => {
-        expect(isRenderIrrelevantSessionPatch(session, {
-            thinking: true,
-            activeAt: 11_000
-        })).toBe(false)
-    })
-
-    it('reports a field the session does not carry yet as relevant', () => {
-        // scratchlistUpdatedAt is absent from the cached session, so the patch
-        // genuinely adds information and must not be dropped.
-        expect(isRenderIrrelevantSessionPatch(session, {
-            activeAt: 11_000,
-            scratchlistUpdatedAt: 5_000
-        })).toBe(false)
-    })
-
-    it('treats an empty patch as irrelevant', () => {
-        expect(isRenderIrrelevantSessionPatch(session, {})).toBe(true)
-    })
-})
-
-describe('applySessionDetailPatch (PR #897 review, Copilot keep-alive)', () => {
-    const session = {
-        id: 'session-1',
-        active: true,
-        thinking: false,
-        activeAt: 1_000,
-        updatedAt: 2_000,
-        model: 'gpt-5',
-        effort: null,
-        permissionMode: 'default',
-        collaborationMode: undefined,
-        copilotAgentMode: 'interactive',
-        serviceTier: null,
-        metadataVersion: 1,
-        agentStateVersion: 1,
-        todosUpdatedAt: 0,
-        teamStateUpdatedAt: 0
-    } as unknown as Session
-
-    it('applies a copilotAgentMode keep-alive change to the detail session', () => {
-        // Hub emits copilotAgentMode from markSessionActive keep-alives. The
-        // field-by-field mapper must copy it — otherwise detailPatched=true
-        // suppresses invalidation and SessionChat keeps the stale mode.
-        const next = applySessionDetailPatch(session, {
-            active: true,
-            thinking: false,
-            activeAt: 11_000,
-            copilotAgentMode: 'plan'
+describe('useSSE composition wiring', () => {
+    it('applies terminal admission only to the subscribed detail and ignores stale account lifetimes', () => {
+        stubEventSource()
+        const held = {
+            id: 'terminal-server', seq: 1, localId: 'terminal-local', createdAt: 1000, invokedAt: null,
+            content: { role: 'user', content: { type: 'text', text: 'original command' } },
+        }
+        ingestIncomingMessages('compose-session', [held])
+        mount({ subscription: { sessionId: 'compose-session' }, scope: 'full' })
+        const source = FakeEventSource.instances[0]!
+        act(() => {
+            source.frame({
+                type: 'messages-resolved', sessionId: 'unrelated-session', resolutions: [
+                    { localId: 'terminal-local', resolution: { outcome: 'handled', resolvedAt: 2000 } },
+                ]
+            })
         })
-        expect(next).not.toBeNull()
-        expect(next?.copilotAgentMode).toBe('plan')
-        expect(next?.activeAt).toBe(11_000)
+        expect(getMessageWindowState('compose-session').messages[0].resolution).toBeUndefined()
+        act(() => {
+            source.frame({
+                type: 'messages-resolved', sessionId: 'compose-session', resolutions: [
+                    { localId: 'terminal-local', resolution: { outcome: 'handled', resolvedAt: 2000 } },
+                ]
+            })
+        })
+        expect(getMessageWindowState('compose-session').messages[0]).toMatchObject({
+            resolution: { outcome: 'handled' }, invokedAt: null, content: held.content,
+        })
+        act(() => {
+            setMessageWindowScope('new-account')
+            ingestIncomingMessages('compose-session', [held])
+            source.frame({
+                type: 'messages-resolved', sessionId: 'compose-session', resolutions: [
+                    { localId: 'terminal-local', resolution: { outcome: 'cancelled', resolvedAt: 3000 } },
+                ]
+            })
+        })
+        expect(getMessageWindowState('compose-session').messages[0].resolution).toBeUndefined()
     })
-
-    it('returns null for a keep-alive that only repeats the current Copilot mode', () => {
-        expect(applySessionDetailPatch(session, {
-            active: true,
-            thinking: false,
-            activeAt: 11_000,
-            copilotAgentMode: 'interactive'
-        })).toBeNull()
-    })
-})
-
-describe('mergeCachedMachine (machine filter bar owner-grouping flicker)', () => {
-    const cached: MachineWithOwner = {
-        id: 'm1',
-        namespace: 'default',
-        seq: 1,
-        createdAt: 0,
-        updatedAt: 0,
-        active: true,
-        activeAt: 0,
-        metadata: { host: 'DESKTOP-4SQALMG', platform: 'win32', happyCliVersion: '0.27.0', displayName: '小主机' },
-        metadataVersion: 1,
-        runnerState: null,
-        runnerStateVersion: 0,
-        ownerUsername: 'admin'
-    }
-
-    function event(overrides: Partial<Machine>): Machine {
-        return { ...cached, ownerUsername: undefined, ...overrides } as Machine
-    }
-
-    it('keeps the gateway-assigned owner that the event never carries', () => {
-        // This is the bug: a bare heartbeat used to overwrite the decorated
-        // entry, dropping the owner and flattening the whole filter bar.
-        const merged = mergeCachedMachine(cached, event({ activeAt: 999 }))
-
-        expect(merged.ownerUsername).toBe('admin')
-        expect(merged.activeAt).toBe(999)
-    })
-
-    it('keeps the alias when the event omits metadata entirely', () => {
-        const merged = mergeCachedMachine(cached, event({ metadata: null }))
-
-        expect(merged.metadata?.displayName).toBe('小主机')
-        expect(merged.metadata?.host).toBe('DESKTOP-4SQALMG')
-    })
-
-    it('keeps metadata keys the event does not mention', () => {
-        const merged = mergeCachedMachine(
-            cached,
-            event({ metadata: { host: 'DESKTOP-4SQALMG', platform: 'win32', happyCliVersion: '0.27.1' } })
+    it('does not open a connection while disabled', () => {
+        stubEventSource()
+        const queryClient = new QueryClient()
+        renderHook(
+            () => useSSE({
+                enabled: false,
+                token: 'tok',
+                baseUrl: 'https://hub.example.test',
+                onEvent: () => { }
+            }),
+            { wrapper: makeWrapper(queryClient) }
         )
-
-        expect(merged.metadata?.happyCliVersion).toBe('0.27.1')
-        expect(merged.metadata?.displayName).toBe('小主机')
+        expect(FakeEventSource.instances).toHaveLength(0)
     })
 
-    it('still lets the event win on the fields it does report', () => {
-        const merged = mergeCachedMachine(
-            cached,
-            event({ metadata: { host: 'renamed-host', platform: 'win32', happyCliVersion: '0.27.0', displayName: 'new alias' } })
-        )
+    it('feeds session-scoped message events into the message window and the event callback', () => {
+        stubEventSource()
+        const { onEvent } = mount({
+            subscription: { sessionId: 'compose-session' },
+            scope: 'full'
+        })
+        const source = FakeEventSource.instances[0]
+        act(() => {
+            source.open()
+            source.frame({
+                type: 'message-received',
+                sessionId: 'compose-session',
+                message: {
+                    id: 'srv-1',
+                    seq: 3,
+                    localId: null,
+                    content: { role: 'user', content: { type: 'text', text: 'hi' } },
+                    createdAt: 1_000
+                }
+            }, 'evt-1')
+        })
 
-        expect(merged.metadata?.displayName).toBe('new alias')
-        expect(merged.metadata?.host).toBe('renamed-host')
+        expect(getMessageWindowState('compose-session').messages.map((m) => m.id)).toContain('srv-1')
+        expect(onEvent).toHaveBeenCalledWith(expect.objectContaining({ type: 'message-received' }))
+    })
+
+    it('patches the session summary cache from the global connection without touching unrelated rows', () => {
+        stubEventSource()
+        const sibling = makeSummary({ id: 'sibling' })
+        const { queryClient } = mount({
+            subscription: { all: true },
+            scope: 'global',
+            sessions: [makeSummary(), sibling]
+        })
+        const source = FakeEventSource.instances[0]
+        act(() => {
+            source.open()
+            source.frame({
+                type: 'session-updated',
+                sessionId: 'session-1',
+                data: { thinking: true }
+            }, 'evt-2')
+        })
+
+        const sessions = queryClient.getQueryData<{ sessions: SessionSummary[] }>(queryKeys.sessions)!
+        expect(sessions.sessions.find((s) => s.id === 'session-1')?.thinking).toBe(true)
+        expect(sessions.sessions.find((s) => s.id === 'sibling')).toBe(sibling)
+    })
+
+    it('does NOT ingest global-scope message-received into the window but still forwards the event', () => {
+        stubEventSource()
+        const { onEvent } = mount({ subscription: { all: true }, scope: 'global' })
+        const source = FakeEventSource.instances[0]
+        act(() => {
+            source.open()
+            source.frame({
+                type: 'message-received',
+                sessionId: 'compose-session',
+                message: {
+                    id: 'srv-9',
+                    seq: 4,
+                    localId: null,
+                    content: { role: 'user', content: { type: 'text', text: 'x' } },
+                    createdAt: 2_000
+                }
+            })
+        })
+        expect(getMessageWindowState('compose-session').messages).toHaveLength(0)
+        expect(onEvent).toHaveBeenCalledWith(expect.objectContaining({ type: 'message-received' }))
+    })
+
+    it('routes the handshake to onConnect with the resume verdict and exposes subscriptionId', () => {
+        stubEventSource()
+        const { view, onConnect } = mount({ subscription: { all: true }, scope: 'global' })
+        const source = FakeEventSource.instances[0]
+        act(() => {
+            source.open()
+            source.frame({
+                type: 'connection-changed',
+                data: { status: 'connected', subscriptionId: 'sub-77', resume: 'ok' }
+            })
+        })
+
+        expect(onConnect).toHaveBeenCalledWith({ resumed: true })
+        expect(view.result.current.subscriptionId).toBe('sub-77')
+    })
+
+    it('routes toast events only to onToast, not onEvent', () => {
+        stubEventSource()
+        const { onEvent, onToast } = mount({ subscription: { all: true }, scope: 'global' })
+        const source = FakeEventSource.instances[0]
+        act(() => {
+            source.open()
+            source.frame({
+                type: 'toast',
+                data: { title: 't', body: 'b', sessionId: 's-1', url: 'https://x' }
+            })
+        })
+
+        expect(onToast).toHaveBeenCalledWith(expect.objectContaining({ type: 'toast' }))
+        expect(onEvent).not.toHaveBeenCalled()
+    })
+
+    it('session-ended preserves cached activity and held messages until authoritative revalidation', () => {
+        stubEventSource()
+        const { queryClient } = mount({
+            subscription: { all: true },
+            scope: 'global',
+            sessions: [makeSummary()]
+        })
+        const source = FakeEventSource.instances[0]
+        act(() => {
+            source.open()
+            // A session-scoped connection would normally have ingested this
+            // row; emulate it directly to exercise the ended-preservation
+            // contract.
+            ingestIncomingMessages('compose-session', [{
+                id: 'srv-hold',
+                seq: 8,
+                localId: null,
+                content: { role: 'user', content: { type: 'text', text: 'held' } },
+                createdAt: 3_000
+            } as Parameters<typeof ingestIncomingMessages>[1][number]])
+            source.frame({ type: 'session-ended', sessionId: 'compose-session', reason: 'terminated' })
+            source.frame({ type: 'session-ended', sessionId: 'session-1', reason: 'terminated' })
+        })
+
+        expect(getMessageWindowState('compose-session').messages.map((m) => m.id)).toContain('srv-hold')
+        const sessions = queryClient.getQueryData<{ sessions: SessionSummary[] }>(queryKeys.sessions)!
+        expect(sessions.sessions[0].active).toBe(true)
+        expect(sessions.sessions).toHaveLength(1)
+    })
+    it('a crashing onEvent handler does not commit the replay cursor', () => {
+        stubEventSource()
+        vi.useFakeTimers()
+        Object.defineProperty(document, 'visibilityState', {
+            configurable: true,
+            value: 'visible'
+        })
+        const onEvent = vi.fn((event: SyncEvent) => {
+            if (event.type === 'session-removed') {
+                throw new Error('boom')
+            }
+        })
+        const queryClient = new QueryClient()
+        renderHook(
+            () => useSSE({
+                enabled: true,
+                token: 'tok',
+                baseUrl: 'https://hub.example.test',
+                subscription: { all: true },
+                scope: 'global',
+                onEvent
+            }),
+            { wrapper: makeWrapper(queryClient) }
+        )
+        const first = FakeEventSource.instances[0]
+        act(() => {
+            first.open()
+            first.frame({ type: 'heartbeat' }, 'evt-good')
+            // The handler throws: the frame must NOT be committed, so the
+            // hub replays it after reconnect (at-least-once).
+            first.frame({ type: 'session-removed', sessionId: 's-x' }, 'evt-bad')
+            // Kill the transport → reconnect picks up the committed cursor.
+            first.readyState = 0
+            first.onerror?.({} as Event)
+        })
+        act(() => {
+            vi.advanceTimersByTime(2_000)
+        })
+
+        const second = FakeEventSource.instances[1]
+        expect(second).toBeDefined()
+        // Cursor must be evt-good — the failed evt-bad frame replays.
+        expect(new URL(second.url).searchParams.get('lastEventId')).toBe('evt-good')
+    })
+
+    it('closes the transport on unmount', () => {
+        stubEventSource()
+        const { view } = mount({ subscription: { all: true }, scope: 'global' })
+        const source = FakeEventSource.instances[0]
+        act(() => {
+            view.unmount()
+        })
+        expect(source.closed).toBe(true)
+        expect(view.result.current.subscriptionId).toBeNull()
     })
 })

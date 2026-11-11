@@ -3,13 +3,14 @@ import { useAppContext } from '@/lib/app-context'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { useTranslation } from '@/lib/use-translation'
+import type { Grant } from './settingsApi'
+import { MachineScopeField, scopeFromDraft } from './MachineScopeField'
 
 export type ShareTarget =
     | { kind: 'session'; id: string; label: string; description?: string }
     | { kind: 'machine'; id: string; label: string; description?: string }
     | { kind: 'directory'; label: string; sessionIds: string[]; description?: string }
 type Account = { id: number; username: string; disabledAt: number | null }
-type Grant = { accountId: number; role: 'viewer' | 'operator' }
 
 export function ShareGrantDialog({ target, onClose }: { target: ShareTarget | null; onClose: () => void }) {
     const context = useAppContext()
@@ -18,6 +19,7 @@ export function ShareGrantDialog({ target, onClose }: { target: ShareTarget | nu
     const [grants, setGrants] = useState<Grant[]>([])
     const [accountId, setAccountId] = useState('')
     const [role, setRole] = useState<'viewer' | 'operator'>('viewer')
+    const [scopeDraft, setScopeDraft] = useState<string | null>(null)
     const [error, setError] = useState<string | null>(null)
     const [pending, setPending] = useState(false)
     const request = useCallback(async <T,>(path: string, init?: RequestInit): Promise<T> => {
@@ -45,7 +47,7 @@ export function ShareGrantDialog({ target, onClose }: { target: ShareTarget | nu
         try {
             const ids = target.kind === 'directory' ? target.sessionIds : [target.id]
             const kind = target.kind === 'directory' ? 'session' : target.kind
-            await Promise.all(ids.map(id => request(`/api/grants/${kind}/${id}`, { method: 'POST', body: JSON.stringify({ accountId: Number(accountId), role }) })))
+            await Promise.all(ids.map(id => request(`/api/grants/${kind}/${id}`, { method: 'POST', body: JSON.stringify({ accountId: Number(accountId), role, ...(kind === 'machine' ? { pathScopes: scopeFromDraft(scopeDraft) } : {}) }) })))
             await refresh(); setAccountId('')
         } catch (cause) { setError(cause instanceof Error ? cause.message : t('settings.fork.grants.updateFailed')) }
         finally { setPending(false) }
@@ -62,5 +64,23 @@ export function ShareGrantDialog({ target, onClose }: { target: ShareTarget | nu
         catch (cause) { setError(cause instanceof Error ? cause.message : t('settings.fork.grants.removeFailed')) }
         finally { setPending(false) }
     }
-    return <Dialog open={target !== null} onOpenChange={open => { if (!open && !pending) onClose() }}><DialogContent className="max-w-md"><DialogHeader><DialogTitle>{t('settings.fork.grants.dialogTitle', { resource: target?.label ?? '' })}</DialogTitle></DialogHeader><div className="mt-4 space-y-3">{error && <div role="alert" className="text-sm text-red-500">{error}</div>}<div className="grid gap-2 sm:grid-cols-[1fr_auto_auto]"><select aria-label={t('settings.fork.grants.user')} className="rounded-lg border bg-[var(--app-bg)] px-3 py-2" value={accountId} onChange={event => setAccountId(event.target.value)}><option value="">{t('settings.fork.grants.selectUser')}</option>{available.map(account => <option key={account.id} value={account.id}>{account.username}</option>)}</select><select aria-label={t('settings.fork.grants.role')} className="rounded-lg border bg-[var(--app-bg)] px-2" value={role} onChange={event => setRole(event.target.value as 'viewer' | 'operator')}><option value="viewer">viewer</option><option value="operator">operator</option></select><Button disabled={!accountId || pending} onClick={add}>{t('settings.fork.grants.add')}</Button></div>{target?.kind === 'directory' && <div className="text-sm text-[var(--app-hint)]">{t('settings.fork.grants.directoryScope', { count: target.sessionIds.length })}</div>}{grants.map(grant => <div key={`${grant.accountId}:${grant.role}`} className="flex items-center justify-between rounded-lg border p-2"><span>{accounts.find(account => account.id === grant.accountId)?.username ?? `#${grant.accountId}`} · {grant.role}</span><Button size="sm" variant="destructive" disabled={pending} onClick={() => remove(grant.accountId)}>{t('settings.fork.grants.remove')}</Button></div>)}</div></DialogContent></Dialog>
+    const scopeField = target?.kind === 'machine' ? <MachineScopeField value={scopeDraft} onChange={setScopeDraft} disabled={pending} /> : null
+    return <Dialog open={target !== null} onOpenChange={open => { if (!open && !pending) onClose() }}>
+        <DialogContent className="max-w-md"><DialogHeader><DialogTitle>{t('settings.fork.grants.dialogTitle', { resource: target?.label ?? '' })}</DialogTitle></DialogHeader>
+            <div className="mt-4 space-y-3">
+                {error && <div role="alert" className="text-sm text-red-500">{error}</div>}
+                <div className="grid gap-2 sm:grid-cols-[1fr_auto_auto]">
+                    <select aria-label={t('settings.fork.grants.user')} className="rounded-lg border bg-[var(--app-bg)] px-3 py-2" value={accountId} onChange={event => setAccountId(event.target.value)}><option value="">{t('settings.fork.grants.selectUser')}</option>{available.map(account => <option key={account.id} value={account.id}>{account.username}</option>)}</select>
+                    <select aria-label={t('settings.fork.grants.role')} className="rounded-lg border bg-[var(--app-bg)] px-2" value={role} onChange={event => setRole(event.target.value as 'viewer' | 'operator')}><option value="viewer">viewer</option><option value="operator">operator</option></select>
+                    <Button disabled={!accountId || pending || (target?.kind === 'machine' && scopeDraft?.trim() === '')} onClick={add}>{t('settings.fork.grants.add')}</Button>
+                </div>
+                {scopeField}
+                {target?.kind === 'directory' && <div className="text-sm text-[var(--app-hint)]">{t('settings.fork.grants.directoryScope', { count: target.sessionIds.length })}</div>}
+                {grants.map(grant => <div key={`${grant.accountId}:${grant.role}`} className="flex items-center justify-between rounded-lg border p-2">
+                    <span>{accounts.find(account => account.id === grant.accountId)?.username ?? `#${grant.accountId}`} · {grant.role}{target?.kind === 'machine' && <span className="block whitespace-pre-wrap break-all text-xs">{grant.pathScopes?.join('\n') ?? grant.pathPrefix ?? '整机授权'}</span>}</span>
+                    <Button size="sm" variant="destructive" disabled={pending} onClick={() => remove(grant.accountId)}>{t('settings.fork.grants.remove')}</Button>
+                </div>)}
+            </div>
+        </DialogContent>
+    </Dialog>
 }

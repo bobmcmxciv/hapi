@@ -744,7 +744,7 @@ export async function runPi(opts: {
     // Preparation reads image files asynchronously. A single promise chain keeps
     // attachment completion order identical to user-message arrival order.
     apiSession.onUserMessage((message, localId) => {
-        const deliveryMode = message.meta?.deliveryMode ?? 'queue';
+        const deliveryMode = apiSession.consumeForceMark?.(localId) ? 'steer' : message.meta?.deliveryMode ?? 'queue';
         // Reserve message order and, for native steering, the exact turn before
         // attachment preparation or a runtime-lock wait can yield execution.
         const outboundSequence = nextOutboundSequence++;
@@ -775,9 +775,8 @@ export async function runPi(opts: {
             }
             if (!prepared.message.trim() && prepared.images.length === 0) {
                 // An image-only prompt can lose every image during asynchronous
-                // preparation. Never issue an empty Pi prompt; resolve the HAPI
-                // queue row so QueuedMessagesBar cannot remain stuck forever.
-                if (localId) piSession.emitMessagesConsumed([localId], { clearQueuedThinkingGrace: true });
+                // Failed attachment preparation is not native consumption.
+                // Keep the durable Hub row recoverable rather than clearing it.
                 return;
             }
             const entry = {
@@ -786,20 +785,18 @@ export async function runPi(opts: {
                 outboundSequence,
                 ...(localId ? { localId } : {}),
             };
-            if (deliveryMode === 'steer') {
-                steerDispatcher?.enqueue({ ...entry, targetStreamingGeneration });
+            const forced = apiSession.consumeForceMark?.(localId) ?? false;
+            if (deliveryMode === 'steer' || forced) {
+                steerDispatcher?.enqueue({ ...entry, targetStreamingGeneration: forced ? piSession.currentStreamingGeneration : targetStreamingGeneration });
             } else {
                 promptQueue.enqueue(entry);
                 pumpPromptQueue();
             }
         }).catch((error: unknown) => {
-            const wasCancelled = localId ? cancelledWhilePreparing.delete(localId) : false;
+            if (localId) cancelledWhilePreparing.delete(localId);
             if (localId) preparingLocalIds.delete(localId);
             const detail = error instanceof Error ? error.message : String(error);
             piSession.sendSessionEvent({ type: 'message', message: `Failed to prepare Pi prompt: ${detail}` });
-            if (localId && !wasCancelled) {
-                piSession.emitMessagesConsumed([localId], { clearQueuedThinkingGrace: true });
-            }
         });
     });
 
@@ -815,6 +812,19 @@ export async function runPi(opts: {
         }
         return promptQueue.cancelByLocalId(localId) || steerDispatcher?.cancelByLocalId(localId) === true;
     });
+
+    apiSession.onForceQueuedMessages?.(localIds => localIds.map(localId => {
+        if (preparingLocalIds.has(localId) || steerDispatcher?.hasLocalId(localId)) {
+            return { localId, status: 'accepted' as const };
+        }
+        const entry = promptQueue.takeByLocalId(localId);
+        if (entry && steerDispatcher) {
+            apiSession.consumeForceMark?.(localId);
+            steerDispatcher.enqueue({ ...entry, targetStreamingGeneration: piSession.currentStreamingGeneration });
+            return { localId, status: 'accepted' as const };
+        }
+        return { localId, status: 'not-found' as const };
+    }));
 
     // --- Abort handler ---
     // Only cancel the current turn, keep session alive for next prompt.
@@ -834,7 +844,7 @@ export async function runPi(opts: {
             activeAbortGuard = abortBoundary.guard;
             // The runtime lock can be queued behind a config mutation; attach a
             // handler immediately so a deadline rejection is never unhandled.
-            void abortBoundary.promise.catch(() => {});
+            void abortBoundary.promise.catch(() => { });
         }
         // Reserve our mutation slot synchronously, after installing the pump
         // barrier. A prompt that settles while an older config mutation owns the
@@ -995,7 +1005,7 @@ export async function runPi(opts: {
         } else {
             logger.debug('[pi] get_state ready signal not seen within grace — establishing history baseline before draining buffered messages');
             void initializeHistoryBaseline()
-                .catch(() => {})
+                .catch(() => { })
                 .finally(() => {
                     if (cleanupInitiated) return;
                     piSession.markReady();

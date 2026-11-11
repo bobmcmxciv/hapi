@@ -1,22 +1,11 @@
-import { clearDraft } from '@/lib/composer-drafts'
+import { clearDraft, composerDraftUnchanged, type ComposerDraftCheckpoint } from '@/lib/composer-drafts'
 import { clearDraftAttachments } from '@/lib/composer-attachment-drafts'
 
-function clearComposerDraft(sessionId: string): void {
-    clearDraft(sessionId)
-    clearDraftAttachments(sessionId)
-}
-
-/**
- * Clear draft(s) after a successful send.
- * When `resolveSessionId` swaps the session (e.g. inactive → resumed),
- * the sent ID differs from the route's session ID, so both must be cleared.
- */
-export function clearDraftsAfterSend(
-    sentSessionId: string,
-    routeSessionId: string | null,
-): void {
-    clearComposerDraft(sentSessionId)
-    if (routeSessionId && sentSessionId !== routeSessionId) {
-        clearComposerDraft(routeSessionId)
+/** A response may clear only the snapshots owned by that submitted attempt. */
+export function clearDraftsAfterSend(checkpoints: readonly ComposerDraftCheckpoint[]): void {
+    for (const checkpoint of checkpoints) {
+        if (!composerDraftUnchanged(checkpoint)) continue
+        clearDraft(checkpoint.sessionId)
+        clearDraftAttachments(checkpoint.sessionId)
     }
 }

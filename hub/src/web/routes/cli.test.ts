@@ -26,7 +26,7 @@ beforeAll(async () => {
 })
 
 describe('gateway CLI authentication boundary', () => {
-    it('rejects retired master keys and suffixes while honoring independent token namespace and revocation', async () => {
+    it.each([false, true])('rejects retired master keys with gateway store=%s while honoring server namespace and revocation', async (withGatewayStore) => {
         const store = new MultiUserGatewayStore(':memory:')
         try {
             const owner = store.createAccount('runner-owner', 'user', 'owner-ns')
@@ -37,7 +37,8 @@ describe('gateway CLI authentication boundary', () => {
             const app = new Hono()
             app.route('/cli', createCliRoutes(
                 () => ({ listLocalResumableSessions }) as unknown as SyncEngine,
-                token => resolveGatewayCliNamespace(store, token)
+                token => resolveGatewayCliNamespace(store, token),
+                withGatewayStore ? { gatewayStore: store } : {}
             ))
             const request = (token: string) => app.request('/cli/sessions/resumable', {
                 headers: { authorization: `Bearer ${token}` }
@@ -54,6 +55,40 @@ describe('gateway CLI authentication boundary', () => {
         } finally {
             store.close()
         }
+    })
+})
+
+describe('gateway CLI machine bootstrap', () => {
+    it.each(['/machines', '/sessions'])('binds the authenticated creator before %s returns and rejects a same-namespace stranger', async path => {
+        const store = new MultiUserGatewayStore(':memory:')
+        try {
+            const owner = store.createAccount('bootstrap-owner', 'user', 'shared')
+            const stranger = store.createAccount('bootstrap-stranger', 'user', 'shared')
+            store.createToken(owner.id, 'owner', hashApiToken('owner-key'))
+            store.createToken(stranger.id, 'stranger', hashApiToken('stranger-key'))
+            const machines = new Map<string, { id: string; namespace: string; metadata: unknown }>()
+            const getOrCreateMachine = mock((id: string, metadata: unknown, _state: unknown, namespace: string) => {
+                const machine = { id, namespace, metadata }
+                machines.set(id, machine)
+                return machine
+            })
+            const getOrCreateSession = mock(() => ({ id: 'session', namespace: 'shared' }))
+            const engine = { getMachine: (id: string) => machines.get(id), getOrCreateMachine, getOrCreateSession } as unknown as SyncEngine
+            const app = new Hono()
+            app.route('/cli', createCliRoutes(() => engine, undefined, { gatewayStore: store }))
+            const machine = { id: 'new-machine', metadata: { host: 'runner' } }
+            const body = path === '/machines' ? machine : { tag: 'native', metadata: { machineId: machine.id }, machine }
+            const request = (token: string) => app.request(`/cli${path}`, {
+                method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body: JSON.stringify(body)
+            })
+            expect((await request('owner-key')).status).toBe(200)
+            expect(store.getResource('machine', machine.id)).toMatchObject({ ownerAccountId: owner.id, coreNamespace: 'shared' })
+            expect(getOrCreateMachine).toHaveBeenCalledTimes(1)
+            expect((await request('stranger-key')).status).toBe(403)
+            expect(getOrCreateMachine).toHaveBeenCalledTimes(1)
+            expect(getOrCreateSession).toHaveBeenCalledTimes(path === '/sessions' ? 1 : 0)
+            expect(store.getResource('machine', machine.id)?.ownerAccountId).toBe(owner.id)
+        } finally { store.close() }
     })
 })
 

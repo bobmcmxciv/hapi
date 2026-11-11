@@ -1,5 +1,6 @@
 import type { Database } from 'bun:sqlite'
 
+import { OmpSourceStore } from './ompSources'
 import type { StoredSession, VersionedUpdateResult } from './types'
 import type { SetSessionTodosOptions } from './sessions'
 import {
@@ -25,9 +26,11 @@ import {
 
 export class SessionStore {
     private readonly db: Database
+    readonly ompSources: OmpSourceStore
 
     constructor(db: Database) {
         this.db = db
+        this.ompSources = new OmpSourceStore(db)
     }
 
     getOrCreateSession(

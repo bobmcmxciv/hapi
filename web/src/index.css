@@ -708,3 +708,53 @@ html[data-theme="oled"] .shiki span:not([data-line-number]) {
   bottom: 50% !important;
   transform: translateY(50%);
 }
+
+/*
+ * Virtual-keyboard compact mode (`app-kbd-open`, owned by
+ * hooks/useViewportHeight.ts — the single keyboard-detection source).
+ * All rules here are temporary presentation: when the soft keyboard grabs
+ * most of a phone viewport, secondary session chrome collapses so the chat
+ * keeps a usable height. Nothing persistent (drafts, attachments, queues,
+ * collapse prefs, unread state) is touched, and everything restores when the
+ * keyboard closes.
+ */
+/* NOTE: Tasks/scratchlist bodies are collapsed in their components from the
+   same flag (JS), so aria-expanded/inert stay truthful and explicit taps can
+   re-expand them. */
+
+/* Queued messages bar: keep the "Queued · N" header; cap the list itself so a
+   long queue cannot push the composer off the shrunken viewport. The list
+   stays scrollable, so every queued item remains reachable. */
+html.app-kbd-open [data-queued-list] {
+    max-height: 3.5rem !important;
+}
+
+html.app-kbd-open [data-beta-composer-toolbar] {
+    padding-bottom: 2px;
+}
+
+html.app-kbd-open [data-beta-composer-toolbar] button {
+    min-height: 2.25rem;
+    min-width: 2.25rem;
+}
+
+html.app-kbd-open [data-beta-composer-toolbar] > button {
+    width: 2.25rem;
+    height: 2.25rem;
+    min-height: 2.25rem;
+}
+
+html.app-kbd-open .happy-message-actions,
+html.app-kbd-open div:has(> .happy-message-actions) {
+    display: none;
+}
+
+html.app-kbd-open .chat-scroll-content {
+    padding-block: 6px;
+}
+
+/* Keyboard resize must not paint a half-collapsed task panel over the editor. */
+html.app-kbd-open [data-testid='todo-panel'] .collapsible-panel {
+    transition: none;
+}
+

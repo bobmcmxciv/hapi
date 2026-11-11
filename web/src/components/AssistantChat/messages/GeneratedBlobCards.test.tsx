@@ -4,6 +4,7 @@ import type { ApiClient, GeneratedBlobFetchOptions } from '@/api/client'
 import type { GeneratedFileBlock, GeneratedImageBlock } from '@/chat/types'
 import { HappyChatProvider, type HappyChatContextValue } from '@/components/AssistantChat/context'
 import { GeneratedFileCard, GeneratedImageCard } from './ToolMessage'
+import { I18nProvider } from '@/lib/i18n-context'
 
 function imageBlock(imageId: string): GeneratedImageBlock {
     return { kind: 'generated-image', id: `message:${imageId}`, localId: null, createdAt: 1, imageId, fileName: 'shot.png', mimeType: 'image/png' }
@@ -38,8 +39,8 @@ function installIntersectionObserver(): { reveal: () => void; observed: number }
             state.callbacks.push(callback)
         }
         observe() { state.observed += 1 }
-        disconnect() {}
-        unobserve() {}
+        disconnect() { }
+        unobserve() { }
         takeRecords() { return [] }
     }
     vi.stubGlobal('IntersectionObserver', FakeObserver)
@@ -62,9 +63,11 @@ describe('GeneratedImageCard lazy loading and progress', () => {
         const getGeneratedImageBlob = vi.fn(async () => new Blob(['png'], { type: 'image/png' }))
 
         render(
-            <HappyChatProvider value={context({ getGeneratedImageBlob })}>
-                <GeneratedImageCard block={imageBlock('img-1')} />
-            </HappyChatProvider>
+            <I18nProvider>
+                <HappyChatProvider value={context({ getGeneratedImageBlob })}>
+                    <GeneratedImageCard block={imageBlock('img-1')} />
+                </HappyChatProvider>
+            </I18nProvider>
         )
         await new Promise((resolve) => setTimeout(resolve, 10))
         expect(getGeneratedImageBlob).not.toHaveBeenCalled()
@@ -91,18 +94,20 @@ describe('GeneratedImageCard lazy loading and progress', () => {
         })
 
         render(
-            <HappyChatProvider value={context({ getGeneratedImageBlob })}>
-                <GeneratedImageCard block={imageBlock('img-1')} />
-            </HappyChatProvider>
+            <I18nProvider>
+                <HappyChatProvider value={context({ getGeneratedImageBlob })}>
+                    <GeneratedImageCard block={imageBlock('img-1')} />
+                </HappyChatProvider>
+            </I18nProvider>
         )
         observer.reveal()
-        expect(await screen.findByText(/Uploading from machine 25%/)).toBeInTheDocument()
-        expect(await screen.findByText(/is unavailable\. HTTP 503/)).toBeInTheDocument()
+        expect(await screen.findByText(/25%/)).toBeInTheDocument()
+        expect(await screen.findByText(/HTTP 503/)).toBeInTheDocument()
 
         fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
         await waitFor(() => expect(getGeneratedImageBlob).toHaveBeenCalledTimes(2))
         await waitFor(() => expect(document.querySelector('img')).not.toBeNull())
-        expect(screen.queryByText(/is unavailable/)).toBeNull()
+        expect(screen.queryByText(/HTTP 503/)).toBeNull()
     })
 })
 
@@ -123,15 +128,17 @@ describe('GeneratedFileCard progress', () => {
         })
 
         render(
-            <HappyChatProvider value={context({ getGeneratedFileBlob })}>
-                <GeneratedFileCard block={fileBlock('file-1')} />
-            </HappyChatProvider>
+            <I18nProvider>
+                <HappyChatProvider value={context({ getGeneratedFileBlob })}>
+                    <GeneratedFileCard block={fileBlock('file-1')} />
+                </HappyChatProvider>
+            </I18nProvider>
         )
         fireEvent.click(screen.getByRole('button', { name: 'Download report.pdf' }))
-        expect(await screen.findByText(/Fetching from machine 50%/)).toBeInTheDocument()
+        expect(await screen.findByText(/50%/)).toBeInTheDocument()
 
         finish!()
-        await waitFor(() => expect(screen.queryByText(/Fetching from machine/)).toBeNull())
+        await waitFor(() => expect(screen.queryByText(/50%/)).toBeNull())
         expect(getGeneratedFileBlob).toHaveBeenCalledTimes(1)
     })
 })

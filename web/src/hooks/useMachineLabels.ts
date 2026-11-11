@@ -54,12 +54,28 @@ const readCachedLabels = () => readCachedStrings(STORAGE_KEY)
 export function useMachineLabels(machines: Machine[]): Record<string, string> {
     const labels = useMemo(() => {
         const merged = readCachedLabels()
+        const aliasByHost = new Map<string, string>()
         for (const machine of machines) {
-            merged[machine.id] = getMachineTitle(machine)
+            const host = machine.metadata?.host?.trim()
+            const displayName = machine.metadata?.displayName?.trim()
+            if (host && displayName && displayName !== host && !displayName.includes(' / ')) {
+                if (machine.active || !aliasByHost.has(host)) {
+                    aliasByHost.set(host, displayName)
+                }
+            }
+        }
+        for (const machine of machines) {
+            const host = machine.metadata?.host?.trim()
+            const displayName = machine.metadata?.displayName?.trim()
+            const hostAlias = host ? aliasByHost.get(host) : undefined
+            if ((!displayName || displayName.includes(' / ')) && hostAlias) {
+                merged[machine.id] = hostAlias
+            } else {
+                merged[machine.id] = getMachineTitle(machine)
+            }
         }
         return merged
     }, [machines])
-
     useEffect(() => {
         writeCachedStrings(STORAGE_KEY, labels)
     }, [labels])

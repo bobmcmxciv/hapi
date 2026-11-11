@@ -389,7 +389,7 @@ describe('Pi abort queue boundary', () => {
         await vi.waitFor(() => expect(harness.session.sendSessionEvent).toHaveBeenCalledWith(expect.objectContaining({
             type: 'message', message: expect.stringContaining('Could not attach image missing.png'),
         })));
-        expect(harness.session.emitMessagesConsumed).toHaveBeenCalledWith(['missing-image-id'], { clearQueuedThinkingGrace: true });
+        expect(harness.session.emitMessagesConsumed).not.toHaveBeenCalled();
         expect(harness.sent).not.toContainEqual(expect.objectContaining({ type: 'prompt' }));
         harness.onError?.(new Error('finish test'));
         await running;

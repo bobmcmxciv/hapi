@@ -11,6 +11,19 @@ Telegram bot + HTTP API + realtime updates for hapi hub.
 - Serves the web app from `web/dist` or embedded assets in the single binary.
 - Persists state in SQLite.
 
+### Force queued input
+
+`POST /sessions/:id/messages/force-send` accepts `{localIds?: string[], includeScheduled?: boolean}`.
+Omit `localIds` to snapshot every durable pending input, not just the current history page.
+Future-scheduled input is excluded unless explicitly included; included rows retain their identity and become immediate.
+The response contains `{results, messages}`; `dispatched` acknowledges a dispatch/promotion request, **not** model consumption.
+Pending rows carry persisted `content.meta.forceSendRequestedAt`; only real delivery receipts set `invokedAt`.
+Session end no longer fake-consumes pending input. Offline/unsupported/failed rows remain visible and recoverable.
+OMP promotion requires token-aware native RPC support. Existing running CLIs/native processes are not upgraded in place;
+unsupported processes report pending/failed instead of pretending that a text-selected or ignored request succeeded.
+The action never sends an unsubmitted draft or aborts the active model run.
+
+
 ## Configuration
 
 See `src/configuration.ts` for all options.
