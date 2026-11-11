@@ -11,6 +11,9 @@ export type VoiceTarget = { id: string; title: string }
 
 export type VoiceTtsOption = { id: string; name: string; subtitle?: string }
 
+/** LAN-direct access to the hub's voice engine; `ticket` is a short-lived HMAC valid only for /tts. */
+export type VoiceTtsLanAccess = { url: string; ticket: string; expiresAt: number }
+
 export type VoiceTtsStatus = {
     available: boolean
     voice: string | null
@@ -18,6 +21,7 @@ export type VoiceTtsStatus = {
     engine?: string | null
     sampleRate: number | null
     reason?: string
+    lan?: VoiceTtsLanAccess
 }
 
 export type VoiceSpeakerRecord = { at: number; seconds: number; score: number | null; decision: 'accept' | 'reject'; reason: string; enforced: boolean }

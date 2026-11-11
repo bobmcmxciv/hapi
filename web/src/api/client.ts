@@ -1,6 +1,7 @@
 import type { ClaudeProxyModelsResponse } from '@/fork-features/claude-proxy-models/types'
 import type { MachinePresentationPatch } from '@/fork-features/machine-icons/types'
 import type { VoiceInstructionPrepareResponse, VoiceSessionQaResponse, VoiceSpeakerEnrollResponse, VoiceSpeakerStatus, VoiceTtsStatus, VoiceTurn } from '@/fork-features/voice-assistant/types'
+import { VoiceTtsLanRouter } from '@/fork-features/voice-assistant/lanTts'
 import type {
     AttachmentMetadata,
     AuthResponse,
@@ -205,6 +206,7 @@ export class ApiClient {
     private readonly baseUrl: string | null
     private readonly getToken: (() => string | null) | null
     private readonly onUnauthorized: (() => Promise<string | null>) | null
+    private readonly voiceTtsLan = new VoiceTtsLanRouter(() => this.getVoiceTtsStatus())
 
     constructor(token: string, options?: ApiClientOptions) {
         this.token = token
@@ -1615,12 +1617,17 @@ export class ApiClient {
     }
 
     async getVoiceTtsStatus(): Promise<VoiceTtsStatus> {
-        return await this.request('/api/voice/tts/status')
+        const status = await this.request<VoiceTtsStatus>('/api/voice/tts/status')
+        this.voiceTtsLan.remember(status)
+        return status
     }
 
-    /** Streamed PCM (s16le mono, rate in `x-sample-rate`) for one piece of text, spoken by the hub's own voice. */
+    /** Streamed PCM (s16le mono, rate in `x-sample-rate`) for one piece of text, spoken by the hub's own voice.
+     *  Inside the LAN the engine is called directly; otherwise through the hub relay. */
     async openVoiceTtsStream(text: string, signal?: AbortSignal, voice?: string | null): Promise<Response> {
         const trimmedVoice = voice?.trim() || undefined
+        const direct = await this.voiceTtsLan.open(JSON.stringify(trimmedVoice ? { text, voice: trimmedVoice } : { text }), signal)
+        if (direct) return direct
         const send = (token: string | null) => fetch(this.buildUrl('/api/voice/tts'), {
             method: 'POST',
             headers: {
