@@ -1147,6 +1147,23 @@ describe('OMP native runtime timeline', () => {
         h.adapter.closeRuntime();
     });
 
+    it('drops the finished run from the live projection when the next run starts', () => {
+        const h = createHarness(undefined, true);
+        h.adapter.handle(rpcEvent({ type: 'agent_start' }));
+        h.adapter.handle(rpcEvent({ type: 'message_start', message: assistantMessage('') }));
+        h.adapter.handle(rpcEvent({ type: 'message_end', message: assistantMessage('first answer') }));
+        h.adapter.handle(rpcEvent({ type: 'agent_end' }));
+        const first = projectedRuntime(h.publications);
+        expect(first.items.map(item => item.text)).toEqual(['first answer']);
+        h.adapter.handle(rpcEvent({ type: 'agent_start' }));
+        h.adapter.handle(rpcEvent({ type: 'message_start', message: assistantMessage('') }));
+        h.adapter.handle(rpcEvent({ type: 'message_end', message: assistantMessage('second answer') }));
+        const second = projectedRuntime(h.publications);
+        expect(second.run?.id).not.toBe(first.run?.id);
+        expect(second.items.map(item => [item.runId, item.text])).toEqual([[second.run?.id, 'second answer']]);
+        h.adapter.closeRuntime();
+    });
+
     it('publishes tool input/progress/result and runtime control even with every presentation event hidden', () => {
         const h = createHarness(new Set<OmpKnownEventType>(), true);
         h.adapter.handle(rpcEvent({ type: 'agent_start' }));

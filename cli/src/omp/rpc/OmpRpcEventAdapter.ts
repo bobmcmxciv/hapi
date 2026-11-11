@@ -1654,7 +1654,8 @@ export class OmpRpcEventAdapter {
  }
 
  #beginRuntimeRun(): void {
-  if (this.#runtimeRunId !== null) {
+  const replacing = this.#runtimeRunId !== null;
+  if (replacing) {
    this.#commitUnfinishedAssistant(this.#runtimeLastStopReason === 'error' ? 'error' : 'aborted');
    if (!this.#runtimeRunTerminal) this.#endRuntimeRun('aborted', 'aborted');
    this.activeMessage = null;
@@ -1665,11 +1666,13 @@ export class OmpRpcEventAdapter {
   this.#runtimeRunTerminal = false;
   this.#runtimeLastStopReason = null;
   this.#runtimeLastErrorMessage = null;
-  this.#emitRuntime([{
-   type: 'run', run: {
-    id: this.#runtimeRunId, state: 'running', startedAt: this.#runtimeRunStartedAt
-   }
-  }]);
+  // The previous run is durable history now. Without `clear`, the hub and
+  // web projections keep its finished items, which render below newer
+  // replies whenever their canonical rows are outside the loaded window.
+  this.#emitRuntime([
+   ...(replacing ? [{ type: 'clear' } as const] : []),
+   { type: 'run', run: { id: this.#runtimeRunId, state: 'running', startedAt: this.#runtimeRunStartedAt } }
+  ]);
  }
 
  #endRuntimeRun(state: 'idle' | 'error' | 'aborted', stopReason: RuntimeStopReason, errorMessage?: string): void {

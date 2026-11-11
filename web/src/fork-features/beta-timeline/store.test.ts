@@ -541,7 +541,7 @@ describe('canonical runtime to durable pipeline', () => {
         store.applyPublication({
             kind: 'snapshot',
             snapshot: snapshot([
-                runtimeItem('display-id', { canonicalId: 'display-id', state: 'completed', reasoning: 'Consider the constraints', text: 'Final answer', stopReason: 'length' })
+                runtimeItem('display-id', { runId: 'r', canonicalId: 'display-id', state: 'completed', reasoning: 'Consider the constraints', text: 'Final answer', stopReason: 'length' })
             ], run('r', 'idle', { stopReason: 'length', endedAt: 3 }))
         })
         const liveKey = store.getRows()[0].id
@@ -621,6 +621,34 @@ describe('BetaTimelineStore review regressions', () => {
         // Runner clock far behind the hub: createdAt 1 << 1000 must not matter.
         store.applyPublication({ kind: 'snapshot', snapshot: snapshot([runtimeItem('live', { createdAt: 1, updatedAt: 1 })]) })
         expect(store.getRows().map(ref => ref.id)).toEqual(['h:u1', 'r:live'])
+    })
+
+    it('never renders a finished prior-run reply below the loaded latest turn', () => {
+        // Window holds only the newest turn; the producer never cleared run-1.
+        const store = new BetaTimelineStore()
+        store.setHistory([
+            userText('u2'),
+            agentText('a2:0', { meta: { runtimeCanonicalId: 'answer-2' } })
+        ])
+        store.applyPublication({ kind: 'snapshot', snapshot: snapshot([
+            runtimeItem('answer-1', { runId: 'run-1', state: 'completed', canonicalId: 'answer-1', text: '12:17 reply' }),
+            runtimeItem('answer-2', { runId: 'run-2', state: 'completed', canonicalId: 'answer-2', text: '12:35 reply' })
+        ], run('run-2', 'idle', { startedAt: 2, endedAt: 3 })) })
+        expect(store.getRows().map(ref => ref.id)).toEqual(['h:u2', 'h:a2:0'])
+    })
+
+    it('retires finished rows when a new run starts while keeping the new run in place', () => {
+        const store = new BetaTimelineStore()
+        store.setHistory([userText('u1')])
+        store.applyPublication({ kind: 'snapshot', snapshot: snapshot([
+            runtimeItem('old', { runId: 'run-1', state: 'completed', text: 'old answer' })
+        ], run('run-1', 'idle', { endedAt: 2 })) })
+        expect(store.getRows().map(ref => ref.id)).toEqual(['h:u1', 'r:old'])
+        store.applyPublication({ kind: 'patch', patch: patch(1, [
+            { type: 'run', run: run('run-2', 'running', { startedAt: 3 }) },
+            { type: 'item', item: runtimeItem('new', { runId: 'run-2', text: 'new answer' }) }
+        ]) })
+        expect(store.getRows().map(ref => ref.id)).toEqual(['h:u1', 'r:new'])
     })
 
     it('does not churn an overlaid history row when unrelated history updates', () => {

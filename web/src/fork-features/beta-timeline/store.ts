@@ -302,6 +302,13 @@ export class BetaTimelineStore {
   const refs = this.#refs
   return refs.length ? refs[refs.length - 1].id : undefined
  }
+ /** A finished item of an earlier run is history, never live state. Older
+  *  producers never publish `clear` between runs, so their items survive in
+  *  the projection; rendered uncovered they settle below newer replies. */
+ #stale(item: RuntimeItem): boolean {
+  const run = this.#status.run
+  return run !== null && item.runId !== run.id && item.state !== 'running'
+ }
  #rebuildRefs(presentationChanged = false): void {
   const previous = new Map(this.#refs.map(ref => [ref.id, ref]))
   const byAnchor = new Map<string, RuntimeEntry[]>()
@@ -320,8 +327,8 @@ export class BetaTimelineStore {
   const flush = (anchor: string | undefined): void => {
    for (const entry of byAnchor.get(anchor as string) ?? []) {
     if (emitted.has(entry.ref.id)) continue
-    refs.push(entry.ref)
     emitted.add(entry.ref.id)
+    if (!this.#stale(entry.row.item)) refs.push(entry.ref)
     flush(entry.ref.id)
    }
   }
@@ -335,16 +342,18 @@ export class BetaTimelineStore {
   let last: string | undefined = refs.length ? refs[refs.length - 1].id : undefined
   for (const entry of loose) {
    if (emitted.has(entry.ref.id)) continue
+   emitted.add(entry.ref.id)
+   if (this.#stale(entry.row.item)) continue
    entry.after = last
    refs.push(entry.ref)
-   emitted.add(entry.ref.id)
    flush(entry.ref.id)
    last = refs[refs.length - 1].id
   }
   for (const entry of this.#runtime.values()) {
    if (entry.covered || emitted.has(entry.ref.id)) continue
-   refs.push(entry.ref)
    emitted.add(entry.ref.id)
+   if (this.#stale(entry.row.item)) continue
+   refs.push(entry.ref)
    entry.after = last
    flush(entry.ref.id)
    last = refs[refs.length - 1].id
@@ -462,11 +471,13 @@ export class BetaTimelineStore {
   this.#rebuildRefs(presentationChanged)
   this.#emitRows(changed)
  }
- #patchRun(run: RuntimeRun): void {
+ /** Returns true when the current run identity changed (stale rows re-evaluate). */
+ #patchRun(run: RuntimeRun): boolean {
   const prior = this.#status.run
-  if (prior?.id === run.id && prior.state !== 'running' && run.state === 'running') return
-  if (prior && prior.id !== run.id && run.startedAt < prior.startedAt) return
+  if (prior?.id === run.id && prior.state !== 'running' && run.state === 'running') return false
+  if (prior && prior.id !== run.id && run.startedAt < prior.startedAt) return false
   this.#setStatus({ run })
+  return prior?.id !== run.id
  }
  #applyPatch(patch: RuntimePatch): void {
   if (patch.epoch !== this.#epoch) throw new RuntimeTimelineResyncError('Runtime epoch changed; snapshot required')
@@ -488,7 +499,7 @@ export class BetaTimelineStore {
     this.#setStatus({ run: null })
     structural = true
    } else if (change.type === 'run') {
-    this.#patchRun(change.run)
+    if (this.#patchRun(change.run)) structural = true
    } else if (change.type === 'delete') {
     // Retention eviction on the producer: drop only the live representation
     // and any overlay it installed; durable history rows keep their keys.
