@@ -52,6 +52,8 @@ describe('Pi conversation-history hub integration', () => {
                 grok.id, 'grok-native', 'grokSessionId', false
             )).toBe(true)
 
+            // Wire order: the CLI publishes session-alive before session-ready.
+            engine.handleSessionAlive({ sid: pi.id, time: Date.now(), mode: 'remote' })
             engine.handleSessionReady({ sid: pi.id, time: Date.now() })
             expect(await piWait).toBe(true)
         } finally {
