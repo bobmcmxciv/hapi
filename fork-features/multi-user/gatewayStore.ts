@@ -10,7 +10,26 @@ import type {
     ResourceBinding,
     ResourceType
 } from './domain'
-import { pathWithinScope } from './machineInheritance'
+import { normalizeMachineScope, pathWithinScope } from './machineInheritance'
+
+type ScopeRow = { path_prefix: string | null; path_scopes: string | null }
+type ResourceGrant = { accountId: number; role: GrantRole; pathPrefix: string | null; pathScopes: string[] | null }
+// Old scope-aware Hubs cannot represent a union: deny rather than silently grant the whole machine.
+const MULTI_SCOPE_LEGACY_DENY = '__hapi_multiple_directory_scopes__'
+
+function readScope(row: ScopeRow | undefined): string[] | null {
+    if (!row) return null
+    try {
+        if (row.path_scopes !== null) {
+            const parsed: unknown = JSON.parse(row.path_scopes)
+            if (!Array.isArray(parsed)) return []
+            return normalizeMachineScope(parsed)
+        }
+        return row.path_prefix?.trim() ? normalizeMachineScope(row.path_prefix) : null
+    } catch {
+        return []
+    }
+}
 
 type AccountRow = {
     id: number
@@ -127,6 +146,21 @@ export function applyGatewaySchema(db: Database): void {
             account_id INTEGER NOT NULL REFERENCES gateway_accounts(id) ON DELETE CASCADE,
             PRIMARY KEY(namespace, endpoint)
         );
+        CREATE TABLE IF NOT EXISTS gateway_account_machine_aliases (
+            account_id INTEGER NOT NULL REFERENCES gateway_accounts(id) ON DELETE CASCADE,
+            machine_id TEXT NOT NULL,
+            display_name TEXT,
+            icon TEXT,
+            updated_at INTEGER NOT NULL,
+            PRIMARY KEY(account_id, machine_id)
+        );
+        CREATE TABLE IF NOT EXISTS gateway_account_preferences (
+            account_id INTEGER PRIMARY KEY REFERENCES gateway_accounts(id) ON DELETE CASCADE,
+            usage_source TEXT,
+            omp_machine_id TEXT,
+            omp_machine_host TEXT,
+            updated_at INTEGER NOT NULL
+        );
     `)
     const accountColumns = columnNames(db, 'gateway_accounts')
     if (!accountColumns.has('memory')) db.exec('ALTER TABLE gateway_accounts ADD COLUMN memory TEXT')
@@ -156,6 +190,8 @@ export function applyGatewaySchema(db: Database): void {
     // 所以存量 grant 无需回填。
     const grantColumns = columnNames(db, 'gateway_grants')
     if (!grantColumns.has('path_prefix')) db.exec('ALTER TABLE gateway_grants ADD COLUMN path_prefix TEXT')
+    // Lazy, non-expanding migration: legacy path_prefix is read as a singleton until next replacement.
+    if (!grantColumns.has('path_scopes')) db.exec('ALTER TABLE gateway_grants ADD COLUMN path_scopes TEXT')
 }
 
 export class MultiUserGatewayStore {
@@ -402,7 +438,7 @@ export class MultiUserGatewayStore {
                 // sessionAccessLevel 拦住，通知这条路要同步跟上，否则提醒会漏出去。
                 ...this.listGrants('machine', machineId!)
                     .filter(relevant)
-                    .filter(grant => pathWithinScope(sessionPath, grant.pathPrefix))
+                    .filter(grant => pathWithinScope(sessionPath, grant.pathScopes))
                     .map(grant => grant.accountId)
             ]
             : []
@@ -414,14 +450,14 @@ export class MultiUserGatewayStore {
         ]))
     }
 
-    /**
-     * `pathPrefix` 只对 `machine` 授权有意义：被授权者只能碰该机器上落在这个目录
-     * 子树内的会话与路径。传 `null`/省略 = 不限定（整机）。
-     */
-    grant(type: ResourceType, id: string, accountId: number, role: GrantRole, pathPrefix: string | null = null): void {
-        this.db.prepare(`INSERT INTO gateway_grants(resource_type,resource_id,grantee_account_id,role,path_prefix) VALUES(?,?,?,?,?)
-            ON CONFLICT(resource_type,resource_id,grantee_account_id) DO UPDATE SET role=excluded.role, path_prefix=excluded.path_prefix`)
-            .run(type, id, accountId, role, pathPrefix)
+    /** Atomically replaces the complete grant scope; legacy strings explicitly become singleton sets. */
+    grant(type: ResourceType, id: string, accountId: number, role: GrantRole, scope: readonly string[] | string | null = null): void {
+        const scopes = type === 'machine' ? normalizeMachineScope(scope) : null
+        const legacy = scopes === null ? null : scopes.length === 1 ? scopes[0]! : MULTI_SCOPE_LEGACY_DENY
+        this.db.prepare(`INSERT INTO gateway_grants(resource_type,resource_id,grantee_account_id,role,path_prefix,path_scopes) VALUES(?,?,?,?,?,?)
+            ON CONFLICT(resource_type,resource_id,grantee_account_id) DO UPDATE SET
+                role=excluded.role, path_prefix=excluded.path_prefix, path_scopes=excluded.path_scopes`)
+            .run(type, id, accountId, role, legacy, scopes === null ? null : JSON.stringify(scopes))
     }
 
     getGrant(type: ResourceType, id: string, accountId: number): GrantRole | null {
@@ -430,24 +466,107 @@ export class MultiUserGatewayStore {
         return row?.role ?? null
     }
 
-    /**
-     * 某账号对某台机器那条 grant 上的目录限定。`null` = 未限定或压根没有这条
-     * grant（机器主人 / admin 走的是 `owner` 档位，不经这里）。
-     */
-    machineGrantScope(machineId: string, accountId: number): string | null {
+    /** Canonical union; null = unrestricted/no grant, [] = corrupt stored scope (deny all). */
+    machineGrantScope(machineId: string, accountId: number): string[] | null {
         const row = this.db.prepare(
-            'SELECT path_prefix FROM gateway_grants WHERE resource_type=? AND resource_id=? AND grantee_account_id=?'
-        ).get('machine', machineId, accountId) as { path_prefix: string | null } | undefined
-        return row?.path_prefix ?? null
+            'SELECT path_prefix,path_scopes FROM gateway_grants WHERE resource_type=? AND resource_id=? AND grantee_account_id=?'
+        ).get('machine', machineId, accountId) as ScopeRow | undefined
+        return readScope(row)
     }
 
-    listGrants(type: ResourceType, id: string): Array<{ accountId: number; role: GrantRole; pathPrefix: string | null }> {
-        return this.db.prepare('SELECT grantee_account_id AS accountId, role, path_prefix AS pathPrefix FROM gateway_grants WHERE resource_type=? AND resource_id=? ORDER BY grantee_account_id')
-            .all(type, id) as Array<{ accountId: number; role: GrantRole; pathPrefix: string | null }>
+    listGrants(type: ResourceType, id: string): ResourceGrant[] {
+        const rows = this.db.prepare('SELECT grantee_account_id AS accountId, role, path_prefix, path_scopes FROM gateway_grants WHERE resource_type=? AND resource_id=? ORDER BY grantee_account_id')
+            .all(type, id) as Array<ScopeRow & { accountId: number; role: GrantRole }>
+        return rows.map(row => {
+            const pathScopes = type === 'machine' ? readScope(row) : null
+            return { accountId: row.accountId, role: row.role, pathScopes,
+                pathPrefix: pathScopes === null ? null : pathScopes.length === 1 ? pathScopes[0]! : MULTI_SCOPE_LEGACY_DENY }
+        })
+    }
+
+    /** Read-only audit: ownership is independent of machine scope. */
+    listOwnedResources(accountId: number): ResourceBinding[] {
+        return (this.db.prepare('SELECT * FROM gateway_resources WHERE owner_account_id=? ORDER BY resource_type,resource_id')
+            .all(accountId) as BindingRow[]).map(toBinding)
+    }
+
+    /** Read-only audit: direct session grants can independently bypass machine scope. */
+    listGrantsForAccount(accountId: number): Array<{ resourceType: ResourceType; resourceId: string; role: GrantRole }> {
+        return this.db.prepare('SELECT resource_type AS resourceType, resource_id AS resourceId, role FROM gateway_grants WHERE grantee_account_id=? ORDER BY resource_type,resource_id')
+            .all(accountId) as Array<{ resourceType: ResourceType; resourceId: string; role: GrantRole }>
     }
 
     removeGrant(type: ResourceType, id: string, accountId: number): boolean {
         return this.db.prepare('DELETE FROM gateway_grants WHERE resource_type=? AND resource_id=? AND grantee_account_id=?')
             .run(type, id, accountId).changes > 0
+    }
+
+    getAccountMachineAliases(accountId: number): Map<string, { displayName: string | null; icon: string | null }> {
+        const rows = this.db.prepare(
+            'SELECT machine_id, display_name, icon FROM gateway_account_machine_aliases WHERE account_id=?'
+        ).all(accountId) as Array<{ machine_id: string; display_name: string | null; icon: string | null }>
+        return new Map(rows.map(row => [row.machine_id, { displayName: row.display_name, icon: row.icon }]))
+    }
+
+    setAccountMachineAlias(
+        accountId: number,
+        machineId: string,
+        patch: { displayName?: string; icon?: string | null },
+        now = Date.now()
+    ): void {
+        const existing = this.db.prepare(
+            'SELECT display_name, icon FROM gateway_account_machine_aliases WHERE account_id=? AND machine_id=?'
+        ).get(accountId, machineId) as { display_name: string | null; icon: string | null } | undefined
+        const nextDisplayName = patch.displayName !== undefined
+            ? patch.displayName.trim()
+            : (existing?.display_name ?? null)
+        const nextIcon = patch.icon !== undefined
+            ? (patch.icon === null ? '' : patch.icon.trim())
+            : (existing?.icon ?? null)
+        this.db.prepare(`
+            INSERT INTO gateway_account_machine_aliases(account_id, machine_id, display_name, icon, updated_at)
+            VALUES(?, ?, ?, ?, ?)
+            ON CONFLICT(account_id, machine_id) DO UPDATE SET
+                display_name=excluded.display_name,
+                icon=excluded.icon,
+                updated_at=excluded.updated_at
+        `).run(accountId, machineId, nextDisplayName, nextIcon, now)
+    }
+
+    getAccountUsagePreference(accountId: number): {
+        source: 'omp-native' | 'external' | null
+        ompMachineId: string | null
+        ompMachineHost: string | null
+    } | null {
+        const row = this.db.prepare(
+            'SELECT usage_source, omp_machine_id, omp_machine_host FROM gateway_account_preferences WHERE account_id=?'
+        ).get(accountId) as { usage_source: string | null; omp_machine_id: string | null; omp_machine_host: string | null } | undefined
+        if (!row) return null
+        const source = row.usage_source === 'omp-native' || row.usage_source === 'external' ? row.usage_source : null
+        return {
+            source,
+            ompMachineId: row.omp_machine_id ?? null,
+            ompMachineHost: row.omp_machine_host ?? null
+        }
+    }
+
+    setAccountUsagePreference(
+        accountId: number,
+        patch: { source?: 'omp-native' | 'external'; ompMachineId?: string | null; ompMachineHost?: string | null },
+        now = Date.now()
+    ): void {
+        const existing = this.getAccountUsagePreference(accountId)
+        const nextSource = patch.source !== undefined ? patch.source : (existing?.source ?? null)
+        const nextMachineId = patch.ompMachineId !== undefined ? patch.ompMachineId : (existing?.ompMachineId ?? null)
+        const nextMachineHost = patch.ompMachineHost !== undefined ? patch.ompMachineHost : (existing?.ompMachineHost ?? null)
+        this.db.prepare(`
+            INSERT INTO gateway_account_preferences(account_id, usage_source, omp_machine_id, omp_machine_host, updated_at)
+            VALUES(?, ?, ?, ?, ?)
+            ON CONFLICT(account_id) DO UPDATE SET
+                usage_source=excluded.usage_source,
+                omp_machine_id=excluded.omp_machine_id,
+                omp_machine_host=excluded.omp_machine_host,
+                updated_at=excluded.updated_at
+        `).run(accountId, nextSource, nextMachineId, nextMachineHost, now)
     }
 }

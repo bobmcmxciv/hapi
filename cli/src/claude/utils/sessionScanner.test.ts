@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { createSessionScanner, readSessionLog } from './sessionScanner'
 import { RawJSONLines } from '../types'
 import { mkdir, writeFile, appendFile, rm, readFile } from 'node:fs/promises'
@@ -127,13 +127,10 @@ describe('sessionScanner', () => {
       await new Promise(resolve => setTimeout(resolve, 50))
       await appendFile(sessionFile2, lines2[i] + '\n')
     }
-    await new Promise(resolve => setTimeout(resolve, 300))
-    
-    // Final count check
+    await vi.waitFor(() => {
+      expect(collectedMessages.slice(phase1Count).length).toBeGreaterThanOrEqual(5)
+    }, { timeout: 3000 })
     const finalMessages = collectedMessages.slice(phase1Count)
-    
-    // Should have: 1 summary + 0 history (deduplicated) + 4 new messages = 5 total for session 2
-    expect(finalMessages.length).toBeGreaterThanOrEqual(5)
     
     // Verify last message is assistant with the file listing
     const lastAssistantMsg = collectedMessages[collectedMessages.length - 1]

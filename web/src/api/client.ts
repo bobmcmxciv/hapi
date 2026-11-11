@@ -74,6 +74,7 @@ import type { AgentFlavor, MessageDeliveryMode } from '@hapi/protocol'
 import type { CancelMessageResponse } from '@hapi/protocol/schemas'
 import type { TranscriptionMode, TranscriptionProvider, TranscriptionProviderInfo } from '@hapi/protocol/voice'
 import type { ForkRouteResult } from '../../../fork-features/session-fork/rpcPayloads'
+import type { OmpUsageResponse } from '@hapi/protocol/ompUsage'
 
 type ApiClientOptions = {
     baseUrl?: string
@@ -1066,6 +1067,10 @@ export class ApiClient {
             method: 'PATCH',
             body: JSON.stringify({ displayName })
         })
+    }
+
+    async getOmpUsage(machineId: string): Promise<OmpUsageResponse> {
+        return await this.request<OmpUsageResponse>(`/api/subscription/omp/${encodeURIComponent(machineId)}`)
     }
 
     /** fork(machine-icons)：名字与设备图标一次提交；省略的字段不动，null 清掉图标。 */

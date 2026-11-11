@@ -1,4 +1,4 @@
-import { execFileSync } from 'node:child_process';
+import { execFileSync, execSync } from 'node:child_process';
 import { describe, expect, it } from 'vitest';
 import { claudeHookCommandJoin, shellJoin, windowsCommandQuote } from './shellQuote';
 
@@ -22,7 +22,7 @@ describe('Windows hook command quoting', () => {
         const script = 'process.stdout.write(JSON.stringify(process.argv.slice(1)))';
         const expected = ['space & paren()', 'embedded"quote', 'trailing\\'];
         const command = shellJoin([process.execPath, '-e', script, ...expected], 'win32');
-        const output = execFileSync(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', command], {
+        const output = execSync(command, {
             encoding: 'utf8'
         });
         expect(JSON.parse(output)).toEqual(expected);

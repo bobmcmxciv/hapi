@@ -15,6 +15,7 @@
         "./modes": "./src/modes.ts",
         "./omp": "./src/omp.ts",
         "./ompSessionMutation": "./src/ompSessionMutation.ts",
+        "./ompUsage": "./src/ompUsage.ts",
         "./rpcMethods": "./src/rpcMethods.ts",
         "./runtimeTimeline": "./src/runtimeTimeline.ts",
         "./schemas": "./src/schemas.ts",

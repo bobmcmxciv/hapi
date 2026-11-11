@@ -4,6 +4,7 @@ import { useAppContext } from '@/lib/app-context'
 import { useTranslation } from '@/lib/use-translation'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { cn } from '@/lib/utils'
+import { ProviderLogo } from './ProviderLogo'
 
 // fork-features/subscription：订阅配额 / API 余额面板。数据来自 hub 的
 // GET /api/subscription/summary（admin-only）。快照由采集机上的 collector 推送，
@@ -222,34 +223,37 @@ function SnapshotCard(props: { snapshot: SubscriptionSnapshot; now: number }) {
     const others = snapshot.windows.filter(w => w !== primary)
 
     return (
-        <div className="rounded-lg border border-[var(--app-divider)] p-3">
-            <div className="mb-2 flex items-baseline justify-between gap-2">
-                <div className="min-w-0">
-                    <div className="truncate text-sm font-medium">
-                        {providerLabel(snapshot.provider)}
-                        {snapshot.plan_name && (
-                            <span className="ml-1.5 font-normal text-[var(--app-hint)]">{snapshot.plan_name}</span>
-                        )}
-                    </div>
-                    <div className="truncate text-[11px] text-[var(--app-hint)]">
-                        {snapshot.machine} · {snapshot.account_key}
+        <div className="rounded-lg border border-[var(--app-divider)] bg-[var(--app-bg)] p-2.5">
+            <div className="mb-1.5 flex items-center justify-between gap-2">
+                <div className="flex min-w-0 items-center gap-2">
+                    <ProviderLogo provider={snapshot.provider} />
+                    <div className="min-w-0">
+                        <div className="truncate text-xs font-semibold leading-tight">
+                            {providerLabel(snapshot.provider)}
+                            {snapshot.plan_name && (
+                                <span className="ml-1.5 font-normal text-[var(--app-hint)]">{snapshot.plan_name}</span>
+                            )}
+                        </div>
+                        <div className="truncate text-[11px] leading-tight text-[var(--app-hint)]">
+                            {snapshot.machine} · {snapshot.account_key}
+                        </div>
                     </div>
                 </div>
-                <div className="shrink-0 text-[11px] text-[var(--app-hint)]">
+                <div className="shrink-0 text-[11px] tabular-nums text-[var(--app-hint)]">
                     {formatRelativeAge(age, t)}
                 </div>
             </div>
 
             {snapshot.error ? (
-                <div className="rounded bg-rose-500/10 px-2 py-1.5 text-xs text-rose-600 dark:text-rose-400">
+                <div className="rounded bg-rose-500/10 px-2 py-1 text-xs text-rose-600 dark:text-rose-400">
                     {t('subscription.collectFailed')}: {snapshot.error}
                 </div>
             ) : (
-                <div className="space-y-2">
+                <div className="space-y-1.5">
                     {snapshot.balance && (
-                        <div className="flex items-baseline justify-between rounded bg-[var(--app-subtle-bg)] px-2 py-1.5">
+                        <div className="flex items-baseline justify-between rounded bg-[var(--app-subtle-bg)] px-2 py-1">
                             <span className="text-xs text-[var(--app-hint)]">{t('subscription.balance')}</span>
-                            <span className="text-base font-semibold tabular-nums">
+                            <span className="text-sm font-semibold tabular-nums">
                                 {snapshot.balance.amount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                                 <span className="ml-1 text-xs font-normal text-[var(--app-hint)]">{snapshot.balance.currency}</span>
                             </span>
@@ -328,18 +332,18 @@ export default function SubscriptionPanel() {
 
     return (
         <Card>
-            <CardHeader className="pb-3">
-                <CardTitle className="text-base">{t('subscription.title')}</CardTitle>
-                <CardDescription>{t('subscription.subtitle')}</CardDescription>
+            <CardHeader className="px-3.5 py-2.5">
+                <CardTitle className="text-sm">{t('subscription.title')}</CardTitle>
+                <CardDescription className="text-xs">{t('subscription.subtitle')}</CardDescription>
             </CardHeader>
-            <CardContent>
+            <CardContent className="px-3.5 pb-3 pt-0">
                 {query.isError ? (
                     <div className="text-sm text-[var(--app-hint)]">
                         {t('subscription.loadFailed')}: {query.error instanceof Error ? query.error.message : ''}
                     </div>
                 ) : (
                     <>
-                        <div className="grid gap-2.5 sm:grid-cols-2">
+                        <div className="grid items-start gap-2 sm:grid-cols-2 lg:grid-cols-3">
                             {snapshots.map(s => (
                                 <SnapshotCard key={`${s.machine}/${s.provider}/${s.account_key}`} snapshot={s} now={now} />
                             ))}

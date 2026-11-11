@@ -253,7 +253,15 @@ function normalizeAssistantOutput(
             if (block.type === 'tool_use' && typeof block.id === 'string') {
                 const name = asString(block.name) ?? 'Tool'
                 const input = 'input' in block ? (block as Record<string, unknown>).input : undefined
-                const description = isObject(input) && typeof input.description === 'string' ? input.description : null
+                const description = isObject(input)
+                    ? (typeof input.description === 'string'
+                        ? input.description
+                        : typeof input.i === 'string' && input.i.trim().length > 0
+                            ? input.i.trim()
+                            : typeof input.title === 'string' && input.title.trim().length > 0
+                                ? input.title.trim()
+                                : null)
+                    : null
                 blocks.push({ type: 'tool-call', id: block.id, name, input, description, uuid, parentUUID })
             }
         }

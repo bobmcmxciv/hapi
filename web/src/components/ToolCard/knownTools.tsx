@@ -647,7 +647,143 @@ export const knownTools: Record<string, {
             return question.length > 0 ? truncate(question, 120) : null
         },
         minimal: true
-    }
+    },
+    read: {
+        icon: () => <EyeIcon className={DEFAULT_ICON_CLASS} />,
+        title: (opts) => {
+            const file = getInputStringAny(opts.input, ['file_path', 'path', 'file'])
+            return file ? resolveDisplayPath(file, opts.metadata) : (opts.description ?? 'Read file')
+        },
+        subtitle: (opts) => {
+            const intent = getInputStringAny(opts.input, ['i']) ?? opts.description
+            const file = getInputStringAny(opts.input, ['file_path', 'path', 'file'])
+            return intent && file ? intent : null
+        },
+        minimal: true
+    },
+    bash: {
+        icon: () => <TerminalIcon className={DEFAULT_ICON_CLASS} />,
+        title: getTerminalTitle,
+        subtitle: getTerminalSubtitle,
+        minimal: true
+    },
+    edit: {
+        icon: () => <FileDiffIcon className={DEFAULT_ICON_CLASS} />,
+        title: (opts) => {
+            const direct = getInputStringAny(opts.input, ['file_path', 'path'])
+            if (direct) return resolveDisplayPath(direct, opts.metadata)
+            const patch = getInputStringAny(opts.input, ['input'])
+            const match = patch?.match(/^\[([^\n#]+)#([0-9A-Fa-f]{4})\]/m)
+            if (match?.[1]) return resolveDisplayPath(match[1].trim(), opts.metadata)
+            return opts.description ?? 'Edit file'
+        },
+        subtitle: (opts) => getInputStringAny(opts.input, ['i']) ?? opts.description ?? null,
+        minimal: true
+    },
+    write: {
+        icon: () => <FileDiffIcon className={DEFAULT_ICON_CLASS} />,
+        title: (opts) => {
+            const file = getInputStringAny(opts.input, ['file_path', 'path'])
+            return file ? resolveDisplayPath(file, opts.metadata) : (opts.description ?? 'Write file')
+        },
+        subtitle: (opts) => {
+            const intent = getInputStringAny(opts.input, ['i']) ?? opts.description
+            if (intent) return intent
+            const content = getInputStringAny(opts.input, ['content', 'text'])
+            if (!content) return null
+            const lines = countLines(content)
+            return lines > 1 ? `${lines} lines` : `${content.length} chars`
+        },
+        minimal: true
+    },
+    grep: {
+        icon: () => <EyeIcon className={DEFAULT_ICON_CLASS} />,
+        title: (opts) => {
+            const pattern = getInputStringAny(opts.input, ['pattern'])
+            return pattern ? `grep(pattern: ${pattern})` : (opts.description ?? 'Search content')
+        },
+        subtitle: (opts) => {
+            const intent = getInputStringAny(opts.input, ['i']) ?? opts.description
+            const path = getInputStringAny(opts.input, ['path'])
+            if (intent && path) return `${intent} · ${resolveDisplayPath(path, opts.metadata)}`
+            return intent ?? (path ? resolveDisplayPath(path, opts.metadata) : null)
+        },
+        minimal: true
+    },
+    glob: {
+        icon: () => <SearchIcon className={DEFAULT_ICON_CLASS} />,
+        title: (opts) => getInputStringAny(opts.input, ['pattern', 'path']) ?? opts.description ?? 'Search files',
+        subtitle: (opts) => getInputStringAny(opts.input, ['i']) ?? opts.description ?? null,
+        minimal: true
+    },
+    eval: {
+        icon: () => <TerminalIcon className={DEFAULT_ICON_CLASS} />,
+        title: (opts) => {
+            const title = getInputStringAny(opts.input, ['title', 'i']) ?? opts.description
+            const lang = getInputStringAny(opts.input, ['language'])
+            if (title && lang) return `Eval (${lang}): ${title}`
+            if (title) return title
+            return lang ? `Eval (${lang})` : 'Eval'
+        },
+        subtitle: (opts) => {
+            const code = getInputStringAny(opts.input, ['code'])
+            if (!code) return null
+            const firstLine = code.split(/\r?\n/).find((line) => line.trim().length > 0)?.trim()
+            return firstLine ? truncate(firstLine, 80) : null
+        },
+        minimal: true
+    },
+    task: {
+        icon: () => <RocketIcon className={DEFAULT_ICON_CLASS} />,
+        title: (opts) => getInputStringAny(opts.input, ['i', 'description']) ?? opts.description ?? 'Subagent task',
+        subtitle: (opts) => {
+            if (isObject(opts.input) && Array.isArray(opts.input.tasks) && opts.input.tasks.length > 0) {
+                const names = opts.input.tasks
+                    .map((item) => isObject(item) ? (getInputStringAny(item, ['name', 'agent', 'solutionSpace']) ?? null) : null)
+                    .filter((item): item is string => Boolean(item))
+                if (names.length > 0) return truncate(names.join(', '), 100)
+            }
+            return null
+        },
+        minimal: (opts) => opts.childrenCount === 0
+    },
+    todo: {
+        icon: () => <ClipboardIcon className={DEFAULT_ICON_CLASS} />,
+        title: (opts) => {
+            const intent = getInputStringAny(opts.input, ['i']) ?? opts.description
+            if (intent) return intent
+            const op = getInputStringAny(opts.input, ['op'])
+            return op ? `Todo (${op})` : 'Todo list'
+        },
+        subtitle: (opts) => getInputStringAny(opts.input, ['task']) ?? null,
+        minimal: true
+    },
+    wait: {
+        icon: () => <RocketIcon className={DEFAULT_ICON_CLASS} />,
+        title: (opts) => getInputStringAny(opts.input, ['i']) ?? opts.description ?? 'Wait for background task',
+        minimal: true
+    },
+    delete: {
+        icon: () => <FileDiffIcon className={DEFAULT_ICON_CLASS} />,
+        title: (opts) => getInputStringAny(opts.input, ['i']) ?? opts.description ?? 'Delete files',
+        subtitle: (opts) => {
+            if (isObject(opts.input) && Array.isArray(opts.input.paths) && opts.input.paths.length > 0) {
+                const first = typeof opts.input.paths[0] === 'string' ? basename(opts.input.paths[0]) : null
+                if (first) return opts.input.paths.length > 1 ? `${first} (+${opts.input.paths.length - 1})` : first
+            }
+            return null
+        },
+        minimal: true
+    },
+    skill_lookup: {
+        icon: () => <PuzzleIcon className={DEFAULT_ICON_CLASS} />,
+        title: (opts) => {
+            const name = getInputStringAny(opts.input, ['name'])
+            return name ? `Skill: ${name}` : (opts.description ?? 'Skill')
+        },
+        subtitle: (opts) => getInputStringAny(opts.input, ['i']) ?? opts.description ?? null,
+        minimal: true
+    },
 }
 
 type Translator = (key: string, params?: Record<string, string | number>) => string

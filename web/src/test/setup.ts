@@ -8,27 +8,43 @@ afterEach(() => {
 
 function installMemoryLocalStorage(): void {
     const store = new Map<string, string>()
-    const memoryLocalStorage: Storage = {
-        get length() {
-            return store.size
-        },
+    const proto = typeof Storage !== 'undefined' && Storage.prototype ? Storage.prototype : Object.prototype
+    const methods = {
         clear() {
             store.clear()
         },
         getItem(key: string) {
-            return store.get(key) ?? null
+            return store.get(String(key)) ?? null
         },
         key(index: number) {
             return Array.from(store.keys())[index] ?? null
         },
         removeItem(key: string) {
-            store.delete(key)
+            store.delete(String(key))
         },
         setItem(key: string, value: string) {
-            store.set(key, String(value))
+            store.set(String(key), String(value))
         }
     }
-
+    if (typeof Storage !== 'undefined' && Storage.prototype) {
+        Object.assign(Storage.prototype, methods)
+        Object.defineProperty(Storage.prototype, 'length', {
+            get() {
+                return store.size
+            },
+            configurable: true
+        })
+    }
+    const memoryLocalStorage = Object.create(proto) as Storage
+    if (typeof Storage === 'undefined' || !Storage.prototype) {
+        Object.assign(memoryLocalStorage, methods)
+        Object.defineProperty(memoryLocalStorage, 'length', {
+            get() {
+                return store.size
+            },
+            configurable: true
+        })
+    }
     Object.defineProperty(globalThis, 'localStorage', {
         value: memoryLocalStorage,
         configurable: true
@@ -57,12 +73,13 @@ if (!('IntersectionObserver' in globalThis)) {
     class MockIntersectionObserver implements IntersectionObserver {
         readonly root = null
         readonly rootMargin = ''
+        readonly scrollMargin = ''
         readonly thresholds = []
 
-        disconnect() {}
-        observe() {}
+        disconnect() { }
+        observe() { }
         takeRecords(): IntersectionObserverEntry[] { return [] }
-        unobserve() {}
+        unobserve() { }
     }
 
     Object.defineProperty(globalThis, 'IntersectionObserver', {
@@ -83,10 +100,10 @@ if (typeof window.matchMedia !== 'function') {
             matches: false,
             media: query,
             onchange: null,
-            addListener() {},
-            removeListener() {},
-            addEventListener() {},
-            removeEventListener() {},
+            addListener() { },
+            removeListener() { },
+            addEventListener() { },
+            removeEventListener() { },
             dispatchEvent() { return false },
         }),
     })

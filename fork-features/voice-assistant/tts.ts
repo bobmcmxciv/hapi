@@ -1,11 +1,10 @@
 /**
- * 语音合成中继（VoxCPM 多声线）：hub 把文字与所选声线（曼波 + 明日方舟 11 位干员）转给常驻在
- * TXFA608 上的 VoxCPM 服务（经 chisel 反向隧道暴露在 ECS 回环口），原样把流式 PCM 转回浏览器。
+ * 语音合成中继（VoxCPM 多声线）：hub 把文字与所选声线（94 声线）转给常驻在
+ * G14 上的 VoxCPM 服务（经 g14-infra-chisel 反向隧道暴露在 ECS 回环口 127.0.0.1:15389），原样把流式 PCM 转回浏览器。
  * 服务的 token 只在 hub 环境变量里，不下发。
  *
- *   HAPI_VOICE_TTS_URL    例如 http://127.0.0.1:13019
- *   HAPI_VOICE_TTS_TOKEN  服务端 /opt/gptsovits/manbo_token 的内容
- *
+ *   HAPI_VOICE_TTS_URL    例如 http://127.0.0.1:15389
+ *   HAPI_VOICE_TTS_TOKEN  服务端 C:\services\voice-engine\manbo_token 的内容
  * 不可用（没配、笔记本关机、隧道断）时 status 报 available:false，网页回落到百炼自带音色。
  */
 

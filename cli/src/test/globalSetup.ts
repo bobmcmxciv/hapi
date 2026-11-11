@@ -26,6 +26,7 @@ async function waitForHub(baseUrl: string, timeoutMs = 15_000): Promise<void> {
     const healthUrl = `${baseUrl}/health`
     const start = Date.now()
     while (Date.now() - start < timeoutMs) {
+        if (hubStartupFailure) throw new Error(`${hubStartupFailure.message}\n${hubOutput}`, { cause: hubStartupFailure })
         try {
             const res = await fetch(healthUrl, { signal: AbortSignal.timeout(1000) })
             if (res.ok) return
@@ -34,7 +35,7 @@ async function waitForHub(baseUrl: string, timeoutMs = 15_000): Promise<void> {
         }
         await new Promise(resolve => setTimeout(resolve, 200))
     }
-    throw new Error(`Hub did not become ready within ${timeoutMs}ms`)
+    throw new Error(`Hub did not become ready within ${timeoutMs}ms\n${hubOutput}`)
 }
 
 function findBunExec(): string {
@@ -63,8 +64,14 @@ function findBunExec(): string {
 
 let hubProcess: ChildProcess | null = null
 let tmpHome: string | null = null
+let hubStartupFailure: Error | null = null
+let hubOutput = ''
+let retainFailedHome = false
 
 export async function setup() {
+    hubStartupFailure = null
+    hubOutput = ''
+    retainFailedHome = false
     const port = await getFreePort()
     tmpHome = mkdtempSync(join(tmpdir(), 'hapi-test-'))
     const token = randomBytes(20).toString('base64url')
@@ -75,9 +82,17 @@ export async function setup() {
     // test hub and triggering real notifications or opening a production DB.
     const hubEnv: NodeJS.ProcessEnv = {
         PATH: process.env.PATH,
-        HOME: process.env.HOME,
-        ...(process.env.TMPDIR ? { TMPDIR: process.env.TMPDIR } : {}),
-        ...(process.env.BUN_INSTALL ? { BUN_INSTALL: process.env.BUN_INSTALL } : {}),
+        HOME: tmpHome,
+        USERPROFILE: tmpHome,
+        APPDATA: tmpHome,
+        LOCALAPPDATA: tmpHome,
+        TEMP: tmpHome,
+        TMP: tmpHome,
+        TMPDIR: tmpHome,
+        SystemRoot: process.env.SystemRoot,
+        WINDIR: process.env.WINDIR,
+        COMSPEC: process.env.COMSPEC,
+        PATHEXT: process.env.PATHEXT,
         HAPI_HOME: tmpHome,
         DB_PATH: join(tmpHome, 'hapi.db'),
         HAPI_LISTEN_PORT: String(port),
@@ -96,35 +111,70 @@ export async function setup() {
         '../../../hub/src/index.ts'
     )
 
-    hubProcess = spawn(bunExec, ['run', hubEntry], {
+    // Match the shipped runtime's low-memory mode; never load workstation dotenv.
+    const child = spawn(bunExec, ['--smol', '--no-env-file', 'run', hubEntry], {
         env: hubEnv,
-        stdio: 'ignore',
+        cwd: tmpHome,
+        stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    hubProcess = child
+    const collectOutput = (chunk: string) => {
+        hubOutput = (hubOutput + chunk.replaceAll(token, '[test credential]')).slice(-32_768)
+    }
+    child.stdout?.setEncoding('utf8').on('data', collectOutput)
+    child.stderr?.setEncoding('utf8').on('data', collectOutput)
+    child.on('error', (error) => {
+        if (hubProcess === child) hubStartupFailure = new Error(`[globalSetup] Failed to spawn isolated hub: ${error.message}`, { cause: error })
+    })
+    child.on('close', (code, signal) => {
+        if (hubProcess === child) hubStartupFailure = new Error(`[globalSetup] Isolated hub exited before readiness (code=${code}, signal=${signal})`)
     })
 
-    hubProcess.on('error', (err) => {
-        throw new Error(`[globalSetup] Failed to spawn hub: ${err.message}`)
-    })
-
-    await waitForHub(`http://127.0.0.1:${port}`)
+    try {
+        await waitForHub(`http://127.0.0.1:${port}`)
+    } catch (error) {
+        retainFailedHome = true
+        await stopHubProcess()
+        writeFileSync(join(tmpHome, 'startup-failure.json'), JSON.stringify({
+            port, bunExec, hubEntry, pid: child.pid, output: hubOutput,
+            error: error instanceof Error ? error.message : String(error)
+        }, null, 2))
+        throw new Error(`Isolated Hub startup failed; retained evidence: ${tmpHome}`, { cause: error })
+    }
 }
 
 async function stopHubProcess(): Promise<void> {
-    if (!hubProcess || hubProcess.exitCode !== null) return
+    const proc = hubProcess
+    hubProcess = null
+    if (!proc) return
+    proc.stdout?.removeAllListeners()
+    proc.stderr?.removeAllListeners()
+    proc.stdout?.destroy()
+    proc.stderr?.destroy()
+    if (proc.exitCode !== null) return
 
-    await new Promise<void>((resolve) => {
-        const timeout = setTimeout(resolve, 5_000)
-        hubProcess!.once('exit', () => {
-            clearTimeout(timeout)
-            resolve()
-        })
-        hubProcess!.kill()
+    const { promise, resolve } = Promise.withResolvers<void>()
+    const timeout = setTimeout(resolve, 3_000)
+    proc.once('exit', () => {
+        clearTimeout(timeout)
+        resolve()
     })
+    if (process.platform === 'win32' && proc.pid) {
+        try {
+            execSync(`taskkill /PID ${proc.pid} /T /F`, { stdio: 'ignore' })
+        } catch {
+            try { proc.kill() } catch { }
+        }
+    } else {
+        try { proc.kill() } catch { }
+    }
+    await promise
 }
 
 export async function teardown() {
     await stopHubProcess()
-    try { rmSync(TEST_CONFIG_FILE) } catch {}
-    if (tmpHome) {
+    try { rmSync(TEST_CONFIG_FILE) } catch { }
+    if (tmpHome && !retainFailedHome) {
         rmSync(tmpHome, { recursive: true, force: true })
     }
 }

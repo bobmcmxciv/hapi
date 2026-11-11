@@ -110,7 +110,11 @@ export type MessagesResponse = {
  * fork：多用户 gateway 在 /api/machines 上给每台机器附加归属账号的用户名。
  * 单用户 hub（upstream 路由）不带该字段，故为可选。
  */
-export type MachineWithOwner = Machine & { ownerUsername?: string }
+export type MachineWithOwner = Machine & {
+    ownerUsername?: string
+    preferredForOmpUsage?: boolean
+    preferredUsageSource?: 'omp-native' | 'external'
+}
 
 export type MachinesResponse = { machines: MachineWithOwner[] }
 

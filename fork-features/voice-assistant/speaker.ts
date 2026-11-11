@@ -1,6 +1,6 @@
 /**
- * 声纹：CAM++（campplus_cn_common-192，与录音助手的声纹库同一模型）由 TXFA608 上的语音服务计算
- * （`POST /speaker/embed`，与曼波同一 token、同一条隧道），hub 只存向量、算余弦相似度。
+ * 声纹：CAM++（campplus_cn_common-192，与录音助手的声纹库同一模型）由 G14 上的语音服务计算
+ * （`POST /speaker/embed`，与曼波同一 token、同一条 127.0.0.1:15389 隧道），hub 只存向量、算余弦相似度。
  *
  * 每个网关账号一份声纹：每次录入存一条质心向量（该次录音各窗口的平均），存在
  * `<dataDir>/voice-voiceprints.json`。管理员账号还没在 hapi 里录过时，先用
