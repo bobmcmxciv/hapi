@@ -2,6 +2,7 @@ import type { Hono } from 'hono'
 import * as path from 'node:path'
 import * as fs from 'node:fs/promises'
 import type { WebAppEnv } from './middleware/auth'
+import { isFingerprintedAsset, staticFileResponse } from './staticAssets'
 
 /** Separate SPA assets and service-worker scope; all APIs retain their existing owners. */
 export function mountBetaAssets(app: Hono<WebAppEnv>, directory: string): void {
@@ -34,15 +35,14 @@ export function mountBetaAssets(app: Hono<WebAppEnv>, directory: string): void {
             const real = await fs.realpath(filePath)
             const realRoot = await fs.realpath(root)
             if (!real.startsWith(`${realRoot}${path.sep}`)) return c.text('Not found', 404)
-            const file = Bun.file(real)
             const isEntry = path.basename(real) === 'index.html'
             const isWorker = path.basename(real) === 'sw.js'
-            const isFingerprintAsset = relative.startsWith('assets/') && /[-.][a-zA-Z0-9_-]{8,}\.[a-z0-9]+$/.test(relative)
-            return new Response(c.req.method === 'HEAD' ? null : file, {
+            return await staticFileResponse({
+                filePath: real,
+                cacheControl: isEntry || isWorker ? 'no-store' : isFingerprintedAsset(relative) ? 'public, max-age=31536000, immutable' : 'no-cache',
+                acceptEncoding: c.req.header('accept-encoding'),
+                head: c.req.method === 'HEAD',
                 headers: {
-                    'content-type': file.type || 'application/octet-stream',
-                    'cache-control': isEntry || isWorker ? 'no-store' : isFingerprintAsset ? 'public, max-age=31536000, immutable' : 'no-cache',
-                    'x-content-type-options': 'nosniff',
                     'x-hapi-ui': 'beta',
                     ...(isWorker ? { 'service-worker-allowed': '/beta/' } : {}),
                 },

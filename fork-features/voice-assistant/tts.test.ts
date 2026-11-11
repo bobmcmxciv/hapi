@@ -1,5 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
-import { VOXCPM_VOICE_CATALOG, getVoiceTtsStatus, proxyVoiceTts } from './tts'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { VOXCPM_VOICE_CATALOG, getVoiceTtsLanAccess, getVoiceTtsStatus, proxyVoiceTts, serveVoiceTtsLanCert, signVoiceTtsTicket } from './tts'
 
 const saved = { url: process.env.HAPI_VOICE_TTS_URL, token: process.env.HAPI_VOICE_TTS_TOKEN }
 
@@ -114,5 +117,36 @@ describe('voice TTS relay', () => {
         client.abort()
         expect((await pending).status).toBe(502)
         expect(upstreamSignal?.aborted).toBe(true)
+    })
+})
+
+describe('voice TTS LAN direct access', () => {
+    afterEach(() => { delete process.env.HAPI_VOICE_TTS_LAN_URL })
+
+    it('only offers LAN access when a LAN URL is configured, with a 30-minute ticket bound to the service token', () => {
+        expect(getVoiceTtsLanAccess(1_000_000)).toBeNull()
+        process.env.HAPI_VOICE_TTS_LAN_URL = 'https://voice-lan.example:9443/'
+        const access = getVoiceTtsLanAccess(1_000_000)
+        expect(access).toMatchObject({ url: 'https://voice-lan.example:9443', expiresAt: 1_000_000 + 30 * 60_000 })
+        expect(access?.ticket.startsWith(`${Math.floor((1_000_000 + 30 * 60_000) / 1000)}.`)).toBe(true)
+        expect(access?.ticket).not.toBe(signVoiceTtsTicket('another-token', 1_000_000 + 30 * 60_000))
+    })
+
+    it('serves the LAN certificate only to the voice service token', async () => {
+        const dir = mkdtempSync(join(tmpdir(), 'voice-lan-cert-'))
+        process.env.HAPI_VOICE_TTS_LAN_CERT_DIR = dir
+        try {
+            expect((await serveVoiceTtsLanCert('secret-token', dir)).status).toBe(503)
+            writeFileSync(join(dir, 'fullchain.pem'), 'CERT')
+            writeFileSync(join(dir, 'key.pem'), 'KEY')
+            expect((await serveVoiceTtsLanCert(undefined, dir)).status).toBe(404)
+            expect((await serveVoiceTtsLanCert('secret-tokex', dir)).status).toBe(404)
+            const ok = await serveVoiceTtsLanCert('secret-token', dir)
+            expect(ok.status).toBe(200)
+            expect(await ok.json()).toEqual({ cert: 'CERT', key: 'KEY' })
+        } finally {
+            delete process.env.HAPI_VOICE_TTS_LAN_CERT_DIR
+            rmSync(dir, { recursive: true, force: true })
+        }
     })
 })

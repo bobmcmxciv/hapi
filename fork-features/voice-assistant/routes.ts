@@ -3,7 +3,7 @@ import { z } from 'zod'
 import type { WebAppEnv } from '../../hub/src/web/middleware/auth'
 import type { VoiceSessionView } from './material'
 import { VoiceAssistantUnavailableError, getVoiceAssistant } from './service'
-import { getVoiceTtsStatus, proxyVoiceTts } from './tts'
+import { getVoiceTtsLanAccess, getVoiceTtsStatus, proxyVoiceTts } from './tts'
 import { buildEnrollment, getVoiceprintStore, speakerScore, speakerServiceConfigured } from './speaker'
 
 /** 由 executionMount 注入：按网关账号解析出可见会话集，无权时直接给出响应。 */
@@ -58,7 +58,10 @@ export function mountVoiceAssistantRoutes(app: Hono<WebAppEnv>, resolveViewer: R
     app.get('/api/voice/tts/status', async (c) => {
         const viewer = await resolveViewer(c)
         if (!viewer.ok) return viewer.response
-        return c.json(await getVoiceTtsStatus())
+        const status = await getVoiceTtsStatus()
+        // Ticket is per-request (short-lived); the engine health itself stays cached.
+        const lan = status.available ? getVoiceTtsLanAccess() : null
+        return c.json(lan ? { ...status, lan } : status)
     })
 
     app.post('/api/voice/tts', async (c) => {

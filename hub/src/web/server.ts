@@ -44,6 +44,8 @@ import { jwtVerify } from 'jose'
 import type { WebSocketData } from '@socket.io/bun-engine'
 import { loadEmbeddedAssetMap, type EmbeddedWebAsset } from './embeddedAssets'
 import { mountBetaAssets } from './betaAssets'
+import { isFingerprintedAsset, staticFileResponse } from './staticAssets'
+import { serveVoiceTtsLanCert } from '../../../fork-features/voice-assistant/tts'
 import { isBunCompiled } from '../utils/bunCompiled'
 import type { Store } from '../store'
 import type { RuntimeTimelineRegistry } from '../sync/runtimeTimeline'
@@ -218,19 +220,17 @@ function findWebappDistDir(): { distDir: string; indexHtmlPath: string } {
     return { distDir, indexHtmlPath: join(distDir, 'index.html') }
 }
 
-function serveEmbeddedAsset(asset: EmbeddedWebAsset): Response {
-    const headers: Record<string, string> = {
-        'Content-Type': asset.mimeType
-    }
-
-    if (asset.path === '/sw.js') {
-        headers['Cache-Control'] = 'no-store, no-cache, must-revalidate'
-        headers['CDN-Cache-Control'] = 'no-store'
-        headers['Cloudflare-CDN-Cache-Control'] = 'no-store'
-    }
-
-    return new Response(Bun.file(asset.sourcePath), {
-        headers
+function serveEmbeddedAsset(asset: EmbeddedWebAsset, request: Request): Promise<Response> {
+    const isWorker = asset.path === '/sw.js'
+    return staticFileResponse({
+        filePath: asset.sourcePath,
+        mimeType: asset.mimeType,
+        cacheControl: isWorker
+            ? 'no-store, no-cache, must-revalidate'
+            : isFingerprintedAsset(asset.path) ? 'public, max-age=31536000, immutable' : 'no-cache',
+        acceptEncoding: request.headers.get('accept-encoding') ?? undefined,
+        head: request.method === 'HEAD',
+        headers: isWorker ? { 'CDN-Cache-Control': 'no-store', 'Cloudflare-CDN-Cache-Control': 'no-store' } : {},
     })
 }
 
@@ -454,6 +454,10 @@ function createWebApp(options: {
         app.on('HEAD', '/download/:token/:file', (c) => serveDownload(c, true))
     }
 
+    // G14 voice engine pulls its renewed LAN TLS certificate with the service
+    // token; outside /api so no user JWT is involved.
+    app.get('/voice-engine/lan-cert', (c) => serveVoiceTtsLanCert(c.req.header('x-voice-token'), configuration.dataDir))
+
     mountBetaAssets(app, process.env.HAPI_BETA_WEB_DIR || join(configuration.dataDir, 'web-beta'))
 
     // Skip static serving in relay mode, show helpful message on root
@@ -506,7 +510,7 @@ from GitHub Pages instead of through the relay tunnel.
 
             const asset = embeddedAssetMap.get(c.req.path)
             if (asset) {
-                return serveEmbeddedAsset(asset)
+                return await serveEmbeddedAsset(asset, c.req.raw)
             }
 
             return await next()
@@ -518,7 +522,7 @@ from GitHub Pages instead of through the relay tunnel.
                 return
             }
 
-            return serveEmbeddedAsset(indexHtmlAsset)
+            return await serveEmbeddedAsset(indexHtmlAsset, c.req.raw)
         })
 
         return app

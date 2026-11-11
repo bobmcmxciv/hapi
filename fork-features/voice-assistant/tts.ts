@@ -6,7 +6,16 @@
  *   HAPI_VOICE_TTS_URL    例如 http://127.0.0.1:15389
  *   HAPI_VOICE_TTS_TOKEN  服务端 C:\services\voice-engine\manbo_token 的内容
  * 不可用（没配、笔记本关机、隧道断）时 status 报 available:false，网页回落到百炼自带音色。
+ *
+ * 局域网直连（可选）：
+ *   HAPI_VOICE_TTS_LAN_URL       例如 https://voice-lan.bobmcmxciv.xin:9443（解析到 G14 局域网地址）
+ *   HAPI_VOICE_TTS_LAN_CERT_DIR  该域名证书目录（fullchain.pem / key.pem），供 G14 每日拉取
+ * status 额外下发 lan:{url,ticket}。ticket 是用服务 token 签的短期 HMAC，只能调 /tts；
+ * 浏览器先探测直连地址，连不上（不在局域网）就照旧走 hub 中继。
  */
+
+import { createHmac, timingSafeEqual } from 'node:crypto'
+import { join } from 'node:path'
 
 export type VoiceTtsOption = {
     id: string
@@ -113,6 +122,12 @@ export const VOXCPM_VOICE_CATALOG: readonly VoiceTtsOption[] = [
     { id: 'jinlei', name: '上海地铁 · 金蕾', subtitle: '上海轨道交通 · 经典报站（CV 金蕾）' },
 ]
 
+export type VoiceTtsLanAccess = {
+    url: string
+    ticket: string
+    expiresAt: number
+}
+
 export type VoiceTtsStatus = {
     available: boolean
     voice: string | null
@@ -120,6 +135,40 @@ export type VoiceTtsStatus = {
     engine?: string | null
     sampleRate: number | null
     reason?: string
+    lan?: VoiceTtsLanAccess
+}
+
+const LAN_TICKET_TTL_MS = 30 * 60_000
+
+/** `<expSeconds>.<hex HMAC-SHA256(token, "manbo-tts:<expSeconds>")>`; manbo_server.py verifies the same way. */
+export function signVoiceTtsTicket(token: string, expiresAtMs: number): string {
+    const exp = Math.floor(expiresAtMs / 1000)
+    return `${exp}.${createHmac('sha256', token).update(`manbo-tts:${exp}`).digest('hex')}`
+}
+
+export function getVoiceTtsLanAccess(now = Date.now()): VoiceTtsLanAccess | null {
+    const config = ttsConfig()
+    const url = process.env.HAPI_VOICE_TTS_LAN_URL?.trim().replace(/\/+$/, '')
+    if (!config || !url) return null
+    const expiresAt = now + LAN_TICKET_TTL_MS
+    return { url, ticket: signVoiceTtsTicket(config.token, expiresAt), expiresAt }
+}
+
+/** G14 pulls the renewed LAN certificate with its own service token (not a user JWT). */
+export async function serveVoiceTtsLanCert(voiceToken: string | undefined, dataDir: string): Promise<Response> {
+    const config = ttsConfig()
+    const presented = Buffer.from(voiceToken ?? '')
+    const expected = Buffer.from(config?.token ?? '')
+    if (!config || presented.length !== expected.length || !timingSafeEqual(presented, expected)) {
+        return new Response('Not found', { status: 404 })
+    }
+    const dir = process.env.HAPI_VOICE_TTS_LAN_CERT_DIR?.trim() || join(dataDir, 'voice-lan-cert')
+    const cert = Bun.file(join(dir, 'fullchain.pem'))
+    const key = Bun.file(join(dir, 'key.pem'))
+    if (!(await cert.exists()) || !(await key.exists())) {
+        return Response.json({ error: 'LAN certificate not installed' }, { status: 503 })
+    }
+    return Response.json({ cert: await cert.text(), key: await key.text() }, { headers: { 'cache-control': 'no-store' } })
 }
 
 const STATUS_TTL_MS = 15_000
